@@ -1,0 +1,64 @@
+import AppKit
+
+/// 用于把本地附件路径写入富文本中，便于序列化/反序列化。
+/// 主要用于图片（通过 fileWrapper 打包进 RTFD）；音频展示/播放使用 `AudioBlockAttachment`。
+final class AttachmentTextAttachment: NSTextAttachment {
+    override static var supportsSecureCoding: Bool { true }
+
+    let attachmentFileURL: URL
+    let kind: AttachmentKind
+
+    init(fileURL: URL, kind: AttachmentKind) {
+        self.attachmentFileURL = fileURL
+        self.kind = kind
+        super.init(data: nil, ofType: nil)
+
+        if let wrapper = try? FileWrapper(url: fileURL, options: []) {
+            self.fileWrapper = wrapper
+        }
+
+        if kind == .audio {
+            self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        // 仅解码我们明确支持的类型，避免使用过宽的 allowedClasses
+        let decodedWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
+
+        if let wrapper = decodedWrapper, let filename = wrapper.preferredFilename {
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ReminderExtracted", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let out = tmp.appendingPathComponent(filename)
+            try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
+            self.attachmentFileURL = out
+        } else {
+            self.attachmentFileURL = FileManager.default.temporaryDirectory
+        }
+
+        if let raw = coder.decodeObject(of: NSString.self, forKey: "ReminderAttachmentKind") as String? {
+            self.kind = AttachmentKind(rawValue: raw) ?? .image
+        } else {
+            self.kind = .image
+        }
+
+        super.init(coder: coder)
+
+        // super.init 之后再赋值 fileWrapper，避免 "self used before super.init"
+        if let wrapper = decodedWrapper {
+            self.fileWrapper = wrapper
+        }
+
+        if kind == .audio {
+            self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
+        }
+    }
+
+    override func encode(with coder: NSCoder) {
+        super.encode(with: coder)
+        coder.encode(kind.rawValue as NSString, forKey: "ReminderAttachmentKind")
+        if let wrapper = fileWrapper {
+            coder.encode(wrapper, forKey: "NSFileWrapper")
+        }
+    }
+}
