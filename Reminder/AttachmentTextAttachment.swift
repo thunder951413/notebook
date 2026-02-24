@@ -19,6 +19,25 @@ final class AttachmentTextAttachment: NSTextAttachment {
 
         if kind == .audio {
             self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
+        } else if kind == .image {
+            // 加载图片并设置合适的尺寸
+            if let image = NSImage(contentsOf: fileURL) {
+                // 限制图片显示的最大尺寸
+                let maxWidth: CGFloat = 600
+                let maxHeight: CGFloat = 400
+                let imageSize = image.size
+                
+                var newSize = imageSize
+                if imageSize.width > maxWidth || imageSize.height > maxHeight {
+                    let widthRatio = maxWidth / imageSize.width
+                    let heightRatio = maxHeight / imageSize.height
+                    let ratio = min(widthRatio, heightRatio)
+                    newSize = NSSize(width: imageSize.width * ratio, height: imageSize.height * ratio)
+                }
+                
+                self.image = image
+                self.bounds = NSRect(origin: .zero, size: newSize)
+            }
         }
     }
 

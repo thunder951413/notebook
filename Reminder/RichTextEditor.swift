@@ -232,6 +232,75 @@ extension NSTextView {
     }
 }
 
+// MARK: - 粘贴图片支持
+
+/// 粘贴协调器协议
+protocol PasteCoordinatorProtocol: AnyObject {
+    func handlePaste(in textView: NSTextView) -> Bool
+}
+
+/// 自定义 NSTextView 以支持图片粘贴
+class RichTextView: NSTextView {
+    weak var pasteCoordinator: PasteCoordinatorProtocol?
+
+    override func paste(_ sender: Any?) {
+        print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
+        // 首先尝试让 coordinator 处理图片粘贴
+        if let coordinator = pasteCoordinator {
+            if coordinator.handlePaste(in: self) {
+                // 图片粘贴成功，不调用父类方法
+                print("[RichTextView] Image paste handled by coordinator")
+                return
+            }
+        }
+        // 如果不是图片，调用标准粘贴
+        print("[RichTextView] Falling back to super.paste")
+        super.paste(sender)
+    }
+
+    // 处理拖放粘贴
+    override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        print("[RichTextView] readSelection(from:type:) called, type: \(type)")
+        return super.readSelection(from: pboard, type: type)
+    }
+    
+    // 处理拖放操作
+    override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
+        print("[RichTextView] performDragOperation called")
+        
+        let pasteboard = draggingInfo.draggingPasteboard
+        
+        // 尝试读取文件URL
+        if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           !fileURLs.isEmpty {
+            let fileURL = fileURLs[0]
+            let imageExtensions = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "webp"]
+            let ext = fileURL.pathExtension.lowercased()
+            
+            if imageExtensions.contains(ext) {
+                print("[RichTextView] Dropped image file: \(fileURL)")
+                if let coordinator = pasteCoordinator as? RichTextEditor.Coordinator {
+                    if coordinator.handleDroppedImage(fileURL: fileURL, in: self) {
+                        return true
+                    }
+                }
+            }
+        }
+        
+        // 如果不是图片，调用父类处理
+        return super.performDragOperation(draggingInfo)
+    }
+
+    // 处理 validateMenuItem 确保粘贴菜单可用
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(NSTextView.paste(_:)) {
+            print("[RichTextView] validateMenuItem for paste")
+            return true
+        }
+        return super.validateMenuItem(menuItem)
+    }
+}
+
 struct RichTextEditor: NSViewRepresentable {
     @Binding var attributedText: NSAttributedString
     let controller: RichTextController
@@ -249,39 +318,47 @@ struct RichTextEditor: NSViewRepresentable {
         let scheme = colorScheme
         scroll.backgroundColor = NSColor(AppColors.editorBackground(scheme))
 
-        let textView = NSTextView()
+        let textView = RichTextView()
         textView.isRichText = true
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticLinkDetectionEnabled = true
         textView.textContainerInset = NSSize(width: 12, height: 12)
-        
+
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
-        
+
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
-        
+
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
         textView.textColor = (scheme == .dark) ? .white : .black
         textView.font = NSFont.systemFont(ofSize: 15)
         textView.delegate = context.coordinator
+        textView.pasteCoordinator = context.coordinator
         
         textView.textStorage?.setAttributedString(attributedText)
 
         textView.isSelectable = true
         textView.isEditable = true
 
+        // 注册拖放类型以支持图片拖放
+        textView.registerForDraggedTypes([.fileURL, .png, .tiff, NSPasteboard.PasteboardType("NSFilenamesPboardType")])
+
         scroll.documentView = textView
         controller.bind(textView: textView, noteID: noteID)
+
         return scroll
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView else { return }
+        guard let textView = nsView.documentView as? RichTextView else { return }
+
+        // 确保 pasteCoordinator 始终是最新的
+        textView.pasteCoordinator = context.coordinator
 
         let scheme = colorScheme
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
@@ -294,7 +371,7 @@ struct RichTextEditor: NSViewRepresentable {
             print("[RichTextEditor] Switching note: \(context.coordinator.lastAppliedNoteID?.uuidString.prefix(8) ?? "nil") -> \(noteID.uuidString.prefix(8))")
             print("[RichTextEditor] attributedText length: \(attributedText.length), content: '\(String(attributedText.string.prefix(20)))'")
             print("[RichTextEditor] textView current length: \(textView.string.count)")
-            
+
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
 
@@ -302,30 +379,32 @@ struct RichTextEditor: NSViewRepresentable {
             textView.setSelectedRange(NSRange(location: 0, length: 0))
 
             context.coordinator.isProgrammaticUpdate = false
-            
+
             // 只有在内容实际更新后才绑定新的 noteID
             controller.bind(textView: textView, noteID: noteID)
-            
+
             print("[RichTextEditor] After update - textView length: \(textView.string.count)")
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(attributedText: $attributedText)
+        Coordinator(attributedText: $attributedText, controller: controller)
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, PasteCoordinatorProtocol {
         @Binding var attributedText: NSAttributedString
         var isProgrammaticUpdate = false
         var lastAppliedNoteID: UUID?
+        weak var controller: RichTextController?
         
         /// 标记是否有正在进行的输入法编辑会话
         private var hasMarkedText = false
         /// 延迟更新的内容
         private var pendingContent: NSAttributedString?
 
-        init(attributedText: Binding<NSAttributedString>) {
+        init(attributedText: Binding<NSAttributedString>, controller: RichTextController) {
             _attributedText = attributedText
+            self.controller = controller
         }
         
         /// 检查是否有 marked text（输入法正在编辑）
@@ -379,6 +458,170 @@ struct RichTextEditor: NSViewRepresentable {
             if hasMarkedText && !checkHasMarkedText(tv) {
                 hasMarkedText = false
                 flushPendingContent()
+            }
+        }
+        
+        // MARK: - 粘贴图片支持
+        
+        /// 处理粘贴操作，支持粘贴图片和文件
+        func handlePaste(in textView: NSTextView) -> Bool {
+            print("[Coordinator] handlePaste called")
+            let pasteboard = NSPasteboard.general
+
+            // 获取当前笔记ID
+            guard let noteID = controller?.currentNoteID else {
+                print("[Coordinator] No noteID available")
+                return false
+            }
+            print("[Coordinator] noteID: \(noteID.uuidString.prefix(8))")
+
+            // 打印剪贴板类型信息
+            let types = pasteboard.types ?? []
+            print("[Coordinator] Pasteboard types: \(types)")
+
+            // 1. 首先尝试读取文件URL（从Finder复制的文件）- 优先处理原文件
+            if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+               !fileURLs.isEmpty {
+                print("[Coordinator] File URLs found: \(fileURLs)")
+                // 只处理第一个文件
+                let fileURL = fileURLs[0]
+
+                // 检查是否是图片文件
+                let imageExtensions = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "webp"]
+                let ext = fileURL.pathExtension.lowercased()
+
+                if imageExtensions.contains(ext) {
+                    print("[Coordinator] Image file detected: \(ext)")
+                    // 是图片文件，复制到附件目录
+                    do {
+                        let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
+                        insertAttachment(at: destURL, kind: .image, in: textView)
+                        return true
+                    } catch {
+                        print("[Coordinator] Failed to copy image file: \(error)")
+                        return false
+                    }
+                }
+                print("[Coordinator] Not an image file: \(ext)")
+                // 其他类型文件不处理，返回false让系统处理
+                return false
+            }
+
+            // 2. 尝试读取图片数据（截图或复制的图片数据）
+            if let image = readImageFromPasteboard(pasteboard) {
+                print("[Coordinator] Image data found in pasteboard")
+                do {
+                    let destURL = try savePastedImage(image: image, noteID: noteID)
+                    insertAttachment(at: destURL, kind: .image, in: textView)
+                    return true
+                } catch {
+                    print("[Coordinator] Failed to save pasted image: \(error)")
+                    return false
+                }
+            }
+            print("[Coordinator] No image found in pasteboard")
+
+            // 如果不是图片或文件，返回false让系统处理其他粘贴类型
+            print("[Coordinator] No file URLs found, falling back to default paste")
+            return false
+        }
+        
+        /// 从剪贴板读取图片数据（支持多种格式）
+        private func readImageFromPasteboard(_ pasteboard: NSPasteboard) -> NSImage? {
+            // 尝试直接读取NSImage
+            if let image = NSImage(pasteboard: pasteboard) {
+                return image
+            }
+            
+            // 尝试读取TIFF数据
+            if let tiffData = pasteboard.data(forType: .tiff),
+               let image = NSImage(data: tiffData) {
+                return image
+            }
+            
+            // 尝试读取PNG数据
+            if let pngData = pasteboard.data(forType: .png),
+               let image = NSImage(data: pngData) {
+                return image
+            }
+            
+            // 尝试读取JPEG数据
+            if let jpegData = pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")),
+               let image = NSImage(data: jpegData) {
+                return image
+            }
+            
+            // 尝试从fileURL读取（某些截图工具会写入临时文件URL）
+            if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+               let firstURL = fileURLs.first {
+                let imageExtensions = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "webp"]
+                if imageExtensions.contains(firstURL.pathExtension.lowercased()) {
+                    return NSImage(contentsOf: firstURL)
+                }
+            }
+            
+            return nil
+        }
+        
+        /// 处理拖放的图片文件
+        func handleDroppedImage(fileURL: URL, in textView: NSTextView) -> Bool {
+            print("[Coordinator] handleDroppedImage called: \(fileURL)")
+            
+            guard let noteID = controller?.currentNoteID else {
+                print("[Coordinator] No noteID available for drop")
+                return false
+            }
+            
+            do {
+                let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
+                insertAttachment(at: destURL, kind: .image, in: textView)
+                print("[Coordinator] Dropped image handled successfully")
+                return true
+            } catch {
+                print("[Coordinator] Failed to handle dropped image: \(error)")
+                return false
+            }
+        }
+        
+        /// 插入附件到文本视图
+        private func insertAttachment(at fileURL: URL, kind: AttachmentKind, in textView: NSTextView) {
+            let attachment = AttachmentTextAttachment(fileURL: fileURL, kind: kind)
+            let attr = NSAttributedString(attachment: attachment)
+            
+            let selectedRange = textView.selectedRange()
+            textView.textStorage?.insert(attr, at: selectedRange.location)
+            textView.didChangeText()
+            
+            // 触发绑定更新
+            let content = textView.attributedString().copy() as! NSAttributedString
+            self.attributedText = content
+        }
+        
+        /// 保存粘贴的图片到附件目录
+        private func savePastedImage(image: NSImage, noteID: UUID) throws -> URL {
+            let location = StorageLocationManager.shared
+            guard let base = location.baseDirectoryURL else {
+                throw NSError(domain: "AttachmentManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "未配置保存目录"])
+            }
+            
+            return try location.withSecurityScopedAccess(base) {
+                try location.ensureDirectoryStructureExists()
+                
+                let folder = try location.attachmentsDirectoryURL().appendingPathComponent(noteID.uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                
+                let filename = UUID().uuidString + ".png"
+                let dest = folder.appendingPathComponent(filename, isDirectory: false)
+                
+                // 将NSImage转换为PNG数据并保存
+                guard let tiffData = image.tiffRepresentation,
+                      let bitmap = NSBitmapImageRep(data: tiffData),
+                      let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                    throw NSError(domain: "AttachmentManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法转换图片格式"])
+                }
+                
+                try pngData.write(to: dest)
+                return dest
             }
         }
     }
