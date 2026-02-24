@@ -63,6 +63,7 @@ final class NoteEntity {
     var rtfdData: Data?
     var reminderAt: Date?
     var recurrenceRule: String? // "none", "daily", "weekly", "monthly"
+    var version: Int64 = 0
 
     init(
         id: UUID = UUID(),
@@ -72,7 +73,8 @@ final class NoteEntity {
         folderName: String = "未分类",
         rtfdData: Data? = nil,
         reminderAt: Date? = nil,
-        recurrenceRule: String? = "none"
+        recurrenceRule: String? = "none",
+        version: Int64 = 0
     ) {
         self.id = id
         self.title = title
@@ -82,5 +84,6 @@ final class NoteEntity {
         self.rtfdData = rtfdData
         self.reminderAt = reminderAt
         self.recurrenceRule = recurrenceRule
+        self.version = version
     }
 }

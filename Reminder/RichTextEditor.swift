@@ -7,19 +7,67 @@ import UniformTypeIdentifiers
 final class RichTextController: ObservableObject {
     fileprivate weak var textView: NSTextView?
 
+    /// 用于跟踪当前选中的笔记（可能在视图更新前就变更）
     var currentNoteID: UUID?
-
-    func bind(textView: NSTextView) {
-        self.textView = textView
+    
+    /// 编辑器实际绑定的笔记ID（只有视图重新渲染时才更新）
+    private(set) var boundNoteID: UUID?
+    
+    /// 获取编辑器实际绑定的笔记ID（用于保存时确定目标）
+    var actualNoteID: UUID? { boundNoteID }
+    
+    /// 检查编辑器是否为空（无内容或已释放）
+    var isEmpty: Bool {
+        guard let tv = textView else { return true }
+        return tv.string.isEmpty
+    }
+    
+    /// 检查当前编辑器内容是否属于指定笔记
+    func isBoundTo(noteID: UUID) -> Bool {
+        return boundNoteID == noteID && textView != nil
     }
 
-    /// 强制同步内容（结束当前输入法的组合状态等）
+    func bind(textView: NSTextView, noteID: UUID) {
+        self.textView = textView
+        self.boundNoteID = noteID
+        self.currentNoteID = noteID
+    }
+
+    /// 强制同步内容并获取当前编辑器内容的快照
+    func snapshotAttributedString() -> NSAttributedString {
+        guard let tv = textView else {
+            print("[RichTextController] snapshot: textView is nil")
+            return NSAttributedString(string: "")
+        }
+        
+        let content = tv.attributedString()
+        print("[RichTextController] snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
+        
+        // 强制结束输入法会话（防止中文输入未提交时内容丢失）
+        if let inputContext = tv.inputContext {
+            let hasMarked = (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+            if hasMarked {
+                inputContext.discardMarkedText()
+            }
+        }
+        
+        // 结束当前的编辑状态
+        tv.breakUndoCoalescing()
+        
+        // 强制第一响应者状态更新
+        if tv.window?.firstResponder === tv {
+            tv.window?.makeFirstResponder(nil)
+            tv.window?.makeFirstResponder(tv)
+        }
+        
+        // 获取当前 attributedString 的副本
+        return tv.attributedString().copy() as! NSAttributedString
+    }
+
+    /// 强制同步内容
     func forceSync() {
         guard let tv = textView else { return }
-        // 结束当前的编辑状态，这会触发 textDidChange
-        tv.window?.makeFirstResponder(nil)
-        // 重新设回焦点
-        tv.window?.makeFirstResponder(tv)
+        tv.didChangeText()
     }
 
     func toggleBold() {
@@ -201,7 +249,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isEditable = true
 
         scroll.documentView = textView
-        controller.bind(textView: textView)
+        controller.bind(textView: textView, noteID: noteID)
         return scroll
     }
 
@@ -216,6 +264,10 @@ struct RichTextEditor: NSViewRepresentable {
 
         // 关键：切换笔记时强制刷新内容；同一笔记编辑时避免 update 覆盖用户输入。
         if context.coordinator.lastAppliedNoteID != noteID {
+            print("[RichTextEditor] Switching note: \(context.coordinator.lastAppliedNoteID?.uuidString.prefix(8) ?? "nil") -> \(noteID.uuidString.prefix(8))")
+            print("[RichTextEditor] attributedText length: \(attributedText.length), content: '\(String(attributedText.string.prefix(20)))'")
+            print("[RichTextEditor] textView current length: \(textView.string.count)")
+            
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
 
@@ -223,9 +275,12 @@ struct RichTextEditor: NSViewRepresentable {
             textView.setSelectedRange(NSRange(location: 0, length: 0))
 
             context.coordinator.isProgrammaticUpdate = false
+            
+            // 只有在内容实际更新后才绑定新的 noteID
+            controller.bind(textView: textView, noteID: noteID)
+            
+            print("[RichTextEditor] After update - textView length: \(textView.string.count)")
         }
-
-        controller.bind(textView: textView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -250,10 +305,8 @@ struct RichTextEditor: NSViewRepresentable {
             // 使用 copy() 确保这是一个全新的实例，避免多线程竞争和 SwiftUI 更新失效
             let content = tv.attributedString().copy() as! NSAttributedString
             
-            // 在主队列异步更新状态，确保不会在 SwiftUI 渲染周期内触发状态变更
-            DispatchQueue.main.async {
-                self.attributedText = content
-            }
+            // 直接同步更新绑定，避免异步导致 Cmd+S 保存到旧内容
+            self.attributedText = content
         }
     }
 }

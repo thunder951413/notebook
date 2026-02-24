@@ -1,5 +1,11 @@
 import SwiftUI
 import AppKit
+import SwiftData
+
+extension Notification.Name {
+    static let openMainWindow = Notification.Name("openMainWindow")
+    static let appShouldTerminate = Notification.Name("appShouldTerminate")
+}
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem?
@@ -7,59 +13,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     // Store 用于跨视图共享数据
     @MainActor let store = NoteStore()
+    @MainActor let storage = StorageLocationManager.shared
+    @MainActor let persistence = PersistenceController.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[AppDelegate] applicationDidFinishLaunching - 程序启动")
+
+        // 初始化数据存储并注入到 NoteStore
+        Task { @MainActor in
+            _ = storage.startAccessIfPossible()
+            try? persistence.configureIfPossible()
+            if let container = persistence.modelContainer {
+                store.setContext(container.mainContext)
+            }
+        }
+
         setupStatusItem()
         setupPopover()
         
-        // 关键：初始时也要尝试绑定
-        rebindWindowDelegates()
+        // 启动时显示主窗口
+        Task { @MainActor in
+            MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
+        }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
         print("[AppDelegate] applicationWillTerminate - 程序正在退出！")
     }
-
-    func applicationDidResignActive(_ notification: Notification) {
-        print("[AppDelegate] applicationDidResignActive - 程序失去焦点")
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        print("[AppDelegate] applicationDidBecomeActive - 程序获得焦点")
-        rebindWindowDelegates()
-    }
     
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        print("[AppDelegate] applicationShouldTerminateAfterLastWindowClosed - 返回 false，防止程序退出")
-        return false
-    }
-
-    func applicationWillUpdate(_ notification: Notification) {
-        rebindWindowDelegates()
-    }
-
-    private func rebindWindowDelegates() {
-        for window in NSApp.windows {
-            let className = window.className
-            // 排除状态栏和 Popover 窗口
-            if !className.contains("StatusItem") && 
-               !className.contains("Popover") &&
-               !className.contains("StatusBar") &&
-               !className.contains("TUI") { // 排除系统/第三方透明窗口
-                if window.delegate == nil {
-                    print("[AppDelegate] 绑定窗口代理: \(className)")
-                    window.delegate = self
-                }
-            }
+    /// 应用即将退出时调用 - 返回 .terminateLater 以延迟退出，确保保存完成
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        print("[AppDelegate] applicationShouldTerminate - 准备退出，触发保存...")
+        
+        // 发送通知让 ContentView 保存当前笔记
+        NotificationCenter.default.post(name: .appShouldTerminate, object: nil)
+        
+        // 刷新所有待保存内容
+        NoteSaveManager.shared.flushAllPending()
+        
+        // 延迟一小段时间确保保存完成
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            print("[AppDelegate] 保存完成，允许退出")
+            NSApp.reply(toApplicationShouldTerminate: true)
         }
+        
+        // 返回 .terminateLater 延迟退出
+        return .terminateLater
     }
-    
-    // 拦截点击关闭按钮或 Cmd+W 的行为
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        print("[AppDelegate] windowShouldClose - 拦截关闭事件，改为 orderOut (仅隐藏窗口)")
-        sender.orderOut(nil) // 仅让窗口不显示，不销毁，也不使用 NSApp.hide
-        return false 
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // 方案 A：关闭最后一个窗口时不退出，让应用常驻（Dock 图标和菜单栏入口都保留）
+        print("[AppDelegate] applicationShouldTerminateAfterLastWindowClosed - 返回 false，保持应用常驻")
+        return false
     }
     
     func setupStatusItem() {
@@ -69,6 +74,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
             button.action = #selector(togglePopover)
             button.target = self
+
+            let menu = NSMenu()
+            menu.addItem(NSMenuItem(title: "打开主窗口", action: #selector(openMainWindow), keyEquivalent: ""))
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ","))
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
+            statusItem?.menu = menu
         }
     }
     
@@ -91,37 +104,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc func openMainWindow() {
-        print("[AppDelegate] openMainWindow - 尝试恢复显示主窗口")
-        
-        // 1. 确保应用处于激活状态
-        NSApp.activate(ignoringOtherApps: true)
-        
-        // 2. 查找主窗口：排除掉系统和工具窗口
-        let mainWindow = NSApp.windows.first { window in
-            let className = window.className
-            return !className.contains("StatusItem") && 
-                   !className.contains("Popover") &&
-                   !className.contains("StatusBar") &&
-                   !className.contains("TUI") &&
-                   window.canBecomeKey
+        print("[AppDelegate] openMainWindow - 通过 MainWindowController 显示主窗口")
+        Task { @MainActor in
+            MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
         }
-        
-        if let window = mainWindow {
-            print("[AppDelegate] 找到主窗口 \(window.className)，执行 makeKeyAndOrderFront")
-            NSApp.unhide(nil) // 确保应用层级没有被隐藏
-            window.makeKeyAndOrderFront(nil)
-            window.deminiaturize(nil) // 如果被最小化了也恢复
-        } else {
-            // 兜底：如果实在找不到，尝试让所有隐藏的窗口显示（针对 NSApp.hide 的补救）
-            print("[AppDelegate] 未找到明确的主窗口，尝试 unhideAll")
-            NSApp.unhide(nil)
-            for window in NSApp.windows {
-                if !window.isVisible && window.canBecomeKey {
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
-        }
-        
         popover?.performClose(nil)
+    }
+
+    @objc func openSettings() {
+        print("[AppDelegate] openSettings - 显示设置窗口")
+        Task { @MainActor in
+            SettingsWindowController.shared.show(with: storage, persistence: persistence, store: store)
+        }
+    }
+
+    @objc func quitApp() {
+        NSApp.terminate(nil)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        print("[AppDelegate] applicationShouldHandleReopen - flag: \(flag)")
+        Task { @MainActor in
+            MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
+        }
+        return true
     }
 }

@@ -8,6 +8,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+
 struct ContentView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
@@ -40,27 +41,105 @@ struct ContentView: View {
         return notes
     }
 
-    private func saveNow() {
-        // 关键：保存前强制同步富文本编辑器的内容
-        richTextController.forceSync()
+    /// 保存指定笔记的内容
+    private func saveNoteContent(noteID: UUID, content: NSAttributedString, reason: String) {
+        guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else { return }
         
-        if let id = selection, let index = store.notes.firstIndex(where: { $0.id == id }) {
-            store.updateNote(store.notes[index])
+        let note = store.notes[index]
+        let preview = String(content.string.prefix(30)).replacingOccurrences(of: "\n", with: "\\n")
+        print("[SAVE] '\(note.title)' [\(reason)]: '\(preview)' (\(content.length))")
+        
+        guard let request = NoteSaveManager.shared.createRequest(
+            noteID: noteID,
+            title: note.title,
+            folder: note.folder,
+            reminderAt: note.reminderAt,
+            recurrenceRule: note.recurrenceRule,
+            content: content,
+            reason: reason
+        ) else { return }
+        
+        _ = NoteSaveManager.shared.saveImmediately(request: request)
+    }
+    
+    /// 保存当前编辑器中的笔记（用于 appBlur/terminate）
+    private func saveCurrentEditorContent(reason: String) {
+        // 安全机制：检查 boundNoteID 和 selection 是否一致
+        let boundIDStr = richTextController.boundNoteID?.uuidString.prefix(8) ?? "nil"
+        let selIDStr = selection?.uuidString.prefix(8) ?? "nil"
+        
+        print("[SAVE DEBUG] reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
+        
+        let targetNoteID: UUID
+        if let boundID = richTextController.boundNoteID,
+           let selID = selection,
+           boundID == selID {
+            targetNoteID = boundID
+        } else if let selID = selection {
+            print("[SAVE WARNING] boundNoteID and selection mismatch, using selection: \(selID)")
+            targetNoteID = selID
+        } else if let boundID = richTextController.boundNoteID {
+            targetNoteID = boundID
+        } else {
+            print("[SAVE ERROR] No target note ID available")
+            return
         }
+        
+        // 从编辑器获取内容
+        let editorContent = richTextController.snapshotAttributedString()
+        print("[SAVE DEBUG] Editor content length: \(editorContent.length)")
+        
+        // 执行保存
+        saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
     }
 
     var body: some View {
         NavigationSplitView {
             SidebarView(selectedFolder: $selectedFolder, onCreateNote: createNote)
         } content: {
-            NotesListView(notes: filteredNotes, selection: $selection)
+            NotesListView(notes: filteredNotes, selection: Binding(
+                get: { selection },
+                set: { newSelection in
+                    // 关键：在变更 selection 前，先保存当前笔记
+                    // 使用 selection（旧笔记ID）而不是 boundNoteID，因为 boundNoteID 可能已经被更新
+                    if let oldNoteID = selection, oldNoteID != newSelection {
+                        // 取消该笔记的待处理自动保存
+                        NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
+                        
+                        // 如果编辑器绑定着旧笔记，从编辑器获取内容
+                        // 否则使用内存中的内容
+                        let contentToSave: NSAttributedString
+                        if richTextController.isBoundTo(noteID: oldNoteID) {
+                            contentToSave = richTextController.snapshotAttributedString()
+                            // 同步更新内存
+                            if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                                store.notes[oldIndex].content = contentToSave
+                            }
+                        } else {
+                            // 编辑器已经不绑定旧笔记，使用内存中的内容
+                            if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                                contentToSave = store.notes[oldIndex].content
+                            } else {
+                                contentToSave = NSAttributedString(string: "")
+                            }
+                        }
+                        
+                        // 执行保存
+                        saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: "switch")
+                    }
+                    
+                    // 更新 selection
+                    selection = newSelection
+                }
+            ))
         } detail: {
             if let currentId = selection, let index = store.notes.firstIndex(where: { $0.id == currentId }) {
                 let noteBinding = $store.notes[index]
-                NoteEditorView(note: noteBinding, controller: richTextController, searchText: $searchText)
-                    .onAppear {
-                        richTextController.currentNoteID = currentId
-                    }
+                NoteEditorView(
+                    note: noteBinding,
+                    controller: richTextController,
+                    searchText: $searchText
+                )
             } else {
                 ContentUnavailableView("未选择笔记", systemImage: "note")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -87,48 +166,28 @@ struct ContentView: View {
         .toolbarBackground(.hidden, for: .windowToolbar)
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索笔记")
         .onAppear {
-            // 优先使用来自菜单栏 Popover 的选中
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 selection = pending
                 didSyncSelectionFromStore = true
             }
-
             if selection == nil {
                 selection = store.notes.first?.id
             }
-            store.fetchData() // 启动时刷新数据以触发清理过期提醒
+            store.fetchData()
         }
         .onChange(of: store.selectedNoteId) { _, newValue in
             guard let id = newValue else { return }
             selection = id
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            store.fetchData() // 每次切回 App 时刷新以自动清除已过期的一次性提醒
+            store.fetchData()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            print("[AppBlur] App lost focus, forcing save")
-            saveNow()
+            saveCurrentEditorContent(reason: "appBlur")
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            print("[ExitSave] App will terminate, forcing save")
-            saveNow()
-        }
-        .onChange(of: selection) { oldSelection, newSelection in
-            // 关键：切换笔记前，强制保存旧笔记
-            if let oldId = oldSelection, let index = store.notes.firstIndex(where: { $0.id == oldId }) {
-                print("[Selection] switching away from \(oldId), forcing save")
-                store.updateNote(store.notes[index])
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("保存") {
-                    print("[ManualSave] Cmd+S triggered")
-                    saveNow()
-                }
-                .keyboardShortcut("s", modifiers: .command)
-                .help("手动保存 (Cmd+S)")
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
+            saveCurrentEditorContent(reason: "terminate")
+            NoteSaveManager.shared.flushAllPending()
         }
     }
 
@@ -140,7 +199,6 @@ struct ContentView: View {
     private func deleteSelectedNote() {
         guard let id = selection else { return }
         store.deleteNote(id: id)
-        // 删除后选中当前列表的一条新笔记（如果存在）
         selection = filteredNotes.first?.id
     }
 }
@@ -151,7 +209,7 @@ private struct SidebarView: View {
 
     @Binding var selectedFolder: String
     let onCreateNote: () -> Void
-    
+
     @State private var showingAddFolderAlert = false
     @State private var newFolderName = ""
 
@@ -171,220 +229,135 @@ private struct SidebarView: View {
                             .font(.headline)
                         Text("本地模式")
                             .font(.caption)
-                            .foregroundStyle(AppColors.textSecondary(colorScheme))
+                            .foregroundStyle(.secondary)
                     }
+                    Spacer()
                 }
-
+                
                 Button {
                     onCreateNote()
                 } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 6) {
                         Image(systemName: "plus")
                         Text("新建笔记")
-                            .fontWeight(.semibold)
-                        Spacer()
+                            .fontWeight(.medium)
                     }
-                    .padding(.vertical, 10)
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 12)
-                    .background(AppColors.accentYellow)
-                    .foregroundStyle(.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.vertical, 6)
+                    .background(Color.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("文件夹")
-                        .font(.caption)
-                        .foregroundStyle(AppColors.textSecondary(colorScheme))
-                        .padding(.leading, 4)
-                        .padding(.bottom, 4)
+            Divider()
 
-                    // “全部笔记” 入口
-                    FolderItemButton(
-                        name: "全部笔记",
-                        icon: "tray.full.fill",
-                        count: store.notes.count,
-                        isSelected: selectedFolder == "全部笔记",
-                        action: { selectedFolder = "全部笔记" }
-                    )
-
-                    ScrollView {
-                        VStack(spacing: 4) {
-                            ForEach(store.folders, id: \.self) { folder in
-                                FolderItemButton(
-                                    name: folder,
-                                    icon: "folder.fill",
-                                    count: store.notes.filter { $0.folder == folder }.count,
-                                    isSelected: selectedFolder == folder,
-                                    action: { selectedFolder = folder }
-                                )
-                                .onDrop(of: [.plainText], isTargeted: nil) { providers in
-                                    guard let provider = providers.first else { return false }
-                                    _ = provider.loadObject(ofClass: String.self) { string, _ in
-                                        if let noteIDString = string, let noteID = UUID(uuidString: noteIDString) {
-                                            DispatchQueue.main.async {
-                                                store.moveNote(id: noteID, toFolder: folder)
-                                            }
-                                        }
-                                    }
-                                    return true
-                                }
+            List(selection: $selectedFolder) {
+                Section("文件夹") {
+                    ForEach(store.folders, id: \.self) { folder in
+                        HStack {
+                            Image(systemName: folder == "全部笔记" ? "tray.fill" : "folder.fill")
+                                .foregroundStyle(folder == selectedFolder ? .white : .orange)
+                            Text(folder)
+                            Spacer()
+                            if folder != "全部笔记" {
+                                Text("\(store.notes.filter { $0.folder == folder }.count)")
+                                    .font(.caption)
+                                    .foregroundStyle(folder == selectedFolder ? .white.opacity(0.7) : .secondary)
                             }
                         }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedFolder = folder
+                        }
+                        .tag(folder)
                     }
                 }
             }
-            .padding(16)
-
-            Spacer()
-            
-            Divider()
-                .padding(.horizontal, 16)
-            
-            Button {
-                showingAddFolderAlert = true
-            } label: {
-                HStack {
-                    Image(systemName: "folder.badge.plus")
-                    Text("新建文件夹")
-                    Spacer()
-                }
-                .padding(16)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(AppColors.textSecondary(colorScheme))
-            .alert("新建文件夹", isPresented: $showingAddFolderAlert) {
-                TextField("文件夹名称", text: $newFolderName)
-                Button("取消", role: .cancel) { newFolderName = "" }
-                Button("创建") {
-                    if !newFolderName.trimmingCharacters(in: .whitespaces).isEmpty {
-                        store.addFolder(name: newFolderName)
-                        newFolderName = ""
-                    }
-                }
-            }
+            .listStyle(.plain)
+            .frame(minWidth: 180, maxWidth: 220)
+            .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
         }
-        .frame(minWidth: 240)
-        .background(AppColors.sidebarBackground(colorScheme))
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(AppColors.divider(colorScheme))
-                .frame(width: 1)
-        }
-    }
-}
-
-private struct FolderItemButton: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let name: String
-    let icon: String
-    let count: Int
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .foregroundStyle(isSelected ? AppColors.accentYellow : AppColors.textSecondary(colorScheme))
-                Text(name)
-                    .lineLimit(1)
-                    .foregroundStyle(isSelected ? .primary : AppColors.textSecondary(colorScheme))
-                Spacer()
-                Text("\(count)")
-                    .foregroundStyle(AppColors.textSecondary(colorScheme))
-                    .font(.caption)
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 10)
-            .background(isSelected ? AppColors.selectedFill(colorScheme) : Color.clear)
-            .contentShape(Rectangle()) // 确保整个区域可点击
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .buttonStyle(.plain)
     }
 }
 
 private struct NotesListView: View {
+    @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
 
     let notes: [Note]
     @Binding var selection: Note.ID?
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
+        List(selection: $selection) {
+            Section("笔记") {
                 ForEach(notes) { note in
-                    NoteCardView(note: note, isSelected: selection == note.id)
-                        .onTapGesture { selection = note.id }
+                    NoteRowView(note: note, isSelected: selection == note.id)
+                        .tag(note.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selection = note.id
+                        }
+                        .contextMenu {
+                            Button("删除") {
+                                store.deleteNote(id: note.id)
+                            }
+                        }
                 }
             }
-            .padding(16)
         }
-        .background(AppColors.listBackground(colorScheme))
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(AppColors.divider(colorScheme))
-                .frame(width: 1)
-        }
+        .listStyle(.plain)
+        .frame(minWidth: 220, maxWidth: 280)
+        .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
     }
 }
 
-private struct NoteCardView: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var store: NoteStore
-
+private struct NoteRowView: View {
     let note: Note
     let isSelected: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(note.title)
-                .font(.headline)
-
-            Text(note.content.string)
-                .font(.subheadline)
-                .foregroundStyle(AppColors.textSecondary(colorScheme))
-                .lineLimit(2)
-
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(note.folder)
-                    .font(.caption)
-                    .foregroundStyle(AppColors.textSecondary(colorScheme))
+                Text(note.title.isEmpty ? "无标题" : note.title)
+                    .font(.system(size: 14, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundStyle(isSelected ? .white : .primary)
                 Spacer()
-                Text(note.createdAt.formatted(date: .omitted, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(AppColors.textSecondary(colorScheme))
-            }
-        }
-        .padding(12)
-        .background(isSelected ? AppColors.selectedFill(colorScheme) : AppColors.cardBackground(colorScheme))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(AppColors.cardBorder(colorScheme, isSelected: isSelected), lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: AppColors.shadowColor(colorScheme), radius: colorScheme == .dark ? 0 : 8, y: 2)
-        .contextMenu {
-            Menu("移动到文件夹") {
-                Button("未分类") { store.moveNote(id: note.id, toFolder: "未分类") }
-                ForEach(store.folders.filter { $0 != "未分类" }, id: \.self) { folder in
-                    Button(folder) {
-                        store.moveNote(id: note.id, toFolder: folder)
-                    }
+                if note.hasReminder {
+                    Image(systemName: "bell.fill")
+                        .font(.caption2)
+                        .foregroundStyle(isSelected ? .white.opacity(0.8) : .orange)
                 }
             }
-            Divider()
-            Button(role: .destructive) {
-                store.deleteNote(id: note.id)
-            } label: {
-                Label("删除笔记", systemImage: "trash")
+            Text(preview(from: note.content))
+                .font(.system(size: 12))
+                .lineLimit(2)
+                .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
+            HStack {
+                Text(note.updatedAt, style: .date)
+                Spacer()
+                Text(note.folder)
             }
+            .font(.caption2)
+            .foregroundStyle(isSelected ? .white.opacity(0.6) : .secondary)
         }
-        .onDrag {
-            NSItemProvider(object: note.id.uuidString as NSString)
-        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .background(isSelected ? Color.blue : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func preview(from attributed: NSAttributedString) -> String {
+        let str = attributed.string
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.components(separatedBy: .newlines)
+        return lines.prefix(2).joined(separator: " ")
     }
 }
 
@@ -396,9 +369,12 @@ private struct NoteEditorView: View {
     @EnvironmentObject private var store: NoteStore
     @Binding var searchText: String
     
-    @State private var autoSaveTimer: Timer?
     @StateObject private var recorder = AudioRecorderManager()
     @State private var showingReminderPopover = false
+    
+    @State private var lastSavedTitle: String = ""
+    @State private var lastSavedContentHash: Int = 0
+    @State private var pendingSaveWorkItem: DispatchWorkItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -410,29 +386,42 @@ private struct NoteEditorView: View {
                 searchText: $searchText
             )
 
-            VStack(alignment: .leading, spacing: 0) { // 去掉 spacing
+            VStack(alignment: .leading, spacing: 0) {
                 TextField("标题", text: $note.title)
                     .font(.title2)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 16)
                     .padding(.top, 14)
                     .padding(.bottom, 10)
-                    .onChange(of: note.title) { scheduleAutoSave() }
+                    .onChange(of: note.title) { _, newTitle in
+                        debouncedScheduleAutoSave(title: newTitle, content: note.content)
+                    }
 
-                RichTextEditor(attributedText: $note.content, controller: controller, noteID: note.id)
-                    .layoutPriority(1) // 赋予最高优先级，占据剩余空间
-                    .onChange(of: note.content) { _, _ in scheduleAutoSave() }
+                RichTextEditor(
+                    attributedText: $note.content,
+                    controller: controller,
+                    noteID: note.id
+                )
+                .id(note.id)  // 强制在 note.id 变化时重新创建视图
+                .layoutPriority(1)
+                .onChange(of: note.content) { _, newContent in
+                    debouncedScheduleAutoSave(title: note.title, content: newContent)
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity) // 确保容器占满
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppColors.editorBackground(colorScheme))
-        .onDisappear { saveNow() }
+        .onAppear {
+            lastSavedTitle = note.title
+            lastSavedContentHash = note.content.hashValue
+        }
+        .onDisappear {
+            pendingSaveWorkItem?.cancel()
+        }
         .toolbar {
             ToolbarItemGroup {
-                // 隐藏按钮，专门用于响应 Cmd+S 快捷键
                 Button("保存") {
-                    print("[ManualSave] Cmd+S triggered")
-                    saveNow()
+                    pendingSaveWorkItem?.cancel()
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .buttonStyle(.plain)
@@ -441,41 +430,48 @@ private struct NoteEditorView: View {
                 .opacity(0)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            print("[ExitSave] App will terminate, forcing save")
-            saveNow()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            print("[AppBlur] App lost focus, forcing save")
-            saveNow()
-        }
     }
-
-    private func scheduleAutoSave() {
-        autoSaveTimer?.invalidate()
-        let id = note.id
-        let title = note.title
-        let snippet = note.content.string.prefix(30)
-        print("[AutoSave] schedule for note id=\(id), title=\(title), snippet=\(snippet)")
+    
+    private func debouncedScheduleAutoSave(title: String, content: NSAttributedString) {
+        let contentHash = content.hashValue
+        let titleChanged = title != lastSavedTitle
+        let contentChanged = contentHash != lastSavedContentHash
         
-        autoSaveTimer = Timer.scheduled(after: 0.8) { _ in
-            print("[AutoSave] fire for note id=\(id)")
-            saveNow()
-        }
-    }
-
-    private func saveNow() {
-        // 关键：保存前强制同步富文本编辑器的内容
-        controller.forceSync()
+        guard titleChanged || contentChanged else { return }
         
-        print("[SaveNow] calling store.updateNote for id=\(note.id), title=\(note.title)")
-        store.updateNote(note)
+        let currentNoteID = note.id
+        pendingSaveWorkItem?.cancel()
+        
+        let workItem = DispatchWorkItem { [self] in
+            performAutoSave(title: title, noteID: currentNoteID)
+        }
+        pendingSaveWorkItem = workItem
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
     }
-}
-
-extension Timer {
-    static func scheduled(after delay: TimeInterval, block: @escaping (Timer) -> Void) -> Timer {
-        Timer.scheduledTimer(withTimeInterval: delay, repeats: false, block: block)
+    
+    private func performAutoSave(title: String, noteID: UUID) {
+        let editorContent = controller.snapshotAttributedString()
+        
+        // 检查编辑器是否还绑定到正确的笔记
+        guard controller.isBoundTo(noteID: noteID) else { return }
+        
+        lastSavedTitle = title
+        lastSavedContentHash = editorContent.hashValue
+        
+        guard let note = store.notes.first(where: { $0.id == noteID }) else { return }
+        
+        guard let request = NoteSaveManager.shared.createRequest(
+            noteID: noteID,
+            title: title,
+            folder: note.folder,
+            reminderAt: note.reminderAt,
+            recurrenceRule: note.recurrenceRule,
+            content: editorContent,
+            reason: "autoSave"
+        ) else { return }
+        
+        NoteSaveManager.shared.scheduleSave(request: request, delay: 1.0)
     }
 }
 
@@ -527,133 +523,92 @@ private struct EditorTopBarView: View {
             } label: {
                 Image(systemName: "textformat.size")
             }
-            .menuStyle(.borderlessButton)
-
-            Button { controller.toggleBullets() } label: { Image(systemName: "list.bullet") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            Button { controller.toggleNumberedList() } label: { Image(systemName: "list.number") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
-            Button { controller.insertCheckbox() } label: { Image(systemName: "checklist") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
-            Button { controller.insertImage() } label: { Image(systemName: "photo") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
-            Button {
-                if recorder.isRecording {
-                    recorder.stopRecording()
-                    if let url = recorder.recordedURL {
-                        controller.insertAudio(from: url)
-                    }
-                } else {
-                    if let noteID = controller.currentNoteID {
-                        Task { await recorder.startRecording(noteID: noteID) }
-                    }
-                }
-            } label: {
-                Image(systemName: recorder.isRecording ? "stop.circle.fill" : "waveform")
-                    .foregroundStyle(recorder.isRecording ? .red : .secondary)
-            }
             .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
 
             Divider().frame(height: 18)
 
-            // 提醒铃铛按钮
+            // 文件夹选择
+            Menu {
+                ForEach(store.folders.filter { $0 != "全部笔记" }, id: \.self) { folder in
+                    Button(folder) {
+                        note.folder = folder
+                    }
+                }
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
+            // 提醒按钮
             Button {
-                tempReminderAt = note.reminderAt ?? Date().addingTimeInterval(3600)
+                tempReminderAt = note.reminderAt ?? Date()
                 tempRecurrence = note.recurrenceRule
                 showingReminderPopover = true
             } label: {
-                Image(systemName: note.reminderAt == nil ? "bell" : "bell.fill")
-                    .foregroundStyle(note.reminderAt == nil ? .secondary : AppColors.accentYellow)
+                Image(systemName: note.hasReminder ? "bell.fill" : "bell")
+                    .foregroundStyle(note.hasReminder ? .orange : .secondary)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showingReminderPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     Text("设置提醒")
                         .font(.headline)
-                    
-                    DatePicker("日期", selection: $tempReminderAt, displayedComponents: [.date])
-                        .datePickerStyle(.field)
-                    
-                    DatePicker("时间", selection: $tempReminderAt, displayedComponents: [.hourAndMinute])
-                        .datePickerStyle(.field)
-
-                    Picker("重复规则", selection: $tempRecurrence) {
-                        ForEach(recurrenceOptions, id: \.1) { option in
-                            Text(option.0).tag(option.1)
+                    DatePicker("提醒时间", selection: $tempReminderAt)
+                    Picker("重复", selection: $tempRecurrence) {
+                        ForEach(recurrenceOptions, id: \.1) { name, value in
+                            Text(name).tag(value)
                         }
                     }
-                    .pickerStyle(.segmented)
-
                     HStack {
-                        if note.reminderAt != nil {
-                            Button("清除提醒") {
-                                note.reminderAt = nil
-                                note.recurrenceRule = "none"
-                                store.updateNote(note)
-                                NotificationManager.shared.cancel(noteID: note.id)
-                                showingReminderPopover = false
-                            }
-                            .foregroundStyle(.red)
-                        }
-                        
-                        Spacer()
-                        
                         Button("取消") {
                             showingReminderPopover = false
                         }
-                        .buttonStyle(.bordered)
-
+                        Spacer()
+                        Button("清除") {
+                            note.reminderAt = nil
+                            note.recurrenceRule = "none"
+                            showingReminderPopover = false
+                        }
+                        .disabled(!note.hasReminder)
                         Button("保存") {
                             note.reminderAt = tempReminderAt
                             note.recurrenceRule = tempRecurrence
-                            store.updateNote(note)
-                            
-                            // 调度通知
-                            let body = note.content.string.prefix(50)
-                            Task {
-                                await NotificationManager.shared.schedule(
-                                    noteID: note.id,
-                                    title: note.title.isEmpty ? "笔记提醒" : note.title,
-                                    body: body.isEmpty ? "点击查看笔记内容" : String(body),
-                                    reminderAt: tempReminderAt,
-                                    recurrence: tempRecurrence
-                                )
-                            }
                             showingReminderPopover = false
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(AppColors.accentYellow)
-                        .foregroundStyle(.black)
                     }
                 }
                 .padding()
+                .frame(width: 320)
             }
 
             Spacer()
 
-            TextField("搜索", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
+            // 搜索
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .frame(width: 140)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(AppColors.topBarBackground(colorScheme))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(AppColors.divider(colorScheme))
-                .frame(height: 1)
-        }
+        .background(AppColors.editorBackground(colorScheme))
     }
-}
-
-#Preview {
-    ContentView()
-        .environmentObject(NoteStore())
 }

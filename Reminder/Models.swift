@@ -46,6 +46,8 @@ class NoteStore: ObservableObject {
 
     func setContext(_ context: ModelContext) {
         self.modelContext = context
+        // 初始化保存管理器
+        NoteSaveManager.shared.setContext(context)
         bootstrapIfNeeded()
         fetchData()
     }
@@ -108,6 +110,7 @@ class NoteStore: ObservableObject {
                 let content: NSAttributedString
                 if let data = entity.rtfdData {
                     do {
+                        // 使用更具体的 options 并明确 allowedClasses 解决安全警告
                         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
                             .documentType: NSAttributedString.DocumentType.rtfd
                         ]
@@ -131,7 +134,8 @@ class NoteStore: ObservableObject {
                     createdAt: entity.createdAt,
                     folder: entity.folderName,
                     reminderAt: entity.reminderAt,
-                    recurrenceRule: entity.recurrenceRule ?? "none"
+                    recurrenceRule: entity.recurrenceRule ?? "none",
+                    version: entity.version
                 )
             }
 
@@ -186,56 +190,106 @@ class NoteStore: ObservableObject {
         fetchData()
     }
 
-    func updateNote(_ note: Note) {
-        guard let context = modelContext else { 
-            print("[Save] modelContext is nil, skip save for id=\(note.id)")
-            return 
+    /// 保存指定笔记（推荐使用该方法）：由调用方提供已经序列化好的 RTFD Data（Sendable）。
+    /// 这种方式最稳，能彻底解决异步保存时的内容快照一致性问题。
+    func saveNote(
+        id: UUID,
+        title: String,
+        folder: String,
+        reminderAt: Date?,
+        recurrenceRule: String,
+        rtfdData: Data,
+        version: Int64,
+        reason: String = "unknown"
+    ) {
+        guard let context = modelContext else {
+            print("[Save] modelContext is nil, skip save for id=\(id)")
+            return
         }
-        let id = note.id
-        let descriptor = FetchDescriptor<NoteEntity>(
-            predicate: #Predicate<NoteEntity> { $0.id == id }
-        )
 
-        do {
-            guard let entity = try context.fetch(descriptor).first else { 
-                print("[Save] entity not found for id=\(note.id), title=\(note.title)")
-                return 
-            }
-            
-            print("[Save] updating entity id=\(entity.id), title=\(note.title)")
-
-            entity.title = note.title
-            entity.updatedAt = Date()
-            entity.folderName = note.folder
-
-            // 关键修复：在序列化前，确保我们在主线程获取内容的快照
-            // 序列化前进行属性清洗，移除可能导致损坏的临时系统属性
-            let contentSnapshot = note.content.copy() as! NSAttributedString
-            let cleanedContent = contentSnapshot.cleanedForStorage()
-            
-            do {
-                // 使用快照进行序列化，避免在序列化过程中底层数据发生变化
-                let data = try cleanedContent.data(
-                    from: NSRange(location: 0, length: cleanedContent.length),
-                    documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+        Task {
+            await MainActor.run {
+                let idToMatch = id
+                let descriptor = FetchDescriptor<NoteEntity>(
+                    predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
                 )
-                entity.rtfdData = data
-            } catch {
-                print("[Save] Failed to serialize RTFD for note id=\(note.id), title=\(note.title). Error: \(error)")
+
+                guard let entities = try? context.fetch(descriptor), let entity = entities.first else {
+                    print("[Save] entity not found for id=\(id), title=\(title)")
+                    return
+                }
+
+                // 版本校验：仅当 payload.version >= entity.version 时才写入，避免旧版本覆盖新内容
+                if version < entity.version {
+                    print("[Save] skip outdated payload for id=\(id), payloadVersion=\(version), currentVersion=\(entity.version)")
+                    return
+                }
+
+                print("[Save] updating entity id=\(entity.id), title=\(title), reason=\(reason), version=\(version)")
+                entity.title = title
+                entity.updatedAt = Date()
+                entity.folderName = folder
+                entity.rtfdData = rtfdData
+                entity.reminderAt = reminderAt
+                entity.recurrenceRule = recurrenceRule
+                entity.version = version
+
+                try? context.save()
+                print("[Save] context.save() success for id=\(id)")
+
+                // 同步内存元数据
+                if let idx = self.notes.firstIndex(where: { $0.id == id }) {
+                    self.notes[idx].title = title
+                    self.notes[idx].folder = folder
+                    self.notes[idx].reminderAt = reminderAt
+                    self.notes[idx].recurrenceRule = recurrenceRule
+                    self.notes[idx].version = version
+                }
             }
-
-            entity.reminderAt = note.reminderAt
-            entity.recurrenceRule = note.recurrenceRule
-
-            try context.save()
-            print("[Save] context.save() success for id=\(note.id)")
-
-            if let idx = notes.firstIndex(where: { $0.id == note.id }) {
-                notes[idx] = note
-            }
-        } catch {
-            print("[Save] Update failed for note id=\(note.id), title=\(note.title). Error: \(error)")
         }
+    }
+
+    /// 兼容旧调用：从 NSAttributedString 快照保存
+    func saveNote(
+        id: UUID,
+        title: String,
+        folder: String,
+        reminderAt: Date?,
+        recurrenceRule: String,
+        contentSnapshot: NSAttributedString,
+        version: Int64,
+        reason: String = "unknown"
+    ) {
+        let cleaned = (contentSnapshot.copy() as! NSAttributedString).cleanedForStorage()
+        if let data = try? cleaned.data(
+            from: NSRange(location: 0, length: cleaned.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+        ) {
+            saveNote(
+                id: id,
+                title: title,
+                folder: folder,
+                reminderAt: reminderAt,
+                recurrenceRule: recurrenceRule,
+                rtfdData: data,
+                version: version,
+                reason: reason
+            )
+        }
+    }
+
+    /// 兼容旧调用：从 Note struct 取快照并保存（不推荐；容易在竞态下保存到旧内容）
+    func updateNote(_ note: Note) {
+        saveNote(
+            id: note.id,
+            title: note.title,
+            folder: note.folder,
+            reminderAt: note.reminderAt,
+            recurrenceRule: note.recurrenceRule,
+            contentSnapshot: note.content,
+            version: note.version,
+            reason: "legacy"
+        )
     }
 
     func deleteNote(id: UUID) {
@@ -307,27 +361,38 @@ struct Note: Identifiable, Hashable {
     var title: String
     var content: NSAttributedString
     var createdAt: Date
+    var updatedAt: Date
     var folder: String
     var reminderAt: Date?
     var recurrenceRule: String
+    var version: Int64
     var tags: [String] = []
+    
+    /// 是否有提醒
+    var hasReminder: Bool {
+        return reminderAt != nil
+    }
 
     init(
         id: UUID = UUID(),
         title: String,
         content: NSAttributedString,
         createdAt: Date = Date(),
+        updatedAt: Date = Date(),
         folder: String = "未分类",
         reminderAt: Date? = nil,
-        recurrenceRule: String = "none"
+        recurrenceRule: String = "none",
+        version: Int64 = 0
     ) {
         self.id = id
         self.title = title
         self.content = content
         self.createdAt = createdAt
+        self.updatedAt = updatedAt
         self.folder = folder
         self.reminderAt = reminderAt
         self.recurrenceRule = recurrenceRule
+        self.version = version
     }
 
     func hash(into hasher: inout Hasher) {
