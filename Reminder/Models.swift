@@ -43,6 +43,7 @@ class NoteStore: ObservableObject {
     @Published var notes: [Note] = []
     @Published var folders: [String] = []
     @Published var selectedNoteId: UUID?
+    @Published var selectedFolderForNavigation: String?
 
     func setContext(_ context: ModelContext) {
         self.modelContext = context

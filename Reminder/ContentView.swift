@@ -179,6 +179,11 @@ struct ContentView: View {
             guard let id = newValue else { return }
             selection = id
         }
+        .onChange(of: store.selectedFolderForNavigation) { _, newValue in
+            guard let folder = newValue else { return }
+            selectedFolder = folder
+            store.selectedFolderForNavigation = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.fetchData()
         }
@@ -396,6 +401,9 @@ private struct NoteEditorView: View {
                     .onChange(of: note.title) { _, newTitle in
                         debouncedScheduleAutoSave(title: newTitle, content: note.content)
                     }
+
+                Divider()
+                    .padding(.horizontal, 16)
 
                 RichTextEditor(
                     attributedText: $note.content,

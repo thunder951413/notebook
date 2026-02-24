@@ -74,14 +74,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
             button.action = #selector(togglePopover)
             button.target = self
-
-            let menu = NSMenu()
-            menu.addItem(NSMenuItem(title: "打开主窗口", action: #selector(openMainWindow), keyEquivalent: ""))
-            menu.addItem(NSMenuItem.separator())
-            menu.addItem(NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ","))
-            menu.addItem(NSMenuItem.separator())
-            menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
-            statusItem?.menu = menu
         }
     }
     
@@ -109,13 +101,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
         }
         popover?.performClose(nil)
-    }
-
-    @objc func openSettings() {
-        print("[AppDelegate] openSettings - 显示设置窗口")
-        Task { @MainActor in
-            SettingsWindowController.shared.show(with: storage, persistence: persistence, store: store)
-        }
     }
 
     @objc func quitApp() {

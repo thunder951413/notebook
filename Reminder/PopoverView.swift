@@ -64,6 +64,7 @@ struct PopoverView: View {
                         .padding(.vertical, 4)
                         .contentShape(Rectangle())
                         .onTapGesture {
+                            store.selectedFolderForNavigation = note.folder
                             store.selectedNoteId = note.id
                             NSApp.sendAction(#selector(AppDelegate.openMainWindow), to: nil, from: nil)
                         }
@@ -73,6 +74,29 @@ struct PopoverView: View {
             }
 
             Spacer(minLength: 0)
+
+            Divider()
+
+            HStack {
+                Button {
+                    NSApp.sendAction(#selector(AppDelegate.openMainWindow), to: nil, from: nil)
+                } label: {
+                    Text("打开主窗口")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    NSApp.sendAction(#selector(AppDelegate.quitApp), to: nil, from: nil)
+                } label: {
+                    Text("退出")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(12)
         .frame(width: 320, height: 420)

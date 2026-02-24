@@ -15,7 +15,10 @@ struct ReminderApp: App {
     var body: some Scene {
         // 不再使用 WindowGroup 生成窗口，由 AppDelegate + MainWindowController 统一管理
         Settings {
-            EmptyView()
+            SettingsRootView()
+                .environmentObject(StorageLocationManager.shared)
+                .environmentObject(PersistenceController.shared)
+                .environmentObject(appDelegate.store)
         }
     }
 }
