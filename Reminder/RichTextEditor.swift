@@ -33,6 +33,13 @@ final class RichTextController: ObservableObject {
         self.currentNoteID = noteID
     }
 
+    /// 检查是否有输入法正在编辑的 marked text
+    var hasMarkedText: Bool {
+        guard let tv = textView else { return false }
+        guard let inputContext = tv.inputContext else { return false }
+        return (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+    }
+
     /// 强制同步内容并获取当前编辑器内容的快照
     func snapshotAttributedString() -> NSAttributedString {
         guard let tv = textView else {
@@ -62,6 +69,26 @@ final class RichTextController: ObservableObject {
         
         // 获取当前 attributedString 的副本
         return tv.attributedString().copy() as! NSAttributedString
+    }
+    
+    /// 获取当前编辑器内容的快照（不结束输入法会话）
+    func snapshotAttributedStringPreservingMarkedText() -> NSAttributedString? {
+        guard let tv = textView else {
+            print("[RichTextController] snapshotPreserving: textView is nil")
+            return nil
+        }
+        
+        // 如果有 marked text，返回 nil 表示不应该保存
+        if hasMarkedText {
+            print("[RichTextController] snapshotPreserving: has marked text, skipping")
+            return nil
+        }
+        
+        let content = tv.attributedString()
+        print("[RichTextController] snapshotPreserving: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
+        
+        // 获取当前 attributedString 的副本
+        return content.copy() as? NSAttributedString
     }
 
     /// 强制同步内容
@@ -291,9 +318,28 @@ struct RichTextEditor: NSViewRepresentable {
         @Binding var attributedText: NSAttributedString
         var isProgrammaticUpdate = false
         var lastAppliedNoteID: UUID?
+        
+        /// 标记是否有正在进行的输入法编辑会话
+        private var hasMarkedText = false
+        /// 延迟更新的内容
+        private var pendingContent: NSAttributedString?
 
         init(attributedText: Binding<NSAttributedString>) {
             _attributedText = attributedText
+        }
+        
+        /// 检查是否有 marked text（输入法正在编辑）
+        private func checkHasMarkedText(_ textView: NSTextView) -> Bool {
+            guard let inputContext = textView.inputContext else { return false }
+            // 使用 KVC 获取 hasMarkedText 属性
+            return (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+        }
+        
+        /// 执行实际的绑定更新
+        private func flushPendingContent() {
+            guard let content = pendingContent else { return }
+            self.attributedText = content
+            pendingContent = nil
         }
 
         func textDidChange(_ notification: Notification) {
@@ -305,8 +351,35 @@ struct RichTextEditor: NSViewRepresentable {
             // 使用 copy() 确保这是一个全新的实例，避免多线程竞争和 SwiftUI 更新失效
             let content = tv.attributedString().copy() as! NSAttributedString
             
-            // 直接同步更新绑定，避免异步导致 Cmd+S 保存到旧内容
+            // 检查是否有输入法正在编辑的 marked text
+            if checkHasMarkedText(tv) {
+                // 输入法正在编辑，延迟更新绑定
+                hasMarkedText = true
+                pendingContent = content
+                return
+            }
+            
+            // 没有 marked text，直接更新
+            hasMarkedText = false
+            pendingContent = nil
             self.attributedText = content
+        }
+        
+        // NSTextViewDelegate 方法：处理输入法文本选择变化
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            // 允许所有更改通过
+            return true
+        }
+        
+        // 监听输入法标记文本的变化
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            
+            // 如果之前有 marked text，现在没有了，说明输入法已提交
+            if hasMarkedText && !checkHasMarkedText(tv) {
+                hasMarkedText = false
+                flushPendingContent()
+            }
         }
     }
 }

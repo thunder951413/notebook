@@ -451,7 +451,19 @@ private struct NoteEditorView: View {
     }
     
     private func performAutoSave(title: String, noteID: UUID) {
-        let editorContent = controller.snapshotAttributedString()
+        // 使用不丢弃 marked text 的方法获取内容
+        // 如果有 marked text（输入法正在编辑），则跳过本次自动保存
+        guard let editorContent = controller.snapshotAttributedStringPreservingMarkedText() else {
+            print("[AutoSave] Skipping save due to marked text (IME editing)")
+            // 重新调度保存，等待输入法提交后再保存
+            pendingSaveWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [self] in
+                performAutoSave(title: title, noteID: noteID)
+            }
+            pendingSaveWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+            return
+        }
         
         // 检查编辑器是否还绑定到正确的笔记
         guard controller.isBoundTo(noteID: noteID) else { return }
