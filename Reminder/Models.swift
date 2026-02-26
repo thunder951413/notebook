@@ -29,67 +29,100 @@ struct AppColors {
     static func divider(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
     }
-    static func topBarBackground(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.black.opacity(0.15) : Color.white.opacity(0.70)
+}
+
+struct Folder: Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var sortOrder: Int
+    var createdAt: Date
+    var isSystem: Bool
+}
+
+struct Tag: Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var color: String
+    var sortOrder: Int
+    var createdAt: Date
+    
+    init(id: UUID = UUID(), name: String, color: String = "gray", sortOrder: Int = 0, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.sortOrder = sortOrder
+        self.createdAt = createdAt
     }
-    static func shadowColor(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? .black.opacity(0.35) : .black.opacity(0.10)
+    
+    var swiftUIColor: Color {
+        switch color {
+        case "red": return .red
+        case "orange": return .orange
+        case "yellow": return .yellow
+        case "green": return .green
+        case "blue": return .blue
+        case "purple": return .purple
+        default: return .gray
+        }
     }
 }
 
 @MainActor
 class NoteStore: ObservableObject {
-    private var modelContext: ModelContext?
     @Published var notes: [Note] = []
-    @Published var folders: [String] = []
+    @Published var folders: [Folder] = []
+    @Published var tags: [Tag] = []
+    
+    /// 用于菜单栏 Popover 跳转的选中笔记 ID
     @Published var selectedNoteId: UUID?
+    /// 用于菜单栏 Popover 跳转的选中文件夹
     @Published var selectedFolderForNavigation: String?
+    
+    private var modelContext: ModelContext?
+    private var cancellables = Set<AnyCancellable>()
+    
+    init() {
+        // 延迟初始化，等 SwiftData 注入后再 fetch
+        DispatchQueue.main.async { [weak self] in
+            self?.setupModelContext()
+        }
+    }
 
+    /// 从外部设置 ModelContext（用于 AppDelegate 注入）
     func setContext(_ context: ModelContext) {
         self.modelContext = context
-        // 初始化保存管理器
-        NoteSaveManager.shared.setContext(context)
-        bootstrapIfNeeded()
         fetchData()
     }
 
-    private func bootstrapIfNeeded() {
-        guard let context = modelContext else { return }
-        let descriptor = FetchDescriptor<NoteEntity>()
-        let count = (try? context.fetchCount(descriptor)) ?? 0
-        if count == 0 {
-            let welcome = NSAttributedString(string: "欢迎使用！\n\n• 菜单栏图标可以快速新建\n• 右侧支持富文本编辑\n\n现在开始写点什么吧。")
-            let rtfd = try? welcome.data(from: NSRange(location: 0, length: welcome.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
-            let entity = NoteEntity(title: "欢迎", folderName: "未分类", rtfdData: rtfd)
-            context.insert(entity)
-            try? context.save()
-        }
-
-        let folderDescriptor = FetchDescriptor<FolderEntity>()
-        let folderCount = (try? context.fetchCount(folderDescriptor)) ?? 0
-        if folderCount == 0 {
-            ["未分类", "我的文件夹", "旅游", "全局收藏", "个人", "生活", "工作"].forEach { name in
-                context.insert(FolderEntity(name: name))
-            }
-            try? context.save()
+    private func setupModelContext() {
+        // 从 PersistenceController 获取 ModelContext
+        if let container = try? ModelContainer(for: NoteEntity.self, FolderEntity.self, TagEntity.self) {
+            self.modelContext = ModelContext(container)
+            fetchData()
         }
     }
-
+    
     func fetchData() {
-        guard let context = modelContext else { return }
-
-        // 1. 先清理一次性且已过期的提醒
-        cleanupExpiredOneTimeReminders(context: context)
-
-        let descriptor = FetchDescriptor<NoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        guard let context = modelContext else {
+            print("NoteStore: modelContext is nil, skipping fetch")
+            return
+        }
+        
         do {
+            // 清理过期的一次性提醒
+            cleanupExpiredOneTimeReminders(context: context)
+            
+            let descriptor = FetchDescriptor<NoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
             let entities = try context.fetch(descriptor)
-
-            // 先做一次“自愈”：遇到损坏的 RTFD 直接清空并回写数据库
+            
+            // 清理孤立附件
+            let allNoteIDs = entities.map { $0.id }
+            AttachmentManager.shared.cleanupOrphanedAttachments(allNoteIDs: allNoteIDs)
+            
+            // 先做一次"自愈"：遇到损坏的 RTFD 直接清空并回写数据库
             for entity in entities {
                 guard let data = entity.rtfdData else { continue }
                 do {
-                    // 使用更具体的 options 尝试解码
                     let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
                         .documentType: NSAttributedString.DocumentType.rtfd
                     ]
@@ -105,13 +138,12 @@ class NoteStore: ObservableObject {
                 }
             }
             try? context.save()
-
+            
             // 映射到内存模型
             self.notes = entities.map { entity in
                 let content: NSAttributedString
                 if let data = entity.rtfdData {
                     do {
-                        // 使用更具体的 options 并明确 allowedClasses 解决安全警告
                         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
                             .documentType: NSAttributedString.DocumentType.rtfd
                         ]
@@ -127,42 +159,47 @@ class NoteStore: ObservableObject {
                 } else {
                     content = NSAttributedString(string: "")
                 }
-
+                
+                let tagIDArray = entity.tagIDs?.split(separator: ",").compactMap { UUID(uuidString: String($0)) } ?? []
+                
+                // 修复复选框附件
+                let fixedContent = Self.fixCheckboxAttachments(in: content)
+                
                 return Note(
                     id: entity.id,
                     title: entity.title,
-                    content: content,
+                    content: fixedContent,
                     createdAt: entity.createdAt,
                     folder: entity.folderName,
                     reminderAt: entity.reminderAt,
                     recurrenceRule: entity.recurrenceRule ?? "none",
-                    version: entity.version
+                    version: entity.version,
+                    tagIDs: tagIDArray
                 )
             }
-
-            let folderDescriptor = FetchDescriptor<FolderEntity>()
+            
+            let folderDescriptor = FetchDescriptor<FolderEntity>(sortBy: [SortDescriptor(\.sortOrder)])
             let folderEntities = try context.fetch(folderDescriptor)
-            self.folders = ["未分类", "我的文件夹", "旅游", "全局收藏", "个人", "生活", "工作"]
-            let dbFolders = folderEntities.map { $0.name }
-            for f in dbFolders where !self.folders.contains(f) {
-                self.folders.append(f)
-            }
+            self.folders = folderEntities.map { Folder(id: $0.id, name: $0.name, sortOrder: $0.sortOrder ?? 0, createdAt: $0.createdAt ?? Date(), isSystem: $0.isSystem ?? false) }
+            
+            let tagDescriptor = FetchDescriptor<TagEntity>(sortBy: [SortDescriptor(\.sortOrder)])
+            let tagEntities = try context.fetch(tagDescriptor)
+            self.tags = tagEntities.map { Tag(id: $0.id, name: $0.name, color: $0.color, sortOrder: $0.sortOrder, createdAt: $0.createdAt) }
         } catch {
             print("Fetch failed: \(error)")
         }
     }
-
+    
     private func cleanupExpiredOneTimeReminders(context: ModelContext) {
         let now = Date()
-        // 简化谓词逻辑，只获取有提醒的笔记
         let descriptor = FetchDescriptor<NoteEntity>(
             predicate: #Predicate<NoteEntity> { $0.reminderAt != nil }
         )
-
-        if let entities = try? context.fetch(descriptor) {
+        
+        do {
+            let entities = try context.fetch(descriptor)
             var changed = false
             for entity in entities {
-                // 在内存中检查是否为一次性提醒且已过期
                 let isOneTime = entity.recurrenceRule == nil || entity.recurrenceRule == "none"
                 if isOneTime, let date = entity.reminderAt, date < now {
                     entity.reminderAt = nil
@@ -172,9 +209,180 @@ class NoteStore: ObservableObject {
             if changed {
                 try? context.save()
             }
+        } catch {
+            print("Cleanup expired reminders failed: \(error)")
         }
     }
+    
+    /// 修复复选框附件
+    private static func fixCheckboxAttachments(in attributedString: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributedString)
+        let range = NSRange(location: 0, length: mutable.length)
+        var replacements: [(NSRange, CheckboxTextAttachment)] = []
+        var debugInfo: [(Int, String, Bool)] = [] // (位置, 类型, 是否已选中)
 
+        mutable.enumerateAttribute(.attachment, in: range, options: []) { value, attrRange, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+
+            let location = attrRange.location
+
+            // 检查是否已经是 CheckboxTextAttachment
+            if let checkbox = attachment as? CheckboxTextAttachment {
+                debugInfo.append((location, "CheckboxTextAttachment", checkbox.isChecked))
+                return // 已经是正确类型，不需要修复
+            }
+
+            // 尝试从 contents 恢复图像
+            var image = attachment.image
+            var imageSource = "attachment.image"
+
+            if image == nil, let contents = attachment.contents {
+                image = NSImage(data: contents)
+                imageSource = "contents"
+                print("[CheckboxDebug] Restored image from contents at pos=\(location), size=\(image?.size ?? .zero)")
+            }
+
+            // 如果仍然没有图像，尝试通过 fileWrapper 恢复
+            if image == nil, let fileWrapper = attachment.fileWrapper {
+                if let data = fileWrapper.regularFileContents {
+                    image = NSImage(data: data)
+                    imageSource = "fileWrapper"
+                    print("[CheckboxDebug] Restored image from fileWrapper at pos=\(location), size=\(image?.size ?? .zero)")
+                }
+            }
+
+            guard let finalImage = image else {
+                debugInfo.append((location, "NSTextAttachment(no image)", false))
+                return
+            }
+
+            // 检查图像大小是否是复选框大小 (约 14x14)
+            let isCorrectImageSize = abs(finalImage.size.width - 14) < 5 && abs(finalImage.size.height - 14) < 5
+
+            // 也检查 bounds 大小（如果 bounds 有效）
+            let bounds = attachment.bounds
+            let isCorrectBounds = bounds.width > 0 && bounds.height > 0 &&
+                                 abs(bounds.width - 14) < 5 && abs(bounds.height - 14) < 5
+
+            // 如果图像大小或 bounds 大小符合复选框特征
+            if isCorrectImageSize || isCorrectBounds {
+                // 尝试检测是否已选中：检查图像中心是否有填充色
+                let isChecked = Self.detectIfCheckboxIsChecked(finalImage)
+                debugInfo.append((location, "NSTextAttachment(checkbox, src:\(imageSource))", isChecked))
+
+                let newAttachment = CheckboxTextAttachment(checked: isChecked)
+                replacements.append((attrRange, newAttachment))
+            } else {
+                debugInfo.append((location, "NSTextAttachment(size: \(Int(finalImage.size.width))x\(Int(finalImage.size.height)), bounds: \(Int(bounds.width))x\(Int(bounds.height)))", false))
+            }
+        }
+        
+        // 打印调试信息
+        if !debugInfo.isEmpty {
+            print("[CheckboxDebug] Found \(debugInfo.count) attachments:")
+            for (location, type, isChecked) in debugInfo {
+                print("  [CheckboxDebug] pos=\(location), type=\(type), checked=\(isChecked)")
+            }
+            print("[CheckboxDebug] Replacing \(replacements.count) attachments")
+        }
+        
+        for (replaceRange, newAttachment) in replacements.reversed() {
+            mutable.removeAttribute(.attachment, range: replaceRange)
+            mutable.addAttribute(.attachment, value: newAttachment, range: replaceRange)
+        }
+        
+        return NSAttributedString(attributedString: mutable)
+    }
+    
+    /// 检测图像是否表示已选中的复选框
+    private static func detectIfCheckboxIsChecked(_ image: NSImage) -> Bool {
+        let size = image.size
+        guard size.width > 0 && size.height > 0 else { return false }
+        
+        // 策略：检查图像中心像素的颜色
+        // 已选中的复选框中心有黄色/深色填充
+        // 未选中的复选框中心是白色/透明
+        
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            print("[CheckboxDebug] Failed to get CGImage")
+            return false
+        }
+        
+        // 获取中心像素
+        let centerX = Int(size.width / 2)
+        let centerY = Int(size.height / 2)
+        
+        // 创建位图上下文来读取像素
+        let width = 1
+        let height = 1
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        let bitsPerComponent = 8
+        
+        var pixelData = [UInt8](repeating: 0, count: bytesPerPixel)
+        
+        guard let context = CGContext(
+            data: &pixelData,
+            width: width,
+            height: height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            print("[CheckboxDebug] Failed to create CGContext")
+            return false
+        }
+        
+        // 绘制中心像素
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1), byTiling: false)
+        
+        // 获取颜色分量
+        let r = CGFloat(pixelData[0]) / 255.0
+        let g = CGFloat(pixelData[1]) / 255.0
+        let b = CGFloat(pixelData[2]) / 255.0
+        let a = CGFloat(pixelData[3]) / 255.0
+        
+        print("[CheckboxDebug] Center pixel: R=\(String(format: "%.2f", r)), G=\(String(format: "%.2f", g)), B=\(String(format: "%.2f", b)), A=\(String(format: "%.2f", a))")
+        
+        // 判断逻辑：
+        // - 已选中：中心有黄色（R高，G高，B低）或深色
+        // - 未选中：中心是白色（R=G=B=1）或透明（A=0）
+        
+        // 如果透明度很低，认为是未选中
+        if a < 0.5 {
+            print("[CheckboxDebug] Low alpha, assuming unchecked")
+            return false
+        }
+        
+        // 计算亮度
+        let brightness = (r + g + b) / 3.0
+        print("[CheckboxDebug] Brightness: \(String(format: "%.2f", brightness))")
+        
+        // 如果亮度很高（接近白色），认为是未选中
+        if brightness > 0.9 {
+            print("[CheckboxDebug] High brightness, assuming unchecked")
+            return false
+        }
+        
+        // 检查是否是黄色（选中状态的特征）
+        // 黄色：R和G都很高，B很低
+        let isYellow = r > 0.7 && g > 0.7 && b < 0.5
+        if isYellow {
+            print("[CheckboxDebug] Yellow detected, assuming checked")
+            return true
+        }
+        
+        // 如果亮度中等偏低，可能是填充色（选中）
+        if brightness < 0.7 {
+            print("[CheckboxDebug] Medium brightness, assuming checked")
+            return true
+        }
+        
+        print("[CheckboxDebug] Uncertain, defaulting to unchecked")
+        return false
+    }
+    
     func addNote(title: String, folder: String = "未分类") {
         guard let context = modelContext else { return }
         let entity = NoteEntity(title: title, folderName: folder)
@@ -182,17 +390,147 @@ class NoteStore: ObservableObject {
         try? context.save()
         fetchData()
     }
-
+    
     func addFolder(name: String) {
         guard let context = modelContext else { return }
-        let entity = FolderEntity(name: name)
+        let maxSortOrder = (try? context.fetch(FetchDescriptor<FolderEntity>()).compactMap { $0.sortOrder }.max() ?? 0) ?? 0
+        let entity = FolderEntity(name: name, sortOrder: maxSortOrder + 1)
         context.insert(entity)
         try? context.save()
         fetchData()
     }
-
-    /// 保存指定笔记（推荐使用该方法）：由调用方提供已经序列化好的 RTFD Data（Sendable）。
-    /// 这种方式最稳，能彻底解决异步保存时的内容快照一致性问题。
+    
+    func updateFolder(id: UUID, name: String) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<FolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            entity.name = name
+            try? context.save()
+            fetchData()
+        }
+    }
+    
+    func deleteFolder(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<FolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            if entity.isSystem == true {
+                print("Cannot delete system folder: \(entity.name)")
+                return
+            }
+            let folderName = entity.name
+            let notesInFolder = try? context.fetch(FetchDescriptor<NoteEntity>(predicate: #Predicate { $0.folderName == folderName }))
+            for note in notesInFolder ?? [] {
+                note.folderName = "未分类"
+            }
+            context.delete(entity)
+            try? context.save()
+            fetchData()
+        }
+    }
+    
+    func reorderFolders(fromOffsets: IndexSet, toOffset: Int) {
+        guard let context = modelContext else { return }
+        var reordered = folders
+        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        for (index, folder) in reordered.enumerated() {
+            let idToMatch = folder.id
+            let descriptor = FetchDescriptor<FolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+            if let entity = try? context.fetch(descriptor).first {
+                entity.sortOrder = index
+            }
+        }
+        try? context.save()
+        fetchData()
+    }
+    
+    // MARK: - Tag Management
+    
+    func addTag(name: String, color: String) {
+        guard let context = modelContext else { return }
+        let maxSortOrder = tags.map { $0.sortOrder }.max() ?? 0
+        let entity = TagEntity(name: name, color: color, sortOrder: maxSortOrder + 1)
+        context.insert(entity)
+        try? context.save()
+        fetchData()
+    }
+    
+    func updateTag(id: UUID, name: String? = nil, color: String? = nil) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<TagEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            if let name = name { entity.name = name }
+            if let color = color { entity.color = color }
+            try? context.save()
+            fetchData()
+        }
+    }
+    
+    func deleteTag(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<TagEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            let notesWithTag = notes.filter { $0.tagIDs.contains(id) }
+            for note in notesWithTag {
+                removeTagFromNote(tagID: id, noteID: note.id)
+            }
+            context.delete(entity)
+            try? context.save()
+            fetchData()
+        }
+    }
+    
+    func reorderTags(fromOffsets: IndexSet, toOffset: Int) {
+        guard let context = modelContext else { return }
+        var reordered = tags
+        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        for (index, tag) in reordered.enumerated() {
+            let idToMatch = tag.id
+            let descriptor = FetchDescriptor<TagEntity>(predicate: #Predicate { $0.id == idToMatch })
+            if let entity = try? context.fetch(descriptor).first {
+                entity.sortOrder = index
+            }
+        }
+        try? context.save()
+        fetchData()
+    }
+    
+    // MARK: - Note Tag Operations
+    
+    func addTagToNote(tagID: UUID, noteID: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<NoteEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            var currentTagIDs = entity.tagIDs?.split(separator: ",").compactMap { UUID(uuidString: String($0)) } ?? []
+            if !currentTagIDs.contains(tagID) {
+                currentTagIDs.append(tagID)
+                entity.tagIDs = currentTagIDs.map { $0.uuidString }.joined(separator: ",")
+                try? context.save()
+                fetchData()
+            }
+        }
+    }
+    
+    func removeTagFromNote(tagID: UUID, noteID: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<NoteEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            var currentTagIDs = entity.tagIDs?.split(separator: ",").compactMap { UUID(uuidString: String($0)) } ?? []
+            currentTagIDs.removeAll { $0 == tagID }
+            entity.tagIDs = currentTagIDs.isEmpty ? nil : currentTagIDs.map { $0.uuidString }.joined(separator: ",")
+            try? context.save()
+            fetchData()
+        }
+    }
+    
+    // MARK: - Note Save Operations
+    
     func saveNote(
         id: UUID,
         title: String,
@@ -207,25 +545,24 @@ class NoteStore: ObservableObject {
             print("[Save] modelContext is nil, skip save for id=\(id)")
             return
         }
-
+        
         Task {
             await MainActor.run {
                 let idToMatch = id
                 let descriptor = FetchDescriptor<NoteEntity>(
                     predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
                 )
-
+                
                 guard let entities = try? context.fetch(descriptor), let entity = entities.first else {
                     print("[Save] entity not found for id=\(id), title=\(title)")
                     return
                 }
-
-                // 版本校验：仅当 payload.version >= entity.version 时才写入，避免旧版本覆盖新内容
+                
                 if version < entity.version {
                     print("[Save] skip outdated payload for id=\(id), payloadVersion=\(version), currentVersion=\(entity.version)")
                     return
                 }
-
+                
                 print("[Save] updating entity id=\(entity.id), title=\(title), reason=\(reason), version=\(version)")
                 entity.title = title
                 entity.updatedAt = Date()
@@ -234,11 +571,10 @@ class NoteStore: ObservableObject {
                 entity.reminderAt = reminderAt
                 entity.recurrenceRule = recurrenceRule
                 entity.version = version
-
+                
                 try? context.save()
                 print("[Save] context.save() success for id=\(id)")
-
-                // 同步内存元数据
+                
                 if let idx = self.notes.firstIndex(where: { $0.id == id }) {
                     self.notes[idx].title = title
                     self.notes[idx].folder = folder
@@ -249,8 +585,7 @@ class NoteStore: ObservableObject {
             }
         }
     }
-
-    /// 兼容旧调用：从 NSAttributedString 快照保存
+    
     func saveNote(
         id: UUID,
         title: String,
@@ -278,8 +613,7 @@ class NoteStore: ObservableObject {
             )
         }
     }
-
-    /// 兼容旧调用：从 Note struct 取快照并保存（不推荐；容易在竞态下保存到旧内容）
+    
     func updateNote(_ note: Note) {
         saveNote(
             id: note.id,
@@ -292,14 +626,14 @@ class NoteStore: ObservableObject {
             reason: "legacy"
         )
     }
-
+    
     func deleteNote(id: UUID) {
         guard let context = modelContext else { return }
         let idToMatch = id
         let descriptor = FetchDescriptor<NoteEntity>(
             predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
         )
-
+        
         if let entity = try? context.fetch(descriptor).first {
             AttachmentManager.shared.deleteAttachments(for: id)
             context.delete(entity)
@@ -307,14 +641,14 @@ class NoteStore: ObservableObject {
             fetchData()
         }
     }
-
+    
     func moveNote(id: UUID, toFolder: String) {
         guard let context = modelContext else { return }
         let idToMatch = id
         let descriptor = FetchDescriptor<NoteEntity>(
             predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
         )
-
+        
         if let entity = try? context.fetch(descriptor).first {
             entity.folderName = toFolder
             entity.updatedAt = Date()
@@ -325,12 +659,10 @@ class NoteStore: ObservableObject {
 }
 
 extension NSAttributedString {
-    /// 清洗属性，只保留必要的富文本样式，移除可能导致序列化损坏的系统临时属性
     func cleanedForStorage() -> NSAttributedString {
         let range = NSRange(location: 0, length: self.length)
         let mutable = NSMutableAttributedString(attributedString: self)
-        
-        // 允许保留的属性列表
+
         let allowedKeys: [NSAttributedString.Key] = [
             .font,
             .foregroundColor,
@@ -344,7 +676,14 @@ extension NSAttributedString {
             .kern,
             .baselineOffset
         ]
-        
+
+        // 先确保所有复选框附件的图像已生成
+        mutable.enumerateAttribute(.attachment, in: range, options: []) { value, attrRange, _ in
+            if let checkbox = value as? CheckboxTextAttachment {
+                checkbox.prepareForSaving()
+            }
+        }
+
         mutable.enumerateAttributes(in: range, options: []) { attributes, subRange, _ in
             for key in attributes.keys {
                 if !allowedKeys.contains(key) {
@@ -352,7 +691,7 @@ extension NSAttributedString {
                 }
             }
         }
-        
+
         return NSAttributedString(attributedString: mutable)
     }
 }
@@ -367,13 +706,12 @@ struct Note: Identifiable, Hashable {
     var reminderAt: Date?
     var recurrenceRule: String
     var version: Int64
-    var tags: [String] = []
+    var tagIDs: [UUID]
     
-    /// 是否有提醒
     var hasReminder: Bool {
         return reminderAt != nil
     }
-
+    
     init(
         id: UUID = UUID(),
         title: String,
@@ -383,7 +721,8 @@ struct Note: Identifiable, Hashable {
         folder: String = "未分类",
         reminderAt: Date? = nil,
         recurrenceRule: String = "none",
-        version: Int64 = 0
+        version: Int64 = 0,
+        tagIDs: [UUID] = []
     ) {
         self.id = id
         self.title = title
@@ -394,12 +733,13 @@ struct Note: Identifiable, Hashable {
         self.reminderAt = reminderAt
         self.recurrenceRule = recurrenceRule
         self.version = version
+        self.tagIDs = tagIDs
     }
-
+    
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-
+    
     static func == (lhs: Note, rhs: Note) -> Bool {
         lhs.id == rhs.id
     }

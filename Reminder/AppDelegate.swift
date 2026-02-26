@@ -19,18 +19,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[AppDelegate] applicationDidFinishLaunching - 程序启动")
 
+        // 应用语言设置
+        LanguageManager.shared.applyLanguage()
+
         // 初始化数据存储并注入到 NoteStore
         Task { @MainActor in
             _ = storage.startAccessIfPossible()
             try? persistence.configureIfPossible()
             if let container = persistence.modelContainer {
                 store.setContext(container.mainContext)
+                // 同时设置 NoteSaveManager 的 context
+                NoteSaveManager.shared.setContext(container.mainContext)
             }
         }
 
         setupStatusItem()
         setupPopover()
-        
+
         // 启动时显示主窗口
         Task { @MainActor in
             MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)

@@ -107,38 +107,53 @@ final class NoteSaveManager {
     }
     
     // MARK: - 私有方法
-    
+
     /// 执行实际保存 - 必须在主线程调用
     private func performSave(request: SaveRequest) -> SaveResult {
         guard let context = modelContext else {
             return .failure(NSError(domain: "SaveManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "ModelContext not initialized"]))
         }
-        
+
         let noteID = request.noteID
-        
+
         // 检查是否正在保存该笔记
         guard !currentlySaving.contains(noteID) else {
             return waitAndRetry(request: request, maxRetries: 3)
         }
-        
-        // 标记为正在保存
+
+        // 标记为正在保存（用于崩溃检测）
         currentlySaving.insert(noteID)
-        
+        BackupManager.shared.markSaveStart(noteID: noteID)
+
         defer {
             currentlySaving.remove(noteID)
+            BackupManager.shared.markSaveComplete()
         }
-        
+
+        // 先创建备份
+        BackupManager.shared.createBackup(
+            noteID: noteID,
+            title: request.title,
+            rtfdData: request.rtfdData,
+            reason: request.reason
+        )
+
         // 执行保存
         do {
             let descriptor = FetchDescriptor<NoteEntity>(
                 predicate: #Predicate<NoteEntity> { $0.id == noteID }
             )
-            
+
             let entities = try context.fetch(descriptor)
             guard let entity = entities.first else {
                 return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
             }
-            
+
+            // 验证数据完整性
+            guard validateData(request.rtfdData) else {
+                return .failure(NSError(domain: "SaveManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Data validation failed"]))
+            }
+
             // 更新实体
             entity.title = request.title
             entity.updatedAt = Date()
@@ -146,10 +161,15 @@ final class NoteSaveManager {
             entity.rtfdData = request.rtfdData
             entity.reminderAt = request.reminderAt
             entity.recurrenceRule = request.recurrenceRule
-            
+
             // 保存到数据库
             try context.save()
-            
+
+            // 清理未引用的附件
+            if let content = try? NSAttributedString(data: request.rtfdData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+                AttachmentManager.shared.cleanupUnusedAttachments(for: noteID, content: content)
+            }
+
             return .success
             
         } catch {
@@ -160,7 +180,7 @@ final class NoteSaveManager {
     /// 等待并重试保存
     private func waitAndRetry(request: SaveRequest, maxRetries: Int) -> SaveResult {
         var retries = 0
-        
+
         while retries < maxRetries {
             Thread.sleep(forTimeInterval: 0.05)
             if !currentlySaving.contains(request.noteID) {
@@ -168,8 +188,37 @@ final class NoteSaveManager {
             }
             retries += 1
         }
-        
+
         return performSave(request: request)
+    }
+
+    /// 验证数据完整性
+    private func validateData(_ data: Data) -> Bool {
+        // 检查数据是否为空
+        guard !data.isEmpty else {
+            print("[SaveManager] Validation failed: empty data")
+            return false
+        }
+
+        // 检查数据大小（至少要有基本的 RTFD 头）
+        guard data.count > 100 else {
+            print("[SaveManager] Validation failed: data too small (\(data.count) bytes)")
+            return false
+        }
+
+        // 尝试解析验证
+        do {
+            if let _ = try? NSAttributedString(
+                data: data,
+                options: [.documentType: NSAttributedString.DocumentType.rtfd],
+                documentAttributes: nil
+            ) {
+                return true
+            }
+        }
+
+        // 如果无法解析，可能是纯文本或其他格式，也接受
+        return true
     }
 }
 

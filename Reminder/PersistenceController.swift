@@ -25,7 +25,8 @@ final class PersistenceController: ObservableObject {
 
         let schema = Schema([
             NoteEntity.self,
-            FolderEntity.self
+            FolderEntity.self,
+            TagEntity.self
         ])
 
         let config = ModelConfiguration(schema: schema, url: storeURL)
@@ -41,13 +42,36 @@ final class PersistenceController: ObservableObject {
 }
 
 @Model
+final class TagEntity {
+    @Attribute(.unique) var id: UUID
+    var name: String
+    var color: String // 存储颜色名称如 "red", "orange", "yellow", "green", "blue", "purple", "gray"
+    var sortOrder: Int
+    var createdAt: Date
+    
+    init(id: UUID = UUID(), name: String, color: String = "gray", sortOrder: Int = 0, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.sortOrder = sortOrder
+        self.createdAt = createdAt
+    }
+}
+
+@Model
 final class FolderEntity {
     @Attribute(.unique) var id: UUID
     var name: String
+    var sortOrder: Int?
+    var createdAt: Date?
+    var isSystem: Bool?
 
-    init(id: UUID = UUID(), name: String) {
+    init(id: UUID = UUID(), name: String, sortOrder: Int = 0, createdAt: Date = Date(), isSystem: Bool = false) {
         self.id = id
         self.name = name
+        self.sortOrder = sortOrder
+        self.createdAt = createdAt
+        self.isSystem = isSystem
     }
 }
 
@@ -64,6 +88,9 @@ final class NoteEntity {
     var reminderAt: Date?
     var recurrenceRule: String? // "none", "daily", "weekly", "monthly"
     var version: Int64 = 0
+    
+    /// 标签ID列表，以逗号分隔存储
+    var tagIDs: String?
 
     init(
         id: UUID = UUID(),
@@ -74,7 +101,8 @@ final class NoteEntity {
         rtfdData: Data? = nil,
         reminderAt: Date? = nil,
         recurrenceRule: String? = "none",
-        version: Int64 = 0
+        version: Int64 = 0,
+        tagIDs: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -85,5 +113,6 @@ final class NoteEntity {
         self.reminderAt = reminderAt
         self.recurrenceRule = recurrenceRule
         self.version = version
+        self.tagIDs = tagIDs
     }
 }

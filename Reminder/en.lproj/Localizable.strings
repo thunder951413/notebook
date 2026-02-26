@@ -1,0 +1,57 @@
+/* English Localization */
+
+/* General */
+"OK" = "OK";
+"Cancel" = "Cancel";
+"Save" = "Save";
+"Delete" = "Delete";
+"Edit" = "Edit";
+"Done" = "Done";
+"Close" = "Close";
+
+/* Language Settings */
+"language.title" = "Language";
+"language.system" = "System Default";
+
+/* Notes */
+"note.new" = "New Note";
+"note.untitled" = "Untitled";
+"note.search.placeholder" = "Search notes...";
+"note.delete.confirm" = "Are you sure you want to delete this note?";
+
+/* Folders */
+"folder.all" = "All Notes";
+"folder.uncategorized" = "Uncategorized";
+"folder.new" = "New Folder";
+
+/* Settings */
+"settings.title" = "Settings";
+"settings.storage.location" = "Data Storage Location";
+"settings.storage.current" = "Current Path:";
+"settings.storage.notConfigured" = "Not configured. Please select a folder for data storage.";
+"settings.storage.change" = "Change Location";
+"settings.storage.select" = "Select Location";
+"settings.storage.showInFinder" = "Show in Finder";
+
+/* Rich Text Editor */
+"editor.bold" = "Bold";
+"editor.italic" = "Italic";
+"editor.underline" = "Underline";
+"editor.heading" = "Heading";
+"editor.bulletList" = "Bullet List";
+"editor.numberedList" = "Numbered List";
+"editor.checkbox" = "Checkbox";
+"editor.insertImage" = "Insert Image";
+"editor.insertAudio" = "Insert Audio";
+
+/* Reminder */
+"reminder.title" = "Reminder";
+"reminder.set" = "Set Reminder";
+"reminder.clear" = "Clear Reminder";
+"reminder.recurring" = "Recurring";
+
+/* Backup */
+"backup.title" = "Backup & Restore";
+"backup.description" = "Backups are automatically created when saving notes and can be used to recover accidentally lost data.";
+"backup.restore" = "Restore from Backup";
+"backup.clear" = "Clear All Backups";

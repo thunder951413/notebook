@@ -27,6 +27,7 @@
 		4D88CC462F48073100A872E5 /* Reminder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Reminder.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4D88CC532F48073200A872E5 /* ReminderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ReminderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4D88CC5D2F48073200A872E5 /* ReminderUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ReminderUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		655363C82F4F2B0B00ABA97C /* 张掖外星谷游玩时间与时长.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = "张掖外星谷游玩时间与时长.png"; path = "Reminder/Assets.xcassets/AppIcon.appiconset/张掖外星谷游玩时间与时长.png"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -91,6 +92,7 @@
 				4D88CC482F48073100A872E5 /* Reminder */,
 				4D88CC562F48073200A872E5 /* ReminderTests */,
 				4D88CC602F48073200A872E5 /* ReminderUITests */,
+				655363C72F4F2B0B00ABA97C /* Frameworks */,
 				4D88CC472F48073100A872E5 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -103,6 +105,14 @@
 				4D88CC5D2F48073200A872E5 /* ReminderUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		655363C72F4F2B0B00ABA97C /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				655363C82F4F2B0B00ABA97C /* 张掖外星谷游玩时间与时长.png */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -205,6 +215,7 @@
 			knownRegions = (
 				en,
 				Base,
+				zh,
 			);
 			mainGroup = 4D88CC3D2F48073100A872E5;
 			minimizedProjectReferenceProxies = 1;
@@ -405,9 +416,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = Reminder/Assets.xcassets;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
@@ -423,7 +436,9 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Reminder/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Notebook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSUIElement = 0;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于录制语音备忘并插入到笔记中。";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -448,9 +463,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = Reminder/Assets.xcassets;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
@@ -466,7 +483,9 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Reminder/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Notebook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSUIElement = 0;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于录制语音备忘并插入到笔记中。";
 				LD_RUNPATH_SEARCH_PATHS = (

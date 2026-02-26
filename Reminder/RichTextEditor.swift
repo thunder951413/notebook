@@ -9,22 +9,69 @@ final class RichTextController: ObservableObject {
 
     /// 用于跟踪当前选中的笔记（可能在视图更新前就变更）
     var currentNoteID: UUID?
-    
+
     /// 编辑器实际绑定的笔记ID（只有视图重新渲染时才更新）
     private(set) var boundNoteID: UUID?
-    
+
     /// 获取编辑器实际绑定的笔记ID（用于保存时确定目标）
     var actualNoteID: UUID? { boundNoteID }
-    
+
     /// 检查编辑器是否为空（无内容或已释放）
     var isEmpty: Bool {
         guard let tv = textView else { return true }
         return tv.string.isEmpty
     }
-    
+
     /// 检查当前编辑器内容是否属于指定笔记
     func isBoundTo(noteID: UUID) -> Bool {
         return boundNoteID == noteID && textView != nil
+    }
+
+    // MARK: - 定期自动保存
+
+    /// 自动保存定时器
+    private var autoSaveTimer: Timer?
+
+    /// 上次保存的内容哈希（用于检测变化）
+    private var lastSavedContentHash: Int?
+
+    /// 启动定期自动保存（每30秒）
+    func startAutoSave(interval: TimeInterval = 30.0, onSave: @escaping @MainActor () -> Void) {
+        stopAutoSave()
+
+        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+
+                // 检查内容是否有变化
+                if let currentContent = self.snapshotAttributedStringPreservingMarkedText() {
+                    let currentHash = currentContent.string.hashValue
+
+                    if self.lastSavedContentHash != currentHash {
+                        self.lastSavedContentHash = currentHash
+                        onSave()
+                        print("[RichTextController] Auto-save triggered")
+                    }
+                }
+            }
+        }
+
+        print("[RichTextController] Auto-save started with interval: \(interval)s")
+    }
+
+    /// 停止定期自动保存
+    func stopAutoSave() {
+        autoSaveTimer?.invalidate()
+        autoSaveTimer = nil
+        print("[RichTextController] Auto-save stopped")
+    }
+
+    /// 更新保存状态（在手动保存后调用）
+    func markAsSaved() {
+        if let currentContent = snapshotAttributedStringPreservingMarkedText() {
+            lastSavedContentHash = currentContent.string.hashValue
+        }
     }
 
     func bind(textView: NSTextView, noteID: UUID) {
@@ -99,17 +146,74 @@ final class RichTextController: ObservableObject {
 
     func toggleBold() {
         guard let tv = textView else { return }
-        tv.richTextToolbarAction(Selector(("toggleBoldface:")))
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 获取当前字体
+        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+
+        // 切换粗体
+        let newFont: NSFont
+        if currentFont.fontDescriptor.symbolicTraits.contains(.bold) {
+            newFont = NSFontManager.shared.convert(currentFont, toNotHaveTrait: .boldFontMask)
+        } else {
+            newFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .boldFontMask)
+        }
+
+        tv.textStorage?.beginEditing()
+        tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
     }
 
     func toggleItalic() {
         guard let tv = textView else { return }
-        tv.richTextToolbarAction(Selector(("toggleItalics:")))
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 获取当前字体
+        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let fontSize = currentFont.pointSize
+
+        // 切换斜体
+        let fontManager = NSFontManager.shared
+        let traits = fontManager.traits(of: currentFont)
+        let newFont: NSFont
+        if traits.contains(.italicFontMask) {
+            // 移除斜体 - 使用系统常规字体
+            newFont = NSFont.systemFont(ofSize: fontSize)
+        } else {
+            // 添加斜体 - 使用系统斜体字体
+            newFont = NSFontManager.shared.font(withFamily: currentFont.familyName ?? ".AppleSystemUIFont",
+                                                 traits: [.italicFontMask],
+                                                 weight: fontManager.weight(of: currentFont),
+                                                 size: fontSize)
+                ?? NSFontManager.shared.convert(NSFont.systemFont(ofSize: fontSize), toHaveTrait: .italicFontMask)
+        }
+
+        tv.textStorage?.beginEditing()
+        tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
     }
 
     func toggleUnderline() {
         guard let tv = textView else { return }
-        tv.richTextToolbarAction(Selector(("underline:")))
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 检查是否已有下划线
+        let attributes = tv.textStorage?.attributes(at: range.location, effectiveRange: nil)
+        let hasUnderline = attributes?[.underlineStyle] != nil
+
+        tv.textStorage?.beginEditing()
+        if hasUnderline {
+            tv.textStorage?.removeAttribute(.underlineStyle, range: range)
+        } else {
+            tv.textStorage?.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+        }
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
     }
 
     func setHeading(level: Int) {
@@ -126,18 +230,182 @@ final class RichTextController: ObservableObject {
         ], range: range.length == 0 ? NSRange(location: 0, length: tv.string.utf16.count) : range)
     }
 
-    func toggleBullets() {
+    func toggleCheckbox() {
         guard let tv = textView else { return }
-        tv.toggleContinuousSpellChecking(nil)
-        prefixSelectedLines(with: "• ")
+        tv.toggleCheckboxForCurrentLine()
     }
 
+    func toggleCheckbox(at location: Int) -> Bool {
+        guard let tv = textView else { return false }
+        return tv.toggleCheckbox(at: location)
+    }
+
+    // MARK: - 缩进功能
+
+    func increaseIndent() {
+        guard let tv = textView else { return }
+        let nsString = tv.string as NSString
+        let selectedRange = tv.selectedRange()
+        let lineRange = nsString.lineRange(for: selectedRange)
+
+        // 在行首插入制表符或空格
+        let indentString = "    " // 4个空格
+        tv.textStorage?.insert(NSAttributedString(string: indentString), at: lineRange.location)
+        tv.didChangeText()
+
+        // 调整选中范围
+        let newLocation = selectedRange.location + indentString.count
+        tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
+    }
+
+    func decreaseIndent() {
+        guard let tv = textView else { return }
+        let nsString = tv.string as NSString
+        let selectedRange = tv.selectedRange()
+        let lineRange = nsString.lineRange(for: selectedRange)
+
+        // 检查行首是否有缩进
+        let lineContent = nsString.substring(with: lineRange)
+        let leadingWhitespace = lineContent.prefix { $0 == " " || $0 == "\t" }
+
+        if !leadingWhitespace.isEmpty {
+            // 删除最多4个空格或1个制表符
+            let deleteCount = min(leadingWhitespace.count, 4)
+            let deleteRange = NSRange(location: lineRange.location, length: deleteCount)
+
+            tv.textStorage?.deleteCharacters(in: deleteRange)
+            tv.didChangeText()
+
+            // 调整选中范围
+            let newLocation = max(lineRange.location, selectedRange.location - deleteCount)
+            tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
+        }
+    }
+
+    // MARK: - 列表功能增强
+
+    /// 切换短划线列表
+    func toggleDashList() {
+        toggleListType(prefix: "- ")
+    }
+
+    /// 切换项目符号列表
+    func toggleBullets() {
+        toggleListType(prefix: "• ")
+    }
+
+    /// 切换编号列表
     func toggleNumberedList() {
-        prefixSelectedLines(withNumbering: true)
+        guard let tv = textView else { return }
+        let nsString = tv.string as NSString
+        let selectedRange = tv.selectedRange()
+        let lineRange = nsString.lineRange(for: selectedRange)
+
+        // 检查是否已经有编号
+        let lineContent = nsString.substring(with: lineRange)
+        let numberedPattern = "^\\d+\\. "
+
+        if let regex = try? NSRegularExpression(pattern: numberedPattern),
+           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
+            // 移除编号
+            let deleteRange = NSRange(location: lineRange.location, length: match.range.length)
+            tv.textStorage?.deleteCharacters(in: deleteRange)
+            tv.didChangeText()
+
+            // 调整光标位置
+            let newLocation = selectedRange.location - match.range.length
+            tv.setSelectedRange(NSRange(location: max(lineRange.location, newLocation), length: 0))
+        } else {
+            // 移除其他列表前缀
+            removeOtherListPrefixes(tv: tv, lineRange: lineRange)
+
+            // 添加编号 "1. "
+            tv.textStorage?.insert(NSAttributedString(string: "1. "), at: lineRange.location)
+            tv.didChangeText()
+
+            // 调整光标位置
+            let newLocation = selectedRange.location + 3
+            tv.setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
     }
 
-    func insertCheckbox() {
-        insertText("[ ] ")
+    /// 通用列表切换方法
+    private func toggleListType(prefix: String) {
+        guard let tv = textView else { return }
+        let nsString = tv.string as NSString
+        let selectedRange = tv.selectedRange()
+        let lineRange = nsString.lineRange(for: selectedRange)
+
+        // 检查是否已经有该前缀
+        let lineContent = nsString.substring(with: lineRange)
+
+        if lineContent.hasPrefix(prefix) {
+            // 移除前缀
+            let deleteRange = NSRange(location: lineRange.location, length: prefix.count)
+            tv.textStorage?.deleteCharacters(in: deleteRange)
+            tv.didChangeText()
+
+            // 调整光标位置
+            let newLocation = selectedRange.location - prefix.count
+            tv.setSelectedRange(NSRange(location: max(lineRange.location, newLocation), length: 0))
+        } else {
+            // 移除其他列表前缀
+            removeOtherListPrefixes(tv: tv, lineRange: lineRange)
+
+            // 添加前缀
+            tv.textStorage?.insert(NSAttributedString(string: prefix), at: lineRange.location)
+            tv.didChangeText()
+
+            // 调整光标位置
+            let newLocation = selectedRange.location + prefix.count
+            tv.setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
+    }
+
+    /// 移除其他列表前缀（避免混合列表类型）
+    private func removeOtherListPrefixes(tv: NSTextView, lineRange: NSRange) {
+        let nsString = tv.string as NSString
+        let lineContent = nsString.substring(with: lineRange)
+
+        let prefixes = ["• ", "- ", "1. ", "2. ", "3. ", "4. ", "5. ", "6. ", "7. ", "8. ", "9. "]
+
+        for prefix in prefixes {
+            if lineContent.hasPrefix(prefix) {
+                let deleteRange = NSRange(location: lineRange.location, length: prefix.count)
+                tv.textStorage?.deleteCharacters(in: deleteRange)
+                return
+            }
+        }
+
+        // 检查编号模式 (数字+点+空格)
+        let numberedPattern = "^\\d+\\. "
+        if let regex = try? NSRegularExpression(pattern: numberedPattern),
+           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
+            let deleteRange = NSRange(location: lineRange.location, length: match.range.length)
+            tv.textStorage?.deleteCharacters(in: deleteRange)
+        }
+    }
+
+    // MARK: - 文本样式
+
+    func toggleStrikethrough() {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+
+        if range.length == 0 { return }
+
+        // 检查是否已经有删除线
+        let attributes = tv.textStorage?.attributes(at: range.location, effectiveRange: nil)
+        let hasStrikethrough = attributes?[.strikethroughStyle] != nil
+
+        tv.textStorage?.beginEditing()
+        if hasStrikethrough {
+            tv.textStorage?.removeAttribute(.strikethroughStyle, range: range)
+        } else {
+            tv.textStorage?.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+        }
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
     }
 
     func insertImage() {
@@ -298,6 +566,262 @@ class RichTextView: NSTextView {
             return true
         }
         return super.validateMenuItem(menuItem)
+    }
+
+    // 处理鼠标点击事件 - 用于切换复选框
+    override func mouseDown(with event: NSEvent) {
+        let point = self.convert(event.locationInWindow, from: nil)
+
+        // 尝试多种方式获取点击位置的字符索引
+        var index = self.characterIndexForInsertion(at: point)
+
+        if (index == NSNotFound || index >= self.attributedString().length),
+           let layoutManager = self.layoutManager,
+           let textContainer = self.textContainer {
+            index = layoutManager.characterIndex(for: point, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
+        }
+
+        // 检查是否点击了复选框 - 检查点击位置以及前后几个位置
+        if index != NSNotFound,
+           let layoutManager = self.layoutManager,
+           let textContainer = self.textContainer {
+            let attr = self.attributedString()
+            let checkRange = 5
+            let startIndex = max(0, index - checkRange)
+            let endIndex = min(attr.length - 1, index + checkRange)
+
+            // 确保范围有效（当文本为空时 attr.length 为 0，endIndex 会是 -1）
+            guard startIndex <= endIndex else { return }
+
+            for checkIndex in startIndex...endIndex {
+                var effectiveRange = NSRange(location: NSNotFound, length: 0)
+
+                if let attachment = normalizedCheckboxAttachment(at: checkIndex, effectiveRange: &effectiveRange) {
+                    let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+                    var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                    attachmentRect.origin.x += self.textContainerInset.width
+                    attachmentRect.origin.y += self.textContainerInset.height
+
+                    // 接近 macOS 备忘录：仅略微扩大点击热区，避免误触文本
+                    let expandedRect = attachmentRect.insetBy(dx: -5, dy: -5)
+                    if expandedRect.contains(point) {
+                        let wasChecked = attachment.isChecked
+                        attachment.toggle()
+                        let isNowChecked = attachment.isChecked
+
+                        self.textStorage?.beginEditing()
+                        self.textStorage?.setAttributes([.attachment: attachment], range: effectiveRange)
+                        self.textStorage?.endEditing()
+                        self.didChangeText()
+
+                        if !wasChecked && isNowChecked {
+                            Task { @MainActor [weak self] in
+                                try? await Task.sleep(for: .milliseconds(300))
+                                self?.sortCheckboxesIfNeeded()
+                            }
+                        }
+
+                        if let coordinator = self.delegate as? RichTextEditor.Coordinator {
+                            coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: self))
+                        }
+                        return
+                    }
+                }
+            }
+        }
+
+        super.mouseDown(with: event)
+    }
+
+    /// 检查是否需要排序复选框
+    private func sortCheckboxesIfNeeded() {
+        // 检查是否有已完成和未完成的混合
+        let checkboxes = self.findAllCheckboxes()
+        guard checkboxes.count > 1 else { return }
+
+        let hasChecked = checkboxes.contains { $0.attachment.isChecked }
+        let hasUnchecked = checkboxes.contains { !$0.attachment.isChecked }
+
+        // 只有同时有已完成和未完成时才排序
+        if hasChecked && hasUnchecked {
+            self.sortCheckboxes()
+        }
+    }
+
+    // 处理键盘事件 - 用于回车自动继承复选框
+    override func keyDown(with event: NSEvent) {
+        // 检查是否是回车键
+        if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
+            if handleReturnKey() {
+                return
+            }
+        }
+
+        super.keyDown(with: event)
+    }
+
+    /// 处理回车键 - 自动继承列表符号
+    private func handleReturnKey() -> Bool {
+        let nsString = self.string as NSString
+        let selectedRange = self.selectedRange()
+        let currentLineRange = nsString.lineRange(for: selectedRange)
+
+        // 1. 检查复选框
+        if let checkboxRange = findCheckboxAtLineStart(lineRange: currentLineRange) {
+            return handleCheckboxReturn(checkboxRange: checkboxRange, currentLineRange: currentLineRange, nsString: nsString)
+        }
+
+        // 2. 检查项目符号列表 (• )
+        if let bulletRange = findPrefixAtLineStart(lineRange: currentLineRange, prefix: "• ") {
+            return handleListReturn(prefixRange: bulletRange, prefix: "• ", currentLineRange: currentLineRange, nsString: nsString)
+        }
+
+        // 3. 检查短划线列表 (- )
+        if let dashRange = findPrefixAtLineStart(lineRange: currentLineRange, prefix: "- ") {
+            return handleListReturn(prefixRange: dashRange, prefix: "- ", currentLineRange: currentLineRange, nsString: nsString)
+        }
+
+        // 4. 检查编号列表 (数字. )
+        if let (numberRange, number) = findNumberedListAtLineStart(lineRange: currentLineRange) {
+            return handleNumberedListReturn(numberRange: numberRange, currentNumber: number, currentLineRange: currentLineRange, nsString: nsString)
+        }
+
+        return false
+    }
+
+    /// 处理复选框回车
+    private func handleCheckboxReturn(checkboxRange: NSRange, currentLineRange: NSRange, nsString: NSString) -> Bool {
+        // 检查当前行是否只有复选框（空行）
+        let contentAfterCheckbox = nsString.substring(with: NSRange(location: checkboxRange.upperBound, length: currentLineRange.upperBound - checkboxRange.upperBound))
+        let trimmedContent = contentAfterCheckbox.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedContent.isEmpty {
+            // 空行，删除复选框
+            let deleteRange = NSRange(location: checkboxRange.location, length: checkboxRange.length + 1) // +1 for space
+            self.textStorage?.deleteCharacters(in: deleteRange)
+            self.insertNewline(nil)
+            self.didChangeText()
+            return true
+        } else {
+            // 有内容，先插入换行
+            self.insertNewline(nil)
+
+            // 在新行插入复选框（未选中状态）
+            let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
+            let newAttachment = CheckboxTextAttachment(checked: false)
+            let attrString = NSAttributedString(attachment: newAttachment)
+            let mutableAttr = NSMutableAttributedString(attributedString: attrString)
+            mutableAttr.append(NSAttributedString(string: " "))
+
+            self.textStorage?.insert(mutableAttr, at: newLineRange.location)
+            self.didChangeText()
+            return true
+        }
+    }
+
+    /// 处理普通列表回车
+    private func handleListReturn(prefixRange: NSRange, prefix: String, currentLineRange: NSRange, nsString: NSString) -> Bool {
+        // 检查当前行是否只有前缀（空行）
+        let contentAfterPrefix = nsString.substring(with: NSRange(location: prefixRange.upperBound, length: currentLineRange.upperBound - prefixRange.upperBound))
+        let trimmedContent = contentAfterPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedContent.isEmpty {
+            // 空行，删除前缀
+            let deleteRange = NSRange(location: prefixRange.location, length: prefixRange.length)
+            self.textStorage?.deleteCharacters(in: deleteRange)
+            self.insertNewline(nil)
+            self.didChangeText()
+            return true
+        } else {
+            // 有内容，先插入换行
+            self.insertNewline(nil)
+
+            // 在新行插入相同的前缀
+            let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
+            self.textStorage?.insert(NSAttributedString(string: prefix), at: newLineRange.location)
+            self.didChangeText()
+            return true
+        }
+    }
+
+    /// 处理编号列表回车
+    private func handleNumberedListReturn(numberRange: NSRange, currentNumber: Int, currentLineRange: NSRange, nsString: NSString) -> Bool {
+        _ = "\(currentNumber). "
+
+        // 检查当前行是否只有编号（空行）
+        let contentAfterNumber = nsString.substring(with: NSRange(location: numberRange.upperBound, length: currentLineRange.upperBound - numberRange.upperBound))
+        let trimmedContent = contentAfterNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedContent.isEmpty {
+            // 空行，删除编号
+            let deleteRange = NSRange(location: numberRange.location, length: numberRange.length)
+            self.textStorage?.deleteCharacters(in: deleteRange)
+            self.insertNewline(nil)
+            self.didChangeText()
+            return true
+        } else {
+            // 有内容，先插入换行
+            self.insertNewline(nil)
+
+            // 在新行插入下一个编号
+            let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
+            let nextNumber = currentNumber + 1
+            let newPrefix = "\(nextNumber). "
+            self.textStorage?.insert(NSAttributedString(string: newPrefix), at: newLineRange.location)
+            self.didChangeText()
+            return true
+        }
+    }
+
+    /// 查找行首的复选框
+    private func findCheckboxAtLineStart(lineRange: NSRange) -> NSRange? {
+        let attr = self.attributedString()
+
+        // 检查行首字符
+        if lineRange.location >= attr.length { return nil }
+
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        if attr.attribute(.attachment, at: lineRange.location, effectiveRange: &effectiveRange) is CheckboxTextAttachment {
+            return effectiveRange
+        }
+
+        return nil
+    }
+
+    /// 查找行首的特定前缀
+    private func findPrefixAtLineStart(lineRange: NSRange, prefix: String) -> NSRange? {
+        let nsString = self.string as NSString
+        if lineRange.location >= nsString.length { return nil }
+
+        let lineContent = nsString.substring(with: lineRange)
+        if lineContent.hasPrefix(prefix) {
+            return NSRange(location: lineRange.location, length: prefix.utf16.count)
+        }
+
+        return nil
+    }
+
+    /// 查找行首的编号列表
+    private func findNumberedListAtLineStart(lineRange: NSRange) -> (range: NSRange, number: Int)? {
+        let nsString = self.string as NSString
+        if lineRange.location >= nsString.length { return nil }
+
+        let lineContent = nsString.substring(with: lineRange)
+        let numberedPattern = "^(\\d+)\\. "
+
+        if let regex = try? NSRegularExpression(pattern: numberedPattern),
+           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
+
+            let fullRange = NSRange(location: lineRange.location, length: match.range.length)
+            let numberRange = match.range(at: 1)
+            let numberStr = (lineContent as NSString).substring(with: numberRange)
+
+            if let number = Int(numberStr) {
+                return (fullRange, number)
+            }
+        }
+
+        return nil
     }
 }
 

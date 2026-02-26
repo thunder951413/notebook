@@ -1,0 +1,57 @@
+/* 简体中文本地化 */
+
+/* 通用 */
+"OK" = "确定";
+"Cancel" = "取消";
+"Save" = "保存";
+"Delete" = "删除";
+"Edit" = "编辑";
+"Done" = "完成";
+"Close" = "关闭";
+
+/* 语言设置 */
+"language.title" = "语言";
+"language.system" = "跟随系统";
+
+/* 笔记 */
+"note.new" = "新建笔记";
+"note.untitled" = "未命名";
+"note.search.placeholder" = "搜索笔记...";
+"note.delete.confirm" = "确定要删除这条笔记吗？";
+
+/* 文件夹 */
+"folder.all" = "全部笔记";
+"folder.uncategorized" = "未分类";
+"folder.new" = "新建文件夹";
+
+/* 设置 */
+"settings.title" = "设置";
+"settings.storage.location" = "数据存储位置";
+"settings.storage.current" = "当前路径：";
+"settings.storage.notConfigured" = "尚未配置，请选择一个文件夹作为数据存储位置。";
+"settings.storage.change" = "更改路径";
+"settings.storage.select" = "选择路径";
+"settings.storage.showInFinder" = "在 Finder 中显示";
+
+/* 富文本编辑器 */
+"editor.bold" = "粗体";
+"editor.italic" = "斜体";
+"editor.underline" = "下划线";
+"editor.heading" = "标题";
+"editor.bulletList" = "项目符号";
+"editor.numberedList" = "编号列表";
+"editor.checkbox" = "复选框";
+"editor.insertImage" = "插入图片";
+"editor.insertAudio" = "插入音频";
+
+/* 提醒 */
+"reminder.title" = "提醒";
+"reminder.set" = "设置提醒";
+"reminder.clear" = "清除提醒";
+"reminder.recurring" = "重复提醒";
+
+/* 备份 */
+"backup.title" = "备份与恢复";
+"backup.description" = "备份会在每次保存笔记时自动创建，可用于恢复意外丢失的数据。";
+"backup.restore" = "从备份恢复";
+"backup.clear" = "清除所有备份";

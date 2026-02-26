@@ -19,25 +19,31 @@ struct ContentView: View {
     @State private var didSyncSelectionFromStore = false
     @State private var searchText: String = ""
     @State private var selectedFolder: String = "全部笔记"
+    @State private var selectedTagID: UUID?
     @StateObject private var richTextController = RichTextController()
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         var notes = store.notes
-        
-        // 1. 文件夹筛选
+
+        // 1. 标签筛选
+        if let tagID = selectedTagID {
+            notes = notes.filter { $0.tagIDs.contains(tagID) }
+        }
+
+        // 2. 文件夹筛选
         if selectedFolder != "全部笔记" {
             notes = notes.filter { $0.folder == selectedFolder }
         }
-        
-        // 2. 搜索词筛选
+
+        // 3. 搜索词筛选
         if !q.isEmpty {
-            notes = notes.filter { 
-                $0.title.localizedCaseInsensitiveContains(q) || 
+            notes = notes.filter {
+                $0.title.localizedCaseInsensitiveContains(q) ||
                 $0.content.string.localizedCaseInsensitiveContains(q)
             }
         }
-        
+
         return notes
     }
 
@@ -95,7 +101,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(selectedFolder: $selectedFolder, onCreateNote: createNote)
+            SidebarView(selectedFolder: $selectedFolder, selectedTagID: $selectedTagID, onCreateNote: createNote)
         } content: {
             NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
@@ -174,6 +180,19 @@ struct ContentView: View {
                 selection = store.notes.first?.id
             }
             store.fetchData()
+
+            // 启动定期自动保存（每30秒）
+            richTextController.startAutoSave(interval: 30.0) { [weak store] in
+                guard let store = store else { return }
+                if let currentId = selection,
+                   let index = store.notes.firstIndex(where: { $0.id == currentId }),
+                   richTextController.isBoundTo(noteID: currentId) {
+                    let content = richTextController.snapshotAttributedStringPreservingMarkedText()
+                        ?? store.notes[index].content
+                    saveNoteContent(noteID: currentId, content: content, reason: "auto")
+                    richTextController.markAsSaved()
+                }
+            }
         }
         .onChange(of: store.selectedNoteId) { _, newValue in
             guard let id = newValue else { return }
@@ -213,10 +232,13 @@ private struct SidebarView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @Binding var selectedFolder: String
+    @Binding var selectedTagID: UUID?
     let onCreateNote: () -> Void
 
-    @State private var showingAddFolderAlert = false
-    @State private var newFolderName = ""
+    @State private var showingFolderManagement = false
+    @State private var showingTagManagement = false
+    @State private var isFoldersExpanded = true
+    @State private var isTagsExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -261,32 +283,173 @@ private struct SidebarView: View {
 
             Divider()
 
-            List(selection: $selectedFolder) {
-                Section("文件夹") {
-                    ForEach(store.folders, id: \.self) { folder in
-                        HStack {
-                            Image(systemName: folder == "全部笔记" ? "tray.fill" : "folder.fill")
-                                .foregroundStyle(folder == selectedFolder ? .white : .orange)
-                            Text(folder)
-                            Spacer()
-                            if folder != "全部笔记" {
-                                Text("\(store.notes.filter { $0.folder == folder }.count)")
-                                    .font(.caption)
-                                    .foregroundStyle(folder == selectedFolder ? .white.opacity(0.7) : .secondary)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedFolder = folder
-                        }
-                        .tag(folder)
-                    }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    allNotesRow
+
+                    // 文件夹区域
+                    foldersSection
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    // 标签区域
+                    tagsSection
                 }
             }
-            .listStyle(.plain)
             .frame(minWidth: 180, maxWidth: 220)
             .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
         }
+        .sheet(isPresented: $showingFolderManagement) {
+            FolderManagementView()
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $showingTagManagement) {
+            TagManagementView()
+                .environmentObject(store)
+        }
+    }
+
+    private var allNotesRow: some View {
+        HStack {
+            Image(systemName: "tray.fill")
+                .foregroundStyle(selectedFolder == "全部笔记" && selectedTagID == nil ? .white : .orange)
+            Text("全部笔记")
+            Spacer()
+            Text("\(store.notes.count)")
+                .font(.caption)
+                .foregroundStyle(selectedFolder == "全部笔记" && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(selectedFolder == "全部笔记" && selectedTagID == nil ? Color.blue : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedFolder = "全部笔记"
+            selectedTagID = nil
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
+    }
+
+    private var foldersSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isFoldersExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Image(systemName: isFoldersExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("文件夹")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        showingFolderManagement = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+
+            if isFoldersExpanded {
+                ForEach(store.folders) { folder in
+                    folderRow(folder)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private var tagsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isTagsExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Image(systemName: isTagsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("标签")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        showingTagManagement = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+
+            if isTagsExpanded {
+                ForEach(store.tags) { tag in
+                    tagRow(tag)
+                }
+            }
+        }
+    }
+
+    private func tagRow(_ tag: Tag) -> some View {
+        let notesWithTag = store.notes.filter { $0.tagIDs.contains(tag.id) }
+        return HStack {
+            Circle()
+                .fill(tag.swiftUIColor)
+                .frame(width: 8, height: 8)
+            Text(tag.name)
+                .lineLimit(1)
+            Spacer()
+            Text("\(notesWithTag.count)")
+                .font(.caption)
+                .foregroundStyle(selectedTagID == tag.id ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(selectedTagID == tag.id ? Color.blue : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedTagID = tag.id
+            selectedFolder = "全部笔记"
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func folderRow(_ folder: Folder) -> some View {
+        HStack {
+            Image(systemName: folder.isSystem ? "folder.fill" : "folder")
+                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white : (folder.isSystem ? .orange : .blue))
+            Text(folder.name)
+                .lineLimit(1)
+            Spacer()
+            Text("\(store.notes.filter { $0.folder == folder.name }.count)")
+                .font(.caption)
+                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(selectedFolder == folder.name && selectedTagID == nil ? Color.blue : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedFolder = folder.name
+            selectedTagID = nil
+        }
+        .padding(.horizontal, 8)
     }
 }
 
@@ -529,30 +692,90 @@ private struct EditorTopBarView: View {
             Button { controller.toggleBold() } label: { Text("B").fontWeight(.bold) }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-            Button { controller.toggleItalic() } label: { Text("I").italic() }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            Button { controller.toggleUnderline() } label: { Text("U").underline() }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
+            // 格式菜单（合并所有文本样式）
             Menu {
-                Button("H1") { controller.setHeading(level: 1) }
-                Button("H2") { controller.setHeading(level: 2) }
-                Button("H3") { controller.setHeading(level: 3) }
+                Button {
+                    controller.toggleBold()
+                } label: {
+                    Label("粗体", systemImage: "bold")
+                }
+                Button {
+                    controller.toggleItalic()
+                } label: {
+                    Label("斜体", systemImage: "italic")
+                }
+                Button {
+                    controller.toggleUnderline()
+                } label: {
+                    Label("下划线", systemImage: "underline")
+                }
+                Button {
+                    controller.toggleStrikethrough()
+                } label: {
+                    Label("删除线", systemImage: "strikethrough")
+                }
+                Divider()
+                Button("标题 1") { controller.setHeading(level: 1) }
+                Button("标题 2") { controller.setHeading(level: 2) }
+                Button("标题 3") { controller.setHeading(level: 3) }
             } label: {
-                Image(systemName: "textformat.size")
+                Image(systemName: "textformat")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
 
             Divider().frame(height: 18)
 
+            // 列表菜单（合并所有列表类型）
+            Menu {
+                Button {
+                    controller.toggleBullets()
+                } label: {
+                    Label("项目符号", systemImage: "list.bullet")
+                }
+                Button {
+                    controller.toggleDashList()
+                } label: {
+                    Label("短划线", systemImage: "list.dash")
+                }
+                Button {
+                    controller.toggleNumberedList()
+                } label: {
+                    Label("编号", systemImage: "list.number")
+                }
+                Divider()
+                Button {
+                    controller.toggleCheckbox()
+                } label: {
+                    Label("复选框", systemImage: "checkmark.circle")
+                }
+            } label: {
+                Image(systemName: "list.bullet")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
+            Divider().frame(height: 18)
+
+            // 增加缩进
+            Button { controller.increaseIndent() } label: {
+                Image(systemName: "increase.indent")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
+            // 减少缩进
+            Button { controller.decreaseIndent() } label: {
+                Image(systemName: "decrease.indent")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
             // 文件夹选择
             Menu {
-                ForEach(store.folders.filter { $0 != "全部笔记" }, id: \.self) { folder in
-                    Button(folder) {
-                        note.folder = folder
+                ForEach(store.folders) { folder in
+                    Button(folder.name) {
+                        note.folder = folder.name
                     }
                 }
             } label: {
@@ -560,6 +783,9 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+
+            // 标签按钮
+            TagButton(note: $note)
 
             // 提醒按钮
             Button {
@@ -630,5 +856,77 @@ private struct EditorTopBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(AppColors.editorBackground(colorScheme))
+    }
+}
+
+private struct TagButton: View {
+    @EnvironmentObject private var store: NoteStore
+    @Binding var note: Note
+    @State private var showingTagPopover = false
+
+    var body: some View {
+        Menu {
+            // 显示已添加的标签
+            let noteTagIDs = Set(note.tagIDs)
+            let addedTags = store.tags.filter { noteTagIDs.contains($0.id) }
+            let availableTags = store.tags.filter { !noteTagIDs.contains($0.id) }
+
+            if !addedTags.isEmpty {
+                Section("已添加") {
+                    ForEach(addedTags) { tag in
+                        Button {
+                            store.removeTagFromNote(tagID: tag.id, noteID: note.id)
+                            if let idx = store.notes.firstIndex(where: { $0.id == note.id }) {
+                                store.notes[idx].tagIDs.removeAll { $0 == tag.id }
+                            }
+                        } label: {
+                            HStack {
+                                Circle()
+                                    .fill(tag.swiftUIColor)
+                                    .frame(width: 8, height: 8)
+                                Text(tag.name)
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !availableTags.isEmpty {
+                Section("添加标签") {
+                    ForEach(availableTags) { tag in
+                        Button {
+                            store.addTagToNote(tagID: tag.id, noteID: note.id)
+                            if let idx = store.notes.firstIndex(where: { $0.id == note.id }) {
+                                store.notes[idx].tagIDs.append(tag.id)
+                            }
+                        } label: {
+                            HStack {
+                                Circle()
+                                    .fill(tag.swiftUIColor)
+                                    .frame(width: 8, height: 8)
+                                Text(tag.name)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if store.tags.isEmpty {
+                Text("没有可用标签")
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "tag")
+                if !note.tagIDs.isEmpty {
+                    Text("\(note.tagIDs.count)")
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(note.tagIDs.isEmpty ? Color.secondary : Color.blue)
+        }
+        .menuStyle(.borderlessButton)
     }
 }
