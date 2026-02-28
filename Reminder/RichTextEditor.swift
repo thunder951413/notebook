@@ -88,10 +88,11 @@ final class RichTextController: ObservableObject {
     }
 
     /// 强制同步内容并获取当前编辑器内容的快照
-    func snapshotAttributedString() -> NSAttributedString {
+    /// - Returns: 编辑器内容，如果 textView 不可用则返回 nil（调用者应使用内存中的内容）
+    func snapshotAttributedString() -> NSAttributedString? {
         guard let tv = textView else {
-            print("[RichTextController] snapshot: textView is nil")
-            return NSAttributedString(string: "")
+            print("[RichTextController] snapshot: textView is nil, returning nil to use memory content")
+            return nil
         }
         
         let content = tv.attributedString()

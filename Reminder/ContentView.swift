@@ -12,8 +12,9 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
 
-    @State private var selection: Note.ID?
+    @State private var selection: Note.ID? = nil
 
     // 与菜单栏 Popover 共享选中状态
     @State private var didSyncSelectionFromStore = false
@@ -92,7 +93,10 @@ struct ContentView: View {
         }
         
         // 从编辑器获取内容
-        let editorContent = richTextController.snapshotAttributedString()
+        guard let editorContent = richTextController.snapshotAttributedString() else {
+            print("[SAVE DEBUG] Editor content is nil, skipping save")
+            return
+        }
         print("[SAVE DEBUG] Editor content length: \(editorContent.length)")
         
         // 执行保存
@@ -101,7 +105,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(selectedFolder: $selectedFolder, selectedTagID: $selectedTagID, onCreateNote: createNote)
+            SidebarView(selectedFolder: $selectedFolder, selectedTagID: $selectedTagID, selection: $selection, onCreateNote: createNote)
         } content: {
             NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
@@ -115,18 +119,23 @@ struct ContentView: View {
                         // 如果编辑器绑定着旧笔记，从编辑器获取内容
                         // 否则使用内存中的内容
                         let contentToSave: NSAttributedString
-                        if richTextController.isBoundTo(noteID: oldNoteID) {
-                            contentToSave = richTextController.snapshotAttributedString()
+                        if richTextController.isBoundTo(noteID: oldNoteID),
+                           let editorContent = richTextController.snapshotAttributedString() {
+                            // 成功从编辑器获取内容
+                            contentToSave = editorContent
                             // 同步更新内存
                             if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
                                 store.notes[oldIndex].content = contentToSave
                             }
                         } else {
-                            // 编辑器已经不绑定旧笔记，使用内存中的内容
+                            // 编辑器不可用或不绑定旧笔记，使用内存中的内容
                             if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
                                 contentToSave = store.notes[oldIndex].content
                             } else {
-                                contentToSave = NSAttributedString(string: "")
+                                print("[SAVE WARNING] Cannot find old note in memory, skipping save")
+                                selection = newSelection
+                                AppSettings.shared.lastSelectedNoteID = newSelection
+                                return
                             }
                         }
                         
@@ -136,6 +145,8 @@ struct ContentView: View {
                     
                     // 更新 selection
                     selection = newSelection
+                    // 保存最后选中的笔记
+                    AppSettings.shared.lastSelectedNoteID = newSelection
                 }
             ))
         } detail: {
@@ -206,6 +217,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.fetchData()
         }
+        .task {
+            // 启动时根据设置恢复选中的笔记
+            await restoreSelectionOnLaunch()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             saveCurrentEditorContent(reason: "appBlur")
         }
@@ -225,79 +240,92 @@ struct ContentView: View {
         store.deleteNote(id: id)
         selection = filteredNotes.first?.id
     }
+
+    /// 启动时恢复选中的笔记
+    private func restoreSelectionOnLaunch() async {
+        // 等待数据加载完成
+        while store.notes.isEmpty {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        let behavior = AppSettings.shared.startupBehavior
+
+        switch behavior {
+        case .restoreLastNote:
+            if let lastID = AppSettings.shared.lastSelectedNoteID,
+               store.notes.contains(where: { $0.id == lastID }) {
+                selection = lastID
+                print("[Launch] Restored last selected note: \(lastID)")
+            } else {
+                selection = nil
+                print("[Launch] Last note not found, selecting none")
+            }
+
+        case .selectNone:
+            selection = nil
+            print("[Launch] Selecting none as per settings")
+
+        case .showAllNotes:
+            selectedFolder = "全部笔记"
+            selectedTagID = nil
+            selection = store.notes.first?.id
+            print("[Launch] Showing all notes")
+        }
+    }
 }
 
 private struct SidebarView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
 
     @Binding var selectedFolder: String
     @Binding var selectedTagID: UUID?
+    @Binding var selection: Note.ID?
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
     @State private var showingTagManagement = false
-    @State private var isFoldersExpanded = true
-    @State private var isTagsExpanded = true
+    @State private var isFoldersExpanded: Bool = AppSettings.shared.isFoldersExpanded
+    @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    Circle()
-                        .fill(colorScheme == .dark ? .white.opacity(0.12) : .black.opacity(0.06))
-                        .frame(width: 44, height: 44)
-                        .overlay {
-                            Image(systemName: "person.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Yan")
-                            .font(.headline)
-                        Text("本地模式")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                // 主内容区域：全部笔记 + 文件夹（可滚动）
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        allNotesRow
+                        foldersSection
                     }
-                    Spacer()
                 }
-                
-                Button {
-                    onCreateNote()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus")
-                        Text("新建笔记")
-                            .fontWeight(.medium)
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
+                .frame(maxHeight: .infinity)
 
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    allNotesRow
-
-                    // 文件夹区域
-                    foldersSection
-
+                // 动态布局：根据展开状态决定标签位置
+                if isTagsExpanded {
+                    // 标签展开时：显示在内容下方，标签本身也可滚动
                     Divider()
                         .padding(.vertical, 8)
-
-                    // 标签区域
+                    
+                    // 标签展开时占用剩余空间并可以滚动
+                    ScrollView {
+                        tagsSection
+                    }
+                    .frame(maxHeight: .infinity)
+                } else {
+                    // 标签折叠时：固定在底部，但留出一些空间避免显示不全
+                    Spacer(minLength: 20)
+                    
+                    Divider()
+                        .padding(.vertical, 8)
+                    
                     tagsSection
+                    
+                    // 底部留出一些内边距
+                    Spacer(minLength: 8)
                 }
             }
-            .frame(minWidth: 180, maxWidth: 220)
+            .frame(width: geometry.size.width, height: geometry.size.height)
             .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
         }
         .sheet(isPresented: $showingFolderManagement) {
@@ -322,7 +350,7 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == "全部笔记" && selectedTagID == nil ? Color.blue : Color.clear)
+        .background(selectedFolder == "全部笔记" && selectedTagID == nil ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -338,6 +366,7 @@ private struct SidebarView: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     isFoldersExpanded.toggle()
+                    AppSettings.shared.isFoldersExpanded = isFoldersExpanded
                 }
             } label: {
                 HStack {
@@ -374,6 +403,7 @@ private struct SidebarView: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     isTagsExpanded.toggle()
+                    AppSettings.shared.isTagsExpanded = isTagsExpanded
                 }
             } label: {
                 HStack {
@@ -419,10 +449,20 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(selectedTagID == tag.id ? Color.blue : Color.clear)
+        .background(selectedTagID == tag.id ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
+            // 检查当前选中的笔记是否包含新标签
+            if let currentSelection = selection,
+               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+               !selectedNote.tagIDs.contains(tag.id) {
+                // 当前笔记没有新标签，清空选中状态（延迟到下一个runloop避免 Publishing changes 警告）
+                DispatchQueue.main.async {
+                    selection = nil
+                    AppSettings.shared.lastSelectedNoteID = nil
+                }
+            }
             selectedTagID = tag.id
             selectedFolder = "全部笔记"
         }
@@ -432,7 +472,7 @@ private struct SidebarView: View {
     private func folderRow(_ folder: Folder) -> some View {
         HStack {
             Image(systemName: folder.isSystem ? "folder.fill" : "folder")
-                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white : (folder.isSystem ? .orange : .blue))
+                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white : (folder.isSystem ? .orange : themeManager.accentColor))
             Text(folder.name)
                 .lineLimit(1)
             Spacer()
@@ -442,10 +482,20 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(selectedFolder == folder.name && selectedTagID == nil ? Color.blue : Color.clear)
+        .background(selectedFolder == folder.name && selectedTagID == nil ? ThemeManager.shared.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
+            // 检查当前选中的笔记是否在新文件夹中
+            if let currentSelection = selection,
+               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+               selectedNote.folder != folder.name {
+                // 当前笔记不在新文件夹中，清空选中状态（延迟到下一个runloop避免 Publishing changes 警告）
+                DispatchQueue.main.async {
+                    selection = nil
+                    AppSettings.shared.lastSelectedNoteID = nil
+                }
+            }
             selectedFolder = folder.name
             selectedTagID = nil
         }
@@ -488,6 +538,7 @@ private struct NoteRowView: View {
     let note: Note
     let isSelected: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -517,7 +568,7 @@ private struct NoteRowView: View {
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
-        .background(isSelected ? Color.blue : Color.clear)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
@@ -861,6 +912,7 @@ private struct EditorTopBarView: View {
 
 private struct TagButton: View {
     @EnvironmentObject private var store: NoteStore
+    @StateObject private var themeManager = ThemeManager.shared
     @Binding var note: Note
     @State private var showingTagPopover = false
 
@@ -925,7 +977,7 @@ private struct TagButton: View {
                         .font(.caption)
                 }
             }
-            .foregroundStyle(note.tagIDs.isEmpty ? Color.secondary : Color.blue)
+            .foregroundStyle(note.tagIDs.isEmpty ? Color.secondary : themeManager.accentColor)
         }
         .menuStyle(.borderlessButton)
     }

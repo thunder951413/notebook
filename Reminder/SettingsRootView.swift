@@ -7,17 +7,20 @@ struct SettingsRootView: View {
     @EnvironmentObject private var persistence: PersistenceController
     @EnvironmentObject private var store: NoteStore
     @StateObject private var languageManager = LanguageManager.shared
+    @StateObject private var themeManager = ThemeManager.shared
 
     @State private var isChoosingDirectory = false
     @State private var errorMessage: String?
     @State private var showRestartAlert = false
     @State private var showBackupRestoreSheet = false
     @State private var showClearBackupConfirmation = false
+    @State private var startupBehavior = AppSettings.shared.startupBehavior
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // 语言设置
-            VStack(alignment: .leading, spacing: 12) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // 语言设置
+                VStack(alignment: .leading, spacing: 12) {
                 Text(l10n(L10nKeys.Language.title))
                     .font(.title2)
                     .bold()
@@ -33,6 +36,67 @@ struct SettingsRootView: View {
                 Text("重启应用后语言设置生效")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            // 启动行为设置
+            VStack(alignment: .leading, spacing: 12) {
+                Text("启动行为")
+                    .font(.title2)
+                    .bold()
+
+                Picker("启动时", selection: $startupBehavior) {
+                    ForEach(AppSettings.StartupBehavior.allCases, id: \.self) { behavior in
+                        Text(behavior.displayName).tag(behavior)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .frame(maxWidth: 300, alignment: .leading)
+                .onChange(of: startupBehavior) { _, newValue in
+                    AppSettings.shared.startupBehavior = newValue
+                }
+
+                Text("选择应用启动时的默认行为")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            // 主题色设置
+            VStack(alignment: .leading, spacing: 12) {
+                Text("主题颜色")
+                    .font(.title2)
+                    .bold()
+
+                Text("选择应用的主题高亮颜色")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 12) {
+                    ForEach(0..<AppSettings.presetColors.count, id: \.self) { index in
+                        let color = AppSettings.presetColors[index]
+                        Button {
+                            themeManager.updateAccentColor(color)
+                        } label: {
+                            Circle()
+                                .fill(color)
+                                .frame(width: 28, height: 28)
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.primary.opacity(0.3), lineWidth: 1)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(isColorSelected(color) ? Color.primary : Color.clear, lineWidth: 2)
+                                        .padding(-2)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 4)
             }
 
             Divider()
@@ -141,15 +205,16 @@ struct SettingsRootView: View {
                 }
             }
 
-            if let error = errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.footnote)
-            }
+                if let error = errorMessage {
+                    Text(error)
+                        .foregroundColor(.red)
+                        .font(.footnote)
+                }
 
-            Spacer()
+                Spacer()
+            }
+            .padding(20)
         }
-        .padding(20)
         .frame(minWidth: 520, minHeight: 400)
         .alert("需要重启", isPresented: $showRestartAlert) {
             Button("确定") {}
@@ -168,6 +233,24 @@ struct SettingsRootView: View {
         } message: {
             Text("确定要清除所有备份吗？此操作不可撤销。")
         }
+    }
+
+    /// 检查颜色是否被选中
+    private func isColorSelected(_ color: Color) -> Bool {
+        // 简单的颜色比较：转换为 NSColor 比较 RGB 值
+        let currentNSColor = NSColor(AppSettings.shared.accentColor)
+        let compareNSColor = NSColor(color)
+
+        var currentR: CGFloat = 0, currentG: CGFloat = 0, currentB: CGFloat = 0, currentA: CGFloat = 0
+        var compareR: CGFloat = 0, compareG: CGFloat = 0, compareB: CGFloat = 0, compareA: CGFloat = 0
+
+        currentNSColor.getRed(&currentR, green: &currentG, blue: &currentB, alpha: &currentA)
+        compareNSColor.getRed(&compareR, green: &compareG, blue: &compareB, alpha: &compareA)
+
+        let tolerance: CGFloat = 0.01
+        return abs(currentR - compareR) < tolerance &&
+               abs(currentG - compareG) < tolerance &&
+               abs(currentB - compareB) < tolerance
     }
 
     private func chooseDirectory() {
