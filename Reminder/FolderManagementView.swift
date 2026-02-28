@@ -13,11 +13,11 @@ struct FolderManagementView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("文件夹管理")
+                Text(l10n(L10nKeys.Folder.management))
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button("完成") {
+                Button(l10n(L10nKeys.common.done)) {
                     dismiss()
                 }
                 .keyboardShortcut(.escape, modifiers: [])
@@ -28,12 +28,12 @@ struct FolderManagementView: View {
                 Button {
                     showingAddFolderAlert = true
                 } label: {
-                    Label("新建文件夹", systemImage: "plus")
+                    Label(l10n(L10nKeys.Folder.new), systemImage: "plus")
                 }
 
                 Spacer()
 
-                Text("拖拽可排序")
+                Text(l10n(L10nKeys.Folder.dragToSort))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -48,7 +48,7 @@ struct FolderManagementView: View {
                         Text(folder.name)
 
                         if folder.isSystem {
-                            Text("系统")
+                            Text(l10n(L10nKeys.Folder.system))
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -69,7 +69,7 @@ struct FolderManagementView: View {
                                     editingFolder = folder
                                     editName = folder.name
                                 } label: {
-                                    Label("重命名", systemImage: "pencil")
+                                    Label(l10n(L10nKeys.common.rename), systemImage: "pencil")
                                 }
 
                                 Divider()
@@ -77,7 +77,7 @@ struct FolderManagementView: View {
                                 Button(role: .destructive) {
                                     store.deleteFolder(id: folder.id)
                                 } label: {
-                                    Label("删除", systemImage: "trash")
+                                    Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle")
@@ -96,36 +96,31 @@ struct FolderManagementView: View {
         }
         .frame(width: 400, height: 450)
         .background(AppColors.sidebarBackground(colorScheme))
-        .alert("新建文件夹", isPresented: $showingAddFolderAlert) {
-            TextField("文件夹名称", text: $newFolderName)
-            Button("取消", role: .cancel) { }
-            Button("创建") {
+        .alert(l10n(L10nKeys.Folder.new), isPresented: $showingAddFolderAlert) {
+            TextField(l10n(L10nKeys.Folder.namePlaceholder), text: $newFolderName)
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) { }
+            Button(l10n(L10nKeys.common.create)) {
                 if !newFolderName.isEmpty {
                     store.addFolder(name: newFolderName)
                     newFolderName = ""
                 }
             }
         } message: {
-            Text("请输入新文件夹的名称")
+            Text(l10n(L10nKeys.Folder.new))
         }
-        .alert("重命名文件夹", isPresented: .constant(editingFolder != nil)) {
-            TextField("名称", text: $editName)
-            Button("取消", role: .cancel) {
+        .alert(l10n(L10nKeys.common.rename), isPresented: .constant(editingFolder != nil)) {
+            TextField(l10n(L10nKeys.Folder.namePlaceholder), text: $editName)
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) {
                 editingFolder = nil
             }
-            Button("保存") {
+            Button(l10n(L10nKeys.common.save)) {
                 if let folder = editingFolder {
                     store.updateFolder(id: folder.id, name: editName)
                 }
                 editingFolder = nil
             }
         } message: {
-            Text("请输入新的文件夹名称")
+            Text(l10n(L10nKeys.common.rename))
         }
     }
-}
-
-#Preview {
-    FolderManagementView()
-        .environmentObject(NoteStore())
 }

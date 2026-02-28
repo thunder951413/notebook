@@ -12,23 +12,23 @@ struct TagManagementView: View {
     @State private var editName = ""
 
     private let colorOptions = [
-        ("red", "红色", Color.red),
-        ("orange", "橙色", Color.orange),
-        ("yellow", "黄色", Color.yellow),
-        ("green", "绿色", Color.green),
-        ("blue", "蓝色", Color.blue),
-        ("purple", "紫色", Color.purple),
-        ("gray", "灰色", Color.gray)
+        ("red", l10n("color.red"), Color.red),
+        ("orange", l10n("color.orange"), Color.orange),
+        ("yellow", l10n("color.yellow"), Color.yellow),
+        ("green", l10n("color.green"), Color.green),
+        ("blue", l10n("color.blue"), Color.blue),
+        ("purple", l10n("color.purple"), Color.purple),
+        ("gray", l10n("color.gray"), Color.gray)
     ]
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("标签管理")
+                Text(l10n(L10nKeys.Tag.management))
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button("完成") {
+                Button(l10n(L10nKeys.common.done)) {
                     dismiss()
                 }
                 .keyboardShortcut(.escape, modifiers: [])
@@ -39,12 +39,12 @@ struct TagManagementView: View {
                 Button {
                     showingAddTagAlert = true
                 } label: {
-                    Label("新建标签", systemImage: "plus")
+                    Label(l10n(L10nKeys.Tag.new), systemImage: "plus")
                 }
 
                 Spacer()
 
-                Text("拖拽可排序")
+                Text(l10n(L10nKeys.Tag.dragToSort))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -61,7 +61,7 @@ struct TagManagementView: View {
 
                         Spacer()
 
-                        Text("\(store.notes.filter { $0.tagIDs.contains(tag.id) }.count) 笔记")
+                        Text(String(format: l10n(L10nKeys.Tag.noteCount), store.notes.filter { $0.tagIDs.contains(tag.id) }.count))
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -70,10 +70,10 @@ struct TagManagementView: View {
                                 editingTag = tag
                                 editName = tag.name
                             } label: {
-                                Label("重命名", systemImage: "pencil")
+                                Label(l10n(L10nKeys.Tag.rename), systemImage: "pencil")
                             }
 
-                            Menu("更改颜色") {
+                            Menu(l10n(L10nKeys.Tag.changeColor)) {
                                 ForEach(colorOptions, id: \.0) { colorKey, colorName, _ in
                                     Button {
                                         store.updateTag(id: tag.id, color: colorKey)
@@ -93,7 +93,7 @@ struct TagManagementView: View {
                             Button(role: .destructive) {
                                 store.deleteTag(id: tag.id)
                             } label: {
-                                Label("删除", systemImage: "trash")
+                                Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                             }
                         } label: {
                             Image(systemName: "ellipsis.circle")
@@ -111,10 +111,10 @@ struct TagManagementView: View {
         }
         .frame(width: 400, height: 450)
         .background(AppColors.sidebarBackground(colorScheme))
-        .alert("新建标签", isPresented: $showingAddTagAlert) {
-            TextField("标签名称", text: $newTagName)
+        .alert(l10n(L10nKeys.Tag.new), isPresented: $showingAddTagAlert) {
+            TextField(l10n(L10nKeys.Tag.namePlaceholder), text: $newTagName)
             VStack(alignment: .leading, spacing: 8) {
-                Text("选择颜色")
+                Text(l10n(L10nKeys.Tag.selectColor))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 12) {
@@ -133,8 +133,8 @@ struct TagManagementView: View {
                 }
             }
             .padding(.vertical, 8)
-            Button("取消", role: .cancel) { }
-            Button("创建") {
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) { }
+            Button(l10n(L10nKeys.common.create)) {
                 if !newTagName.isEmpty {
                     store.addTag(name: newTagName, color: selectedColor)
                     newTagName = ""
@@ -142,21 +142,21 @@ struct TagManagementView: View {
                 }
             }
         } message: {
-            Text("请输入新标签的名称")
+            Text(l10n("tag.new.message"))
         }
-        .alert("重命名标签", isPresented: .constant(editingTag != nil)) {
-            TextField("名称", text: $editName)
-            Button("取消", role: .cancel) {
+        .alert(l10n("tag.rename.title"), isPresented: .constant(editingTag != nil)) {
+            TextField(l10n(L10nKeys.Tag.namePlaceholder), text: $editName)
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) {
                 editingTag = nil
             }
-            Button("保存") {
+            Button(l10n(L10nKeys.common.save)) {
                 if let tag = editingTag {
                     store.updateTag(id: tag.id, name: editName)
                 }
                 editingTag = nil
             }
         } message: {
-            Text("请输入新的标签名称")
+            Text(l10n("tag.rename.message"))
         }
     }
 }

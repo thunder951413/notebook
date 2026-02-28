@@ -9,16 +9,16 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("欢迎")
+            Text(l10n(L10nKeys.Onboarding.welcome))
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("首次使用需要选择一个保存目录。应用会在该目录下创建：")
+            Text(l10n(L10nKeys.Onboarding.description))
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("• ReminderData/Database（笔记数据）")
-                Text("• ReminderData/Attachments（图片/音频附件）")
+                Text(l10n(L10nKeys.Onboarding.databasePath))
+                Text(l10n(L10nKeys.Onboarding.attachmentsPath))
             }
             .font(.body)
 
@@ -31,7 +31,7 @@ struct OnboardingView: View {
                 Button {
                     Task { await chooseDirectory() }
                 } label: {
-                    Text(isChoosing ? "正在打开选择器…" : "选择保存目录")
+                    Text(isChoosing ? l10n(L10nKeys.Onboarding.selecting) : l10n(L10nKeys.Onboarding.selectDirectory))
                         .fontWeight(.semibold)
                 }
                 .disabled(isChoosing)
@@ -39,7 +39,7 @@ struct OnboardingView: View {
                 Spacer()
             }
 
-            Text("提示：后续可在设置中更换目录（稍后实现）。")
+            Text(l10n(L10nKeys.Onboarding.tip))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -60,10 +60,4 @@ struct OnboardingView: View {
             errorMessage = error.localizedDescription
         }
     }
-}
-
-#Preview {
-    OnboardingView()
-        .environmentObject(StorageLocationManager.shared)
-        .environmentObject(PersistenceController.shared)
 }

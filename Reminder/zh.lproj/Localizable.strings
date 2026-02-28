@@ -1,57 +1,185 @@
 /* 简体中文本地化 */
 
-/* 通用 */
-"OK" = "确定";
-"Cancel" = "取消";
-"Save" = "保存";
-"Delete" = "删除";
-"Edit" = "编辑";
-"Done" = "完成";
-"Close" = "关闭";
+/* App Name */
+"app.name" = "Reminder";
 
-/* 语言设置 */
+/* Common */
+"common.ok" = "确定";
+"common.cancel" = "取消";
+"common.save" = "保存";
+"common.delete" = "删除";
+"common.edit" = "编辑";
+"common.done" = "完成";
+"common.close" = "关闭";
+"common.create" = "创建";
+"common.confirm" = "确认";
+"common.noTitle" = "无标题";
+"common.select" = "选择";
+"common.search" = "搜索";
+"common.rename" = "重命名";
+"common.add" = "添加";
+"common.remove" = "移除";
+"common.clear" = "清除";
+"common.refresh" = "刷新";
+"common.notes" = "笔记";
+"common.note" = "笔记";
+
+/* Language Settings */
 "language.title" = "语言";
-"language.system" = "跟随系统";
+"language.system" = "系统";
+"language.systemDefault" = "跟随系统";
+"language.restartRequired" = "重启应用后语言设置生效";
 
-/* 笔记 */
+/* Notes */
 "note.new" = "新建笔记";
 "note.untitled" = "未命名";
 "note.search.placeholder" = "搜索笔记...";
 "note.delete.confirm" = "确定要删除这条笔记吗？";
+"note.noSelection" = "未选择笔记";
+"note.title" = "标题";
+"note.title.placeholder" = "标题";
+"note.reminder" = "提醒";
+"note.reminder.title" = "设置提醒";
+"note.reminder.set" = "设置提醒";
+"note.reminder.clear" = "清除提醒";
+"note.recurrence" = "重复";
+"note.recurrence.none" = "不重复";
+"note.recurrence.daily" = "每天";
+"note.recurrence.weekly" = "每周";
+"note.recurrence.monthly" = "每月";
 
-/* 文件夹 */
+/* Folders */
 "folder.all" = "全部笔记";
 "folder.uncategorized" = "未分类";
 "folder.new" = "新建文件夹";
+"folder.title" = "文件夹";
+"folder.management" = "文件夹管理";
+"folder.name.placeholder" = "文件夹名称";
+"folder.system" = "系统";
+"folder.dragToSort" = "拖拽可排序";
 
-/* 设置 */
+/* Tags */
+"tag.title" = "标签";
+"tag.management" = "标签管理";
+"tag.new" = "新建标签";
+"tag.name.placeholder" = "标签名称";
+"tag.selectColor" = "选择颜色";
+"tag.added" = "已添加";
+"tag.add" = "添加标签";
+"tag.noAvailable" = "没有可用标签";
+"tag.rename" = "重命名";
+"tag.changeColor" = "更改颜色";
+"tag.dragToSort" = "拖拽可排序";
+"tag.noteCount" = "%d 笔记";
+
+/* Settings */
 "settings.title" = "设置";
+"settings.windowTitle" = "设置";
 "settings.storage.location" = "数据存储位置";
 "settings.storage.current" = "当前路径：";
 "settings.storage.notConfigured" = "尚未配置，请选择一个文件夹作为数据存储位置。";
 "settings.storage.change" = "更改路径";
 "settings.storage.select" = "选择路径";
 "settings.storage.showInFinder" = "在 Finder 中显示";
+"settings.startup.behavior" = "启动行为";
+"settings.startup.title" = "启动行为";
+"settings.startup.description" = "选择应用启动时的默认行为";
+"settings.theme.color" = "主题颜色";
+"settings.theme.description" = "选择应用的主题高亮颜色";
+"settings.icloud.sync" = "iCloud 同步";
+"settings.icloud.lastSync" = "上次同步: %@";
+"settings.icloud.notSynced" = "尚未同步";
+"settings.icloud.unavailable" = "iCloud 不可用";
+"settings.icloud.syncNow" = "立即同步";
+"settings.restartAlert.title" = "需要重启";
+"settings.restartAlert.message" = "语言设置已更改，重启应用后生效。";
+"restart.restartNow" = "立即重启";
+"restart.later" = "稍后";
+"settings.clearBackups.confirm" = "清除所有备份";
+"settings.clearBackups.title" = "清除所有备份";
+"settings.clearBackups.message" = "确定要清除所有备份吗？此操作不可撤销。";
 
-/* 富文本编辑器 */
-"editor.bold" = "粗体";
-"editor.italic" = "斜体";
-"editor.underline" = "下划线";
-"editor.heading" = "标题";
-"editor.bulletList" = "项目符号";
-"editor.numberedList" = "编号列表";
-"editor.checkbox" = "复选框";
-"editor.insertImage" = "插入图片";
-"editor.insertAudio" = "插入音频";
-
-/* 提醒 */
-"reminder.title" = "提醒";
-"reminder.set" = "设置提醒";
-"reminder.clear" = "清除提醒";
-"reminder.recurring" = "重复提醒";
-
-/* 备份 */
+/* Backup */
 "backup.title" = "备份与恢复";
 "backup.description" = "备份会在每次保存笔记时自动创建，可用于恢复意外丢失的数据。";
 "backup.restore" = "从备份恢复";
 "backup.clear" = "清除所有备份";
+"backup.windowTitle" = "从备份恢复";
+"backup.close" = "关闭";
+"backup.noBackups" = "暂无备份";
+"backup.autoCreated" = "备份会在每次保存笔记时自动创建";
+"backup.refresh" = "刷新";
+"backup.restoreSelected" = "恢复选中备份";
+"backup.confirmRestore" = "确认恢复";
+"backup.confirmRestore.message" = "确定要恢复到 %@ 的备份版本吗？当前内容将被替换。";
+"backup.restoreSuccess" = "恢复成功";
+"backup.restoreSuccess.message" = "备份已成功恢复。";
+
+/* Editor */
+"editor.bold" = "粗体";
+"editor.italic" = "斜体";
+"editor.underline" = "下划线";
+"editor.strikethrough" = "删除线";
+"editor.heading" = "标题";
+"editor.heading1" = "标题 1";
+"editor.heading2" = "标题 2";
+"editor.heading3" = "标题 3";
+"editor.bulletList" = "项目符号";
+"editor.dashList" = "短划线";
+"editor.numberedList" = "编号列表";
+"editor.checkbox" = "复选框";
+"editor.increaseIndent" = "增加缩进";
+"editor.decreaseIndent" = "减少缩进";
+"editor.insertImage" = "插入图片";
+"editor.insertAudio" = "插入音频";
+"editor.search" = "搜索";
+
+/* Startup Behavior */
+"startup.restoreLastNote" = "恢复上次选中的笔记";
+"startup.selectNone" = "不选中任何笔记";
+"startup.showAllNotes" = "显示全部笔记列表";
+
+/* Popover */
+"popover.searchNotes" = "搜索笔记";
+"popover.openMainWindow" = "打开主窗口";
+"popover.recentNotes" = "最近笔记";
+"popover.searchResults" = "搜索结果";
+"popover.noResults" = "无匹配结果";
+"popover.quit" = "退出";
+"popover.searchPlaceholder" = "输入关键字搜索…";
+
+/* Onboarding */
+"onboarding.welcome" = "欢迎";
+"onboarding.description" = "首次使用需要选择一个保存目录。应用会在该目录下创建：";
+"onboarding.databasePath" = "• ReminderData/Database（笔记数据）";
+"onboarding.attachmentsPath" = "• ReminderData/Attachments（图片/音频附件）";
+"onboarding.selectDirectory" = "选择保存目录";
+"onboarding.selecting" = "正在打开选择器…";
+"onboarding.tip" = "提示：后续可在设置中更换目录。";
+
+/* Errors */
+"error.storage.notConfigured" = "未配置保存目录";
+"error.userCancelled" = "用户取消选择目录";
+
+/* Colors */
+"color.red" = "红色";
+"color.orange" = "橙色";
+"color.yellow" = "黄色";
+"color.green" = "绿色";
+"color.blue" = "蓝色";
+"color.purple" = "紫色";
+"color.gray" = "灰色";
+
+/* Tag Messages */
+"tag.new.message" = "请输入新标签的名称";
+"tag.rename.title" = "重命名标签";
+"tag.rename.message" = "请输入新的标签名称";
+
+/* Folder Messages */
+"folder.new.message" = "请输入新文件夹的名称";
+"folder.rename.title" = "重命名文件夹";
+"folder.rename.message" = "请输入新的文件夹名称";
+
+/* Backup Errors */
+"backup.restoreFailed" = "恢复失败，请重试";
+"backup.contextError" = "无法获取数据库上下文";

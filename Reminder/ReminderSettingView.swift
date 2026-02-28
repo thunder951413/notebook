@@ -15,10 +15,10 @@ struct ReminderSettingView: View {
     
     var body: some View {
         VStack(spacing: 16) {
-            Text("设置提醒")
+            Text(l10n(L10nKeys.Note.reminderTitle))
                 .font(.headline)
             
-            DatePicker("提醒时间", selection: $selectedDate, displayedComponents: [.date, .hourAndMinute])
+            DatePicker(l10n(L10nKeys.Note.reminder), selection: $selectedDate, displayedComponents: [.date, .hourAndMinute])
                 .datePickerStyle(.graphical)
                 .labelsHidden()
             
@@ -27,7 +27,7 @@ struct ReminderSettingView: View {
                     Button(role: .destructive) {
                         clearReminder()
                     } label: {
-                        Text("清除提醒")
+                        Text(l10n(L10nKeys.Note.clearReminder))
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -36,7 +36,7 @@ struct ReminderSettingView: View {
                 Button {
                     saveReminder()
                 } label: {
-                    Text("保存提醒")
+                    Text(l10n(L10nKeys.Note.setReminder))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -59,7 +59,7 @@ struct ReminderSettingView: View {
         Task {
             await NotificationManager.shared.schedule(
                 noteID: note.id,
-                title: note.title.isEmpty ? "笔记提醒" : note.title,
+                title: note.title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : note.title,
                 body: String(preview),
                 reminderAt: selectedDate
             )

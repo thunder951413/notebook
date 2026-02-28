@@ -52,9 +52,9 @@ final class AppSettings {
 
         var displayName: String {
             switch self {
-            case .restoreLastNote: return "恢复上次选中的笔记"
-            case .selectNone: return "不选中任何笔记"
-            case .showAllNotes: return "显示全部笔记列表"
+            case .restoreLastNote: return l10n(L10nKeys.Startup.restoreLastNote)
+            case .selectNone: return l10n(L10nKeys.Startup.selectNone)
+            case .showAllNotes: return l10n(L10nKeys.Startup.showAllNotes)
             }
         }
     }

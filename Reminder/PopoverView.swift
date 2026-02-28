@@ -25,7 +25,7 @@ struct PopoverView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                Text("搜索笔记")
+                Text(l10n(L10nKeys.Popover.searchNotes))
                     .font(.headline)
                 Spacer()
                 Button {
@@ -35,20 +35,20 @@ struct PopoverView: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
                 .buttonStyle(.plain)
-                .help("打开主窗口")
+                .help(l10n(L10nKeys.Popover.openMainWindow))
             }
 
-            TextField("输入关键字搜索…", text: $query)
+            TextField(l10n("popover.searchPlaceholder"), text: $query)
                 .textFieldStyle(.roundedBorder)
 
             Divider()
 
-            Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "最近笔记" : "搜索结果")
+            Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? l10n(L10nKeys.Popover.recentNotes) : l10n(L10nKeys.Popover.searchResults))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             if filteredNotes.isEmpty {
-                ContentUnavailableView("无匹配结果", systemImage: "doc.text.magnifyingglass")
+                ContentUnavailableView(l10n(L10nKeys.Popover.noResults), systemImage: "doc.text.magnifyingglass")
             } else {
                 List {
                     ForEach(filteredNotes) { note in
@@ -81,7 +81,7 @@ struct PopoverView: View {
                 Button {
                     NSApp.sendAction(#selector(AppDelegate.openMainWindow), to: nil, from: nil)
                 } label: {
-                    Text("打开主窗口")
+                    Text(l10n(L10nKeys.Popover.openMainWindow))
                         .font(.caption)
                 }
                 .buttonStyle(.plain)
@@ -91,7 +91,7 @@ struct PopoverView: View {
                 Button {
                     NSApp.sendAction(#selector(AppDelegate.quitApp), to: nil, from: nil)
                 } label: {
-                    Text("退出")
+                    Text(l10n(L10nKeys.Popover.quit))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -101,9 +101,4 @@ struct PopoverView: View {
         .padding(12)
         .frame(width: 320, height: 420)
     }
-}
-
-#Preview {
-    PopoverView()
-        .environmentObject(NoteStore())
 }

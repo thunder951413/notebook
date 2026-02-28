@@ -25,13 +25,13 @@ struct BackupRestoreView: View {
         VStack(spacing: 0) {
             // 标题栏
             HStack {
-                Text("从备份恢复")
+                Text(l10n(L10nKeys.Backup.windowTitle))
                     .font(.title2)
                     .bold()
 
                 Spacer()
 
-                Button("关闭") {
+                Button(l10n(L10nKeys.Backup.close)) {
                     dismiss()
                 }
             }
@@ -47,11 +47,11 @@ struct BackupRestoreView: View {
                         .font(.system(size: 48))
                         .foregroundColor(.secondary)
 
-                    Text("暂无备份")
+                    Text(l10n(L10nKeys.Backup.noBackups))
                         .font(.headline)
                         .foregroundColor(.secondary)
 
-                    Text("备份会在每次保存笔记时自动创建")
+                    Text(l10n(L10nKeys.Backup.autoCreated))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -87,12 +87,12 @@ struct BackupRestoreView: View {
                         .padding(.trailing, 8)
                 }
 
-                Button("刷新") {
+                Button(l10n(L10nKeys.Backup.refresh)) {
                     loadBackups()
                 }
                 .disabled(isLoading)
 
-                Button("恢复选中备份") {
+                Button(l10n(L10nKeys.Backup.restoreSelected)) {
                     if selectedBackup != nil {
                         showRestoreConfirmation = true
                     }
@@ -106,22 +106,22 @@ struct BackupRestoreView: View {
         .onAppear {
             loadBackups()
         }
-        .alert("确认恢复", isPresented: $showRestoreConfirmation) {
-            Button("取消", role: .cancel) {}
-            Button("恢复", role: .destructive) {
+        .alert(l10n(L10nKeys.Backup.confirmRestore), isPresented: $showRestoreConfirmation) {
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) {}
+            Button(l10n(L10nKeys.Backup.restore), role: .destructive) {
                 performRestore()
             }
         } message: {
             if let backup = selectedBackup {
-                Text("确定要恢复到 \(backup.title) 的备份版本吗？当前内容将被替换。")
+                Text(String(format: l10n(L10nKeys.Backup.confirmRestoreMessage), backup.title))
             }
         }
-        .alert("恢复成功", isPresented: $restoreSuccess) {
-            Button("确定") {
+        .alert(l10n(L10nKeys.Backup.restoreSuccess), isPresented: $restoreSuccess) {
+            Button(l10n(L10nKeys.common.ok)) {
                 dismiss()
             }
         } message: {
-            Text("备份已成功恢复。")
+            Text(l10n(L10nKeys.Backup.restoreSuccessMessage))
         }
     }
 
@@ -160,10 +160,10 @@ struct BackupRestoreView: View {
                     store.fetchData()
                     restoreSuccess = true
                 } else {
-                    errorMessage = "恢复失败，请重试"
+                    errorMessage = l10n("backup.restoreFailed")
                 }
             } else {
-                errorMessage = "无法获取数据库上下文"
+                errorMessage = l10n("backup.contextError")
             }
 
             isLoading = false
@@ -199,7 +199,7 @@ struct BackupRowView: View {
 
             // 信息
             VStack(alignment: .leading, spacing: 4) {
-                Text(backup.title.isEmpty ? "无标题" : backup.title)
+                Text(backup.title.isEmpty ? l10n(L10nKeys.common.noTitle) : backup.title)
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
 
@@ -241,9 +241,4 @@ struct BackupRowView: View {
         formatter.countStyle = .file
         return formatter.string(fromByteCount: Int64(bytes))
     }
-}
-
-#Preview {
-    BackupRestoreView()
-        .frame(width: 600, height: 400)
 }

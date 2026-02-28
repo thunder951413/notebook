@@ -32,8 +32,11 @@ struct SettingsRootView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 300)
+                .onChange(of: languageManager.currentLanguage) { _, _ in
+                    showRestartAlert = true
+                }
 
-                Text("重启应用后语言设置生效")
+                Text(l10n(L10nKeys.Language.restartRequired))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -42,11 +45,11 @@ struct SettingsRootView: View {
 
             // 启动行为设置
             VStack(alignment: .leading, spacing: 12) {
-                Text("启动行为")
+                Text(l10n(L10nKeys.Settings.startupTitle))
                     .font(.title2)
                     .bold()
 
-                Picker("启动时", selection: $startupBehavior) {
+                Picker(l10n(L10nKeys.Settings.startupBehavior), selection: $startupBehavior) {
                     ForEach(AppSettings.StartupBehavior.allCases, id: \.self) { behavior in
                         Text(behavior.displayName).tag(behavior)
                     }
@@ -57,7 +60,7 @@ struct SettingsRootView: View {
                     AppSettings.shared.startupBehavior = newValue
                 }
 
-                Text("选择应用启动时的默认行为")
+                Text(l10n(L10nKeys.Settings.startupDescription))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -66,11 +69,11 @@ struct SettingsRootView: View {
 
             // 主题色设置
             VStack(alignment: .leading, spacing: 12) {
-                Text("主题颜色")
+                Text(l10n(L10nKeys.Settings.themeColor))
                     .font(.title2)
                     .bold()
 
-                Text("选择应用的主题高亮颜色")
+                Text(l10n(L10nKeys.Settings.themeDescription))
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -129,21 +132,21 @@ struct SettingsRootView: View {
 
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("iCloud 同步")
+                            Text(l10n(L10nKeys.Settings.iCloudSync))
                                 .font(.headline)
 
                             if iCloudBackupManager.shared.isiCloudAvailable {
                                 if let lastSync = iCloudBackupManager.shared.lastSyncDate {
-                                    Text("上次同步: \(formattedDate(lastSync))")
+                                    Text(String(format: l10n(L10nKeys.Settings.iCloudLastSync), formattedDate(lastSync)))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 } else {
-                                    Text("尚未同步")
+                                    Text(l10n(L10nKeys.Settings.iCloudNotSynced))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
                             } else {
-                                Text("iCloud 不可用")
+                                Text(l10n(L10nKeys.Settings.iCloudUnavailable))
                                     .font(.caption)
                                     .foregroundColor(.red)
                             }
@@ -155,7 +158,7 @@ struct SettingsRootView: View {
                             ProgressView()
                                 .scaleEffect(0.8)
                         } else if iCloudBackupManager.shared.isiCloudAvailable {
-                            Button("立即同步") {
+                            Button(l10n(L10nKeys.Settings.iCloudSyncNow)) {
                                 Task {
                                     await iCloudBackupManager.shared.syncToiCloud()
                                 }
@@ -205,8 +208,8 @@ struct SettingsRootView: View {
                 }
             }
 
-                if let error = errorMessage {
-                    Text(error)
+                if let errorMessage {
+                    Text(errorMessage)
                         .foregroundColor(.red)
                         .font(.footnote)
                 }
@@ -216,22 +219,25 @@ struct SettingsRootView: View {
             .padding(20)
         }
         .frame(minWidth: 520, minHeight: 400)
-        .alert("需要重启", isPresented: $showRestartAlert) {
-            Button("确定") {}
+        .alert(l10n(L10nKeys.Settings.restartAlertTitle), isPresented: $showRestartAlert) {
+            Button(l10n(L10nKeys.Restart.later)) {}
+            Button(l10n(L10nKeys.Restart.restartNow)) {
+                restartApp()
+            }
         } message: {
-            Text("语言设置已更改，重启应用后生效。")
+            Text(l10n(L10nKeys.Settings.restartAlertMessage))
         }
         .sheet(isPresented: $showBackupRestoreSheet) {
             BackupRestoreView()
                 .frame(minWidth: 600, minHeight: 400)
         }
-        .alert("清除所有备份", isPresented: $showClearBackupConfirmation) {
-            Button("取消", role: .cancel) {}
-            Button("清除", role: .destructive) {
+        .alert(l10n(L10nKeys.Settings.clearBackupsTitle), isPresented: $showClearBackupConfirmation) {
+            Button(l10n(L10nKeys.common.cancel), role: .cancel) {}
+            Button(l10n(L10nKeys.Backup.clear), role: .destructive) {
                 BackupManager.shared.clearAllBackups()
             }
         } message: {
-            Text("确定要清除所有备份吗？此操作不可撤销。")
+            Text(l10n(L10nKeys.Settings.clearBackupsMessage))
         }
     }
 
@@ -253,26 +259,25 @@ struct SettingsRootView: View {
                abs(currentB - compareB) < tolerance
     }
 
-    private func chooseDirectory() {
-        errorMessage = nil
-        isChoosingDirectory = true
+    /// 格式化日期
+    private func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
 
-        Task { @MainActor in
+    /// 选择目录
+    private func chooseDirectory() {
+        isChoosingDirectory = true
+        errorMessage = nil
+
+        Task {
             do {
                 try await storage.promptUserToChooseBaseDirectory()
-                // 重新配置 SwiftData 容器
                 try persistence.configureIfPossible()
-
-                // 关键：切换路径后必须把新的 ModelContext 注入 NoteStore，否则无法读取/写入数据
-                if let container = persistence.modelContainer {
-                    store.setContext(container.mainContext)
-                    // 同时更新 NoteSaveManager 的 context
-                    NoteSaveManager.shared.setContext(container.mainContext)
-                } else {
-                    // 配置失败时清空展示，避免误导
-                    store.notes = []
-                    store.folders = []
-                }
+                // 刷新笔记列表
+                store.fetchData()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -280,10 +285,15 @@ struct SettingsRootView: View {
         }
     }
 
-    /// 格式化日期
-    private func formattedDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
+    /// 重启应用
+    private func restartApp() {
+        let url = URL(fileURLWithPath: Bundle.main.resourcePath!)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = [url.path]
+        task.launch()
+        NSApp.terminate(nil)
     }
 }

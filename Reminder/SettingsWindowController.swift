@@ -14,7 +14,7 @@ final class SettingsWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "设置"
+        window.title = l10n(L10nKeys.Settings.windowTitle)
         window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)

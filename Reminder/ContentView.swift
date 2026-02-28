@@ -19,7 +19,7 @@ struct ContentView: View {
     // 与菜单栏 Popover 共享选中状态
     @State private var didSyncSelectionFromStore = false
     @State private var searchText: String = ""
-    @State private var selectedFolder: String = "全部笔记"
+    @State private var selectedFolder: String = l10n(L10nKeys.Folder.allNotes)
     @State private var selectedTagID: UUID?
     @StateObject private var richTextController = RichTextController()
 
@@ -33,7 +33,7 @@ struct ContentView: View {
         }
 
         // 2. 文件夹筛选
-        if selectedFolder != "全部笔记" {
+        if selectedFolder != l10n(L10nKeys.Folder.allNotes) {
             notes = notes.filter { $0.folder == selectedFolder }
         }
 
@@ -158,7 +158,7 @@ struct ContentView: View {
                     searchText: $searchText
                 )
             } else {
-                ContentUnavailableView("未选择笔记", systemImage: "note")
+                ContentUnavailableView(l10n(L10nKeys.Note.noSelection), systemImage: "note")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(AppColors.editorBackground(colorScheme))
             }
@@ -169,19 +169,19 @@ struct ContentView: View {
                 Button {
                     createNote()
                 } label: {
-                    Label("新建", systemImage: "plus")
+                    Label(l10n(L10nKeys.Note.new), systemImage: "plus")
                 }
 
                 Button {
                     deleteSelectedNote()
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                 }
                 .disabled(selection == nil)
             }
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
-        .searchable(text: $searchText, placement: .toolbar, prompt: "搜索笔记")
+        .searchable(text: $searchText, placement: .toolbar, prompt: l10n(L10nKeys.Note.searchPlaceholder))
         .onAppear {
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 selection = pending
@@ -231,7 +231,7 @@ struct ContentView: View {
     }
 
     private func createNote() {
-        store.addNote(title: "新建笔记", folder: selectedFolder == "全部笔记" ? "未分类" : selectedFolder)
+        store.addNote(title: l10n(L10nKeys.Note.new), folder: selectedFolder == l10n(L10nKeys.Folder.allNotes) ? l10n(L10nKeys.Folder.uncategorized) : selectedFolder)
         selection = store.notes.first?.id
     }
 
@@ -266,7 +266,7 @@ struct ContentView: View {
             print("[Launch] Selecting none as per settings")
 
         case .showAllNotes:
-            selectedFolder = "全部笔记"
+            selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
             selection = store.notes.first?.id
             print("[Launch] Showing all notes")
@@ -341,20 +341,20 @@ private struct SidebarView: View {
     private var allNotesRow: some View {
         HStack {
             Image(systemName: "tray.fill")
-                .foregroundStyle(selectedFolder == "全部笔记" && selectedTagID == nil ? .white : .orange)
-            Text("全部笔记")
+                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white : .orange)
+            Text(l10n(L10nKeys.Folder.allNotes))
             Spacer()
             Text("\(store.notes.count)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == "全部笔记" && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == "全部笔记" && selectedTagID == nil ? themeManager.accentColor : Color.clear)
+        .background(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedFolder = "全部笔记"
+            selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
         }
         .padding(.horizontal, 8)
@@ -373,7 +373,7 @@ private struct SidebarView: View {
                     Image(systemName: isFoldersExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("文件夹")
+                    Text(l10n(L10nKeys.Folder.title))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -410,7 +410,7 @@ private struct SidebarView: View {
                     Image(systemName: isTagsExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("标签")
+                    Text(l10n(L10nKeys.Tag.title))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -464,7 +464,7 @@ private struct SidebarView: View {
                 }
             }
             selectedTagID = tag.id
-            selectedFolder = "全部笔记"
+            selectedFolder = l10n(L10nKeys.Folder.allNotes)
         }
         .padding(.horizontal, 8)
     }
@@ -512,7 +512,7 @@ private struct NotesListView: View {
 
     var body: some View {
         List(selection: $selection) {
-            Section("笔记") {
+            Section(l10n(L10nKeys.common.notes)) {
                 ForEach(notes) { note in
                     NoteRowView(note: note, isSelected: selection == note.id)
                         .tag(note.id)
@@ -521,7 +521,7 @@ private struct NotesListView: View {
                             selection = note.id
                         }
                         .contextMenu {
-                            Button("删除") {
+                            Button(l10n(L10nKeys.common.delete)) {
                                 store.deleteNote(id: note.id)
                             }
                         }
@@ -543,7 +543,7 @@ private struct NoteRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(note.title.isEmpty ? "无标题" : note.title)
+                Text(note.title.isEmpty ? l10n(L10nKeys.common.noTitle) : note.title)
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? .white : .primary)
@@ -606,7 +606,7 @@ private struct NoteEditorView: View {
             )
 
             VStack(alignment: .leading, spacing: 0) {
-                TextField("标题", text: $note.title)
+                TextField(l10n(L10nKeys.Note.titlePlaceholder), text: $note.title)
                     .font(.title2)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 16)
@@ -642,7 +642,7 @@ private struct NoteEditorView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                Button("保存") {
+                Button(l10n(L10nKeys.common.save)) {
                     pendingSaveWorkItem?.cancel()
                 }
                 .keyboardShortcut("s", modifiers: .command)
@@ -722,12 +722,14 @@ private struct EditorTopBarView: View {
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
 
-    let recurrenceOptions = [
-        ("不重复", "none"),
-        ("每天", "daily"),
-        ("每周", "weekly"),
-        ("每月", "monthly")
-    ]
+    var recurrenceOptions: [(String, String)] {
+        [
+            (l10n(L10nKeys.Note.noRecurrence), "none"),
+            (l10n(L10nKeys.Note.daily), "daily"),
+            (l10n(L10nKeys.Note.weekly), "weekly"),
+            (l10n(L10nKeys.Note.monthly), "monthly")
+        ]
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -748,27 +750,27 @@ private struct EditorTopBarView: View {
                 Button {
                     controller.toggleBold()
                 } label: {
-                    Label("粗体", systemImage: "bold")
+                    Label(l10n(L10nKeys.Editor.bold), systemImage: "bold")
                 }
                 Button {
                     controller.toggleItalic()
                 } label: {
-                    Label("斜体", systemImage: "italic")
+                    Label(l10n(L10nKeys.Editor.italic), systemImage: "italic")
                 }
                 Button {
                     controller.toggleUnderline()
                 } label: {
-                    Label("下划线", systemImage: "underline")
+                    Label(l10n(L10nKeys.Editor.underline), systemImage: "underline")
                 }
                 Button {
                     controller.toggleStrikethrough()
                 } label: {
-                    Label("删除线", systemImage: "strikethrough")
+                    Label(l10n(L10nKeys.Editor.strikethrough), systemImage: "strikethrough")
                 }
                 Divider()
-                Button("标题 1") { controller.setHeading(level: 1) }
-                Button("标题 2") { controller.setHeading(level: 2) }
-                Button("标题 3") { controller.setHeading(level: 3) }
+                Button(l10n(L10nKeys.Editor.heading1)) { controller.setHeading(level: 1) }
+                Button(l10n(L10nKeys.Editor.heading2)) { controller.setHeading(level: 2) }
+                Button(l10n(L10nKeys.Editor.heading3)) { controller.setHeading(level: 3) }
             } label: {
                 Image(systemName: "textformat")
             }
@@ -782,23 +784,23 @@ private struct EditorTopBarView: View {
                 Button {
                     controller.toggleBullets()
                 } label: {
-                    Label("项目符号", systemImage: "list.bullet")
+                    Label(l10n(L10nKeys.Editor.bulletList), systemImage: "list.bullet")
                 }
                 Button {
                     controller.toggleDashList()
                 } label: {
-                    Label("短划线", systemImage: "list.dash")
+                    Label(l10n(L10nKeys.Editor.dashList), systemImage: "list.dash")
                 }
                 Button {
                     controller.toggleNumberedList()
                 } label: {
-                    Label("编号", systemImage: "list.number")
+                    Label(l10n(L10nKeys.Editor.numberedList), systemImage: "list.number")
                 }
                 Divider()
                 Button {
                     controller.toggleCheckbox()
                 } label: {
-                    Label("复选框", systemImage: "checkmark.circle")
+                    Label(l10n(L10nKeys.Editor.checkbox), systemImage: "checkmark.circle")
                 }
             } label: {
                 Image(systemName: "list.bullet")
@@ -850,26 +852,26 @@ private struct EditorTopBarView: View {
             .buttonStyle(.plain)
             .popover(isPresented: $showingReminderPopover, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("设置提醒")
+                    Text(l10n(L10nKeys.Note.reminderTitle))
                         .font(.headline)
-                    DatePicker("提醒时间", selection: $tempReminderAt)
-                    Picker("重复", selection: $tempRecurrence) {
+                    DatePicker(l10n(L10nKeys.Note.reminder), selection: $tempReminderAt)
+                    Picker(l10n(L10nKeys.Note.recurrence), selection: $tempRecurrence) {
                         ForEach(recurrenceOptions, id: \.1) { name, value in
                             Text(name).tag(value)
                         }
                     }
                     HStack {
-                        Button("取消") {
+                        Button(l10n(L10nKeys.common.cancel)) {
                             showingReminderPopover = false
                         }
                         Spacer()
-                        Button("清除") {
+                        Button(l10n(L10nKeys.Note.clearReminder)) {
                             note.reminderAt = nil
                             note.recurrenceRule = "none"
                             showingReminderPopover = false
                         }
                         .disabled(!note.hasReminder)
-                        Button("保存") {
+                        Button(l10n(L10nKeys.common.save)) {
                             note.reminderAt = tempReminderAt
                             note.recurrenceRule = tempRecurrence
                             showingReminderPopover = false
@@ -886,7 +888,7 @@ private struct EditorTopBarView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("搜索", text: $searchText)
+                TextField(l10n(L10nKeys.Editor.search), text: $searchText)
                     .textFieldStyle(.plain)
                     .frame(width: 140)
                 if !searchText.isEmpty {
@@ -924,7 +926,7 @@ private struct TagButton: View {
             let availableTags = store.tags.filter { !noteTagIDs.contains($0.id) }
 
             if !addedTags.isEmpty {
-                Section("已添加") {
+                Section(l10n(L10nKeys.Tag.added)) {
                     ForEach(addedTags) { tag in
                         Button {
                             store.removeTagFromNote(tagID: tag.id, noteID: note.id)
@@ -946,7 +948,7 @@ private struct TagButton: View {
             }
 
             if !availableTags.isEmpty {
-                Section("添加标签") {
+                Section(l10n(L10nKeys.Tag.addTag)) {
                     ForEach(availableTags) { tag in
                         Button {
                             store.addTagToNote(tagID: tag.id, noteID: note.id)
@@ -966,7 +968,7 @@ private struct TagButton: View {
             }
 
             if store.tags.isEmpty {
-                Text("没有可用标签")
+                Text(l10n(L10nKeys.Tag.noAvailable))
                     .foregroundStyle(.secondary)
             }
         } label: {

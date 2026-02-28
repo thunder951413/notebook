@@ -30,7 +30,7 @@ final class StorageLocationManager: ObservableObject {
 
         let result = panel.runModal()
         guard result == .OK, let url = panel.url else {
-            throw NSError(domain: "StorageLocationManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "用户取消选择目录"])
+            throw NSError(domain: "StorageLocationManager", code: 1, userInfo: [NSLocalizedDescriptionKey: l10n(L10nKeys.Error.userCancelled)])
         }
 
         try persistBookmark(for: url)
@@ -77,7 +77,7 @@ final class StorageLocationManager: ObservableObject {
 
     func reminderDataDirectoryURL() throws -> URL {
         guard let base = baseDirectoryURL else {
-            throw NSError(domain: "StorageLocationManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "未配置保存目录"])
+            throw NSError(domain: "StorageLocationManager", code: 2, userInfo: [NSLocalizedDescriptionKey: l10n(L10nKeys.Error.storageNotConfigured)])
         }
         return base.appendingPathComponent("ReminderData", isDirectory: true)
     }

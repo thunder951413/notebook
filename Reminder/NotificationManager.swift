@@ -28,7 +28,7 @@ final class NotificationManager {
         center.removePendingNotificationRequests(withIdentifiers: [id])
 
         let content = UNMutableNotificationContent()
-        content.title = title.isEmpty ? "笔记提醒" : title
+        content.title = title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : title
         content.body = body
         content.sound = .default
         content.userInfo = ["noteID": id]
