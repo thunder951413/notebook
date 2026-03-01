@@ -597,6 +597,7 @@ private struct NoteEditorView: View {
     
     // AI 侧边窗口状态
     @State private var isAIPanelExpanded: Bool = false
+    @State private var aiPanelWidth: CGFloat = 320
 
     var body: some View {
         GeometryReader { geometry in
@@ -638,14 +639,14 @@ private struct NoteEditorView: View {
                         }
                     }
                 }
-                .frame(width: isAIPanelExpanded ? geometry.size.width - 320 : geometry.size.width, height: geometry.size.height)
+                .frame(width: isAIPanelExpanded ? geometry.size.width - aiPanelWidth : geometry.size.width, height: geometry.size.height)
                 .background(AppColors.editorBackground(colorScheme))
                 
                 // AI 侧边窗口
                 if isAIPanelExpanded {
-                    AIPanelView(isExpanded: $isAIPanelExpanded)
+                    AIPanelView(isExpanded: $isAIPanelExpanded, panelWidth: $aiPanelWidth)
                         .transition(.move(edge: .trailing))
-                        .frame(width: 320, height: geometry.size.height)
+                        .frame(height: geometry.size.height)
                 }
             }
         }
@@ -1024,12 +1025,30 @@ private struct TagButton: View {
 private struct AIPanelView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Binding var isExpanded: Bool
+    @Binding var panelWidth: CGFloat
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var aiService = AIService.shared
+    
+    // AI 配置参数
+    @AppStorage("ai.apiKey") private var apiKey: String = ""
+    @AppStorage("ai.baseURL") private var baseURL: String = "https://api.openai.com/v1"
+    @AppStorage("ai.model") private var model: String = "gpt-4"
+    @AppStorage("ai.temperature") private var temperature: Double = 0.7
+    @AppStorage("ai.maxTokens") private var maxTokens: Int = 2000
+    
+    // 拖动状态
+    @State private var isDragging: Bool = false
+    @State private var dragStartWidth: CGFloat = 320
     
     // 对话状态
     @State private var messages: [AIMessage] = []
     @State private var inputText: String = ""
     @State private var isLoading: Bool = false
+    @State private var errorMessage: String? = nil
+    @State private var streamingMessage: String = ""
+    
+    private let minWidth: CGFloat = 250
+    private let maxWidth: CGFloat = 600
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1040,6 +1059,9 @@ private struct AIPanelView: View {
                     .foregroundStyle(.primary)
                 
                 Spacer()
+                
+                // 设置按钮
+                AISettingsButton()
                 
                 Button {
                     messages.removeAll()
@@ -1068,6 +1090,30 @@ private struct AIPanelView: View {
             .background(AppColors.editorBackground(colorScheme))
             
             Divider()
+            
+            // 错误提示
+            if let errorMessage = errorMessage {
+                HStack(alignment: .top) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .padding(.top, 2)
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button {
+                        self.errorMessage = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.1))
+            }
             
             // 消息列表
             ScrollView {
@@ -1154,7 +1200,7 @@ private struct AIPanelView: View {
             .padding(.vertical, 10)
             .background(AppColors.editorBackground(colorScheme))
         }
-        .frame(width: 320)
+        .frame(width: panelWidth)
         .background(AppColors.editorBackground(colorScheme))
         .overlay(
             Rectangle()
@@ -1162,36 +1208,275 @@ private struct AIPanelView: View {
                 .foregroundStyle(Color.gray.opacity(0.2)),
             alignment: .leading
         )
+        .overlay(
+            // 拖动条
+            HStack {
+                Rectangle()
+                    .fill(isDragging ? themeManager.accentColor : Color.clear)
+                    .frame(width: 4)
+                    .contentShape(Rectangle().size(width: 12, height: .infinity))
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                if !isDragging {
+                                    isDragging = true
+                                    dragStartWidth = panelWidth
+                                }
+                                // 向左拖动（减小 x）增加宽度，向右拖动（增加 x）减小宽度
+                                let delta = -value.translation.width
+                                let newWidth = dragStartWidth + delta
+                                panelWidth = min(max(newWidth, minWidth), maxWidth)
+                            }
+                            .onEnded { _ in
+                                isDragging = false
+                            }
+                    )
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.resizeLeftRight.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
+                Spacer()
+            }
+        )
     }
     
     private func sendMessage() {
         let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
         
+        // 检查 API Key
+        guard !apiKey.isEmpty else {
+            errorMessage = "请先配置 API Key"
+            return
+        }
+        
         let userMessage = AIMessage(content: trimmedText, isUser: true)
         messages.append(userMessage)
         inputText = ""
         isLoading = true
+        errorMessage = nil
+        streamingMessage = ""
         
-        // 模拟 AI 回复（后续可替换为真实 API 调用）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            let aiResponse = AIMessage(
-                content: "这是一个模拟的 AI 回复。在实际实现中，这里会调用大模型 API 来获取回复。",
-                isUser: false
-            )
-            messages.append(aiResponse)
-            isLoading = false
+        // 创建临时的 AI 消息用于流式显示
+        let aiMessageId = UUID()
+        let aiMessage = AIMessage(id: aiMessageId, content: "", isUser: false)
+        messages.append(aiMessage)
+        
+        // 准备消息历史（不包含刚添加的空AI消息）
+        let messageDTOs = messages.dropLast().map { AIMessageDTO(content: $0.content, isUser: $0.isUser) }
+        
+        // 调用 AI 服务（流式）
+        Task {
+            do {
+                var fullResponse = ""
+                try await aiService.sendMessageStream(
+                    messages: messageDTOs,
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    model: model,
+                    temperature: temperature,
+                    maxTokens: maxTokens
+                ) { chunk in
+                    Task { @MainActor in
+                        fullResponse += chunk
+                        if let index = messages.firstIndex(where: { $0.id == aiMessageId }) {
+                            messages[index].content = fullResponse
+                        }
+                    }
+                }
+                
+                isLoading = false
+            } catch {
+                isLoading = false
+                errorMessage = error.localizedDescription
+                // 移除失败的 AI 消息
+                messages.removeAll { $0.id == aiMessageId }
+            }
         }
+    }
+}
+
+// MARK: - AI 设置按钮
+
+private struct AISettingsButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
+    @State private var showingSettingsPopover = false
+    
+    // AI 配置参数
+    @AppStorage("ai.apiKey") private var apiKey: String = ""
+    @AppStorage("ai.baseURL") private var baseURL: String = "https://api.openai.com/v1"
+    @AppStorage("ai.model") private var model: String = "gpt-4"
+    @AppStorage("ai.temperature") private var temperature: Double = 0.7
+    @AppStorage("ai.maxTokens") private var maxTokens: Int = 2000
+    
+    var body: some View {
+        Menu {
+            Button {
+                showingSettingsPopover = true
+            } label: {
+                Label("配置 AI 参数", systemImage: "gearshape")
+            }
+            
+            Divider()
+            
+            // 快速选择模型
+            Menu("选择模型") {
+                Button("GPT-4") {
+                    model = "gpt-4"
+                }
+                Button("GPT-4 Turbo") {
+                    model = "gpt-4-turbo-preview"
+                }
+                Button("GPT-3.5 Turbo") {
+                    model = "gpt-3.5-turbo"
+                }
+            }
+            
+            Divider()
+            
+            // 温度设置
+            Menu("Temperature: \(String(format: "%.1f", temperature))") {
+                Button("0.0 (精确)") { temperature = 0.0 }
+                Button("0.3") { temperature = 0.3 }
+                Button("0.5 (平衡)") { temperature = 0.5 }
+                Button("0.7 (默认)") { temperature = 0.7 }
+                Button("1.0 (创意)") { temperature = 1.0 }
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.caption)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("AI 设置")
+        .popover(isPresented: $showingSettingsPopover, arrowEdge: .bottom) {
+            AISettingsView(
+                apiKey: $apiKey,
+                baseURL: $baseURL,
+                model: $model,
+                temperature: $temperature,
+                maxTokens: $maxTokens
+            )
+        }
+    }
+}
+
+// MARK: - AI 设置视图
+
+private struct AISettingsView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var apiKey: String
+    @Binding var baseURL: String
+    @Binding var model: String
+    @Binding var temperature: Double
+    @Binding var maxTokens: Int
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("AI 参数配置")
+                .font(.headline)
+            
+            // API Key
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                SecureField("输入 API Key", text: $apiKey)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 280)
+            }
+            
+            // Base URL
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Base URL")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("输入 Base URL", text: $baseURL)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 280)
+            }
+            
+            // 模型选择
+            VStack(alignment: .leading, spacing: 4) {
+                Text("模型")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("输入模型名称", text: $model)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 280)
+            }
+            
+            // Temperature
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Temperature")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(String(format: "%.1f", temperature))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $temperature, in: 0...2, step: 0.1)
+                    .frame(width: 280)
+            }
+            
+            // Max Tokens
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Max Tokens")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(maxTokens)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: Binding(
+                    get: { Double(maxTokens) },
+                    set: { maxTokens = Int($0) }
+                ), in: 100...8000, step: 100)
+                    .frame(width: 280)
+            }
+            
+            Spacer()
+            
+            // 保存按钮
+            HStack {
+                Spacer()
+                Button("保存") {
+                    // 配置已自动保存到 AppStorage
+                    // 这里可以添加验证逻辑或通知用户
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                Spacer()
+            }
+            .padding(.top, 8)
+        }
+        .padding()
+        .frame(width: 320)
+        .background(AppColors.editorBackground(colorScheme))
     }
 }
 
 // MARK: - AI 消息模型
 
 private struct AIMessage: Identifiable {
-    let id = UUID()
-    let content: String
+    let id: UUID
+    var content: String
     let isUser: Bool
-    let timestamp: Date = Date()
+    let timestamp: Date
+    
+    init(id: UUID = UUID(), content: String, isUser: Bool, timestamp: Date = Date()) {
+        self.id = id
+        self.content = content
+        self.isUser = isUser
+        self.timestamp = timestamp
+    }
 }
 
 // MARK: - 消息气泡组件
