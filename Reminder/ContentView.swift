@@ -1028,13 +1028,7 @@ private struct AIPanelView: View {
     @Binding var panelWidth: CGFloat
     @StateObject private var themeManager = ThemeManager.shared
     @StateObject private var aiService = AIService.shared
-    
-    // AI 配置参数
-    @AppStorage("ai.apiKey") private var apiKey: String = ""
-    @AppStorage("ai.baseURL") private var baseURL: String = "https://api.openai.com/v1"
-    @AppStorage("ai.model") private var model: String = "gpt-4"
-    @AppStorage("ai.temperature") private var temperature: Double = 0.7
-    @AppStorage("ai.maxTokens") private var maxTokens: Int = 2000
+    @StateObject private var configManager = AIConfigManager.shared
     
     // 拖动状态
     @State private var isDragging: Bool = false
@@ -1170,6 +1164,9 @@ private struct AIPanelView: View {
             // 输入区域
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
+                    // AI 服务选择按钮
+                    AIServiceSelectorButton()
+                    
                     TextField("输入消息...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
@@ -1247,8 +1244,14 @@ private struct AIPanelView: View {
         let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
         
+        // 检查是否选择了配置
+        guard let config = configManager.selectedConfig else {
+            errorMessage = "请先配置 AI 服务"
+            return
+        }
+        
         // 检查 API Key
-        guard !apiKey.isEmpty else {
+        guard !config.apiKey.isEmpty else {
             errorMessage = "请先配置 API Key"
             return
         }
@@ -1274,11 +1277,11 @@ private struct AIPanelView: View {
                 var fullResponse = ""
                 try await aiService.sendMessageStream(
                     messages: messageDTOs,
-                    apiKey: apiKey,
-                    baseURL: baseURL,
-                    model: model,
-                    temperature: temperature,
-                    maxTokens: maxTokens
+                    apiKey: config.apiKey,
+                    baseURL: config.baseURL,
+                    model: config.model,
+                    temperature: config.temperature,
+                    maxTokens: config.maxTokens
                 ) { chunk in
                     Task { @MainActor in
                         fullResponse += chunk
@@ -1299,53 +1302,72 @@ private struct AIPanelView: View {
     }
 }
 
+// MARK: - AI 服务选择按钮
+
+private struct AIServiceSelectorButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var configManager = AIConfigManager.shared
+    @State private var showingSettings = false
+    
+    var body: some View {
+        Menu {
+            if configManager.configs.isEmpty {
+                Text("没有配置的服务")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(configManager.configs) { config in
+                    Button {
+                        configManager.selectConfig(id: config.id)
+                    } label: {
+                        HStack {
+                            Text(config.name)
+                            if config.id == configManager.selectedConfigID {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Divider()
+            
+            Button {
+                showingSettings = true
+            } label: {
+                Label("管理配置...", systemImage: "gearshape")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.caption)
+                Text(configManager.selectedConfig?.name ?? "AI")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("选择 AI 服务")
+        .sheet(isPresented: $showingSettings) {
+            AIConfigManagementView()
+        }
+    }
+}
+
 // MARK: - AI 设置按钮
 
 private struct AISettingsButton: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var themeManager = ThemeManager.shared
-    @State private var showingSettingsPopover = false
-    
-    // AI 配置参数
-    @AppStorage("ai.apiKey") private var apiKey: String = ""
-    @AppStorage("ai.baseURL") private var baseURL: String = "https://api.openai.com/v1"
-    @AppStorage("ai.model") private var model: String = "gpt-4"
-    @AppStorage("ai.temperature") private var temperature: Double = 0.7
-    @AppStorage("ai.maxTokens") private var maxTokens: Int = 2000
+    @State private var showingSettings = false
     
     var body: some View {
-        Menu {
-            Button {
-                showingSettingsPopover = true
-            } label: {
-                Label("配置 AI 参数", systemImage: "gearshape")
-            }
-            
-            Divider()
-            
-            // 快速选择模型
-            Menu("选择模型") {
-                Button("GPT-4") {
-                    model = "gpt-4"
-                }
-                Button("GPT-4 Turbo") {
-                    model = "gpt-4-turbo-preview"
-                }
-                Button("GPT-3.5 Turbo") {
-                    model = "gpt-3.5-turbo"
-                }
-            }
-            
-            Divider()
-            
-            // 温度设置
-            Menu("Temperature: \(String(format: "%.1f", temperature))") {
-                Button("0.0 (精确)") { temperature = 0.0 }
-                Button("0.3") { temperature = 0.3 }
-                Button("0.5 (平衡)") { temperature = 0.5 }
-                Button("0.7 (默认)") { temperature = 0.7 }
-                Button("1.0 (创意)") { temperature = 1.0 }
-            }
+        Button {
+            showingSettings = true
         } label: {
             Image(systemName: "gearshape")
                 .font(.caption)
@@ -1353,113 +1375,386 @@ private struct AISettingsButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help("AI 设置")
-        .popover(isPresented: $showingSettingsPopover, arrowEdge: .bottom) {
-            AISettingsView(
-                apiKey: $apiKey,
-                baseURL: $baseURL,
-                model: $model,
-                temperature: $temperature,
-                maxTokens: $maxTokens
+        .sheet(isPresented: $showingSettings) {
+            AIConfigManagementView()
+        }
+    }
+}
+
+// MARK: - AI 配置管理视图
+
+private struct AIConfigManagementView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var configManager = AIConfigManager.shared
+    @State private var editingConfig: AIServiceConfig?
+    @State private var showingAddSheet = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // 标题栏
+            HStack {
+                Text("AI 服务配置")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showingAddSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.plain)
+                Button {
+                    dismiss()
+                } label: {
+                    Text("关闭")
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .background(AppColors.editorBackground(colorScheme))
+            
+            Divider()
+            
+            // 配置列表
+            List {
+                Section {
+                    ForEach(configManager.configs) { config in
+                        ConfigRow(config: config, isSelected: config.id == configManager.selectedConfigID)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                configManager.selectConfig(id: config.id)
+                            }
+                            .contextMenu {
+                                Button {
+                                    editingConfig = config
+                                } label: {
+                                    Label("编辑", systemImage: "pencil")
+                                }
+                                Button {
+                                    configManager.duplicateConfig(config)
+                                } label: {
+                                    Label("复制", systemImage: "doc.on.doc")
+                                }
+                                Divider()
+                                Button(role: .destructive) {
+                                    configManager.deleteConfig(id: config.id)
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
+                            }
+                    }
+                }
+                
+                Section("添加预设") {
+                    HStack(spacing: 12) {
+                        PresetButton(title: "OpenAI", icon: "plus") {
+                            configManager.addConfig(AIServiceConfig.openAI)
+                        }
+                        PresetButton(title: "GPT-3.5", icon: "plus") {
+                            configManager.addConfig(AIServiceConfig.openAIGPT35)
+                        }
+                        PresetButton(title: "Azure", icon: "plus") {
+                            configManager.addConfig(AIServiceConfig.azureOpenAI)
+                        }
+                    }
+                    HStack(spacing: 12) {
+                        PresetButton(title: "Ollama", icon: "plus") {
+                            configManager.addConfig(AIServiceConfig.ollama)
+                        }
+                        PresetButton(title: "LM Studio", icon: "plus") {
+                            configManager.addConfig(AIServiceConfig.lmStudio)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .listStyle(.plain)
+        }
+        .frame(width: 400, height: 500)
+        .background(AppColors.editorBackground(colorScheme))
+        .sheet(item: $editingConfig) { config in
+            AIConfigEditView(config: config, isNew: false)
+        }
+        .sheet(isPresented: $showingAddSheet) {
+            AIConfigEditView(
+                config: AIServiceConfig(name: "新配置"),
+                isNew: true
             )
         }
     }
 }
 
-// MARK: - AI 设置视图
+// MARK: - 预设按钮
 
-private struct AISettingsView: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Binding var apiKey: String
-    @Binding var baseURL: String
-    @Binding var model: String
-    @Binding var temperature: Double
-    @Binding var maxTokens: Int
+private struct PresetButton: View {
+    let title: String
+    let icon: String
+    let action: () -> Void
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("AI 参数配置")
-                .font(.headline)
-            
-            // API Key
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption)
+                Text(title)
+                    .font(.caption)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.blue.opacity(0.1))
+            .foregroundStyle(.blue)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 配置行视图
+
+private struct ConfigRow: View {
+    let config: AIServiceConfig
+    let isSelected: Bool
+    
+    var body: some View {
+        HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("API Key")
+                Text(config.name)
+                    .font(.headline)
+                Text("\(config.model) @ \(config.baseURL)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                SecureField("输入 API Key", text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-            }
-            
-            // Base URL
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Base URL")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("输入 Base URL", text: $baseURL)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-            }
-            
-            // 模型选择
-            VStack(alignment: .leading, spacing: 4) {
-                Text("模型")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("输入模型名称", text: $model)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-            }
-            
-            // Temperature
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Temperature")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(String(format: "%.1f", temperature))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $temperature, in: 0...2, step: 0.1)
-                    .frame(width: 280)
-            }
-            
-            // Max Tokens
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Max Tokens")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(maxTokens)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: Binding(
-                    get: { Double(maxTokens) },
-                    set: { maxTokens = Int($0) }
-                ), in: 100...8000, step: 100)
-                    .frame(width: 280)
+                    .lineLimit(1)
             }
             
             Spacer()
             
-            // 保存按钮
-            HStack {
-                Spacer()
-                Button("保存") {
-                    // 配置已自动保存到 AppStorage
-                    // 这里可以添加验证逻辑或通知用户
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                Spacer()
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.blue)
             }
-            .padding(.top, 8)
+            
+            if config.apiKey.isEmpty {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("未配置 API Key")
+            }
         }
-        .padding()
-        .frame(width: 320)
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - AI 配置编辑视图
+
+private struct AIConfigEditView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var configManager = AIConfigManager.shared
+    
+    @State var config: AIServiceConfig
+    let isNew: Bool
+    
+    @State private var name: String = ""
+    @State private var baseURL: String = ""
+    @State private var apiKey: String = ""
+    @State private var model: String = ""
+    @State private var temperature: Double = 0.7
+    @State private var maxTokens: Int = 2000
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // 标题栏
+            HStack {
+                Button("取消") {
+                    dismiss()
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                Text(isNew ? "添加配置" : "编辑配置")
+                    .font(.headline)
+                
+                Spacer()
+                
+                Button("保存") {
+                    saveConfig()
+                }
+                .buttonStyle(.plain)
+                .disabled(name.isEmpty || baseURL.isEmpty || model.isEmpty)
+            }
+            .padding()
+            .background(AppColors.editorBackground(colorScheme))
+            
+            Divider()
+            
+            // 表单内容
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // 基本信息
+                    Group {
+                        Text("基本信息")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        TextField("配置名称", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                        
+                        TextField("Base URL", text: $baseURL)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    Divider()
+                    
+                    // 认证
+                    Group {
+                        Text("认证")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        SecureField("API Key", text: $apiKey)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    Divider()
+                    
+                    // 模型设置
+                    Group {
+                        Text("模型设置")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        TextField("模型名称", text: $model)
+                            .textFieldStyle(.roundedBorder)
+                        
+                        HStack {
+                            Text("Temperature: \(String(format: "%.1f", temperature))")
+                            Spacer()
+                        }
+                        Slider(value: $temperature, in: 0...2, step: 0.1)
+                        
+                        HStack {
+                            Text("Max Tokens: \(maxTokens)")
+                            Spacer()
+                        }
+                        Slider(value: Binding(
+                            get: { Double(maxTokens) },
+                            set: { maxTokens = Int($0) }
+                        ), in: 100...8000, step: 100)
+                    }
+                    
+                    Divider()
+                    
+                    // 常用模型
+                    Group {
+                        Text("常用模型")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        FlowLayout(spacing: 8) {
+                            ModelButton(title: "GPT-4") { model = "gpt-4" }
+                            ModelButton(title: "GPT-4 Turbo") { model = "gpt-4-turbo-preview" }
+                            ModelButton(title: "GPT-3.5") { model = "gpt-3.5-turbo" }
+                            ModelButton(title: "Claude 3 Opus") { model = "claude-3-opus-20240229" }
+                            ModelButton(title: "Claude 3 Sonnet") { model = "claude-3-sonnet-20240229" }
+                            ModelButton(title: "Llama 2") { model = "llama2" }
+                            ModelButton(title: "Mistral") { model = "mistral" }
+                        }
+                    }
+                }
+                .padding()
+            }
+        }
+        .frame(width: 400, height: 500)
         .background(AppColors.editorBackground(colorScheme))
+        .onAppear {
+            name = config.name
+            baseURL = config.baseURL
+            apiKey = config.apiKey
+            model = config.model
+            temperature = config.temperature
+            maxTokens = config.maxTokens
+        }
+    }
+    
+    private func saveConfig() {
+        var updatedConfig = config
+        updatedConfig.name = name
+        updatedConfig.baseURL = baseURL
+        updatedConfig.apiKey = apiKey
+        updatedConfig.model = model
+        updatedConfig.temperature = temperature
+        updatedConfig.maxTokens = maxTokens
+        
+        if isNew {
+            configManager.addConfig(updatedConfig)
+        } else {
+            configManager.updateConfig(updatedConfig)
+        }
+        
+        dismiss()
+    }
+}
+
+// MARK: - 模型按钮
+
+private struct ModelButton: View {
+    let title: String
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.1))
+                .foregroundStyle(.blue)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 流式布局
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = FlowResult(in: proposal.width ?? 0, subviews: subviews, spacing: spacing)
+        return result.size
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = FlowResult(in: bounds.width, subviews: subviews, spacing: spacing)
+        for (index, subview) in subviews.enumerated() {
+            subview.place(at: CGPoint(x: bounds.minX + result.positions[index].x, y: bounds.minY + result.positions[index].y), proposal: .unspecified)
+        }
+    }
+    
+    struct FlowResult {
+        var size: CGSize = .zero
+        var positions: [CGPoint] = []
+        
+        init(in maxWidth: CGFloat, subviews: Subviews, spacing: CGFloat) {
+            var x: CGFloat = 0
+            var y: CGFloat = 0
+            var rowHeight: CGFloat = 0
+            
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                if x + size.width > maxWidth && x > 0 {
+                    x = 0
+                    y += rowHeight + spacing
+                    rowHeight = 0
+                }
+                positions.append(CGPoint(x: x, y: y))
+                rowHeight = max(rowHeight, size.height)
+                x += size.width + spacing
+            }
+            
+            self.size = CGSize(width: maxWidth, height: y + rowHeight)
+        }
     }
 }
 
