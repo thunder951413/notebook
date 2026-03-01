@@ -2134,9 +2134,10 @@ private struct MessageBubble: View {
             }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                // 使用 TextEditor 或可选择文本
-                SelectableTextView(text: message.content)
+                // 消息内容文本
+                Text(message.content)
                     .font(.system(size: 13))
+                    .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
@@ -2200,40 +2201,4 @@ private struct MessageBubble: View {
     }
 }
 
-// MARK: - 可选择文本视图
 
-private struct SelectableTextView: NSViewRepresentable {
-    let text: String
-    var font: NSFont = .systemFont(ofSize: 13)
-    
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.backgroundColor = .clear
-        
-        let textView = NSTextView()
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.backgroundColor = .clear
-        textView.font = font
-        textView.textColor = NSColor.textColor
-        textView.isRichText = false
-        textView.autoresizingMask = [.width, .height]
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.heightTracksTextView = true
-        textView.textContainer?.lineFragmentPadding = 0
-        
-        scrollView.documentView = textView
-        
-        return scrollView
-    }
-    
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView else { return }
-        textView.string = text
-        textView.font = font
-    }
-}
