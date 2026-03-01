@@ -595,9 +595,8 @@ private struct NoteEditorView: View {
     @State private var lastSavedContentHash: Int = 0
     @State private var pendingSaveWorkItem: DispatchWorkItem?
     
-    // AI 侧边窗口状态
-    @State private var isAIPanelExpanded: Bool = false
-    @State private var aiPanelWidth: CGFloat = 320
+    // 窗口状态管理
+    @StateObject private var windowState = WindowStateManager.shared
 
     var body: some View {
         GeometryReader { geometry in
@@ -609,8 +608,7 @@ private struct NoteEditorView: View {
                         recorder: recorder,
                         note: $note,
                         showingReminderPopover: $showingReminderPopover,
-                        searchText: $searchText,
-                        isAIPanelExpanded: $isAIPanelExpanded
+                        searchText: $searchText
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -639,12 +637,12 @@ private struct NoteEditorView: View {
                         }
                     }
                 }
-                .frame(width: isAIPanelExpanded ? geometry.size.width - aiPanelWidth : geometry.size.width, height: geometry.size.height)
+                .frame(width: windowState.isRightSidebarExpanded ? geometry.size.width - windowState.rightSidebarWidth : geometry.size.width, height: geometry.size.height)
                 .background(AppColors.editorBackground(colorScheme))
                 
                 // AI 侧边窗口
-                if isAIPanelExpanded {
-                    AIPanelView(isExpanded: $isAIPanelExpanded, panelWidth: $aiPanelWidth)
+                if windowState.isRightSidebarExpanded {
+                    AIPanelView(isExpanded: $windowState.isRightSidebarExpanded, panelWidth: $windowState.rightSidebarWidth)
                         .transition(.move(edge: .trailing))
                         .frame(height: geometry.size.height)
                 }
@@ -737,7 +735,7 @@ private struct EditorTopBarView: View {
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
     @Binding var searchText: String
-    @Binding var isAIPanelExpanded: Bool
+    @StateObject private var windowState = WindowStateManager.shared
 
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
@@ -929,12 +927,12 @@ private struct EditorTopBarView: View {
             // AI 助手按钮（使用与侧边栏类似的图标）
             Button {
                 withAnimation(.easeInOut(duration: 0.25)) {
-                    isAIPanelExpanded.toggle()
+                    windowState.isRightSidebarExpanded.toggle()
                 }
             } label: {
-                Image(systemName: isAIPanelExpanded ? "sidebar.right" : "sidebar.right")
+                Image(systemName: windowState.isRightSidebarExpanded ? "sidebar.right" : "sidebar.right")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isAIPanelExpanded ? ThemeManager.shared.accentColor : .secondary)
+                    .foregroundStyle(windowState.isRightSidebarExpanded ? ThemeManager.shared.accentColor : .secondary)
             }
             .buttonStyle(.plain)
             .help("AI 助手")
@@ -1024,6 +1022,7 @@ private struct TagButton: View {
 
 private struct AIPanelView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var store: NoteStore
     @Binding var isExpanded: Bool
     @Binding var panelWidth: CGFloat
     @StateObject private var themeManager = ThemeManager.shared
@@ -1167,13 +1166,11 @@ private struct AIPanelView: View {
                 AIServiceSelectorHeader()
                 
                 HStack(spacing: 8) {
-                    TextField("输入消息...", text: $inputText, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...5)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    AIInputField(
+                        text: $inputText,
+                        onSend: sendMessage,
+                        isLoading: isLoading
+                    )
                     
                     Button {
                         sendMessage()
@@ -1249,7 +1246,10 @@ private struct AIPanelView: View {
             return
         }
         
-        let userMessage = AIMessage(content: trimmedText, isUser: true)
+        // 解析 @ 引用并构建发送内容
+        let (displayContent, sendContent) = parseMentionsAndBuildContent(trimmedText)
+        
+        let userMessage = AIMessage(content: displayContent, isUser: true)
         messages.append(userMessage)
         inputText = ""
         isLoading = true
@@ -1262,7 +1262,12 @@ private struct AIPanelView: View {
         messages.append(aiMessage)
         
         // 准备消息历史（不包含刚添加的空AI消息）
-        let messageDTOs = messages.dropLast().map { AIMessageDTO(content: $0.content, isUser: $0.isUser) }
+        var messageDTOs = messages.dropLast().map { AIMessageDTO(content: $0.content, isUser: $0.isUser) }
+        
+        // 将最后一条用户消息替换为包含引用内容的完整消息
+        if let lastIndex = messageDTOs.indices.last {
+            messageDTOs[lastIndex] = AIMessageDTO(content: sendContent, isUser: true)
+        }
         
         // 调用 AI 服务（流式）
         Task {
@@ -1292,6 +1297,68 @@ private struct AIPanelView: View {
                 messages.removeAll { $0.id == aiMessageId }
             }
         }
+    }
+    
+    /// 解析 @ 引用并构建发送内容
+    private func parseMentionsAndBuildContent(_ text: String) -> (displayContent: String, sendContent: String) {
+        // 匹配 [@标题](note:ID) 格式
+        let pattern = #"\[@([^\]]+)\]\(note:([a-zA-Z0-9]+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return (text, text)
+        }
+        
+        let nsRange = NSRange(text.startIndex..., in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+        
+        // 如果没有匹配，直接返回原文
+        guard !matches.isEmpty else {
+            return (text, text)
+        }
+        
+        var sendContent = text
+        var referencedNotes: [(title: String, content: String)] = []
+        
+        // 从后往前替换，避免位置变化
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: text),
+                  let titleRange = Range(match.range(at: 1), in: text),
+                  let idRange = Range(match.range(at: 2), in: text) else { continue }
+            
+            let shortID = String(text[idRange])
+            let title = String(text[titleRange])
+            
+            // 查找匹配的笔记（通过ID前缀匹配）
+            if let note = store.notes.first(where: { $0.id.uuidString.hasPrefix(shortID) }) {
+                // 提取笔记纯文本内容
+                let plainContent = note.content.string
+                
+                // 添加到引用列表
+                referencedNotes.append((title: note.title.isEmpty ? "无标题" : note.title, content: plainContent))
+                
+                // 在发送内容中替换为简单引用标记
+                let replacement = "[@\(title)]"
+                sendContent.replaceSubrange(fullRange, with: replacement)
+            }
+        }
+        
+        // 构建最终发送内容
+        if !referencedNotes.isEmpty {
+            var finalContent = "用户问题：\(sendContent)\n\n"
+            finalContent += "---\n\n"
+            finalContent += "引用的笔记内容：\n\n"
+            
+            for (index, note) in referencedNotes.enumerated() {
+                finalContent += "【笔记 \(index + 1)】\(note.title)\n"
+                finalContent += "\(note.content)\n\n"
+            }
+            
+            finalContent += "---\n"
+            finalContent += "请根据以上引用的笔记内容回答用户问题。"
+            
+            return (text, finalContent)
+        }
+        
+        return (text, text)
     }
 }
 
@@ -1348,6 +1415,234 @@ private struct AIServiceSelectorHeader: View {
         }
         .sheet(isPresented: $showingSettings) {
             AIConfigManagementView()
+        }
+    }
+}
+
+// MARK: - AI 输入框（支持 @ 提及）
+
+private struct AIInputField: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var store: NoteStore
+    @Binding var text: String
+    let onSend: () -> Void
+    let isLoading: Bool
+    
+    // @ 提及相关状态
+    @State private var showMentionPicker = false
+    @State private var mentionQuery = ""
+    @State private var cursorPosition = 0
+    @State private var mentionRange: Range<String.Index>?
+    
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            // 文本输入框
+            TextEditor(text: $text)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .frame(minHeight: 32, maxHeight: 100)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .onChange(of: text) { oldValue, newValue in
+                    handleTextChange(oldValue: oldValue, newValue: newValue)
+                }
+            
+            // @ 提及选择器
+            if showMentionPicker {
+                NoteMentionPicker(
+                    query: mentionQuery,
+                    notes: store.notes,
+                    onSelect: { note in
+                        insertMention(note: note)
+                    },
+                    onDismiss: {
+                        showMentionPicker = false
+                        mentionQuery = ""
+                    }
+                )
+                .offset(y: -150)
+                .zIndex(1)
+            }
+        }
+    }
+    
+    private func handleTextChange(oldValue: String, newValue: String) {
+        // 检测是否输入了 @
+        if let lastChar = newValue.last, lastChar == "@" {
+            // 检查 @ 前面是否是空格或者是开头
+            let index = newValue.index(before: newValue.endIndex)
+            if index == newValue.startIndex {
+                // @ 在开头
+                showMentionPicker = true
+                mentionQuery = ""
+                mentionRange = newValue.range(of: "@", options: .backwards)
+            } else {
+                let prevIndex = newValue.index(before: index)
+                let prevChar = newValue[prevIndex]
+                if prevChar.isWhitespace || prevChar == "\n" {
+                    showMentionPicker = true
+                    mentionQuery = ""
+                    mentionRange = newValue.range(of: "@", options: .backwards)
+                }
+            }
+        } else if showMentionPicker {
+            // 更新查询关键词
+            if let range = mentionRange {
+                let queryEnd = newValue.index(range.upperBound, offsetBy: 0)
+                if queryEnd <= newValue.endIndex {
+                    mentionQuery = String(newValue[range.upperBound...])
+                }
+                
+                // 如果输入了空格或删除了 @，关闭选择器
+                if newValue.count < oldValue.count && !newValue.contains("@") {
+                    showMentionPicker = false
+                    mentionQuery = ""
+                }
+            }
+        }
+    }
+    
+    private func insertMention(note: Note) {
+        guard let range = mentionRange else { return }
+        
+        // 构建短格式的提及文本，使用笔记ID前8位作为标识
+        let shortID = String(note.id.uuidString.prefix(8))
+        let displayTitle = note.title.isEmpty ? "无标题" : note.title
+        // 限制显示长度为15个字符
+        let truncatedTitle = displayTitle.count > 15 ? String(displayTitle.prefix(15)) + "..." : displayTitle
+        let mentionText = "[@\(truncatedTitle)](note:\(shortID)) "
+        
+        // 替换 @ + 查询内容
+        let endIndex = text.index(range.lowerBound, offsetBy: mentionQuery.count + 1)
+        let replaceRange = range.lowerBound..<min(endIndex, text.endIndex)
+        text.replaceSubrange(replaceRange, with: mentionText)
+        
+        showMentionPicker = false
+        mentionQuery = ""
+        mentionRange = nil
+    }
+}
+
+// MARK: - 笔记提及选择器
+
+private struct NoteMentionPicker: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let query: String
+    let notes: [Note]
+    let onSelect: (Note) -> Void
+    let onDismiss: () -> Void
+    
+    var filteredNotes: [Note] {
+        if query.isEmpty {
+            return Array(notes.prefix(10))
+        } else {
+            return notes.filter { $0.title.localizedCaseInsensitiveContains(query) }.prefix(10).map { $0 }
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 标题
+            HStack {
+                Text("选择笔记")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(filteredNotes.count) 个结果")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(AppColors.editorBackground(colorScheme))
+            
+            Divider()
+            
+            // 笔记列表
+            if filteredNotes.isEmpty {
+                Text("没有找到匹配的笔记")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 20)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredNotes) { note in
+                            NoteMentionRow(note: note, onSelect: {
+                                onSelect(note)
+                            })
+                            
+                            if note.id != filteredNotes.last?.id {
+                                Divider()
+                                    .padding(.leading, 36)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .frame(width: 280)
+        .background(AppColors.editorBackground(colorScheme))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - 笔记提及行
+
+private struct NoteMentionRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let note: Note
+    let onSelect: () -> Void
+    
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(note.title.isEmpty ? "无标题" : note.title)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
+                    
+                    if !note.tagIDs.isEmpty {
+                        HStack(spacing: 4) {
+                            // 显示标签数量指示
+                            Text("\(note.tagIDs.count) 个标签")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary.opacity(0.7))
+                        }
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(Color.clear)
+        .onHover { isHovered in
+            if isHovered {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         }
     }
 }
@@ -1830,6 +2125,7 @@ private struct MessageBubble: View {
     let message: AIMessage
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var themeManager = ThemeManager.shared
+    @State private var isHovered = false
     
     var body: some View {
         HStack {
@@ -1838,7 +2134,8 @@ private struct MessageBubble: View {
             }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                Text(message.content)
+                // 使用 TextEditor 或可选择文本
+                SelectableTextView(text: message.content)
                     .font(.system(size: 13))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -1849,16 +2146,94 @@ private struct MessageBubble: View {
                     )
                     .foregroundStyle(message.isUser ? .white : .primary)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .contextMenu {
+                        Button {
+                            copyToClipboard(message.content)
+                        } label: {
+                            Label("复制", systemImage: "doc.on.doc")
+                        }
+                        
+                        if !message.isUser {
+                            Button {
+                                copyToClipboard(message.content)
+                            } label: {
+                                Label("复制并粘贴到笔记", systemImage: "arrow.down.doc")
+                            }
+                        }
+                    }
                 
-                Text(message.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary.opacity(0.6))
+                HStack(spacing: 6) {
+                    Text(message.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary.opacity(0.6))
+                    
+                    // 悬停时显示复制按钮
+                    if isHovered {
+                        Button {
+                            copyToClipboard(message.content)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .transition(.opacity)
+                    }
+                }
             }
             .frame(maxWidth: 260, alignment: message.isUser ? .trailing : .leading)
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isHovered = hovering
+                }
+            }
             
             if !message.isUser {
                 Spacer()
             }
         }
+    }
+    
+    private func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+// MARK: - 可选择文本视图
+
+private struct SelectableTextView: NSViewRepresentable {
+    let text: String
+    var font: NSFont = .systemFont(ofSize: 13)
+    
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.backgroundColor = .clear
+        
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = .clear
+        textView.font = font
+        textView.textColor = NSColor.textColor
+        textView.isRichText = false
+        textView.autoresizingMask = [.width, .height]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        
+        scrollView.documentView = textView
+        
+        return scrollView
+    }
+    
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView else { return }
+        textView.string = text
+        textView.font = font
     }
 }
