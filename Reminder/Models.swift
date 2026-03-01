@@ -308,10 +308,6 @@ class NoteStore: ObservableObject {
             return false
         }
         
-        // 获取中心像素
-        let centerX = Int(size.width / 2)
-        let centerY = Int(size.height / 2)
-        
         // 创建位图上下文来读取像素
         let width = 1
         let height = 1
@@ -335,7 +331,9 @@ class NoteStore: ObservableObject {
         }
         
         // 绘制中心像素
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1), byTiling: false)
+        let centerX = size.width / 2
+        let centerY = size.height / 2
+        context.draw(cgImage, in: CGRect(x: -centerX, y: -centerY, width: size.width, height: size.height), byTiling: false)
         
         // 获取颜色分量
         let r = CGFloat(pixelData[0]) / 255.0

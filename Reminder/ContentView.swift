@@ -594,40 +594,58 @@ private struct NoteEditorView: View {
     @State private var lastSavedTitle: String = ""
     @State private var lastSavedContentHash: Int = 0
     @State private var pendingSaveWorkItem: DispatchWorkItem?
+    
+    // AI 侧边窗口状态
+    @State private var isAIPanelExpanded: Bool = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            EditorTopBarView(
-                controller: controller,
-                recorder: recorder,
-                note: $note,
-                showingReminderPopover: $showingReminderPopover,
-                searchText: $searchText
-            )
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                // 主编辑器区域
+                VStack(spacing: 0) {
+                    EditorTopBarView(
+                        controller: controller,
+                        recorder: recorder,
+                        note: $note,
+                        showingReminderPopover: $showingReminderPopover,
+                        searchText: $searchText,
+                        isAIPanelExpanded: $isAIPanelExpanded
+                    )
 
-            VStack(alignment: .leading, spacing: 0) {
-                TextField(l10n(L10nKeys.Note.titlePlaceholder), text: $note.title)
-                    .font(.title2)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 14)
-                    .padding(.bottom, 10)
-                    .onChange(of: note.title) { _, newTitle in
-                        debouncedScheduleAutoSave(title: newTitle, content: note.content)
+                    VStack(alignment: .leading, spacing: 0) {
+                        TextField(l10n(L10nKeys.Note.titlePlaceholder), text: $note.title)
+                            .font(.title2)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 14)
+                            .padding(.bottom, 10)
+                            .onChange(of: note.title) { _, newTitle in
+                                debouncedScheduleAutoSave(title: newTitle, content: note.content)
+                            }
+
+                        Divider()
+                            .padding(.horizontal, 16)
+
+                        RichTextEditor(
+                            attributedText: $note.content,
+                            controller: controller,
+                            noteID: note.id
+                        )
+                        .id(note.id)  // 强制在 note.id 变化时重新创建视图
+                        .layoutPriority(1)
+                        .onChange(of: note.content) { _, newContent in
+                            debouncedScheduleAutoSave(title: note.title, content: newContent)
+                        }
                     }
-
-                Divider()
-                    .padding(.horizontal, 16)
-
-                RichTextEditor(
-                    attributedText: $note.content,
-                    controller: controller,
-                    noteID: note.id
-                )
-                .id(note.id)  // 强制在 note.id 变化时重新创建视图
-                .layoutPriority(1)
-                .onChange(of: note.content) { _, newContent in
-                    debouncedScheduleAutoSave(title: note.title, content: newContent)
+                }
+                .frame(width: isAIPanelExpanded ? geometry.size.width - 320 : geometry.size.width, height: geometry.size.height)
+                .background(AppColors.editorBackground(colorScheme))
+                
+                // AI 侧边窗口
+                if isAIPanelExpanded {
+                    AIPanelView(isExpanded: $isAIPanelExpanded)
+                        .transition(.move(edge: .trailing))
+                        .frame(width: 320, height: geometry.size.height)
                 }
             }
         }
@@ -718,6 +736,7 @@ private struct EditorTopBarView: View {
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
     @Binding var searchText: String
+    @Binding var isAIPanelExpanded: Bool
 
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
@@ -733,18 +752,10 @@ private struct EditorTopBarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button { } label: { Image(systemName: "arrow.uturn.left") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            Button { } label: { Image(systemName: "arrow.uturn.right") }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
-            Divider().frame(height: 18)
-
             Button { controller.toggleBold() } label: { Text("B").fontWeight(.bold) }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
             // 格式菜单（合并所有文本样式）
             Menu {
                 Button {
@@ -776,6 +787,7 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
 
             Divider().frame(height: 18)
 
@@ -807,6 +819,7 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
 
             Divider().frame(height: 18)
 
@@ -816,6 +829,7 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
 
             // 减少缩进
             Button { controller.decreaseIndent() } label: {
@@ -823,6 +837,7 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
 
             // 文件夹选择
             Menu {
@@ -836,6 +851,7 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
 
             // 标签按钮
             TagButton(note: $note)
@@ -850,6 +866,7 @@ private struct EditorTopBarView: View {
                     .foregroundStyle(note.hasReminder ? .orange : .secondary)
             }
             .buttonStyle(.plain)
+            .frame(minWidth: 20)
             .popover(isPresented: $showingReminderPopover, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(l10n(L10nKeys.Note.reminderTitle))
@@ -905,6 +922,21 @@ private struct EditorTopBarView: View {
             .padding(.vertical, 4)
             .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            
+            Divider().frame(height: 18)
+            
+            // AI 助手按钮（使用与侧边栏类似的图标）
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    isAIPanelExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: isAIPanelExpanded ? "sidebar.right" : "sidebar.right")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isAIPanelExpanded ? ThemeManager.shared.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("AI 助手")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -974,6 +1006,7 @@ private struct TagButton: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "tag")
+                    .font(.system(size: 14))
                 if !note.tagIDs.isEmpty {
                     Text("\(note.tagIDs.count)")
                         .font(.caption)
@@ -982,5 +1015,220 @@ private struct TagButton: View {
             .foregroundStyle(note.tagIDs.isEmpty ? Color.secondary : themeManager.accentColor)
         }
         .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+}
+
+// MARK: - AI 侧边窗口
+
+private struct AIPanelView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var isExpanded: Bool
+    @StateObject private var themeManager = ThemeManager.shared
+    
+    // 对话状态
+    @State private var messages: [AIMessage] = []
+    @State private var inputText: String = ""
+    @State private var isLoading: Bool = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // 顶部工具栏
+            HStack {
+                Text("AI 助手")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                
+                Spacer()
+                
+                Button {
+                    messages.removeAll()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("清空对话")
+                
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isExpanded = false
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("关闭")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(AppColors.editorBackground(colorScheme))
+            
+            Divider()
+            
+            // 消息列表
+            ScrollView {
+                ScrollViewReader { proxy in
+                    LazyVStack(spacing: 12) {
+                        if messages.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "brain")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(themeManager.accentColor.opacity(0.6))
+                                Text("开始与 AI 对话")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text("输入问题或选择笔记内容提问")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary.opacity(0.7))
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 200)
+                            .padding(.top, 60)
+                        } else {
+                            ForEach(messages) { message in
+                                MessageBubble(message: message)
+                            }
+                            
+                            if isLoading {
+                                HStack {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                    Text("AI 思考中...")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 12)
+                    .onChange(of: messages.count) { _, _ in
+                        if let lastId = messages.last?.id {
+                            withAnimation {
+                                proxy.scrollTo(lastId, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+            }
+            .background(AppColors.editorBackground(colorScheme))
+            
+            Divider()
+            
+            // 输入区域
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("输入消息...", text: $inputText, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...5)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    
+                    Button {
+                        sendMessage()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : themeManager.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
+                }
+                
+                HStack {
+                    Spacer()
+                    Text("\(messages.count) 条消息")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary.opacity(0.6))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(AppColors.editorBackground(colorScheme))
+        }
+        .frame(width: 320)
+        .background(AppColors.editorBackground(colorScheme))
+        .overlay(
+            Rectangle()
+                .frame(width: 1)
+                .foregroundStyle(Color.gray.opacity(0.2)),
+            alignment: .leading
+        )
+    }
+    
+    private func sendMessage() {
+        let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+        
+        let userMessage = AIMessage(content: trimmedText, isUser: true)
+        messages.append(userMessage)
+        inputText = ""
+        isLoading = true
+        
+        // 模拟 AI 回复（后续可替换为真实 API 调用）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let aiResponse = AIMessage(
+                content: "这是一个模拟的 AI 回复。在实际实现中，这里会调用大模型 API 来获取回复。",
+                isUser: false
+            )
+            messages.append(aiResponse)
+            isLoading = false
+        }
+    }
+}
+
+// MARK: - AI 消息模型
+
+private struct AIMessage: Identifiable {
+    let id = UUID()
+    let content: String
+    let isUser: Bool
+    let timestamp: Date = Date()
+}
+
+// MARK: - 消息气泡组件
+
+private struct MessageBubble: View {
+    let message: AIMessage
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
+    
+    var body: some View {
+        HStack {
+            if message.isUser {
+                Spacer()
+            }
+            
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
+                Text(message.content)
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        message.isUser
+                            ? themeManager.accentColor
+                            : (colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
+                    )
+                    .foregroundStyle(message.isUser ? .white : .primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                
+                Text(message.timestamp, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary.opacity(0.6))
+            }
+            .frame(maxWidth: 260, alignment: message.isUser ? .trailing : .leading)
+            
+            if !message.isUser {
+                Spacer()
+            }
+        }
     }
 }

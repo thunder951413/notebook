@@ -116,7 +116,7 @@ final class RichTextController: ObservableObject {
         }
         
         // 获取当前 attributedString 的副本
-        return tv.attributedString().copy() as! NSAttributedString
+        return tv.attributedString().copy() as? NSAttributedString
     }
     
     /// 获取当前编辑器内容的快照（不结束输入法会话）
@@ -953,7 +953,7 @@ struct RichTextEditor: NSViewRepresentable {
             }
             
             // 使用 copy() 确保这是一个全新的实例，避免多线程竞争和 SwiftUI 更新失效
-            let content = tv.attributedString().copy() as! NSAttributedString
+            guard let content = tv.attributedString().copy() as? NSAttributedString else { return }
             
             // 检查是否有输入法正在编辑的 marked text
             if checkHasMarkedText(tv) {
@@ -1118,8 +1118,9 @@ struct RichTextEditor: NSViewRepresentable {
             textView.didChangeText()
             
             // 触发绑定更新
-            let content = textView.attributedString().copy() as! NSAttributedString
-            self.attributedText = content
+            if let content = textView.attributedString().copy() as? NSAttributedString {
+                self.attributedText = content
+            }
         }
         
         /// 保存粘贴的图片到附件目录
