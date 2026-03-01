@@ -154,8 +154,7 @@ struct ContentView: View {
                 let noteBinding = $store.notes[index]
                 NoteEditorView(
                     note: noteBinding,
-                    controller: richTextController,
-                    searchText: $searchText
+                    controller: richTextController
                 )
             } else {
                 ContentUnavailableView(l10n(L10nKeys.Note.noSelection), systemImage: "note")
@@ -586,7 +585,6 @@ private struct NoteEditorView: View {
     @Binding var note: Note
     @ObservedObject var controller: RichTextController
     @EnvironmentObject private var store: NoteStore
-    @Binding var searchText: String
     
     @StateObject private var recorder = AudioRecorderManager()
     @State private var showingReminderPopover = false
@@ -607,8 +605,7 @@ private struct NoteEditorView: View {
                         controller: controller,
                         recorder: recorder,
                         note: $note,
-                        showingReminderPopover: $showingReminderPopover,
-                        searchText: $searchText
+                        showingReminderPopover: $showingReminderPopover
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -734,7 +731,6 @@ private struct EditorTopBarView: View {
     @ObservedObject var recorder: AudioRecorderManager
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
-    @Binding var searchText: String
     @StateObject private var windowState = WindowStateManager.shared
 
     @State private var tempReminderAt: Date = Date()
@@ -885,12 +881,26 @@ private struct EditorTopBarView: View {
                             note.reminderAt = nil
                             note.recurrenceRule = "none"
                             showingReminderPopover = false
+                            NotificationManager.shared.cancel(noteID: note.id)
                         }
                         .disabled(!note.hasReminder)
                         Button(l10n(L10nKeys.common.save)) {
                             note.reminderAt = tempReminderAt
                             note.recurrenceRule = tempRecurrence
                             showingReminderPopover = false
+                            
+                            // 调度通知
+                            let body = note.content.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let preview = body.prefix(30) + (body.count > 30 ? "..." : "")
+                            Task {
+                                await NotificationManager.shared.schedule(
+                                    noteID: note.id,
+                                    title: note.title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : note.title,
+                                    body: String(preview),
+                                    reminderAt: tempReminderAt,
+                                    recurrence: tempRecurrence
+                                )
+                            }
                         }
                     }
                 }
@@ -899,28 +909,6 @@ private struct EditorTopBarView: View {
             }
 
             Spacer()
-
-            // 搜索
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField(l10n(L10nKeys.Editor.search), text: $searchText)
-                    .textFieldStyle(.plain)
-                    .frame(width: 140)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             
             Divider().frame(height: 18)
             
