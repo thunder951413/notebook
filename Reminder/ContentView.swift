@@ -1163,10 +1163,10 @@ private struct AIPanelView: View {
             
             // 输入区域
             VStack(spacing: 8) {
+                // 当前模型显示（可点击选择）
+                AIServiceSelectorHeader()
+                
                 HStack(spacing: 8) {
-                    // AI 服务选择按钮
-                    AIServiceSelectorButton()
-                    
                     TextField("输入消息...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
@@ -1184,13 +1184,6 @@ private struct AIPanelView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
-                }
-                
-                HStack {
-                    Spacer()
-                    Text("\(messages.count) 条消息")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary.opacity(0.6))
                 }
             }
             .padding(.horizontal, 12)
@@ -1298,6 +1291,63 @@ private struct AIPanelView: View {
                 // 移除失败的 AI 消息
                 messages.removeAll { $0.id == aiMessageId }
             }
+        }
+    }
+}
+
+// MARK: - AI 服务选择头部
+
+private struct AIServiceSelectorHeader: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var configManager = AIConfigManager.shared
+    @State private var showingSettings = false
+    
+    var body: some View {
+        HStack {
+            Menu {
+                if configManager.configs.isEmpty {
+                    Text("没有配置的服务")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(configManager.configs) { config in
+                        Button {
+                            configManager.selectConfig(id: config.id)
+                        } label: {
+                            HStack {
+                                Text(config.name)
+                                if config.id == configManager.selectedConfigID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Divider()
+                
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("管理配置...", systemImage: "gearshape")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                        .font(.caption2)
+                    Text(configManager.selectedConfig?.model ?? "未选择模型")
+                        .font(.caption2)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            
+            Spacer()
+        }
+        .sheet(isPresented: $showingSettings) {
+            AIConfigManagementView()
         }
     }
 }
