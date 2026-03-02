@@ -133,6 +133,7 @@
 "editor.insertImage" = "Insert Image";
 "editor.insertAudio" = "Insert Audio";
 "editor.search" = "Search";
+"editor.clearFormatting" = "Clear Formatting";
 
 /* Startup Behavior */
 "startup.restoreLastNote" = "Restore last selected note";

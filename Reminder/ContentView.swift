@@ -777,6 +777,12 @@ private struct EditorTopBarView: View {
                 Button(l10n(L10nKeys.Editor.heading1)) { controller.setHeading(level: 1) }
                 Button(l10n(L10nKeys.Editor.heading2)) { controller.setHeading(level: 2) }
                 Button(l10n(L10nKeys.Editor.heading3)) { controller.setHeading(level: 3) }
+                Divider()
+                Button {
+                    controller.clearFormatting()
+                } label: {
+                    Label(l10n(L10nKeys.Editor.clearFormatting), systemImage: "textformat.clear")
+                }
             } label: {
                 Image(systemName: "textformat")
             }
@@ -1235,7 +1241,9 @@ private struct AIPanelView: View {
         }
         
         // 解析 @ 引用并构建发送内容
-        let (displayContent, sendContent) = parseMentionsAndBuildContent(trimmedText)
+        print("[AI Debug] Input text: \(trimmedText)")
+        let (displayContent, sendContent, extractedImages) = parseMentionsAndBuildContent(trimmedText)
+        print("[AI Debug] Parsed - display: \(displayContent.prefix(50)), send: \(sendContent.prefix(50)), images: \(extractedImages.count)")
         
         let userMessage = AIMessage(content: displayContent, isUser: true)
         messages.append(userMessage)
@@ -1252,9 +1260,9 @@ private struct AIPanelView: View {
         // 准备消息历史（不包含刚添加的空AI消息）
         var messageDTOs = messages.dropLast().map { AIMessageDTO(content: $0.content, isUser: $0.isUser) }
         
-        // 将最后一条用户消息替换为包含引用内容的完整消息
+        // 将最后一条用户消息替换为包含引用内容的完整消息和图片
         if let lastIndex = messageDTOs.indices.last {
-            messageDTOs[lastIndex] = AIMessageDTO(content: sendContent, isUser: true)
+            messageDTOs[lastIndex] = AIMessageDTO(content: sendContent, isUser: true, images: extractedImages)
         }
         
         // 调用 AI 服务（流式）
@@ -1288,23 +1296,27 @@ private struct AIPanelView: View {
     }
     
     /// 解析 @ 引用并构建发送内容
-    private func parseMentionsAndBuildContent(_ text: String) -> (displayContent: String, sendContent: String) {
+    private func parseMentionsAndBuildContent(_ text: String) -> (displayContent: String, sendContent: String, images: [AIImageAttachment]) {
         // 匹配 [@标题](note:ID) 格式
         let pattern = #"\[@([^\]]+)\]\(note:([a-zA-Z0-9]+)\)"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return (text, text)
+            return (text, text, [])
         }
         
         let nsRange = NSRange(text.startIndex..., in: text)
         let matches = regex.matches(in: text, options: [], range: nsRange)
         
+        print("[AI Debug] Found \(matches.count) @ mentions in text")
+        
         // 如果没有匹配，直接返回原文
         guard !matches.isEmpty else {
-            return (text, text)
+            print("[AI Debug] No @ mentions found, returning original text")
+            return (text, text, [])
         }
         
         var sendContent = text
-        var referencedNotes: [(title: String, content: String)] = []
+        var referencedNotes: [(title: String, content: String, images: [AIImageAttachment])] = []
+        var allImages: [AIImageAttachment] = []
         
         // 从后往前替换，避免位置变化
         for match in matches.reversed() {
@@ -1317,11 +1329,19 @@ private struct AIPanelView: View {
             
             // 查找匹配的笔记（通过ID前缀匹配）
             if let note = store.notes.first(where: { $0.id.uuidString.hasPrefix(shortID) }) {
+                print("[AI Debug] Found note: \(note.title), content length: \(note.content.length)")
+                
                 // 提取笔记纯文本内容
                 let plainContent = note.content.string
                 
+                // 提取笔记中的图片
+                let images = extractImages(from: note.content)
+                allImages.append(contentsOf: images)
+                
+                print("[AI Debug] Extracted \(images.count) images from note")
+                
                 // 添加到引用列表
-                referencedNotes.append((title: note.title.isEmpty ? "无标题" : note.title, content: plainContent))
+                referencedNotes.append((title: note.title.isEmpty ? "无标题" : note.title, content: plainContent, images: images))
                 
                 // 在发送内容中替换为简单引用标记
                 let replacement = "[@\(title)]"
@@ -1337,16 +1357,117 @@ private struct AIPanelView: View {
             
             for (index, note) in referencedNotes.enumerated() {
                 finalContent += "【笔记 \(index + 1)】\(note.title)\n"
-                finalContent += "\(note.content)\n\n"
+                finalContent += "\(note.content)\n"
+                if !note.images.isEmpty {
+                    finalContent += "[包含 \(note.images.count) 张图片]\n"
+                }
+                finalContent += "\n"
             }
             
             finalContent += "---\n"
             finalContent += "请根据以上引用的笔记内容回答用户问题。"
             
-            return (text, finalContent)
+            return (text, finalContent, allImages)
         }
         
-        return (text, text)
+        return (text, text, [])
+    }
+    
+    /// 从 NSAttributedString 中提取图片附件
+    private func extractImages(from attributedString: NSAttributedString) -> [AIImageAttachment] {
+        var images: [AIImageAttachment] = []
+        let length = attributedString.length
+        
+        print("[AI Image] Starting extraction from attributed string of length: \(length)")
+        
+        attributedString.enumerateAttribute(.attachment, in: NSRange(location: 0, length: length), options: []) { value, range, stop in
+            guard let attachment = value else {
+                print("[AI Image] No attachment value found at range: \(range)")
+                return
+            }
+            
+            print("[AI Image] Found attachment of type: \(type(of: attachment))")
+            
+            // 处理 AttachmentTextAttachment
+            if let textAttachment = attachment as? AttachmentTextAttachment {
+                guard textAttachment.kind == .image else {
+                    print("[AI Image] Attachment is not an image, kind: \(textAttachment.kind)")
+                    return
+                }
+                
+                print("[AI Image] Processing image attachment at: \(textAttachment.attachmentFileURL)")
+                
+                // 检查文件是否存在
+                let fileManager = FileManager.default
+                if !fileManager.fileExists(atPath: textAttachment.attachmentFileURL.path) {
+                    print("[AI Image] File does not exist at path: \(textAttachment.attachmentFileURL.path)")
+                    return
+                }
+                
+                // 读取图片文件并转换为 base64
+                do {
+                    let imageData = try Data(contentsOf: textAttachment.attachmentFileURL)
+                    let base64String = imageData.base64EncodedString()
+                    let mimeType = mimeTypeForPath(path: textAttachment.attachmentFileURL.path)
+                    let aiImage = AIImageAttachment(base64Data: base64String, mimeType: mimeType)
+                    images.append(aiImage)
+                    print("[AI Image] Successfully extracted image: \(textAttachment.attachmentFileURL.lastPathComponent), size: \(imageData.count) bytes, base64 length: \(base64String.count)")
+                } catch {
+                    print("[AI Image] Failed to read image data: \(error)")
+                }
+            }
+            // 处理普通的 NSTextAttachment（可能包含图片）
+            else if let nsAttachment = attachment as? NSTextAttachment {
+                print("[AI Image] Found NSTextAttachment, checking for image...")
+                
+                // 尝试从 fileWrapper 获取数据
+                if let fileWrapper = nsAttachment.fileWrapper,
+                   let data = fileWrapper.regularFileContents {
+                    let base64String = data.base64EncodedString()
+                    let mimeType = "image/png" // 默认类型
+                    let aiImage = AIImageAttachment(base64Data: base64String, mimeType: mimeType)
+                    images.append(aiImage)
+                    print("[AI Image] Extracted image from NSTextAttachment, size: \(data.count) bytes")
+                }
+                // 尝试从 image 属性获取
+                else if let image = nsAttachment.image,
+                        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+                    if let data = bitmapRep.representation(using: .png, properties: [:]) {
+                        let base64String = data.base64EncodedString()
+                        let aiImage = AIImageAttachment(base64Data: base64String, mimeType: "image/png")
+                        images.append(aiImage)
+                        print("[AI Image] Extracted image from NSTextAttachment.image, size: \(data.count) bytes")
+                    }
+                } else {
+                    print("[AI Image] Could not extract image data from NSTextAttachment")
+                }
+            } else {
+                print("[AI Image] Unknown attachment type: \(type(of: attachment))")
+            }
+        }
+        
+        print("[AI Image] Total images extracted: \(images.count)")
+        return images
+    }
+    
+    /// 根据文件路径获取 MIME 类型
+    private func mimeTypeForPath(path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "png":
+            return "image/png"
+        case "gif":
+            return "image/gif"
+        case "webp":
+            return "image/webp"
+        case "heic":
+            return "image/heic"
+        default:
+            return "image/jpeg"
+        }
     }
 }
 

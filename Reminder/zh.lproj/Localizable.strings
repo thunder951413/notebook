@@ -133,6 +133,7 @@
 "editor.insertImage" = "插入图片";
 "editor.insertAudio" = "插入音频";
 "editor.search" = "搜索";
+"editor.clearFormatting" = "清除格式";
 
 /* Startup Behavior */
 "startup.restoreLastNote" = "恢复上次选中的笔记";

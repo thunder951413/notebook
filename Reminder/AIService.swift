@@ -37,7 +37,7 @@ class AIService: ObservableObject {
         
         let body = RequestBody(
             model: model,
-            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", content: $0.content) },
+            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", text: $0.content, images: $0.images) },
             temperature: temperature,
             max_tokens: maxTokens
         )
@@ -61,7 +61,7 @@ class AIService: ObservableObject {
             throw AIServiceError.noResponse
         }
         
-        return choice.message.content
+        return choice.message.textContent
     }
     
     // MARK: - 流式发送消息
@@ -88,7 +88,7 @@ class AIService: ObservableObject {
         // 使用非流式模式，简化处理
         let body = RequestBody(
             model: model,
-            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", content: $0.content) },
+            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", text: $0.content, images: $0.images) },
             temperature: temperature,
             max_tokens: maxTokens,
             stream: false
@@ -139,7 +139,7 @@ class AIService: ObservableObject {
         }
         
         // 模拟流式效果，逐字输出
-        let content = choice.message.content
+        let content = choice.message.textContent
         for char in content {
             onReceive(String(char))
             // 添加小延迟模拟打字效果
@@ -151,9 +151,28 @@ class AIService: ObservableObject {
 // MARK: - 数据模型
 
 struct AIMessageDTO: Identifiable {
-    let id = UUID()
+    let id: UUID
     let content: String
     let isUser: Bool
+    let images: [AIImageAttachment]
+    
+    init(id: UUID = UUID(), content: String, isUser: Bool, images: [AIImageAttachment] = []) {
+        self.id = id
+        self.content = content
+        self.isUser = isUser
+        self.images = images
+    }
+}
+
+/// AI 图片附件
+struct AIImageAttachment: Codable {
+    let base64Data: String
+    let mimeType: String
+    
+    /// 转换为 OpenAI 格式的 image_url
+    func toOpenAIImageURL() -> String {
+        return "data:\(mimeType);base64,\(base64Data)"
+    }
 }
 
 // MARK: - 请求/响应模型
@@ -166,9 +185,98 @@ private struct RequestBody: Codable {
     var stream: Bool = false
 }
 
+/// 支持多模态的消息结构
 private struct Message: Codable {
     let role: String
-    let content: String
+    let content: MessageContent
+    
+    /// 用于发送请求的初始化方法
+    init(role: String, text: String, images: [AIImageAttachment] = []) {
+        self.role = role
+        
+        var items: [ContentItem] = []
+        
+        // 添加文本内容
+        if !text.isEmpty {
+            items.append(ContentItem(type: "text", text: text))
+        }
+        
+        // 添加图片
+        for image in images {
+            let imageURL = ["url": image.toOpenAIImageURL()]
+            items.append(ContentItem(type: "image_url", image_url: imageURL))
+        }
+        
+        // 如果没有内容，添加空文本
+        if items.isEmpty {
+            items.append(ContentItem(type: "text", text: ""))
+        }
+        
+        self.content = .array(items)
+    }
+    
+    /// 获取文本内容（用于响应解析）
+    var textContent: String {
+        switch content {
+        case .string(let text):
+            return text
+        case .array(let items):
+            return items.compactMap { $0.text }.joined()
+        }
+    }
+}
+
+/// 消息内容类型（支持字符串或数组）
+private enum MessageContent: Codable {
+    case string(String)
+    case array([ContentItem])
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        
+        // 尝试解码为字符串
+        if let stringValue = try? container.decode(String.self) {
+            self = .string(stringValue)
+            return
+        }
+        
+        // 尝试解码为数组
+        if let arrayValue = try? container.decode([ContentItem].self) {
+            self = .array(arrayValue)
+            return
+        }
+        
+        throw DecodingError.typeMismatch(
+            MessageContent.self,
+            DecodingError.Context(
+                codingPath: decoder.codingPath,
+                debugDescription: "Expected String or Array<ContentItem>"
+            )
+        )
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        }
+    }
+}
+
+/// 内容项（支持文本和图片）
+private struct ContentItem: Codable {
+    let type: String
+    var text: String?
+    var image_url: [String: String]?
+    
+    init(type: String, text: String? = nil, image_url: [String: String]? = nil) {
+        self.type = type
+        self.text = text
+        self.image_url = image_url
+    }
 }
 
 private struct ResponseBody: Codable {

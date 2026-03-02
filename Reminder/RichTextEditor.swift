@@ -102,7 +102,8 @@ final class RichTextController: ObservableObject {
         if let inputContext = tv.inputContext {
             let hasMarked = (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
             if hasMarked {
-                inputContext.discardMarkedText()
+                // 使用 performSelector 调用 commitComposition 避免编译器检查
+                _ = inputContext.perform(NSSelectorFromString("commitComposition"))
             }
         }
         
@@ -409,6 +410,63 @@ final class RichTextController: ObservableObject {
         tv.didChangeText()
     }
 
+    func clearFormatting() {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 检查范围是否有效
+        let textLength = tv.string.utf16.count
+        guard range.location >= 0, range.location + range.length <= textLength else {
+            print("[RichTextController] clearFormatting: invalid range \(range), text length \(textLength)")
+            return
+        }
+
+        let defaultFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+
+        tv.textStorage?.beginEditing()
+
+        // 遍历选中范围内的每个字符，保留段落样式，只清除字体格式
+        var currentLocation = range.location
+        let endLocation = range.location + range.length
+
+        while currentLocation < endLocation {
+            // 检查 textStorage 是否仍然有效
+            guard let textStorage = tv.textStorage else { break }
+
+            var effectiveRange: NSRange = NSRange(location: NSNotFound, length: 0)
+            let attributes = textStorage.attributes(at: currentLocation, effectiveRange: &effectiveRange)
+
+            // 限制在当前选中范围内
+            var actualRange = effectiveRange
+            if actualRange.location < range.location {
+                let offset = range.location - actualRange.location
+                actualRange.location = range.location
+                actualRange.length -= offset
+            }
+            if actualRange.location + actualRange.length > endLocation {
+                actualRange.length = endLocation - actualRange.location
+            }
+
+            // 确保范围有效
+            guard actualRange.length > 0 else { break }
+
+            // 保留段落样式，只更新字体
+            var newAttributes: [NSAttributedString.Key: Any] = [:]
+            if let paragraphStyle = attributes[.paragraphStyle] {
+                newAttributes[.paragraphStyle] = paragraphStyle
+            }
+            newAttributes[.font] = defaultFont
+
+            textStorage.setAttributes(newAttributes, range: actualRange)
+
+            currentLocation = actualRange.location + actualRange.length
+        }
+
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
+    }
+
     func insertImage() {
         guard let tv = textView, let noteID = currentNoteID else { return }
         let panel = NSOpenPanel()
@@ -653,12 +711,24 @@ class RichTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         // 检查是否是回车键
         if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
+            _ = commitMarkedTextIfNeeded()
             if handleReturnKey() {
                 return
             }
         }
 
         super.keyDown(with: event)
+    }
+
+    private func commitMarkedTextIfNeeded() -> Bool {
+        guard let inputContext = self.inputContext else { return false }
+        let hasMarked = (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+        if hasMarked {
+            // 使用 performSelector 调用 commitComposition 避免编译器检查
+            _ = inputContext.perform(NSSelectorFromString("commitComposition"))
+            return true
+        }
+        return false
     }
 
     /// 处理回车键 - 自动继承列表符号
@@ -899,6 +969,9 @@ struct RichTextEditor: NSViewRepresentable {
 
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
+
+            // 清除撤销管理器，避免切换笔记后撤销操作导致崩溃
+            textView.undoManager?.removeAllActions()
 
             textView.textStorage?.setAttributedString(attributedText)
             textView.setSelectedRange(NSRange(location: 0, length: 0))

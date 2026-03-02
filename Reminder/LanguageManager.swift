@@ -256,6 +256,7 @@ struct L10nKeys {
         static let insertImage = "editor.insertImage"
         static let insertAudio = "editor.insertAudio"
         static let search = "editor.search"
+        static let clearFormatting = "editor.clearFormatting"
     }
 
     // MARK: - 启动行为
