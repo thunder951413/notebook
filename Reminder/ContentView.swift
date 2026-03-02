@@ -2228,6 +2228,204 @@ private struct AIMessage: Identifiable {
     }
 }
 
+// MARK: - Markdown 渲染视图
+
+import WebKit
+
+struct MarkdownWebView: NSViewRepresentable {
+    let markdown: String
+    let colorScheme: ColorScheme
+    @Binding var height: CGFloat
+    
+    func makeNSView(context: Context) -> WKWebView {
+        let webView = WKWebView()
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = context.coordinator
+        return webView
+    }
+    
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        let html = generateHTML(from: markdown, colorScheme: colorScheme)
+        webView.loadHTMLString(html, baseURL: nil)
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: MarkdownWebView
+        
+        init(_ parent: MarkdownWebView) {
+            self.parent = parent
+        }
+        
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // 获取内容高度
+            webView.evaluateJavaScript("document.body.scrollHeight") { [weak self] result, error in
+                if let height = result as? CGFloat {
+                    DispatchQueue.main.async {
+                        self?.parent.height = height + 20 // 添加一些边距
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 使用 NSRegularExpression 进行替换，支持 anchorsMatchLines 选项
+    private func replaceWithRegex(_ string: String, pattern: String, replacement: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
+            return string
+        }
+        let range = NSRange(string.startIndex..., in: string)
+        return regex.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: replacement)
+    }
+    
+    private func generateHTML(from markdown: String, colorScheme: ColorScheme) -> String {
+        let textColor = colorScheme == .dark ? "#FFFFFF" : "#000000"
+        
+        // 简单的 Markdown 到 HTML 转换
+        var html = markdown
+            // 转义 HTML 特殊字符
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        
+        // 代码块
+        html = html.replacingOccurrences(of: #"```([\s\S]*?)```"#, with: "<pre><code>$1</code></pre>", options: .regularExpression)
+        
+        // 行内代码
+        html = html.replacingOccurrences(of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
+        
+        // 表格处理
+        html = processTables(html)
+        
+        // 标题 - 使用 NSRegularExpression 处理 anchorsMatchLines
+        html = replaceWithRegex(html, pattern: #"^###### (.+)$"#, replacement: "<h6>$1</h6>")
+        html = replaceWithRegex(html, pattern: #"^##### (.+)$"#, replacement: "<h5>$1</h5>")
+        html = replaceWithRegex(html, pattern: #"^#### (.+)$"#, replacement: "<h4>$1</h4>")
+        html = replaceWithRegex(html, pattern: #"^### (.+)$"#, replacement: "<h3>$1</h3>")
+        html = replaceWithRegex(html, pattern: #"^## (.+)$"#, replacement: "<h2>$1</h2>")
+        html = replaceWithRegex(html, pattern: #"^# (.+)$"#, replacement: "<h1>$1</h1>")
+        
+        // 粗体和斜体
+        html = html.replacingOccurrences(of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
+        html = html.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
+        html = html.replacingOccurrences(of: #"\*(.+?)\*"#, with: "<em>$1</em>", options: .regularExpression)
+        
+        // 换行
+        html = html.replacingOccurrences(of: "\n", with: "<br>")
+        
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                    font-size: 13px;
+                    line-height: 1.5;
+                    color: \(textColor);
+                    margin: 0;
+                    padding: 0;
+                }
+                table {
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin: 8px 0;
+                }
+                th, td {
+                    border: 1px solid \(colorScheme == .dark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.2)");
+                    padding: 6px 8px;
+                    text-align: left;
+                }
+                th {
+                    background-color: \(colorScheme == .dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.05)");
+                    font-weight: 600;
+                }
+                code {
+                    background-color: \(colorScheme == .dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)");
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                    font-family: "SF Mono", Monaco, monospace;
+                    font-size: 12px;
+                }
+                pre {
+                    background-color: \(colorScheme == .dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.05)");
+                    padding: 8px;
+                    border-radius: 6px;
+                    overflow-x: auto;
+                    margin: 8px 0;
+                }
+                pre code {
+                    background: none;
+                    padding: 0;
+                }
+                h1, h2, h3, h4, h5, h6 {
+                    margin: 12px 0 8px 0;
+                }
+                h1 { font-size: 18px; }
+                h2 { font-size: 16px; }
+                h3 { font-size: 14px; }
+                h4, h5, h6 { font-size: 13px; }
+            </style>
+        </head>
+        <body>
+            \(html)
+        </body>
+        </html>
+        """
+    }
+    
+    private func processTables(_ html: String) -> String {
+        var result = html
+        let tablePattern = #"(\|[^\n]+\|\n\|[-:\| ]+\|\n(?:\|[^\n]+\|\n?)+)"#
+        
+        if let regex = try? NSRegularExpression(pattern: tablePattern, options: []) {
+            let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+            
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: html) else { continue }
+                let tableText = String(html[range])
+                let tableHTML = convertTableToHTML(tableText)
+                result.replaceSubrange(range, with: tableHTML)
+            }
+        }
+        
+        return result
+    }
+    
+    private func convertTableToHTML(_ tableText: String) -> String {
+        let lines = tableText.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n")
+        guard lines.count >= 2 else { return tableText }
+        
+        var html = "<table>"
+        
+        let headerLine = String(lines[0])
+        let headers = headerLine.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        html += "<thead><tr>"
+        for header in headers {
+            html += "<th>\(header)</th>"
+        }
+        html += "</tr></thead>"
+        
+        html += "<tbody>"
+        for i in 2..<lines.count {
+            let line = String(lines[i])
+            let cells = line.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            html += "<tr>"
+            for cell in cells {
+                html += "<td>\(cell)</td>"
+            }
+            html += "</tr>"
+        }
+        html += "</tbody></table>"
+        
+        return html
+    }
+}
+
 // MARK: - 消息气泡组件
 
 private struct MessageBubble: View {
@@ -2235,6 +2433,7 @@ private struct MessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var themeManager = ThemeManager.shared
     @State private var isHovered = false
+    @State private var webViewHeight: CGFloat = 50
     
     var body: some View {
         HStack {
@@ -2243,41 +2442,49 @@ private struct MessageBubble: View {
             }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
-                // 消息内容文本
-                Text(message.content)
-                    .font(.system(size: 13))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        message.isUser
-                            ? themeManager.accentColor
-                            : (colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
-                    )
-                    .foregroundStyle(message.isUser ? .white : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .contextMenu {
-                        Button {
-                            copyToClipboard(message.content)
-                        } label: {
-                            Label("复制", systemImage: "doc.on.doc")
+                if message.isUser {
+                    Text(message.content)
+                        .font(.system(size: 13))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(themeManager.accentColor)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .contextMenu {
+                            Button {
+                                copyToClipboard(message.content)
+                            } label: {
+                                Label("复制", systemImage: "doc.on.doc")
+                            }
                         }
-                        
-                        if !message.isUser {
+                } else {
+                    MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight)
+                        .frame(width: 260, height: webViewHeight)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .contextMenu {
+                            Button {
+                                copyToClipboard(message.content)
+                            } label: {
+                                Label("复制", systemImage: "doc.on.doc")
+                            }
+                            
                             Button {
                                 copyToClipboard(message.content)
                             } label: {
                                 Label("复制并粘贴到笔记", systemImage: "arrow.down.doc")
                             }
                         }
-                    }
+                }
                 
                 HStack(spacing: 6) {
                     Text(message.timestamp, style: .time)
                         .font(.caption2)
                         .foregroundStyle(.secondary.opacity(0.6))
                     
-                    // 悬停时显示复制按钮
                     if isHovered {
                         Button {
                             copyToClipboard(message.content)
