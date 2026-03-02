@@ -547,6 +547,18 @@ final class RichTextController: ObservableObject {
         tv.didChangeText()
     }
 
+    // MARK: - 快捷键支持方法
+
+    /// 切换项目符号列表（供快捷键使用）
+    func toggleBulletList() {
+        toggleBullets()
+    }
+
+    /// 聚焦编辑器
+    func focus() {
+        textView?.becomeFirstResponder()
+    }
+
     private func prefixSelectedLines(withNumbering: Bool) {
         guard let tv = textView else { return }
         let ns = tv.string as NSString

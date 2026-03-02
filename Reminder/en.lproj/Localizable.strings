@@ -184,3 +184,33 @@
 /* Backup Errors */
 "backup.restoreFailed" = "Restore failed, please try again";
 "backup.contextError" = "Unable to get database context";
+
+/* Settings Tabs */
+"settings_tab_general" = "General";
+"settings_tab_shortcuts" = "Shortcuts";
+
+/* Shortcut Settings */
+"shortcut_settings_title" = "Keyboard Shortcuts";
+"shortcut_settings_description" = "Click an item below to set a shortcut. Supports combinations like ⌘+N, ⌥+⇧+S, etc.";
+"shortcut_reset_defaults" = "Reset to Defaults";
+"shortcut_press_shortcut" = "Press shortcut...";
+"shortcut_conflict_warning" = "This shortcut is already in use. Replace it?";
+
+/* Shortcut Actions */
+"shortcut_new_note" = "New Note";
+"shortcut_save_note" = "Save Note";
+"shortcut_delete_note" = "Delete Note";
+"shortcut_toggle_bold" = "Bold";
+"shortcut_toggle_italic" = "Italic";
+"shortcut_toggle_underline" = "Underline";
+"shortcut_toggle_strikethrough" = "Strikethrough";
+"shortcut_toggle_checkbox" = "Checkbox";
+"shortcut_increase_indent" = "Increase Indent";
+"shortcut_decrease_indent" = "Decrease Indent";
+"shortcut_toggle_bullet_list" = "Bullet List";
+"shortcut_toggle_numbered_list" = "Numbered List";
+"shortcut_toggle_ai_assistant" = "Show/Hide AI Assistant";
+"shortcut_insert_conversation" = "Insert Conversation to Note";
+"shortcut_toggle_markdown_preview" = "Toggle Markdown Preview";
+"shortcut_focus_search" = "Focus Search";
+"shortcut_focus_editor" = "Focus Editor";

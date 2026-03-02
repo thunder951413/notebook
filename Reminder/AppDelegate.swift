@@ -6,6 +6,9 @@ extension Notification.Name {
     static let openMainWindow = Notification.Name("openMainWindow")
     static let appShouldTerminate = Notification.Name("appShouldTerminate")
     static let insertTextAtCursor = Notification.Name("insertTextAtCursor")
+    static let focusSearchField = Notification.Name("focusSearchField")
+    static let toggleMarkdownPreview = Notification.Name("toggleMarkdownPreview")
+    static let insertConversation = Notification.Name("insertConversation")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {

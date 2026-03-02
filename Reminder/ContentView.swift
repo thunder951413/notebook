@@ -14,6 +14,7 @@ struct ContentView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var windowState = WindowStateManager.shared
 
     @State private var selection: Note.ID? = nil
 
@@ -232,6 +233,73 @@ struct ContentView: View {
             if let text = notification.userInfo?["text"] as? String {
                 richTextController.insertTextAtCursor(text)
             }
+        }
+        // 快捷键处理
+        .onReceive(ShortcutActionHandler.shared.newNotePublisher) { _ in
+            createNote()
+        }
+        .onReceive(ShortcutActionHandler.shared.saveNotePublisher) { _ in
+            if let currentId = selection,
+               let index = store.notes.firstIndex(where: { $0.id == currentId }),
+               richTextController.isBoundTo(noteID: currentId) {
+                let content = richTextController.snapshotAttributedString() ?? store.notes[index].content
+                saveNoteContent(noteID: currentId, content: content, reason: "shortcut")
+                richTextController.markAsSaved()
+            }
+        }
+        .onReceive(ShortcutActionHandler.shared.deleteNotePublisher) { _ in
+            deleteSelectedNote()
+        }
+        .onReceive(ShortcutActionHandler.shared.focusSearchPublisher) { _ in
+            // 聚焦搜索框 - 通过发送通知让搜索框获得焦点
+            NotificationCenter.default.post(name: .focusSearchField, object: nil)
+        }
+        // 格式设置快捷键
+        .onReceive(ShortcutActionHandler.shared.toggleBoldPublisher) { _ in
+            richTextController.toggleBold()
+        }
+        .onReceive(ShortcutActionHandler.shared.toggleItalicPublisher) { _ in
+            richTextController.toggleItalic()
+        }
+        .onReceive(ShortcutActionHandler.shared.toggleUnderlinePublisher) { _ in
+            richTextController.toggleUnderline()
+        }
+        .onReceive(ShortcutActionHandler.shared.toggleStrikethroughPublisher) { _ in
+            richTextController.toggleStrikethrough()
+        }
+        // 列表与缩进快捷键
+        .onReceive(ShortcutActionHandler.shared.toggleCheckboxPublisher) { _ in
+            richTextController.toggleCheckbox()
+        }
+        .onReceive(ShortcutActionHandler.shared.increaseIndentPublisher) { _ in
+            richTextController.increaseIndent()
+        }
+        .onReceive(ShortcutActionHandler.shared.decreaseIndentPublisher) { _ in
+            richTextController.decreaseIndent()
+        }
+        .onReceive(ShortcutActionHandler.shared.toggleBulletListPublisher) { _ in
+            richTextController.toggleBulletList()
+        }
+        .onReceive(ShortcutActionHandler.shared.toggleNumberedListPublisher) { _ in
+            richTextController.toggleNumberedList()
+        }
+        // 聚焦编辑器
+        .onReceive(ShortcutActionHandler.shared.focusEditorPublisher) { _ in
+            richTextController.focus()
+        }
+        // AI 功能快捷键
+        .onReceive(ShortcutActionHandler.shared.toggleAIAssistantPublisher) { _ in
+            withAnimation(.easeInOut(duration: 0.25)) {
+                windowState.isRightSidebarExpanded.toggle()
+            }
+        }
+        // Markdown 预览快捷键
+        .onReceive(ShortcutActionHandler.shared.toggleMarkdownPreviewPublisher) { _ in
+            NotificationCenter.default.post(name: .toggleMarkdownPreview, object: nil)
+        }
+        // 插入对话到笔记
+        .onReceive(ShortcutActionHandler.shared.insertConversationPublisher) { _ in
+            NotificationCenter.default.post(name: .insertConversation, object: nil)
         }
     }
 
@@ -670,6 +738,9 @@ private struct NoteEditorView: View {
         }
         .onDisappear {
             pendingSaveWorkItem?.cancel()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleMarkdownPreview)) { _ in
+            isMarkdownPreview.toggle()
         }
         .toolbar {
             ToolbarItemGroup {
@@ -1268,8 +1339,11 @@ private struct AIPanelView: View {
                 Spacer()
             }
         )
+        .onReceive(NotificationCenter.default.publisher(for: .insertConversation)) { _ in
+            insertConversationToNote()
+        }
     }
-    
+
     private func sendMessage() {
         let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
@@ -1630,11 +1704,9 @@ private struct AIInputField: View {
     
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            // 文本输入框
-            TextEditor(text: $text)
+            // 文本输入框 - 使用自定义的 NSTextView 包装器支持 ⌘+Enter
+            AIInputTextView(text: $text, onSend: onSend)
                 .font(.body)
-                .scrollContentBackground(.hidden)
-                .background(Color.clear)
                 .frame(minHeight: 32, maxHeight: 100)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 10)
@@ -1718,6 +1790,78 @@ private struct AIInputField: View {
         showMentionPicker = false
         mentionQuery = ""
         mentionRange = nil
+    }
+}
+
+// MARK: - AI 输入框自定义 TextView（支持 ⌘+Enter）
+
+// 自定义 NSTextView 子类用于捕获 ⌘+Enter
+private class AIInputNSTextView: NSTextView {
+    var onCmdEnter: (() -> Void)?
+    
+    override func keyDown(with event: NSEvent) {
+        // 检查是否是 ⌘+Enter (keyCode 36 = Return, keyCode 76 = Enter)
+        if (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.contains(.command) {
+            onCmdEnter?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+private struct AIInputTextView: NSViewRepresentable {
+    @Binding var text: String
+    let onSend: () -> Void
+    
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autoresizingMask = [.width, .height]
+        
+        let textView = AIInputNSTextView()
+        textView.onCmdEnter = onSend
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.backgroundColor = .clear
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        
+        scrollView.documentView = textView
+        
+        return scrollView
+    }
+    
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? AIInputNSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        // 更新回调
+        textView.onCmdEnter = onSend
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, NSTextViewDelegate {
+        let parent: AIInputTextView
+        
+        init(_ parent: AIInputTextView) {
+            self.parent = parent
+        }
+        
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
     }
 }
 

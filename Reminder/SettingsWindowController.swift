@@ -25,15 +25,16 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func show(with storage: StorageLocationManager, persistence: PersistenceController, store: NoteStore) {
-        if hostingController == nil {
-            let view = SettingsRootView()
-                .environmentObject(storage)
-                .environmentObject(persistence)
-                .environmentObject(store)
-            let host = NSHostingController(rootView: AnyView(view))
-            hostingController = host
-            window?.contentViewController = host
-        }
+        // 每次都重新创建视图，确保使用最新的布局
+        let view = SettingsContainerView()
+            .environmentObject(storage)
+            .environmentObject(persistence)
+            .environmentObject(store)
+        let host = NSHostingController(rootView: AnyView(view))
+        hostingController = host
+        window?.contentViewController = host
+        // 调整窗口大小以适应新的 Tab 布局
+        window?.setContentSize(NSSize(width: 800, height: 550))
 
         guard let window = window else { return }
         window.makeKeyAndOrderFront(nil)

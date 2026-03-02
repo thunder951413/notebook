@@ -43,6 +43,9 @@ final class SwiftDataCloudKitManager: ObservableObject {
                 case .couldNotDetermine:
                     self?.isCloudKitEnabled = false
                     print("[SwiftDataCloudKitManager] CloudKit status could not be determined")
+                case .temporarilyUnavailable:
+                    self?.isCloudKitEnabled = false
+                    print("[SwiftDataCloudKitManager] CloudKit is temporarily unavailable")
                 @unknown default:
                     self?.isCloudKitEnabled = false
                 }

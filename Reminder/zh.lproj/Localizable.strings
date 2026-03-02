@@ -184,3 +184,33 @@
 /* Backup Errors */
 "backup.restoreFailed" = "恢复失败，请重试";
 "backup.contextError" = "无法获取数据库上下文";
+
+/* Settings Tabs */
+"settings_tab_general" = "通用";
+"settings_tab_shortcuts" = "快捷键";
+
+/* Shortcut Settings */
+"shortcut_settings_title" = "快捷键设置";
+"shortcut_settings_description" = "点击下方的项目来设置快捷键。支持组合键如 ⌘+N、⌥+⇧+S 等。";
+"shortcut_reset_defaults" = "重置为默认值";
+"shortcut_press_shortcut" = "按下快捷键...";
+"shortcut_conflict_warning" = "该快捷键已被使用，是否替换？";
+
+/* Shortcut Actions */
+"shortcut_new_note" = "新建笔记";
+"shortcut_save_note" = "保存笔记";
+"shortcut_delete_note" = "删除笔记";
+"shortcut_toggle_bold" = "粗体";
+"shortcut_toggle_italic" = "斜体";
+"shortcut_toggle_underline" = "下划线";
+"shortcut_toggle_strikethrough" = "删除线";
+"shortcut_toggle_checkbox" = "复选框";
+"shortcut_increase_indent" = "增加缩进";
+"shortcut_decrease_indent" = "减少缩进";
+"shortcut_toggle_bullet_list" = "项目符号列表";
+"shortcut_toggle_numbered_list" = "编号列表";
+"shortcut_toggle_ai_assistant" = "显示/隐藏 AI 助手";
+"shortcut_insert_conversation" = "插入对话到笔记";
+"shortcut_toggle_markdown_preview" = "切换 Markdown 预览";
+"shortcut_focus_search" = "聚焦搜索框";
+"shortcut_focus_editor" = "聚焦编辑器";
