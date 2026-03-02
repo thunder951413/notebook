@@ -1705,7 +1705,10 @@ private struct AIInputField: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             // 文本输入框 - 使用自定义的 NSTextView 包装器支持 ⌘+Enter
-            AIInputTextView(text: $text, onSend: onSend)
+            AIInputTextView(text: $text, onSend: {
+                print("[AIInput] onSend callback triggered")
+                onSend()
+            })
                 .font(.body)
                 .frame(minHeight: 32, maxHeight: 100)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1798,10 +1801,15 @@ private struct AIInputField: View {
 // 自定义 NSTextView 子类用于捕获 ⌘+Enter
 private class AIInputNSTextView: NSTextView {
     var onCmdEnter: (() -> Void)?
-    
+
     override func keyDown(with event: NSEvent) {
+        print("[AIInput] keyDown - keyCode: \(event.keyCode), modifiers: \(event.modifierFlags)")
         // 检查是否是 ⌘+Enter (keyCode 36 = Return, keyCode 76 = Enter)
-        if (event.keyCode == 36 || event.keyCode == 76) && event.modifierFlags.contains(.command) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        let hasCommand = event.modifierFlags.contains(.command)
+        print("[AIInput] isReturn: \(isReturn), hasCommand: \(hasCommand)")
+        if isReturn && hasCommand {
+            print("[AIInput] ⌘+Enter detected, calling onCmdEnter")
             onCmdEnter?()
             return
         }
@@ -1814,12 +1822,17 @@ private struct AIInputTextView: NSViewRepresentable {
     let onSend: () -> Void
     
     func makeNSView(context: Context) -> NSScrollView {
+        print("[AIInput] makeNSView called")
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.autoresizingMask = [.width, .height]
-        
+
         let textView = AIInputNSTextView()
-        textView.onCmdEnter = onSend
+        print("[AIInput] Setting onCmdEnter callback")
+        textView.onCmdEnter = {
+            print("[AIInput] onCmdEnter closure executed")
+            self.onSend()
+        }
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -1844,7 +1857,11 @@ private struct AIInputTextView: NSViewRepresentable {
             textView.string = text
         }
         // 更新回调
-        textView.onCmdEnter = onSend
+        print("[AIInput] updateNSView - updating onCmdEnter callback")
+        textView.onCmdEnter = {
+            print("[AIInput] onCmdEnter closure executed (from update)")
+            self.onSend()
+        }
     }
     
     func makeCoordinator() -> Coordinator {
