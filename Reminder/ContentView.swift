@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 
 struct ContentView: View {
@@ -226,6 +227,11 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
             saveCurrentEditorContent(reason: "terminate")
             NoteSaveManager.shared.flushAllPending()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .insertTextAtCursor)) { notification in
+            if let text = notification.userInfo?["text"] as? String {
+                richTextController.insertTextAtCursor(text)
+            }
         }
     }
 
@@ -595,6 +601,9 @@ private struct NoteEditorView: View {
     
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
+    
+    // Markdown 预览模式
+    @State private var isMarkdownPreview: Bool = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -605,7 +614,8 @@ private struct NoteEditorView: View {
                         controller: controller,
                         recorder: recorder,
                         note: $note,
-                        showingReminderPopover: $showingReminderPopover
+                        showingReminderPopover: $showingReminderPopover,
+                        isMarkdownPreview: $isMarkdownPreview
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -622,15 +632,22 @@ private struct NoteEditorView: View {
                         Divider()
                             .padding(.horizontal, 16)
 
-                        RichTextEditor(
-                            attributedText: $note.content,
-                            controller: controller,
-                            noteID: note.id
-                        )
-                        .id(note.id)  // 强制在 note.id 变化时重新创建视图
-                        .layoutPriority(1)
-                        .onChange(of: note.content) { _, newContent in
-                            debouncedScheduleAutoSave(title: note.title, content: newContent)
+                        if isMarkdownPreview {
+                            // Markdown 预览模式
+                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
+                                .frame(maxHeight: .infinity)
+                        } else {
+                            // 富文本编辑模式
+                            RichTextEditor(
+                                attributedText: $note.content,
+                                controller: controller,
+                                noteID: note.id
+                            )
+                            .id(note.id)  // 强制在 note.id 变化时重新创建视图
+                            .frame(maxHeight: .infinity)
+                            .onChange(of: note.content) { _, newContent in
+                                debouncedScheduleAutoSave(title: note.title, content: newContent)
+                            }
                         }
                     }
                 }
@@ -731,6 +748,7 @@ private struct EditorTopBarView: View {
     @ObservedObject var recorder: AudioRecorderManager
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
+    @Binding var isMarkdownPreview: Bool
     @StateObject private var windowState = WindowStateManager.shared
 
     @State private var tempReminderAt: Date = Date()
@@ -918,6 +936,21 @@ private struct EditorTopBarView: View {
             
             Divider().frame(height: 18)
             
+            // Markdown 预览切换按钮
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isMarkdownPreview.toggle()
+                }
+            } label: {
+                Image(systemName: isMarkdownPreview ? "doc.plaintext" : "doc.text.image")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isMarkdownPreview ? ThemeManager.shared.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(isMarkdownPreview ? "切换到文本编辑" : "切换到 Markdown 预览")
+            
+            Divider().frame(height: 18)
+            
             // AI 助手按钮（使用与侧边栏类似的图标）
             Button {
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -1047,6 +1080,18 @@ private struct AIPanelView: View {
                 
                 Spacer()
                 
+                // 插入到笔记按钮
+                Button {
+                    insertConversationToNote()
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("插入对话到笔记")
+                .disabled(messages.isEmpty)
+                
                 // 设置按钮
                 AISettingsButton()
                 
@@ -1124,7 +1169,7 @@ private struct AIPanelView: View {
                             ForEach(messages) { message in
                                 MessageBubble(message: message)
                             }
-                            
+
                             if isLoading {
                                 HStack {
                                     ProgressView()
@@ -1150,6 +1195,7 @@ private struct AIPanelView: View {
                     }
                 }
             }
+            .frame(maxHeight: .infinity)
             .background(AppColors.editorBackground(colorScheme))
             
             Divider()
@@ -1468,6 +1514,45 @@ private struct AIPanelView: View {
         default:
             return "image/jpeg"
         }
+    }
+
+    /// 将当前对话插入到笔记光标位置
+    private func insertConversationToNote() {
+        guard !messages.isEmpty else { return }
+
+        // 构建对话内容
+        var conversationText = "\n\n--- AI 对话 ---\n\n"
+        for message in messages {
+            let role = message.isUser ? "用户" : "AI"
+            conversationText += "【\(role)】\n\(message.content)\n\n"
+        }
+        conversationText += "--- 对话结束 ---\n"
+
+        // 发送通知让 ContentView 处理插入
+        NotificationCenter.default.post(
+            name: .insertTextAtCursor,
+            object: nil,
+            userInfo: ["text": conversationText]
+        )
+    }
+}
+
+// MARK: - 笔记 Markdown 预览视图
+
+private struct NoteMarkdownPreviewView: View {
+    let content: String
+    let colorScheme: ColorScheme
+    @State private var webViewHeight: CGFloat = 500
+
+    var body: some View {
+        ScrollView {
+            MarkdownWebView(markdown: content, colorScheme: colorScheme, height: $webViewHeight)
+                .frame(height: webViewHeight)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+        }
+        .frame(maxHeight: .infinity)
+        .background(AppColors.editorBackground(colorScheme))
     }
 }
 
@@ -2232,13 +2317,24 @@ private struct AIMessage: Identifiable {
 
 import WebKit
 
+final class NonScrollingWKWebView: WKWebView {
+    override func scrollWheel(with event: NSEvent) {
+        if let nextResponder {
+            nextResponder.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+}
+
 struct MarkdownWebView: NSViewRepresentable {
     let markdown: String
     let colorScheme: ColorScheme
     @Binding var height: CGFloat
     
     func makeNSView(context: Context) -> WKWebView {
-        let webView = WKWebView()
+        let configuration = WKWebViewConfiguration()
+        let webView = NonScrollingWKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         return webView
@@ -2437,15 +2533,12 @@ private struct MessageBubble: View {
     
     var body: some View {
         HStack {
-            if message.isUser {
-                Spacer()
-            }
-            
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
                 if message.isUser {
                     Text(message.content)
                         .font(.system(size: 13))
                         .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(themeManager.accentColor)
@@ -2460,7 +2553,8 @@ private struct MessageBubble: View {
                         }
                 } else {
                     MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight)
-                        .frame(width: 260, height: webViewHeight)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: webViewHeight)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
@@ -2498,17 +2592,14 @@ private struct MessageBubble: View {
                     }
                 }
             }
-            .frame(maxWidth: 260, alignment: message.isUser ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.15)) {
                     isHovered = hovering
                 }
             }
-            
-            if !message.isUser {
-                Spacer()
-            }
         }
+        .frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
     }
     
     private func copyToClipboard(_ text: String) {
@@ -2516,5 +2607,3 @@ private struct MessageBubble: View {
         NSPasteboard.general.setString(text, forType: .string)
     }
 }
-
-

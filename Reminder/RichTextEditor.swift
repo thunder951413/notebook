@@ -146,6 +146,20 @@ final class RichTextController: ObservableObject {
         tv.didChangeText()
     }
 
+    /// 在当前光标位置插入文本
+    func insertTextAtCursor(_ text: String) {
+        guard let tv = textView else { return }
+        let selectedRange = tv.selectedRange()
+        let attributedText = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        ])
+        tv.textStorage?.insert(attributedText, at: selectedRange.location)
+        tv.didChangeText()
+        // 更新光标位置到插入文本之后
+        let newLocation = selectedRange.location + text.utf16.count
+        tv.setSelectedRange(NSRange(location: newLocation, length: 0))
+    }
+
     func toggleBold() {
         guard let tv = textView else { return }
         let range = tv.selectedRange()

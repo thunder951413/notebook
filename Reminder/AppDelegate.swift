@@ -5,6 +5,7 @@ import SwiftData
 extension Notification.Name {
     static let openMainWindow = Notification.Name("openMainWindow")
     static let appShouldTerminate = Notification.Name("appShouldTerminate")
+    static let insertTextAtCursor = Notification.Name("insertTextAtCursor")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
