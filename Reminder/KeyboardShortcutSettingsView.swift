@@ -14,7 +14,7 @@ struct KeyboardShortcutSettingsView: View {
         ("格式设置", [.toggleBold, .toggleItalic, .toggleUnderline, .toggleStrikethrough]),
         ("列表与缩进", [.toggleCheckbox, .increaseIndent, .decreaseIndent, .toggleBulletList, .toggleNumberedList]),
         ("AI 功能", [.toggleAIAssistant, .insertConversation]),
-        ("视图与导航", [.toggleMarkdownPreview, .focusSearch, .focusEditor])
+        ("视图与导航", [.toggleMarkdownPreview, .toggleTableOfContents, .focusSearch, .focusEditor])
     ]
     
     var body: some View {

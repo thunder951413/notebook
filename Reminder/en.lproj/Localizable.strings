@@ -212,5 +212,6 @@
 "shortcut_toggle_ai_assistant" = "Show/Hide AI Assistant";
 "shortcut_insert_conversation" = "Insert Conversation to Note";
 "shortcut_toggle_markdown_preview" = "Toggle Markdown Preview";
+"shortcut_toggle_table_of_contents" = "Show/Hide Table of Contents";
 "shortcut_focus_search" = "Focus Search";
 "shortcut_focus_editor" = "Focus Editor";

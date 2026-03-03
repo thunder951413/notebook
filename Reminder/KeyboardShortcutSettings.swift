@@ -20,11 +20,12 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case toggleAIAssistant = "toggle_ai_assistant"
     case insertConversation = "insert_conversation"
     case toggleMarkdownPreview = "toggle_markdown_preview"
+    case toggleTableOfContents = "toggle_table_of_contents"
     case focusSearch = "focus_search"
     case focusEditor = "focus_editor"
-    
+
     var id: String { rawValue }
-    
+
     var displayName: String {
         switch self {
         case .newNote: return l10n(L10nKeys.Shortcut.newNote)
@@ -42,11 +43,12 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleAIAssistant: return l10n(L10nKeys.Shortcut.toggleAIAssistant)
         case .insertConversation: return l10n(L10nKeys.Shortcut.insertConversation)
         case .toggleMarkdownPreview: return l10n(L10nKeys.Shortcut.toggleMarkdownPreview)
+        case .toggleTableOfContents: return l10n(L10nKeys.Shortcut.toggleTableOfContents)
         case .focusSearch: return l10n(L10nKeys.Shortcut.focusSearch)
         case .focusEditor: return l10n(L10nKeys.Shortcut.focusEditor)
         }
     }
-    
+
     var defaultShortcut: KeyboardShortcut? {
         switch self {
         case .newNote: return KeyboardShortcut(key: .n, modifiers: [.command])
@@ -64,6 +66,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleAIAssistant: return KeyboardShortcut(key: .a, modifiers: [.command, .shift])
         case .insertConversation: return KeyboardShortcut(key: .returnKey, modifiers: [.command])
         case .toggleMarkdownPreview: return KeyboardShortcut(key: .m, modifiers: [.command, .shift])
+        case .toggleTableOfContents: return KeyboardShortcut(key: .t, modifiers: [.command, .shift])
         case .focusSearch: return KeyboardShortcut(key: .f, modifiers: [.command, .shift])
         case .focusEditor: return KeyboardShortcut(key: .e, modifiers: [.command, .shift])
         }
@@ -234,6 +237,7 @@ extension L10nKeys {
         static let toggleAIAssistant = "shortcut_toggle_ai_assistant"
         static let insertConversation = "shortcut_insert_conversation"
         static let toggleMarkdownPreview = "shortcut_toggle_markdown_preview"
+        static let toggleTableOfContents = "shortcut_toggle_table_of_contents"
         static let focusSearch = "shortcut_focus_search"
         static let focusEditor = "shortcut_focus_editor"
         

@@ -27,6 +27,7 @@ final class ShortcutActionHandler: ObservableObject {
     let toggleAIAssistantPublisher = PassthroughSubject<Void, Never>()
     let insertConversationPublisher = PassthroughSubject<Void, Never>()
     let toggleMarkdownPreviewPublisher = PassthroughSubject<Void, Never>()
+    let toggleTableOfContentsPublisher = PassthroughSubject<Void, Never>()
     let focusSearchPublisher = PassthroughSubject<Void, Never>()
     let focusEditorPublisher = PassthroughSubject<Void, Never>()
     
@@ -188,6 +189,8 @@ final class ShortcutActionHandler: ObservableObject {
             insertConversationPublisher.send()
         case .toggleMarkdownPreview:
             toggleMarkdownPreviewPublisher.send()
+        case .toggleTableOfContents:
+            toggleTableOfContentsPublisher.send()
         case .focusSearch:
             focusSearchPublisher.send()
         case .focusEditor:

@@ -8,6 +8,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
+import Combine
 
 
 struct ContentView: View {
@@ -1109,19 +1110,20 @@ private struct EditorTopBarView: View {
             Divider().frame(height: 18)
 
             // 目录按钮（仅在预览或分屏模式下显示）
-            if note.viewMode != .text {
-                TableOfContentsMenu(content: note.content.string, onSelect: { anchor in
+            TableOfContentsMenu(
+                content: note.content.string,
+                viewMode: note.viewMode,
+                onSelect: { anchor in
                     // 发送通知让 MarkdownWebView 滚动到指定位置
                     NotificationCenter.default.post(
                         name: .scrollToHeading,
                         object: note.id,
                         userInfo: ["anchor": anchor]
                     )
-                })
-                .buttonStyle(.plain)
+                }
+            )
 
-                Divider().frame(height: 18)
-            }
+            Divider().frame(height: 18)
 
             // Markdown 预览模式选择菜单
             Menu {
@@ -1876,6 +1878,7 @@ private struct AIInputField: View {
         // 检测是否输入了 @
         if let lastChar = newValue.last, lastChar == "@" {
             // 检查 @ 前面是否是空格或者是开头
+            guard !newValue.isEmpty else { return }
             let index = newValue.index(before: newValue.endIndex)
             if index == newValue.startIndex {
                 // @ 在开头
@@ -1919,8 +1922,11 @@ private struct AIInputField: View {
         let mentionText = "[@\(truncatedTitle)](note:\(shortID)) "
         
         // 替换 @ + 查询内容
-        let endIndex = text.index(range.lowerBound, offsetBy: mentionQuery.count + 1)
-        let replaceRange = range.lowerBound..<min(endIndex, text.endIndex)
+        let offset = mentionQuery.count + 1
+        let maxOffset = text.distance(from: range.lowerBound, to: text.endIndex)
+        let safeOffset = min(offset, maxOffset)
+        let endIndex = text.index(range.lowerBound, offsetBy: safeOffset)
+        let replaceRange = range.lowerBound..<endIndex
         text.replaceSubrange(replaceRange, with: mentionText)
         
         showMentionPicker = false
@@ -2609,40 +2615,108 @@ private struct AIMessage: Identifiable {
 
 // MARK: - 目录菜单按钮
 
-private struct TableOfContentsMenu: View {
+private struct TableOfContentsMenu: NSViewRepresentable {
     let content: String
+    let viewMode: NoteViewMode
     let onSelect: (String) -> Void
-    @StateObject private var themeManager = ThemeManager.shared
 
-    var body: some View {
-        let tocItems = extractTableOfContents(from: content)
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton()
+        button.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "目录")
+        button.bezelStyle = .shadowlessSquare
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.showMenu(_:))
+        button.toolTip = "目录 (⌘⇧T)"
 
-        Menu {
-            if tocItems.isEmpty {
-                Text("没有标题")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(tocItems) { item in
-                    Button {
-                        onSelect(item.anchor)
-                    } label: {
-                        Text(indentText(for: item))
-                            .lineLimit(1)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "list.bullet")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(themeManager.accentColor)
-        }
-        .help("目录")
-        .disabled(tocItems.isEmpty)
+        // 设置固定大小
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 20),
+            button.heightAnchor.constraint(equalToConstant: 20)
+        ])
+
+        return button
     }
 
-    private func indentText(for item: TableOfContentsItem) -> String {
-        let indent = String(repeating: "    ", count: max(0, item.level - 1))
-        return indent + item.title
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        let tocItems = extractTableOfContents(from: content)
+        let isAvailable = viewMode != .text && !tocItems.isEmpty
+        nsView.isEnabled = isAvailable
+        nsView.alphaValue = viewMode != .text ? 1.0 : 0.0
+
+        // 更新 coordinator 的数据
+        context.coordinator.content = content
+        context.coordinator.onSelect = onSelect
+        context.coordinator.button = nsView
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(content: content, onSelect: onSelect)
+    }
+
+    class Coordinator: NSObject {
+        var content: String
+        var onSelect: (String) -> Void
+        weak var button: NSButton?
+        var cancellable: AnyCancellable?
+
+        init(content: String, onSelect: @escaping (String) -> Void) {
+            self.content = content
+            self.onSelect = onSelect
+            super.init()
+
+            // 监听快捷键 publisher
+            cancellable = ShortcutActionHandler.shared.toggleTableOfContentsPublisher
+                .sink { [weak self] in
+                    guard let self = self,
+                          let button = self.button,
+                          button.isEnabled,
+                          button.alphaValue > 0 else { return }
+                    self.showTableOfContentsMenu(from: button)
+                }
+        }
+
+        @objc func showMenu(_ sender: NSButton) {
+            showTableOfContentsMenu(from: sender)
+        }
+
+        private func showTableOfContentsMenu(from button: NSButton) {
+            let tocItems = extractTableOfContents(from: content)
+            guard !tocItems.isEmpty else { return }
+
+            let menu = NSMenu()
+            for item in tocItems {
+                let menuItem = NSMenuItem(
+                    title: indentText(for: item),
+                    action: #selector(menuItemSelected(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.representedObject = item.anchor
+                menu.addItem(menuItem)
+            }
+
+            // 在按钮下方显示菜单
+            let location = NSPoint(x: 0, y: button.bounds.minY)
+            menu.popUp(positioning: nil, at: location, in: button)
+        }
+
+        @objc private func menuItemSelected(_ sender: NSMenuItem) {
+            if let anchor = sender.representedObject as? String {
+                onSelect(anchor)
+            }
+        }
+
+        private func indentText(for item: TableOfContentsItem) -> String {
+            let indent = String(repeating: "    ", count: max(0, item.level - 1))
+            return indent + item.title
+        }
+
+        deinit {
+            cancellable?.cancel()
+        }
     }
 }
 

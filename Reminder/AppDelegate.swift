@@ -10,6 +10,8 @@ extension Notification.Name {
     static let toggleMarkdownPreview = Notification.Name("toggleMarkdownPreview")
     static let insertConversation = Notification.Name("insertConversation")
     static let scrollToHeading = Notification.Name("scrollToHeading")
+    static let showTableOfContentsMenu = Notification.Name("showTableOfContentsMenu")
+    static let toggleTableOfContents = Notification.Name("toggleTableOfContents")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
