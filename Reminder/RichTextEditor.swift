@@ -123,21 +123,17 @@ final class RichTextController: ObservableObject {
     /// 获取当前编辑器内容的快照（不结束输入法会话）
     func snapshotAttributedStringPreservingMarkedText() -> NSAttributedString? {
         guard let tv = textView else {
-            print("[RichTextController] snapshotPreserving: textView is nil")
+            // textView 为 nil 时静默返回，避免日志刷屏
             return nil
         }
         
         // 如果有 marked text，返回 nil 表示不应该保存
         if hasMarkedText {
-            print("[RichTextController] snapshotPreserving: has marked text, skipping")
             return nil
         }
         
-        let content = tv.attributedString()
-        print("[RichTextController] snapshotPreserving: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
-        
         // 获取当前 attributedString 的副本
-        return content.copy() as? NSAttributedString
+        return tv.attributedString().copy() as? NSAttributedString
     }
 
     /// 强制同步内容

@@ -728,7 +728,7 @@ enum NoteViewMode: String, Codable, CaseIterable {
     case text = "text"
     case preview = "preview"
     case split = "split"
-    
+
     var displayName: String {
         switch self {
         case .text: return "文本编辑"
@@ -736,7 +736,7 @@ enum NoteViewMode: String, Codable, CaseIterable {
         case .split: return "分屏预览"
         }
     }
-    
+
     var icon: String {
         switch self {
         case .text: return "doc.plaintext"
@@ -744,6 +744,45 @@ enum NoteViewMode: String, Codable, CaseIterable {
         case .split: return "rectangle.split.2x1"
         }
     }
+}
+
+// MARK: - 目录项
+
+struct TableOfContentsItem: Identifiable {
+    let id = UUID()
+    let level: Int
+    let title: String
+    let anchor: String
+}
+
+/// 从 Markdown 内容中提取目录
+func extractTableOfContents(from content: String) -> [TableOfContentsItem] {
+    var items: [TableOfContentsItem] = []
+    let lines = content.components(separatedBy: .newlines)
+
+    // 正则表达式匹配标题
+    let headingPattern = "^(#{1,6})\\s+(.+)$"
+    guard let regex = try? NSRegularExpression(pattern: headingPattern, options: [.anchorsMatchLines]) else {
+        return items
+    }
+
+    for line in lines {
+        let range = NSRange(line.startIndex..., in: line)
+        if let match = regex.firstMatch(in: line, options: [], range: range) {
+            let levelRange = match.range(at: 1)
+            let titleRange = match.range(at: 2)
+
+            if let levelSwiftRange = Range(levelRange, in: line),
+               let titleSwiftRange = Range(titleRange, in: line) {
+                let level = line[levelSwiftRange].count
+                let title = String(line[titleSwiftRange]).trimmingCharacters(in: .whitespaces)
+                let anchor = "heading-\(items.count)"
+                items.append(TableOfContentsItem(level: level, title: title, anchor: anchor))
+            }
+        }
+    }
+
+    return items
 }
 
 struct Note: Identifiable, Hashable {

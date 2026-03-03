@@ -9,6 +9,7 @@ extension Notification.Name {
     static let focusSearchField = Notification.Name("focusSearchField")
     static let toggleMarkdownPreview = Notification.Name("toggleMarkdownPreview")
     static let insertConversation = Notification.Name("insertConversation")
+    static let scrollToHeading = Notification.Name("scrollToHeading")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {

@@ -74,78 +74,96 @@ class WindowStateManager: ObservableObject {
     var isLeftSidebarExpanded: Bool {
         get { state.isLeftSidebarExpanded }
         set {
-            state.isLeftSidebarExpanded = newValue
-            saveState()
+            DispatchQueue.main.async {
+                self.state.isLeftSidebarExpanded = newValue
+                self.saveState()
+            }
         }
     }
-    
+
     var isRightSidebarExpanded: Bool {
         get { state.isRightSidebarExpanded }
         set {
-            state.isRightSidebarExpanded = newValue
-            saveState()
+            DispatchQueue.main.async {
+                self.state.isRightSidebarExpanded = newValue
+                self.saveState()
+            }
         }
     }
-    
+
     var leftSidebarWidth: CGFloat {
         get { state.leftSidebarWidth }
         set {
-            state.leftSidebarWidth = max(180, min(newValue, 400))
-            saveState()
+            DispatchQueue.main.async {
+                self.state.leftSidebarWidth = max(180, min(newValue, 400))
+                self.saveState()
+            }
         }
     }
-    
+
     var rightSidebarWidth: CGFloat {
         get { state.rightSidebarWidth }
         set {
-            state.rightSidebarWidth = max(250, min(newValue, 600))
-            saveState()
+            DispatchQueue.main.async {
+                self.state.rightSidebarWidth = max(250, min(newValue, 600))
+                self.saveState()
+            }
         }
     }
-    
+
     var windowFrame: CGRect {
         get { state.windowFrame }
         set {
-            state.windowFrame = newValue
-            saveState()
+            DispatchQueue.main.async {
+                self.state.windowFrame = newValue
+                self.saveState()
+            }
         }
     }
-    
+
     var isMaximized: Bool {
         get { state.isMaximized }
         set {
-            state.isMaximized = newValue
-            saveState()
+            DispatchQueue.main.async {
+                self.state.isMaximized = newValue
+                self.saveState()
+            }
         }
     }
     
     // MARK: - 更新方法
     
     func updateLeftSidebar(expanded: Bool? = nil, width: CGFloat? = nil) {
-        if let expanded = expanded {
-            state.isLeftSidebarExpanded = expanded
+        DispatchQueue.main.async {
+            if let expanded = expanded {
+                self.state.isLeftSidebarExpanded = expanded
+            }
+            if let width = width {
+                self.state.leftSidebarWidth = max(180, min(width, 400))
+            }
+            self.saveState()
         }
-        if let width = width {
-            state.leftSidebarWidth = max(180, min(width, 400))
-        }
-        saveState()
     }
-    
+
     func updateRightSidebar(expanded: Bool? = nil, width: CGFloat? = nil) {
-        if let expanded = expanded {
-            state.isRightSidebarExpanded = expanded
+        DispatchQueue.main.async {
+            if let expanded = expanded {
+                self.state.isRightSidebarExpanded = expanded
+            }
+            if let width = width {
+                self.state.rightSidebarWidth = max(250, min(width, 600))
+            }
+            self.saveState()
         }
-        if let width = width {
-            state.rightSidebarWidth = max(250, min(width, 600))
-        }
-        saveState()
     }
-    
+
     func updateWindowFrame(_ frame: CGRect, isMaximized: Bool? = nil) {
-        state.windowFrame = frame
-        if let isMaximized = isMaximized {
-            state.isMaximized = isMaximized
+        DispatchQueue.main.async {
+            self.state.windowFrame = frame
+            if let isMaximized = isMaximized {
+                self.state.isMaximized = isMaximized
+            }
+            self.saveState()
         }
-        saveState()
     }
 }

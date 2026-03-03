@@ -122,43 +122,46 @@ struct ContentView: View {
             NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
                 set: { newSelection in
-                    // 关键：在变更 selection 前，先保存当前笔记
-                    // 使用 selection（旧笔记ID）而不是 boundNoteID，因为 boundNoteID 可能已经被更新
-                    if let oldNoteID = selection, oldNoteID != newSelection {
-                        // 取消该笔记的待处理自动保存
-                        NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
-                        
-                        // 如果编辑器绑定着旧笔记，从编辑器获取内容
-                        // 否则使用内存中的内容
-                        let contentToSave: NSAttributedString
-                        if richTextController.isBoundTo(noteID: oldNoteID),
-                           let editorContent = richTextController.snapshotAttributedString() {
-                            // 成功从编辑器获取内容
-                            contentToSave = editorContent
-                            // 同步更新内存
-                            if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
-                                store.notes[oldIndex].content = contentToSave
-                            }
-                        } else {
-                            // 编辑器不可用或不绑定旧笔记，使用内存中的内容
-                            if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
-                                contentToSave = store.notes[oldIndex].content
+                    // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
+                    DispatchQueue.main.async {
+                        // 关键：在变更 selection 前，先保存当前笔记
+                        // 使用 selection（旧笔记ID）而不是 boundNoteID，因为 boundNoteID 可能已经被更新
+                        if let oldNoteID = selection, oldNoteID != newSelection {
+                            // 取消该笔记的待处理自动保存
+                            NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
+
+                            // 如果编辑器绑定着旧笔记，从编辑器获取内容
+                            // 否则使用内存中的内容
+                            let contentToSave: NSAttributedString
+                            if richTextController.isBoundTo(noteID: oldNoteID),
+                               let editorContent = richTextController.snapshotAttributedString() {
+                                // 成功从编辑器获取内容
+                                contentToSave = editorContent
+                                // 同步更新内存
+                                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                                    store.notes[oldIndex].content = contentToSave
+                                }
                             } else {
-                                print("[SAVE WARNING] Cannot find old note in memory, skipping save")
-                                selection = newSelection
-                                AppSettings.shared.lastSelectedNoteID = newSelection
-                                return
+                                // 编辑器不可用或不绑定旧笔记，使用内存中的内容
+                                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                                    contentToSave = store.notes[oldIndex].content
+                                } else {
+                                    print("[SAVE WARNING] Cannot find old note in memory, skipping save")
+                                    selection = newSelection
+                                    AppSettings.shared.lastSelectedNoteID = newSelection
+                                    return
+                                }
                             }
+
+                            // 执行保存
+                            saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: "switch")
                         }
-                        
-                        // 执行保存
-                        saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: "switch")
+
+                        // 更新 selection
+                        selection = newSelection
+                        // 保存最后选中的笔记
+                        AppSettings.shared.lastSelectedNoteID = newSelection
                     }
-                    
-                    // 更新 selection
-                    selection = newSelection
-                    // 保存最后选中的笔记
-                    AppSettings.shared.lastSelectedNoteID = newSelection
                 }
             ))
         } detail: {
@@ -775,7 +778,7 @@ private struct NoteEditorView: View {
                             }
                         case .preview:
                             // Markdown 预览模式
-                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
+                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme, noteID: note.id)
                                 .frame(maxHeight: .infinity)
                         case .split:
                             // 分屏预览模式
@@ -798,7 +801,7 @@ private struct NoteEditorView: View {
                                     .foregroundStyle(Color.gray.opacity(0.3))
 
                                 // 右侧预览
-                                NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
+                                NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme, noteID: note.id)
                                     .frame(maxHeight: .infinity)
                             }
                         }
@@ -878,7 +881,6 @@ private struct NoteEditorView: View {
         // 使用不丢弃 marked text 的方法获取内容
         // 如果有 marked text（输入法正在编辑），则跳过本次自动保存
         guard let editorContent = controller.snapshotAttributedStringPreservingMarkedText() else {
-            print("[AutoSave] Skipping save due to marked text (IME editing)")
             // 重新调度保存，等待输入法提交后再保存
             pendingSaveWorkItem?.cancel()
             let workItem = DispatchWorkItem { [self] in
@@ -1105,7 +1107,22 @@ private struct EditorTopBarView: View {
             Spacer()
             
             Divider().frame(height: 18)
-            
+
+            // 目录按钮（仅在预览或分屏模式下显示）
+            if note.viewMode != .text {
+                TableOfContentsMenu(content: note.content.string, onSelect: { anchor in
+                    // 发送通知让 MarkdownWebView 滚动到指定位置
+                    NotificationCenter.default.post(
+                        name: .scrollToHeading,
+                        object: note.id,
+                        userInfo: ["anchor": anchor]
+                    )
+                })
+                .buttonStyle(.plain)
+
+                Divider().frame(height: 18)
+            }
+
             // Markdown 预览模式选择菜单
             Menu {
                 ForEach(NoteViewMode.allCases, id: \.self) { mode in
@@ -1733,17 +1750,16 @@ private struct AIPanelView: View {
 private struct NoteMarkdownPreviewView: View {
     let content: String
     let colorScheme: ColorScheme
+    let noteID: UUID
     @State private var webViewHeight: CGFloat = 500
+    @State private var scrollOffset: CGFloat = 0
 
     var body: some View {
-        ScrollView {
-            MarkdownWebView(markdown: content, colorScheme: colorScheme, height: $webViewHeight)
-                .frame(height: webViewHeight)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-        }
-        .frame(maxHeight: .infinity)
-        .background(AppColors.editorBackground(colorScheme))
+        MarkdownWebView(markdown: content, colorScheme: colorScheme, height: $webViewHeight, noteID: noteID)
+            .frame(maxHeight: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(AppColors.editorBackground(colorScheme))
     }
 }
 
@@ -2591,6 +2607,45 @@ private struct AIMessage: Identifiable {
     }
 }
 
+// MARK: - 目录菜单按钮
+
+private struct TableOfContentsMenu: View {
+    let content: String
+    let onSelect: (String) -> Void
+    @StateObject private var themeManager = ThemeManager.shared
+
+    var body: some View {
+        let tocItems = extractTableOfContents(from: content)
+
+        Menu {
+            if tocItems.isEmpty {
+                Text("没有标题")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(tocItems) { item in
+                    Button {
+                        onSelect(item.anchor)
+                    } label: {
+                        Text(indentText(for: item))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(themeManager.accentColor)
+        }
+        .help("目录")
+        .disabled(tocItems.isEmpty)
+    }
+
+    private func indentText(for item: TableOfContentsItem) -> String {
+        let indent = String(repeating: "    ", count: max(0, item.level - 1))
+        return indent + item.title
+    }
+}
+
 // MARK: - Markdown 渲染视图
 
 import WebKit
@@ -2609,32 +2664,44 @@ struct MarkdownWebView: NSViewRepresentable {
     let markdown: String
     let colorScheme: ColorScheme
     @Binding var height: CGFloat
-    
+    let noteID: UUID
+
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        let webView = NonScrollingWKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
+
+        // 监听滚动到标题的通知
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.scrollToHeading(_:)),
+            name: .scrollToHeading,
+            object: nil
+        )
+
         return webView
     }
-    
+
     func updateNSView(_ webView: WKWebView, context: Context) {
         let html = generateHTML(from: markdown, colorScheme: colorScheme)
         webView.loadHTMLString(html, baseURL: nil)
     }
-    
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
-    
+
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: MarkdownWebView
-        
+        var webView: WKWebView?
+
         init(_ parent: MarkdownWebView) {
             self.parent = parent
         }
-        
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            self.webView = webView
             // 获取内容高度
             webView.evaluateJavaScript("document.body.scrollHeight") { [weak self] result, error in
                 if let height = result as? CGFloat {
@@ -2644,8 +2711,51 @@ struct MarkdownWebView: NSViewRepresentable {
                 }
             }
         }
+
+        @objc func scrollToHeading(_ notification: Notification) {
+            // 检查通知是否针对当前 noteID
+            guard let notificationNoteID = notification.object as? UUID,
+                  notificationNoteID == parent.noteID else {
+                return
+            }
+
+            guard let userInfo = notification.userInfo,
+                  let anchor = userInfo["anchor"] as? String else { return }
+
+            print("[ScrollToHeading] Received for noteID: \(parent.noteID), anchor: \(anchor)")
+
+            // 使用更可靠的滚动方法
+            let script = """
+                (function() {
+                    var element = document.getElementById('\(anchor)');
+                    if (element) {
+                        var elementTop = element.offsetTop;
+                        window.scrollTo({
+                            top: elementTop - 20,
+                            behavior: 'smooth'
+                        });
+                        return 'scrolled to \(anchor) at ' + elementTop;
+                    }
+                    return 'element not found: \(anchor)';
+                })();
+            """
+
+            DispatchQueue.main.async { [weak self] in
+                self?.webView?.evaluateJavaScript(script) { result, error in
+                    if let error = error {
+                        print("[ScrollToHeading] Error: \(error)")
+                    } else if let result = result {
+                        print("[ScrollToHeading] Result: \(result)")
+                    }
+                }
+            }
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
     }
-    
+
     /// 使用 NSRegularExpression 进行替换，支持 anchorsMatchLines 选项
     private func replaceWithRegex(_ string: String, pattern: String, replacement: String) -> String {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
@@ -2654,42 +2764,41 @@ struct MarkdownWebView: NSViewRepresentable {
         let range = NSRange(string.startIndex..., in: string)
         return regex.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: replacement)
     }
-    
+
     private func generateHTML(from markdown: String, colorScheme: ColorScheme) -> String {
         let textColor = colorScheme == .dark ? "#FFFFFF" : "#000000"
-        
+
+        // 提取目录项用于生成锚点
+        let tocItems = extractTableOfContents(from: markdown)
+        var anchorIndex = 0
+
         // 简单的 Markdown 到 HTML 转换
         var html = markdown
             // 转义 HTML 特殊字符
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
-        
+
         // 代码块
         html = html.replacingOccurrences(of: #"```([\s\S]*?)```"#, with: "<pre><code>$1</code></pre>", options: .regularExpression)
-        
+
         // 行内代码
         html = html.replacingOccurrences(of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
-        
+
         // 表格处理
         html = processTables(html)
-        
-        // 标题 - 使用 NSRegularExpression 处理 anchorsMatchLines
-        html = replaceWithRegex(html, pattern: #"^###### (.+)$"#, replacement: "<h6>$1</h6>")
-        html = replaceWithRegex(html, pattern: #"^##### (.+)$"#, replacement: "<h5>$1</h5>")
-        html = replaceWithRegex(html, pattern: #"^#### (.+)$"#, replacement: "<h4>$1</h4>")
-        html = replaceWithRegex(html, pattern: #"^### (.+)$"#, replacement: "<h3>$1</h3>")
-        html = replaceWithRegex(html, pattern: #"^## (.+)$"#, replacement: "<h2>$1</h2>")
-        html = replaceWithRegex(html, pattern: #"^# (.+)$"#, replacement: "<h1>$1</h1>")
-        
+
+        // 标题 - 使用 NSRegularExpression 处理 anchorsMatchLines，并添加锚点
+        html = replaceHeadingsWithAnchors(html, tocItems: tocItems, anchorIndex: &anchorIndex)
+
         // 粗体和斜体
         html = html.replacingOccurrences(of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
         html = html.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
         html = html.replacingOccurrences(of: #"\*(.+?)\*"#, with: "<em>$1</em>", options: .regularExpression)
-        
+
         // 换行
         html = html.replacingOccurrences(of: "\n", with: "<br>")
-        
+
         return """
         <!DOCTYPE html>
         <html>
@@ -2738,6 +2847,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 }
                 h1, h2, h3, h4, h5, h6 {
                     margin: 12px 0 8px 0;
+                    scroll-margin-top: 20px;
                 }
                 h1 { font-size: 18px; }
                 h2 { font-size: 16px; }
@@ -2750,6 +2860,40 @@ struct MarkdownWebView: NSViewRepresentable {
         </body>
         </html>
         """
+    }
+
+    private func replaceHeadingsWithAnchors(_ html: String, tocItems: [TableOfContentsItem], anchorIndex: inout Int) -> String {
+        let headingPattern = #"^(#{1,6})\s+(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: headingPattern, options: [.anchorsMatchLines]) else {
+            return html
+        }
+
+        let lines = html.components(separatedBy: .newlines)
+        var modifiedLines: [String] = []
+
+        for line in lines {
+            let range = NSRange(line.startIndex..., in: line)
+            if let match = regex.firstMatch(in: line, options: [], range: range),
+               anchorIndex < tocItems.count {
+                let levelRange = match.range(at: 1)
+                let titleRange = match.range(at: 2)
+
+                if let levelSwiftRange = Range(levelRange, in: line),
+                   let titleSwiftRange = Range(titleRange, in: line) {
+                    let level = line[levelSwiftRange].count
+                    let title = String(line[titleSwiftRange])
+                    let anchor = tocItems[anchorIndex].anchor
+                    anchorIndex += 1
+
+                    let headingTag = "h\(level)"
+                    modifiedLines.append("<\(headingTag) id=\"\(anchor)\">\(title)</\(headingTag)>")
+                    continue
+                }
+            }
+            modifiedLines.append(line)
+        }
+
+        return modifiedLines.joined(separator: "\n")
     }
     
     private func processTables(_ html: String) -> String {
@@ -2833,7 +2977,7 @@ private struct MessageBubble: View {
                             }
                         }
                 } else {
-                    MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight)
+                    MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight, noteID: UUID())
                         .frame(height: webViewHeight)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -2845,7 +2989,7 @@ private struct MessageBubble: View {
                             } label: {
                                 Label("复制", systemImage: "doc.on.doc")
                             }
-                            
+
                             Button {
                                 copyToClipboard(message.content)
                             } label: {
