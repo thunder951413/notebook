@@ -47,6 +47,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task { @MainActor in
             MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
         }
+
+        // 启动鼠标中键监控
+        RadialMenuEventMonitor.shared.startMonitoring()
     }
     
     func applicationWillTerminate(_ notification: Notification) {

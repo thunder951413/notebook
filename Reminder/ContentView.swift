@@ -938,10 +938,6 @@ private struct EditorTopBarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button { controller.toggleBold() } label: { Text("B").fontWeight(.bold) }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 20)
             // 格式菜单（合并所有文本样式）
             Menu {
                 Button {
@@ -988,23 +984,23 @@ private struct EditorTopBarView: View {
                 Button {
                     controller.toggleBullets()
                 } label: {
-                    Label(l10n(L10nKeys.Editor.bulletList), systemImage: "list.bullet")
+                    Text("•  " + l10n(L10nKeys.Editor.bulletList))
                 }
                 Button {
                     controller.toggleDashList()
                 } label: {
-                    Label(l10n(L10nKeys.Editor.dashList), systemImage: "list.dash")
+                    Text("–  " + l10n(L10nKeys.Editor.dashList))
                 }
                 Button {
                     controller.toggleNumberedList()
                 } label: {
-                    Label(l10n(L10nKeys.Editor.numberedList), systemImage: "list.number")
+                    Text("1. " + l10n(L10nKeys.Editor.numberedList))
                 }
                 Divider()
                 Button {
                     controller.toggleCheckbox()
                 } label: {
-                    Label(l10n(L10nKeys.Editor.checkbox), systemImage: "checkmark.circle")
+                    Text("☑  " + l10n(L10nKeys.Editor.checkbox))
                 }
             } label: {
                 Image(systemName: "list.bullet")

@@ -4,20 +4,23 @@ import SwiftUI
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "general"
     case shortcuts = "shortcuts"
-    
+    case radialMenu = "radialMenu"
+
     var id: String { rawValue }
-    
+
     var displayName: String {
         switch self {
         case .general: return l10n(L10nKeys.Settings.tabGeneral)
         case .shortcuts: return l10n(L10nKeys.Settings.tabShortcuts)
+        case .radialMenu: return "环形菜单"
         }
     }
-    
+
     var icon: String {
         switch self {
         case .general: return "gearshape"
         case .shortcuts: return "keyboard"
+        case .radialMenu: return "circle.circle"
         }
     }
 }
@@ -25,7 +28,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 /// 设置容器视图 - 包含 Tab 切换
 struct SettingsContainerView: View {
     @State private var selectedTab: SettingsTab = .general
-    
+
     var body: some View {
         TabView(selection: $selectedTab) {
             SettingsGeneralView()
@@ -33,12 +36,18 @@ struct SettingsContainerView: View {
                     Label(SettingsTab.general.displayName, systemImage: SettingsTab.general.icon)
                 }
                 .tag(SettingsTab.general)
-            
+
             KeyboardShortcutSettingsView()
                 .tabItem {
                     Label(SettingsTab.shortcuts.displayName, systemImage: SettingsTab.shortcuts.icon)
                 }
                 .tag(SettingsTab.shortcuts)
+
+            RadialMenuSettingsView()
+                .tabItem {
+                    Label(SettingsTab.radialMenu.displayName, systemImage: SettingsTab.radialMenu.icon)
+                }
+                .tag(SettingsTab.radialMenu)
         }
         .frame(minWidth: 600, minHeight: 500)
         .padding(.top, 8)

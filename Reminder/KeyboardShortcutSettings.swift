@@ -49,6 +49,29 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         }
     }
 
+    var icon: String {
+        switch self {
+        case .newNote: return "doc.badge.plus"
+        case .saveNote: return "arrow.down.doc"
+        case .deleteNote: return "trash"
+        case .toggleBold: return "bold"
+        case .toggleItalic: return "italic"
+        case .toggleUnderline: return "underline"
+        case .toggleStrikethrough: return "strikethrough"
+        case .toggleCheckbox: return "checkmark.square"
+        case .increaseIndent: return "increase.indent"
+        case .decreaseIndent: return "decrease.indent"
+        case .toggleBulletList: return "list.bullet"
+        case .toggleNumberedList: return "list.number"
+        case .toggleAIAssistant: return "brain"
+        case .insertConversation: return "text.bubble"
+        case .toggleMarkdownPreview: return "eye"
+        case .toggleTableOfContents: return "list.bullet.rectangle"
+        case .focusSearch: return "magnifyingglass"
+        case .focusEditor: return "doc.text"
+        }
+    }
+
     var defaultShortcut: KeyboardShortcut? {
         switch self {
         case .newNote: return KeyboardShortcut(key: .n, modifiers: [.command])
