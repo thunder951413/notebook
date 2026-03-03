@@ -23,6 +23,7 @@ final class AppSettings: ObservableObject {
         static let foldersExpanded = "sidebar_folders_expanded"
         static let tagsExpanded = "sidebar_tags_expanded"
         static let lastSelectedNoteID = "last_selected_note_id"
+        static let lastSelectedFolder = "last_selected_folder"
         static let startupBehavior = "startup_behavior" // "restore", "none", "all_notes"
         static let accentColor = "accent_color" // 主题色
         static let iCloudSyncEnabled = "icloud_sync_enabled"
@@ -60,6 +61,21 @@ final class AppSettings: ObservableObject {
                 defaults.set(id.uuidString, forKey: Keys.lastSelectedNoteID)
             } else {
                 defaults.removeObject(forKey: Keys.lastSelectedNoteID)
+            }
+        }
+    }
+
+    // MARK: - 最后选中的文件夹
+
+    var lastSelectedFolder: String? {
+        get {
+            return defaults.string(forKey: Keys.lastSelectedFolder)
+        }
+        set {
+            if let folder = newValue {
+                defaults.set(folder, forKey: Keys.lastSelectedFolder)
+            } else {
+                defaults.removeObject(forKey: Keys.lastSelectedFolder)
             }
         }
     }

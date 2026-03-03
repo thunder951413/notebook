@@ -23,20 +23,29 @@ struct ContentView: View {
     @State private var searchText: String = ""
     @State private var selectedFolder: String = l10n(L10nKeys.Folder.allNotes)
     @State private var selectedTagID: UUID?
+    @State private var searchInAllFolders: Bool = false
     @StateObject private var richTextController = RichTextController()
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         var notes = store.notes
+        print("[Search] Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
 
         // 1. 标签筛选
         if let tagID = selectedTagID {
             notes = notes.filter { $0.tagIDs.contains(tagID) }
+            print("[Search] After tag filter: \(notes.count) notes")
         }
 
         // 2. 文件夹筛选
-        if selectedFolder != l10n(L10nKeys.Folder.allNotes) {
+        // 如果有搜索词且选择搜索所有文件夹，则跳过文件夹筛选
+        let shouldApplyFolderFilter = selectedFolder != l10n(L10nKeys.Folder.allNotes) &&
+                                       !(searchInAllFolders && !q.isEmpty)
+        if shouldApplyFolderFilter {
             notes = notes.filter { $0.folder == selectedFolder }
+            print("[Search] After folder filter: \(notes.count) notes")
+        } else if searchInAllFolders && !q.isEmpty {
+            print("[Search] Skipping folder filter (searching all folders)")
         }
 
         // 3. 搜索词筛选
@@ -45,6 +54,7 @@ struct ContentView: View {
                 $0.title.localizedCaseInsensitiveContains(q) ||
                 $0.content.string.localizedCaseInsensitiveContains(q)
             }
+            print("[Search] After search filter '\(q)': \(notes.count) notes")
         }
 
         return notes
@@ -182,7 +192,11 @@ struct ContentView: View {
             }
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
-        .searchable(text: $searchText, placement: .toolbar, prompt: l10n(L10nKeys.Note.searchPlaceholder))
+        .searchable(text: $searchText, placement: .toolbar, prompt: searchInAllFolders ? "搜索所有笔记..." : l10n(L10nKeys.Note.searchPlaceholder))
+        .searchScopes($searchInAllFolders) {
+            Text("当前目录").tag(false)
+            Text("所有笔记").tag(true)
+        }
         .onAppear {
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 selection = pending
@@ -224,10 +238,18 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             saveCurrentEditorContent(reason: "appBlur")
+            // 保存当前选择的文件夹和笔记
+            AppSettings.shared.lastSelectedFolder = selectedFolder
+            AppSettings.shared.lastSelectedNoteID = selection
+            print("[AppBlur] Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")")
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
             saveCurrentEditorContent(reason: "terminate")
             NoteSaveManager.shared.flushAllPending()
+            // 保存当前选择的文件夹和笔记
+            AppSettings.shared.lastSelectedFolder = selectedFolder
+            AppSettings.shared.lastSelectedNoteID = selection
+            print("[Terminate] Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")")
         }
         .onReceive(NotificationCenter.default.publisher(for: .insertTextAtCursor)) { notification in
             if let text = notification.userInfo?["text"] as? String {
@@ -314,10 +336,15 @@ struct ContentView: View {
         selection = filteredNotes.first?.id
     }
 
-    /// 启动时恢复选中的笔记
+    /// 启动时恢复选中的笔记和文件夹
     private func restoreSelectionOnLaunch() async {
         // 等待数据加载完成
         while store.notes.isEmpty {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        // 等待文件夹数据加载
+        while store.folders.isEmpty {
             try? await Task.sleep(for: .milliseconds(100))
         }
 
@@ -325,16 +352,53 @@ struct ContentView: View {
 
         switch behavior {
         case .restoreLastNote:
-            if let lastID = AppSettings.shared.lastSelectedNoteID,
-               store.notes.contains(where: { $0.id == lastID }) {
-                selection = lastID
-                print("[Launch] Restored last selected note: \(lastID)")
+            // 恢复文件夹选择
+            if let lastFolder = AppSettings.shared.lastSelectedFolder {
+                // 检查文件夹是否存在（包括"全部笔记"）
+                let allNotesTitle = l10n(L10nKeys.Folder.allNotes)
+                let folderExists = lastFolder == allNotesTitle || store.folders.contains(where: { $0.name == lastFolder })
+
+                if folderExists {
+                    selectedFolder = lastFolder
+                    print("[Launch] Restored last selected folder: \(lastFolder)")
+                } else {
+                    // Fallback 到全部笔记
+                    selectedFolder = allNotesTitle
+                    print("[Launch] Last folder '\(lastFolder)' not found, fallback to all notes")
+                }
             } else {
-                selection = nil
-                print("[Launch] Last note not found, selecting none")
+                selectedFolder = l10n(L10nKeys.Folder.allNotes)
+                print("[Launch] No last folder saved, defaulting to all notes")
+            }
+
+            // 恢复笔记选择
+            if let lastID = AppSettings.shared.lastSelectedNoteID {
+                // 检查笔记是否存在，并且在当前文件夹中
+                if let note = store.notes.first(where: { $0.id == lastID }) {
+                    let allNotesTitle = l10n(L10nKeys.Folder.allNotes)
+                    let noteInCurrentFolder = selectedFolder == allNotesTitle || note.folder == selectedFolder
+
+                    if noteInCurrentFolder {
+                        selection = lastID
+                        print("[Launch] Restored last selected note: \(lastID)")
+                    } else {
+                        // 笔记不在当前文件夹中，选择当前文件夹的第一个笔记
+                        selection = filteredNotes.first?.id
+                        print("[Launch] Last note not in current folder, selecting first note in folder")
+                    }
+                } else {
+                    // 笔记不存在，选择当前文件夹的第一个笔记
+                    selection = filteredNotes.first?.id
+                    print("[Launch] Last note not found, selecting first note in folder")
+                }
+            } else {
+                selection = filteredNotes.first?.id
+                print("[Launch] No last note saved, selecting first note")
             }
 
         case .selectNone:
+            selectedFolder = l10n(L10nKeys.Folder.allNotes)
+            selectedTagID = nil
             selection = nil
             print("[Launch] Selecting none as per settings")
 
@@ -2694,12 +2758,15 @@ private struct MessageBubble: View {
     
     var body: some View {
         HStack {
+            if message.isUser {
+                Spacer(minLength: 40)
+            }
+            
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
                 if message.isUser {
                     Text(message.content)
                         .font(.system(size: 13))
                         .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(themeManager.accentColor)
@@ -2714,7 +2781,6 @@ private struct MessageBubble: View {
                         }
                 } else {
                     MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: webViewHeight)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -2753,14 +2819,16 @@ private struct MessageBubble: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.15)) {
                     isHovered = hovering
                 }
             }
+            
+            if !message.isUser {
+                Spacer(minLength: 40)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
     }
     
     private func copyToClipboard(_ text: String) {
