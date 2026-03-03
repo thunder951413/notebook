@@ -463,6 +463,7 @@ extension Note {
         record["reminderAt"] = reminderAt
         record["recurrenceRule"] = recurrenceRule
         record["version"] = version
+        record["viewMode"] = viewMode.rawValue
         
         // 将 NSAttributedString 转换为 RTFD 数据
         do {
@@ -504,6 +505,14 @@ extension Note {
         self.reminderAt = record["reminderAt"] as? Date
         self.recurrenceRule = record["recurrenceRule"] as? String ?? "none"
         self.version = record["version"] as? Int64 ?? 0
+        
+        // 解析 viewMode
+        if let viewModeString = record["viewMode"] as? String,
+           let mode = NoteViewMode(rawValue: viewModeString) {
+            self.viewMode = mode
+        } else {
+            self.viewMode = .text
+        }
         
         // 从 RTFD 数据恢复 content
         if let rtfdData = record["rtfdData"] as? Data {

@@ -733,30 +733,6 @@ private struct NoteEditorView: View {
     
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
-    
-    // Markdown 预览模式
-    enum MarkdownViewMode: String, CaseIterable {
-        case text = "text"
-        case preview = "preview"
-        case split = "split"
-
-        var displayName: String {
-            switch self {
-            case .text: return "文本编辑"
-            case .preview: return "Markdown 预览"
-            case .split: return "分屏预览"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .text: return "doc.plaintext"
-            case .preview: return "doc.text.image"
-            case .split: return "rectangle.split.2x1"
-            }
-        }
-    }
-    @State private var markdownViewMode: MarkdownViewMode = .text
 
     var body: some View {
         GeometryReader { geometry in
@@ -767,8 +743,7 @@ private struct NoteEditorView: View {
                         controller: controller,
                         recorder: recorder,
                         note: $note,
-                        showingReminderPopover: $showingReminderPopover,
-                        markdownViewMode: $markdownViewMode
+                        showingReminderPopover: $showingReminderPopover
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -785,7 +760,7 @@ private struct NoteEditorView: View {
                         Divider()
                             .padding(.horizontal, 16)
 
-                        switch markdownViewMode {
+                        switch note.viewMode {
                         case .text:
                             // 富文本编辑模式
                             RichTextEditor(
@@ -851,13 +826,20 @@ private struct NoteEditorView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleMarkdownPreview)) { _ in
             // 快捷键循环切换三种模式
-            switch markdownViewMode {
+            let newMode: NoteViewMode
+            switch note.viewMode {
             case .text:
-                markdownViewMode = .preview
+                newMode = .preview
             case .preview:
-                markdownViewMode = .split
+                newMode = .split
             case .split:
-                markdownViewMode = .text
+                newMode = .text
+            }
+            // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
+            DispatchQueue.main.async {
+                note.viewMode = newMode
+                // 保存视图模式到数据库
+                store.saveNoteViewMode(id: note.id, viewMode: newMode)
             }
         }
         .toolbar {
@@ -937,7 +919,6 @@ private struct EditorTopBarView: View {
     @ObservedObject var recorder: AudioRecorderManager
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
-    @Binding var markdownViewMode: NoteEditorView.MarkdownViewMode
     @StateObject private var windowState = WindowStateManager.shared
 
     @State private var tempReminderAt: Date = Date()
@@ -1127,16 +1108,21 @@ private struct EditorTopBarView: View {
             
             // Markdown 预览模式选择菜单
             Menu {
-                ForEach(NoteEditorView.MarkdownViewMode.allCases, id: \.self) { mode in
+                ForEach(NoteViewMode.allCases, id: \.self) { mode in
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            markdownViewMode = mode
+                        // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                note.viewMode = mode
+                                // 保存视图模式到数据库
+                                store.saveNoteViewMode(id: note.id, viewMode: mode)
+                            }
                         }
                     } label: {
                         HStack {
                             Image(systemName: mode.icon)
                             Text(mode.displayName)
-                            if markdownViewMode == mode {
+                            if note.viewMode == mode {
                                 Spacer()
                                 Image(systemName: "checkmark")
                             }
@@ -1144,7 +1130,7 @@ private struct EditorTopBarView: View {
                     }
                 }
             } label: {
-                Image(systemName: markdownViewMode.icon)
+                Image(systemName: note.viewMode.icon)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ThemeManager.shared.accentColor)
             }

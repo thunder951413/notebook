@@ -165,6 +165,9 @@ class NoteStore: ObservableObject {
                 // 修复复选框附件
                 let fixedContent = Self.fixCheckboxAttachments(in: content)
                 
+                // 解析 viewMode，默认为 text
+                let viewMode = NoteViewMode(rawValue: entity.viewMode ?? "text") ?? .text
+                
                 return Note(
                     id: entity.id,
                     title: entity.title,
@@ -174,7 +177,8 @@ class NoteStore: ObservableObject {
                     reminderAt: entity.reminderAt,
                     recurrenceRule: entity.recurrenceRule ?? "none",
                     version: entity.version,
-                    tagIDs: tagIDArray
+                    tagIDs: tagIDArray,
+                    viewMode: viewMode
                 )
             }
             
@@ -625,6 +629,32 @@ class NoteStore: ObservableObject {
         )
     }
     
+    /// 保存笔记的视图模式
+    func saveNoteViewMode(id: UUID, viewMode: NoteViewMode) {
+        guard let context = modelContext else {
+            print("[SaveViewMode] modelContext is nil, skip save for id=\(id)")
+            return
+        }
+        
+        Task {
+            await MainActor.run {
+                let idToMatch = id
+                let descriptor = FetchDescriptor<NoteEntity>(
+                    predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
+                )
+                
+                guard let entities = try? context.fetch(descriptor), let entity = entities.first else {
+                    print("[SaveViewMode] entity not found for id=\(id)")
+                    return
+                }
+                
+                entity.viewMode = viewMode.rawValue
+                try? context.save()
+                print("[SaveViewMode] saved viewMode '\(viewMode.rawValue)' for note id=\(id)")
+            }
+        }
+    }
+    
     func deleteNote(id: UUID) {
         guard let context = modelContext else { return }
         let idToMatch = id
@@ -694,6 +724,28 @@ extension NSAttributedString {
     }
 }
 
+enum NoteViewMode: String, Codable, CaseIterable {
+    case text = "text"
+    case preview = "preview"
+    case split = "split"
+    
+    var displayName: String {
+        switch self {
+        case .text: return "文本编辑"
+        case .preview: return "Markdown 预览"
+        case .split: return "分屏预览"
+        }
+    }
+    
+    var icon: String {
+        switch self {
+        case .text: return "doc.plaintext"
+        case .preview: return "doc.text.image"
+        case .split: return "rectangle.split.2x1"
+        }
+    }
+}
+
 struct Note: Identifiable, Hashable {
     let id: UUID
     var title: String
@@ -705,11 +757,12 @@ struct Note: Identifiable, Hashable {
     var recurrenceRule: String
     var version: Int64
     var tagIDs: [UUID]
-    
+    var viewMode: NoteViewMode
+
     var hasReminder: Bool {
         return reminderAt != nil
     }
-    
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -720,7 +773,8 @@ struct Note: Identifiable, Hashable {
         reminderAt: Date? = nil,
         recurrenceRule: String = "none",
         version: Int64 = 0,
-        tagIDs: [UUID] = []
+        tagIDs: [UUID] = [],
+        viewMode: NoteViewMode = .text
     ) {
         self.id = id
         self.title = title
@@ -732,6 +786,7 @@ struct Note: Identifiable, Hashable {
         self.recurrenceRule = recurrenceRule
         self.version = version
         self.tagIDs = tagIDs
+        self.viewMode = viewMode
     }
     
     func hash(into hasher: inout Hasher) {

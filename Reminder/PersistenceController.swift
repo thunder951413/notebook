@@ -91,6 +91,9 @@ final class NoteEntity {
     
     /// 标签ID列表，以逗号分隔存储
     var tagIDs: String?
+    
+    /// 视图模式：text, preview, split
+    var viewMode: String?
 
     init(
         id: UUID = UUID(),
@@ -102,7 +105,8 @@ final class NoteEntity {
         reminderAt: Date? = nil,
         recurrenceRule: String? = "none",
         version: Int64 = 0,
-        tagIDs: String? = nil
+        tagIDs: String? = nil,
+        viewMode: String? = "text"
     ) {
         self.id = id
         self.title = title
@@ -114,5 +118,6 @@ final class NoteEntity {
         self.recurrenceRule = recurrenceRule
         self.version = version
         self.tagIDs = tagIDs
+        self.viewMode = viewMode
     }
 }
