@@ -735,7 +735,28 @@ private struct NoteEditorView: View {
     @StateObject private var windowState = WindowStateManager.shared
     
     // Markdown 预览模式
-    @State private var isMarkdownPreview: Bool = false
+    enum MarkdownViewMode: String, CaseIterable {
+        case text = "text"
+        case preview = "preview"
+        case split = "split"
+
+        var displayName: String {
+            switch self {
+            case .text: return "文本编辑"
+            case .preview: return "Markdown 预览"
+            case .split: return "分屏预览"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .text: return "doc.plaintext"
+            case .preview: return "doc.text.image"
+            case .split: return "rectangle.split.2x1"
+            }
+        }
+    }
+    @State private var markdownViewMode: MarkdownViewMode = .text
 
     var body: some View {
         GeometryReader { geometry in
@@ -747,7 +768,7 @@ private struct NoteEditorView: View {
                         recorder: recorder,
                         note: $note,
                         showingReminderPopover: $showingReminderPopover,
-                        isMarkdownPreview: $isMarkdownPreview
+                        markdownViewMode: $markdownViewMode
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -764,21 +785,46 @@ private struct NoteEditorView: View {
                         Divider()
                             .padding(.horizontal, 16)
 
-                        if isMarkdownPreview {
-                            // Markdown 预览模式
-                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
-                                .frame(maxHeight: .infinity)
-                        } else {
+                        switch markdownViewMode {
+                        case .text:
                             // 富文本编辑模式
                             RichTextEditor(
                                 attributedText: $note.content,
                                 controller: controller,
                                 noteID: note.id
                             )
-                            .id(note.id)  // 强制在 note.id 变化时重新创建视图
+                            .id(note.id)
                             .frame(maxHeight: .infinity)
                             .onChange(of: note.content) { _, newContent in
                                 debouncedScheduleAutoSave(title: note.title, content: newContent)
+                            }
+                        case .preview:
+                            // Markdown 预览模式
+                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
+                                .frame(maxHeight: .infinity)
+                        case .split:
+                            // 分屏预览模式
+                            HStack(spacing: 0) {
+                                // 左侧编辑器
+                                RichTextEditor(
+                                    attributedText: $note.content,
+                                    controller: controller,
+                                    noteID: note.id
+                                )
+                                .id(note.id)
+                                .frame(maxHeight: .infinity)
+                                .onChange(of: note.content) { _, newContent in
+                                    debouncedScheduleAutoSave(title: note.title, content: newContent)
+                                }
+
+                                // 中间分割线
+                                Rectangle()
+                                    .frame(width: 1)
+                                    .foregroundStyle(Color.gray.opacity(0.3))
+
+                                // 右侧预览
+                                NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme)
+                                    .frame(maxHeight: .infinity)
                             }
                         }
                     }
@@ -804,7 +850,15 @@ private struct NoteEditorView: View {
             pendingSaveWorkItem?.cancel()
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleMarkdownPreview)) { _ in
-            isMarkdownPreview.toggle()
+            // 快捷键循环切换三种模式
+            switch markdownViewMode {
+            case .text:
+                markdownViewMode = .preview
+            case .preview:
+                markdownViewMode = .split
+            case .split:
+                markdownViewMode = .text
+            }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -883,7 +937,7 @@ private struct EditorTopBarView: View {
     @ObservedObject var recorder: AudioRecorderManager
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
-    @Binding var isMarkdownPreview: Bool
+    @Binding var markdownViewMode: NoteEditorView.MarkdownViewMode
     @StateObject private var windowState = WindowStateManager.shared
 
     @State private var tempReminderAt: Date = Date()
@@ -1071,18 +1125,31 @@ private struct EditorTopBarView: View {
             
             Divider().frame(height: 18)
             
-            // Markdown 预览切换按钮
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isMarkdownPreview.toggle()
+            // Markdown 预览模式选择菜单
+            Menu {
+                ForEach(NoteEditorView.MarkdownViewMode.allCases, id: \.self) { mode in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            markdownViewMode = mode
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: mode.icon)
+                            Text(mode.displayName)
+                            if markdownViewMode == mode {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
                 }
             } label: {
-                Image(systemName: isMarkdownPreview ? "doc.plaintext" : "doc.text.image")
+                Image(systemName: markdownViewMode.icon)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isMarkdownPreview ? ThemeManager.shared.accentColor : .secondary)
+                    .foregroundStyle(ThemeManager.shared.accentColor)
             }
             .buttonStyle(.plain)
-            .help(isMarkdownPreview ? "切换到文本编辑" : "切换到 Markdown 预览")
+            .help("选择视图模式")
             
             Divider().frame(height: 18)
             

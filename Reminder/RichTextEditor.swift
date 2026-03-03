@@ -737,7 +737,13 @@ class RichTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         // 检查是否是回车键
         if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
-            _ = commitMarkedTextIfNeeded()
+            // 先检查是否有 marked text（输入法正在编辑中）
+            if commitMarkedTextIfNeeded() {
+                // 有 marked text，已经提交，现在让系统处理回车键
+                super.keyDown(with: event)
+                return
+            }
+            // 没有 marked text，处理列表自动继承
             if handleReturnKey() {
                 return
             }
