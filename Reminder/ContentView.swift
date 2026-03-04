@@ -1632,6 +1632,17 @@ private struct AIPanelView: View {
         
         print("[AI Image] Starting extraction from attributed string of length: \(length)")
         
+        // 首先检查字符串内容，看看是否有附件字符
+        let string = attributedString.string
+        print("[AI Image] String content: \(string.prefix(200))")
+        
+        // 检查所有属性
+        attributedString.enumerateAttributes(in: NSRange(location: 0, length: length), options: []) { attrs, range, _ in
+            if !attrs.isEmpty {
+                print("[AI Image] Attributes at range \(range): \(attrs.keys.map { String(describing: $0) })")
+            }
+        }
+        
         attributedString.enumerateAttribute(.attachment, in: NSRange(location: 0, length: length), options: []) { value, range, stop in
             guard let attachment = value else {
                 print("[AI Image] No attachment value found at range: \(range)")
@@ -1639,6 +1650,7 @@ private struct AIPanelView: View {
             }
             
             print("[AI Image] Found attachment of type: \(type(of: attachment))")
+            print("[AI Image] Attachment class hierarchy: \(String(reflecting: type(of: attachment)))")
             
             // 处理 AttachmentTextAttachment
             if let textAttachment = attachment as? AttachmentTextAttachment {
@@ -2755,6 +2767,11 @@ struct MarkdownWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         let html = generateHTML(from: markdown, colorScheme: colorScheme)
+        // 调试：打印生成的 HTML 内容
+        if markdown.contains("```mermaid") {
+            print("[Mermaid Debug] Generated HTML preview:")
+            print(String(html.prefix(2000)))
+        }
         webView.loadHTMLString(html, baseURL: nil)
     }
 
@@ -2837,23 +2854,51 @@ struct MarkdownWebView: NSViewRepresentable {
 
     private func generateHTML(from markdown: String, colorScheme: ColorScheme) -> String {
         let textColor = colorScheme == .dark ? "#FFFFFF" : "#000000"
+        let linkColor = colorScheme == .dark ? "#4A9EFF" : "#0066CC"
 
         // 提取目录项用于生成锚点
         let tocItems = extractTableOfContents(from: markdown)
         var anchorIndex = 0
 
-        // 简单的 Markdown 到 HTML 转换
+        // 先处理代码块（在转义之前），避免代码块内的内容被转义
         var html = markdown
-            // 转义 HTML 特殊字符
+
+        // 第一步：提取并保护代码块（包括 Mermaid）
+        var codeBlocks: [(placeholder: String, content: String, isMermaid: Bool)] = []
+        var codeBlockIndex = 0
+
+        // 匹配所有代码块
+        let codePattern = #"```([^\n]*)\n([\s\S]*?)```"#
+        if let codeRegex = try? NSRegularExpression(pattern: codePattern, options: []) {
+            let matches = codeRegex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+
+            // 从后往前处理，避免位置变化
+            for match in matches.reversed() {
+                guard let fullRange = Range(match.range, in: html),
+                      let langRange = Range(match.range(at: 1), in: html),
+                      let codeRange = Range(match.range(at: 2), in: html) else { continue }
+
+                let lang = String(html[langRange]).trimmingCharacters(in: .whitespaces)
+                let code = String(html[codeRange])
+                let isMermaid = lang == "mermaid"
+
+                // 使用不会被 HTML 转义影响的占位符格式
+                let placeholder = "CODEBLOCK_\(codeBlockIndex)_END"
+                codeBlocks.append((placeholder: placeholder, content: code, isMermaid: isMermaid))
+                codeBlockIndex += 1
+
+                html.replaceSubrange(fullRange, with: placeholder)
+            }
+        }
+
+        // 第二步：处理行内代码
+        html = html.replacingOccurrences(of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
+
+        // 第三步：转义 HTML 特殊字符
+        html = html
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
-
-        // 代码块
-        html = html.replacingOccurrences(of: #"```([\s\S]*?)```"#, with: "<pre><code>$1</code></pre>", options: .regularExpression)
-
-        // 行内代码
-        html = html.replacingOccurrences(of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
 
         // 表格处理
         html = processTables(html)
@@ -2866,8 +2911,38 @@ struct MarkdownWebView: NSViewRepresentable {
         html = html.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
         html = html.replacingOccurrences(of: #"\*(.+?)\*"#, with: "<em>$1</em>", options: .regularExpression)
 
+        // 链接 [text](url) - 支持多行和 [text]\n(url) 格式
+        let linkPattern = #"\[([^\]]+)\]\s*\(([^\)]+)\)"#
+        if let linkRegex = try? NSRegularExpression(pattern: linkPattern, options: [.dotMatchesLineSeparators]) {
+            let matches = linkRegex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+            print("[Link Debug] Found \(matches.count) links in HTML")
+            for match in matches {
+                if let textRange = Range(match.range(at: 1), in: html),
+                   let urlRange = Range(match.range(at: 2), in: html) {
+                    let text = String(html[textRange])
+                    let url = String(html[urlRange])
+                    print("[Link Debug] Found link: [\(text)](\(url))")
+                }
+            }
+        }
+        html = html.replacingOccurrences(of: linkPattern, with: "<a href=\"$2\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">$1</a>", options: .regularExpression)
+
+        // 自动链接（纯 URL）
+        html = processAutoLinks(html, linkColor: linkColor)
+
         // 换行
         html = html.replacingOccurrences(of: "\n", with: "<br>")
+
+        // 第四步：恢复代码块
+        for (placeholder, content, isMermaid) in codeBlocks {
+            let replacement: String
+            if isMermaid {
+                replacement = "<div class=\"mermaid\">\(content)</div>"
+            } else {
+                replacement = "<pre><code>\(content)</code></pre>"
+            }
+            html = html.replacingOccurrences(of: placeholder, with: replacement)
+        }
 
         return """
         <!DOCTYPE html>
@@ -2923,13 +2998,99 @@ struct MarkdownWebView: NSViewRepresentable {
                 h2 { font-size: 16px; }
                 h3 { font-size: 14px; }
                 h4, h5, h6 { font-size: 13px; }
+                a {
+                    color: \(linkColor);
+                    text-decoration: none;
+                }
+                a:hover {
+                    text-decoration: underline;
+                }
+                .mermaid {
+                    background-color: \(colorScheme == .dark ? "#1e1e1e" : "#f5f5f5");
+                    padding: 16px;
+                    border-radius: 8px;
+                    margin: 8px 0;
+                }
             </style>
+            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script>
+                mermaid.initialize({
+                    startOnLoad: true,
+                    theme: '\(colorScheme == .dark ? "dark" : "default")',
+                    securityLevel: 'loose'
+                });
+            </script>
         </head>
         <body>
             \(html)
         </body>
         </html>
         """
+    }
+
+    /// 处理 Mermaid 代码块
+    private func processMermaidBlocks(_ html: String) -> String {
+        let pattern = #"```mermaid\n([\s\S]*?)```"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return html
+        }
+
+        let range = NSRange(html.startIndex..., in: html)
+        return regex.stringByReplacingMatches(
+            in: html,
+            options: [],
+            range: range,
+            withTemplate: "<div class=\"mermaid\">$1</div>"
+        )
+    }
+
+    /// 处理普通代码块（排除 Mermaid）
+    private func processCodeBlocks(_ html: String) -> String {
+        // 匹配 ``` 开头的代码块，但排除已经处理的 mermaid div
+        let pattern = #"```([^\n]*)\n([\s\S]*?)```"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return html
+        }
+
+        let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+
+        var result = html
+        // 从后往前替换，避免位置变化
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: result),
+                  let langRange = Range(match.range(at: 1), in: result),
+                  let codeRange = Range(match.range(at: 2), in: result) else { continue }
+
+            let lang = String(result[langRange])
+            let code = String(result[codeRange])
+
+            // 跳过 mermaid（已经处理过了）
+            if lang.trimmingCharacters(in: .whitespaces) == "mermaid" {
+                continue
+            }
+
+            let replacement = "<pre><code>\(code)</code></pre>"
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+
+        return result
+    }
+
+    /// 处理自动链接（纯 URL）
+    private func processAutoLinks(_ html: String, linkColor: String) -> String {
+        // 匹配 http://, https://, ftp:// 等 URL
+        let pattern = #"(?<![\"\'>])(https?://[^\s\<\>\"\']+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return html
+        }
+
+        let range = NSRange(html.startIndex..., in: html)
+        return regex.stringByReplacingMatches(
+            in: html,
+            options: [],
+            range: range,
+            withTemplate: "<a href=\"$1\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">$1</a>"
+        )
     }
 
     private func replaceHeadingsWithAnchors(_ html: String, tocItems: [TableOfContentsItem], anchorIndex: inout Int) -> String {

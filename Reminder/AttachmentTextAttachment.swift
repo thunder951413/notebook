@@ -42,8 +42,11 @@ final class AttachmentTextAttachment: NSTextAttachment {
     }
 
     required init?(coder: NSCoder) {
+        print("[AttachmentTextAttachment] Decoding started...")
+        
         // 仅解码我们明确支持的类型，避免使用过宽的 allowedClasses
         let decodedWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
+        print("[AttachmentTextAttachment] Decoded wrapper: \(decodedWrapper != nil)")
 
         if let wrapper = decodedWrapper, let filename = wrapper.preferredFilename {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ReminderExtracted", isDirectory: true)
@@ -51,17 +54,22 @@ final class AttachmentTextAttachment: NSTextAttachment {
             let out = tmp.appendingPathComponent(filename)
             try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
             self.attachmentFileURL = out
+            print("[AttachmentTextAttachment] File URL set to: \(out.path)")
         } else {
             self.attachmentFileURL = FileManager.default.temporaryDirectory
+            print("[AttachmentTextAttachment] No wrapper or filename, using temp directory")
         }
 
         if let raw = coder.decodeObject(of: NSString.self, forKey: "ReminderAttachmentKind") as String? {
             self.kind = AttachmentKind(rawValue: raw) ?? .image
+            print("[AttachmentTextAttachment] Kind decoded: \(self.kind)")
         } else {
             self.kind = .image
+            print("[AttachmentTextAttachment] No kind found, defaulting to image")
         }
 
         super.init(coder: coder)
+        print("[AttachmentTextAttachment] super.init completed")
 
         // super.init 之后再赋值 fileWrapper，避免 "self used before super.init"
         if let wrapper = decodedWrapper {
@@ -71,6 +79,8 @@ final class AttachmentTextAttachment: NSTextAttachment {
         if kind == .audio {
             self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
         }
+        
+        print("[AttachmentTextAttachment] Decoding completed")
     }
 
     override func encode(with coder: NSCoder) {
