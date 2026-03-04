@@ -149,6 +149,14 @@
 "popover.quit" = "退出";
 "popover.searchPlaceholder" = "输入关键字搜索…";
 
+/* 关于 */
+"about.title" = "关于";
+"about.appName" = "应用名称：";
+"about.author" = "作者：";
+"about.email" = "邮箱：";
+"about.projectHelp" = "项目帮助：";
+"about.viewOnGitHub" = "在 GitHub 上查看";
+
 /* Onboarding */
 "onboarding.welcome" = "欢迎";
 "onboarding.description" = "首次使用需要选择一个保存目录。应用会在该目录下创建：";

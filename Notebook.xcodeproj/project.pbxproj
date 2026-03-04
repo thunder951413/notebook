@@ -25,8 +25,8 @@
 
 /* Begin PBXFileReference section */
 		4D88CC462F48073100A872E5 /* Notebook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Notebook.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		4D88CC532F48073200A872E5 /* NotebookTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = NotebookTests.xctest; path = NotebookTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		4D88CC5D2F48073200A872E5 /* NotebookUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = NotebookUITests.xctest; path = NotebookUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D88CC532F48073200A872E5 /* NotebookTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NotebookTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D88CC5D2F48073200A872E5 /* NotebookUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NotebookUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		655363C82F4F2B0B00ABA97C /* 张掖外星谷游玩时间与时长.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = "张掖外星谷游玩时间与时长.png"; path = "Notebook/Assets.xcassets/AppIcon.appiconset/张掖外星谷游玩时间与时长.png"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 

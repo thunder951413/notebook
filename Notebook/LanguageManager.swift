@@ -282,6 +282,16 @@ struct L10nKeys {
         static let quit = "popover.quit"
     }
 
+    // MARK: - 关于
+    struct About {
+        static let title = "about.title"
+        static let appName = "about.appName"
+        static let author = "about.author"
+        static let email = "about.email"
+        static let projectHelp = "about.projectHelp"
+        static let viewOnGitHub = "about.viewOnGitHub"
+    }
+
     // MARK: - Onboarding
     struct Onboarding {
         static let welcome = "onboarding.welcome"

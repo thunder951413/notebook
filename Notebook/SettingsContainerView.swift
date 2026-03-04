@@ -279,6 +279,48 @@ struct SettingsGeneralView: View {
                         .font(.footnote)
                 }
 
+                Divider()
+
+                // 关于/帮助信息
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(l10n(L10nKeys.About.title))
+                        .font(.title2)
+                        .bold()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(l10n(L10nKeys.About.appName))
+                                .foregroundColor(.secondary)
+                            Text("Notebook")
+                        }
+
+                        HStack {
+                            Text(l10n(L10nKeys.About.author))
+                                .foregroundColor(.secondary)
+                            Text("Yanyan")
+                        }
+
+                        HStack {
+                            Text(l10n(L10nKeys.About.email))
+                                .foregroundColor(.secondary)
+                            Text("thunder951413@gmail.com")
+                                .textSelection(.enabled)
+                        }
+
+                        HStack {
+                            Text(l10n(L10nKeys.About.projectHelp))
+                                .foregroundColor(.secondary)
+                            Button(l10n(L10nKeys.About.viewOnGitHub)) {
+                                if let url = URL(string: "https://github.com/your-username/Notebook") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(.link)
+                        }
+                    }
+                    .font(.body)
+                }
+
                 Spacer()
             }
             .padding(20)

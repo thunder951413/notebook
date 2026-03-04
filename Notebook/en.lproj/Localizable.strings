@@ -149,6 +149,14 @@
 "popover.quit" = "Quit";
 "popover.searchPlaceholder" = "Enter keywords to search...";
 
+/* About */
+"about.title" = "About";
+"about.appName" = "App Name:";
+"about.author" = "Author:";
+"about.email" = "Email:";
+"about.projectHelp" = "Project Help:";
+"about.viewOnGitHub" = "View on GitHub";
+
 /* Onboarding */
 "onboarding.welcome" = "Welcome";
 "onboarding.description" = "First-time use requires selecting a save directory. The app will create:";

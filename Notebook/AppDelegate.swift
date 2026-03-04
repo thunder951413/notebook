@@ -17,7 +17,8 @@ extension Notification.Name {
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
-    
+    var aboutWindow: NSWindow?
+
     // Store 用于跨视图共享数据
     @MainActor let store = NoteStore()
     @MainActor let storage = StorageLocationManager.shared
@@ -25,6 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[AppDelegate] applicationDidFinishLaunching - 程序启动")
+
+        // 配置关于面板信息
+        setupAboutPanel()
 
         // 应用语言设置
         LanguageManager.shared.applyLanguage()
@@ -40,6 +44,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        setupMenu()
         setupStatusItem()
         setupPopover()
 
@@ -82,6 +87,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
     
+    /// 配置应用菜单
+    func setupMenu() {
+        // 获取主菜单
+        guard let mainMenu = NSApp.mainMenu else { return }
+
+        // 查找应用菜单（通常是第一个菜单）
+        if let appMenuItem = mainMenu.items.first {
+            // 查找关于菜单项并替换其 action
+            if let aboutMenuItem = appMenuItem.submenu?.items.first(where: { $0.title.contains("关于") || $0.title.contains("About") }) {
+                aboutMenuItem.target = self
+                aboutMenuItem.action = #selector(showAboutPanel)
+            }
+        }
+    }
+
+    /// 配置关于面板信息
+    func setupAboutPanel() {
+        // 创建自定义关于窗口
+        let aboutWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        aboutWindow.title = "关于 Notebook"
+        aboutWindow.center()
+
+        // 创建关于视图
+        let aboutView = AboutView()
+        aboutWindow.contentView = NSHostingView(rootView: aboutView)
+
+        // 保存窗口引用
+        self.aboutWindow = aboutWindow
+    }
+
+    /// 显示关于窗口
+    @objc func showAboutPanel() {
+        if let window = aboutWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            setupAboutPanel()
+            aboutWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
     func setupStatusItem() {
         print("[AppDelegate] setupStatusItem - 创建菜单栏图标")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
