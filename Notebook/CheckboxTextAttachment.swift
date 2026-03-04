@@ -536,18 +536,17 @@ extension NSTextView {
         }
 
         // 禁用撤销跟踪，避免 UndoManager 问题
-        self.undoManager?.disableUndoRegistration()
+        let undoManager = self.undoManager
+        undoManager?.disableUndoRegistration()
 
         // 替换内容
         self.textStorage?.beginEditing()
         self.textStorage?.replaceCharacters(in: replaceRange, with: newAttributedText)
         self.textStorage?.endEditing()
 
-        // 恢复撤销跟踪
-        self.undoManager?.enableUndoRegistration()
-
-        // 清除撤销栈，避免范围错误
-        self.undoManager?.removeAllActions()
+        // 恢复撤销跟踪并清除撤销栈
+        undoManager?.enableUndoRegistration()
+        undoManager?.removeAllActions()
 
         self.didChangeText()
     }

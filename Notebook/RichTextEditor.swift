@@ -1026,7 +1026,12 @@ struct RichTextEditor: NSViewRepresentable {
             context.coordinator.lastAppliedNoteID = noteID
 
             // 清除撤销管理器，避免切换笔记后撤销操作导致崩溃
-            textView.undoManager?.removeAllActions()
+            // 先禁用撤销注册，再清除所有操作，最后重新启用
+            if let undoManager = textView.undoManager {
+                undoManager.disableUndoRegistration()
+                undoManager.removeAllActions()
+                undoManager.enableUndoRegistration()
+            }
 
             textView.textStorage?.setAttributedString(attributedText)
             textView.setSelectedRange(NSRange(location: 0, length: 0))
