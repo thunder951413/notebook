@@ -138,9 +138,52 @@ class NoteStore: ObservableObject {
             let descriptor = FetchDescriptor<NoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
             let entities = try context.fetch(descriptor)
             
+            // 先加载文件夹，用于修复笔记的 folderID
+            let folderDescriptor = FetchDescriptor<FolderEntity>(sortBy: [SortDescriptor(\.sortOrder)])
+            let folderEntities = try context.fetch(folderDescriptor)
+            let folderMap = Dictionary(uniqueKeysWithValues: folderEntities.map { ($0.name, $0.id) })
+            
             // 清理孤立附件
             let allNoteIDs = entities.map { $0.id }
             AttachmentManager.shared.cleanupOrphanedAttachments(allNoteIDs: allNoteIDs)
+            
+            // 修复笔记的 folderID 和 folderName 不一致问题
+            var needsSave = false
+            for entity in entities {
+                let folderName = entity.folderName
+                let folderID = entity.folderID
+                
+                // folderName 不为空时，检查 folderID 是否正确
+                if !folderName.isEmpty {
+                    // 有 folderName，检查 folderID 是否正确
+                    if let correctID = folderMap[folderName] {
+                        if folderID != correctID {
+                            // folderID 不匹配，修复它
+                            print("[Fetch] Fixing folderID for note \(entity.id): \(String(describing: folderID)) -> \(correctID)")
+                            entity.folderID = correctID
+                            needsSave = true
+                        }
+                    } else {
+                        // folderName 对应的文件夹不存在，清空 folderID
+                        if folderID != nil {
+                            print("[Fetch] Clearing folderID for note \(entity.id): folder '\(folderName)' not found")
+                            entity.folderID = nil
+                            needsSave = true
+                        }
+                    }
+                } else {
+                    // 没有 folderName，清空 folderID
+                    if folderID != nil {
+                        print("[Fetch] Clearing folderID for note \(entity.id): no folderName")
+                        entity.folderID = nil
+                        needsSave = true
+                    }
+                }
+            }
+            
+            if needsSave {
+                try? context.save()
+            }
             
             // 先做一次"自愈"：遇到损坏的 RTFD 直接清空并回写数据库
             for entity in entities {
@@ -158,9 +201,12 @@ class NoteStore: ObservableObject {
                     print("[SelfHeal] Broken RTFD detected for note id=\(entity.id), title=\(entity.title). Resetting content. Error: \(error)")
                     entity.rtfdData = nil
                     entity.updatedAt = Date()
+                    needsSave = true
                 }
             }
-            try? context.save()
+            if needsSave {
+                try? context.save()
+            }
             
             // 映射到内存模型
             self.notes = entities.map { entity in
@@ -213,8 +259,7 @@ class NoteStore: ObservableObject {
                 )
             }
             
-            let folderDescriptor = FetchDescriptor<FolderEntity>(sortBy: [SortDescriptor(\.sortOrder)])
-            let folderEntities = try context.fetch(folderDescriptor)
+            // 使用之前已加载的文件夹数据
             self.folders = folderEntities.map { Folder(id: $0.id, name: $0.name, sortOrder: $0.sortOrder ?? 0, createdAt: $0.createdAt ?? Date(), isSystem: $0.isSystem ?? false) }
             
             let tagDescriptor = FetchDescriptor<TagEntity>(sortBy: [SortDescriptor(\.sortOrder)])
@@ -618,10 +663,14 @@ class NoteStore: ObservableObject {
                     return
                 }
                 
-                print("[Save] updating entity id=\(entity.id), title=\(title), reason=\(reason), version=\(version)")
+                // 根据文件夹名称查找对应的 folderID
+                let folderID = self.folders.first { $0.name == folder }?.id
+                
+                print("[Save] updating entity id=\(entity.id), title=\(title), folder=\(folder), folderID=\(String(describing: folderID)), reason=\(reason), version=\(version)")
                 entity.title = title
                 entity.updatedAt = Date()
                 entity.folderName = folder
+                entity.folderID = folderID
                 entity.rtfdData = rtfdData
                 entity.reminderAt = reminderAt
                 entity.recurrenceRule = recurrenceRule
@@ -633,6 +682,7 @@ class NoteStore: ObservableObject {
                 if let idx = self.notes.firstIndex(where: { $0.id == id }) {
                     self.notes[idx].title = title
                     self.notes[idx].folder = folder
+                    self.notes[idx].folderID = folderID
                     self.notes[idx].reminderAt = reminderAt
                     self.notes[idx].recurrenceRule = recurrenceRule
                     self.notes[idx].version = version

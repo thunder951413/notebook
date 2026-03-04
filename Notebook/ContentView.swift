@@ -41,14 +41,24 @@ struct ContentView: View {
         // 2. 文件夹筛选
         // 如果有搜索词且选择搜索所有文件夹，则跳过文件夹筛选
         let shouldApplyFolderFilter = selectedFolder != l10n(L10nKeys.Folder.allNotes) &&
-                                       selectedFolder != "未整理笔记" &&
+                                       selectedFolder != "未分类" &&
                                        !(searchInAllFolders && !q.isEmpty)
         if shouldApplyFolderFilter {
-            notes = notes.filter { $0.folder == selectedFolder }
+            // 通过文件夹名称找到对应的文件夹ID，然后通过ID筛选
+            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
+                notes = notes.filter { $0.folderID == folder.id }
+            } else {
+                // 如果找不到对应的文件夹，显示空结果
+                notes = []
+            }
             print("[Search] After folder filter: \(notes.count) notes")
-        } else if selectedFolder == "未整理笔记" {
-            // 显示未整理笔记（没有 folderID 的笔记）
-            notes = notes.filter { $0.folderID == nil }
+        } else if selectedFolder == "未分类" {
+            // 显示未分类（没有 folderID 或 folderID 指向不存在文件夹的笔记）
+            let existingFolderIDs = Set(store.folders.map { $0.id })
+            notes = notes.filter { note in
+                guard let folderID = note.folderID else { return true }
+                return !existingFolderIDs.contains(folderID)
+            }
             print("[Search] After uncategorized filter: \(notes.count) notes")
         } else if searchInAllFolders && !q.isEmpty {
             print("[Search] Skipping folder filter (searching all folders)")
@@ -441,7 +451,7 @@ private struct SidebarView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                // 主内容区域：全部笔记 + 未整理笔记 + 文件夹（可滚动）
+                // 主内容区域：全部笔记 + 未分类 + 文件夹（可滚动）
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         allNotesRow
@@ -512,23 +522,30 @@ private struct SidebarView: View {
     }
 
     private var uncategorizedNotesRow: some View {
-        let uncategorizedCount = store.notes.filter { $0.folderID == nil }.count
+        // 未分类包括：
+        // 1. folderID 为 nil 的笔记
+        // 2. folderID 指向不存在文件夹的笔记（孤儿笔记）
+        let existingFolderIDs = Set(store.folders.map { $0.id })
+        let uncategorizedCount = store.notes.filter { note in
+            guard let folderID = note.folderID else { return true }
+            return !existingFolderIDs.contains(folderID)
+        }.count
         return HStack {
             Image(systemName: "tray")
-                .foregroundStyle(selectedFolder == "未整理笔记" && selectedTagID == nil ? .white : .secondary)
-            Text("未整理笔记")
+                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil ? .white : .secondary)
+            Text("未分类")
             Spacer()
             Text("\(uncategorizedCount)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == "未整理笔记" && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == "未整理笔记" && selectedTagID == nil ? themeManager.accentColor : Color.clear)
+        .background(selectedFolder == "未分类" && selectedTagID == nil ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedFolder = "未整理笔记"
+            selectedFolder = "未分类"
             selectedTagID = nil
         }
         .padding(.horizontal, 8)
@@ -571,6 +588,39 @@ private struct SidebarView: View {
         .padding(.top, 8)
     }
 
+    /// 根据当前选中的文件夹获取应该显示的标签
+    /// - 选择"全部笔记"时显示所有标签
+    /// - 选择其他文件夹时只显示该文件夹下笔记拥有的标签
+    private var filteredTags: [Tag] {
+        // 获取当前文件夹下的所有笔记（不考虑标签筛选）
+        let notesInCurrentFolder: [Note]
+        
+        if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
+            // 全部笔记：显示所有标签
+            return store.tags
+        } else if selectedFolder == "未分类" {
+            // 未分类：显示未分类笔记中的标签
+            let existingFolderIDs = Set(store.folders.map { $0.id })
+            notesInCurrentFolder = store.notes.filter { note in
+                guard let folderID = note.folderID else { return true }
+                return !existingFolderIDs.contains(folderID)
+            }
+        } else {
+            // 特定文件夹：显示该文件夹下的笔记标签
+            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
+                notesInCurrentFolder = store.notes.filter { $0.folderID == folder.id }
+            } else {
+                notesInCurrentFolder = []
+            }
+        }
+        
+        // 收集这些笔记拥有的所有标签ID
+        let tagIDsInFolder = Set(notesInCurrentFolder.flatMap { $0.tagIDs })
+        
+        // 过滤标签，只保留在当前文件夹笔记中出现过的标签
+        return store.tags.filter { tagIDsInFolder.contains($0.id) }
+    }
+
     private var tagsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
@@ -600,15 +650,48 @@ private struct SidebarView: View {
             .padding(.horizontal, 16)
 
             if isTagsExpanded {
-                ForEach(store.tags) { tag in
-                    tagRow(tag)
+                let tags = filteredTags
+                if tags.isEmpty {
+                    Text("无标签")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(tags) { tag in
+                        tagRow(tag)
+                    }
                 }
             }
         }
     }
 
     private func tagRow(_ tag: Tag) -> some View {
-        let notesWithTag = store.notes.filter { $0.tagIDs.contains(tag.id) }
+        // 计算当前文件夹下包含该标签的笔记数量
+        let notesWithTag: Int
+        
+        if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
+            // 全部笔记：统计所有包含该标签的笔记
+            notesWithTag = store.notes.filter { $0.tagIDs.contains(tag.id) }.count
+        } else if selectedFolder == "未分类" {
+            // 未分类：统计未分类笔记中包含该标签的笔记
+            let existingFolderIDs = Set(store.folders.map { $0.id })
+            notesWithTag = store.notes.filter { note in
+                let isUncategorized = {
+                    guard let folderID = note.folderID else { return true }
+                    return !existingFolderIDs.contains(folderID)
+                }()
+                return isUncategorized && note.tagIDs.contains(tag.id)
+            }.count
+        } else {
+            // 特定文件夹：统计该文件夹下包含该标签的笔记
+            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
+                notesWithTag = store.notes.filter { $0.folderID == folder.id && $0.tagIDs.contains(tag.id) }.count
+            } else {
+                notesWithTag = 0
+            }
+        }
+        
         return HStack {
             Circle()
                 .fill(tag.swiftUIColor)
@@ -616,7 +699,7 @@ private struct SidebarView: View {
             Text(tag.name)
                 .lineLimit(1)
             Spacer()
-            Text("\(notesWithTag.count)")
+            Text("\(notesWithTag)")
                 .font(.caption)
                 .foregroundStyle(selectedTagID == tag.id ? .white.opacity(0.7) : .secondary)
         }
@@ -649,7 +732,7 @@ private struct SidebarView: View {
             Text(folder.name)
                 .lineLimit(1)
             Spacer()
-            Text("\(store.notes.filter { $0.folder == folder.name }.count)")
+            Text("\(store.notes.filter { $0.folderID == folder.id }.count)")
                 .font(.caption)
                 .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
         }
@@ -662,7 +745,7 @@ private struct SidebarView: View {
             // 检查当前选中的笔记是否在新文件夹中
             if let currentSelection = selection,
                let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
-               selectedNote.folder != folder.name {
+               selectedNote.folderID != folder.id {
                 // 当前笔记不在新文件夹中，清空选中状态（延迟到下一个runloop避免 Publishing changes 警告）
                 DispatchQueue.main.async {
                     selection = nil
