@@ -734,9 +734,8 @@ class RichTextView: NSTextView {
         // 检查是否是回车键
         if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
             // 先检查是否有 marked text（输入法正在编辑中）
-            if commitMarkedTextIfNeeded() {
-                // 有 marked text，已经提交，现在让系统处理回车键
-                super.keyDown(with: event)
+            if hasInputMarkedText() {
+                _ = commitMarkedTextIfNeeded()
                 return
             }
             // 没有 marked text，处理列表自动继承
@@ -745,18 +744,46 @@ class RichTextView: NSTextView {
             }
         }
 
+        // 检查是否是 ESC 键
+        if event.keyCode == 53 { // 53 = Escape
+            if hasInputMarkedText() {
+                clearInputMarkedText()
+                return
+            }
+        }
+
         super.keyDown(with: event)
     }
 
-    private func commitMarkedTextIfNeeded() -> Bool {
+    private func hasInputMarkedText() -> Bool {
         guard let inputContext = self.inputContext else { return false }
-        let hasMarked = (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
-        if hasMarked {
-            // 使用 performSelector 调用 commitComposition 避免编译器检查
-            _ = inputContext.perform(NSSelectorFromString("commitComposition"))
-            return true
-        }
-        return false
+        return (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+    }
+
+    private func clearInputMarkedText() {
+        let markedRange = self.markedRange()
+        guard markedRange.location != NSNotFound, markedRange.length > 0 else { return }
+        
+        self.textStorage?.deleteCharacters(in: markedRange)
+        self.setSelectedRange(NSRange(location: markedRange.location, length: 0))
+    }
+
+    private func commitMarkedTextIfNeeded() -> Bool {
+        let markedRange = self.markedRange()
+        guard markedRange.location != NSNotFound, markedRange.length > 0 else { return false }
+        
+        let fullString = self.string as NSString
+        var markedString = fullString.substring(with: markedRange)
+        
+        markedString = markedString.replacingOccurrences(of: "'", with: "")
+        
+        self.textStorage?.beginEditing()
+        self.textStorage?.deleteCharacters(in: markedRange)
+        self.textStorage?.endEditing()
+        
+        self.insertText(markedString, replacementRange: NSRange(location: markedRange.location, length: 0))
+        
+        return true
     }
 
     /// 处理回车键 - 自动继承列表符号

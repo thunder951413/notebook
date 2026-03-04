@@ -105,7 +105,7 @@ class NoteStore: ObservableObject {
         // 如果没有配置，尝试从 StorageLocationManager 获取存储位置并创建容器
         let location = StorageLocationManager.shared
         guard location.isConfigured,
-              let base = location.baseDirectoryURL else {
+              let _ = location.baseDirectoryURL else {
             print("NoteStore: Storage not configured yet, skipping fetch")
             return
         }
