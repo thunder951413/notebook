@@ -400,14 +400,14 @@ extension NSTextView {
     // MARK: - 复选框排序
 
     /// 排序复选框：未完成的在前，已完成的在后
-    /// 注意：只排序连续的复选框区域，不影响其他内容
+    /// 注意：只排序连续的复选框区域，不影响其他内容，保留原始空行
     func sortCheckboxes() {
         // 先保存当前选中的位置
         let originalSelectedRange = self.selectedRange()
         let originalString = self.string as NSString
 
         // 收集所有复选框行（包括非复选框行作为分隔）
-        var allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString)] = []
+        var allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)] = []
         var currentLocation = 0
 
         while currentLocation < originalString.length {
@@ -423,7 +423,8 @@ extension NSTextView {
                         isCheckbox: true,
                         isChecked: checkboxInfo.isChecked,
                         content: "",
-                        originalText: NSAttributedString()
+                        originalText: NSAttributedString(),
+                        trailingNewlines: 1
                     ))
                     currentLocation = lineRange.upperBound
                     continue
@@ -432,13 +433,16 @@ extension NSTextView {
                 let content = originalString.substring(with: contentRange).trimmingCharacters(in: .whitespacesAndNewlines)
                 // 保留复选框后的原始富文本（用于重建时保持格式）
                 let originalText = self.attributedString().attributedSubstring(from: contentRange)
+                // 计算行尾换行符数量
+                let trailingNewlines = countTrailingNewlines(in: originalText.string)
 
                 allLines.append((
                     lineRange: lineRange,
                     isCheckbox: true,
                     isChecked: checkboxInfo.isChecked,
                     content: content,
-                    originalText: originalText
+                    originalText: originalText,
+                    trailingNewlines: trailingNewlines
                 ))
             } else {
                 // 非复选框行 - 保留完整的原始富文本
@@ -448,7 +452,8 @@ extension NSTextView {
                     isCheckbox: false,
                     isChecked: false,
                     content: "",
-                    originalText: originalText
+                    originalText: originalText,
+                    trailingNewlines: 0
                 ))
             }
 
@@ -456,16 +461,16 @@ extension NSTextView {
         }
 
         // 找到需要排序的复选框区域（连续的复选框行）
-        var regions: [(startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString)])] = []
+        var regions: [(startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)])] = []
         var currentRegionStart: Int?
-        var currentRegionLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)] = []
+        var currentRegionLines: [(isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)] = []
 
         for (index, line) in allLines.enumerated() {
             if line.isCheckbox {
                 if currentRegionStart == nil {
                     currentRegionStart = index
                 }
-                currentRegionLines.append((line.isChecked, line.content, line.originalText))
+                currentRegionLines.append((line.isChecked, line.content, line.originalText, line.trailingNewlines))
             } else {
                 // 遇到非复选框行，结束当前区域
                 if let start = currentRegionStart, currentRegionLines.count > 1 {
@@ -495,8 +500,21 @@ extension NSTextView {
         self.setSelectedRange(NSRange(location: newLocation, length: 0))
     }
 
+    /// 计算字符串末尾换行符数量
+    private func countTrailingNewlines(in string: String) -> Int {
+        var count = 0
+        for char in string.reversed() {
+            if char == "\n" || char == "\r" {
+                count += 1
+            } else {
+                break
+            }
+        }
+        return max(count, 1) // 至少保留一个换行符
+    }
+
     /// 排序单个区域内的复选框
-    private func sortRegion(allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString)], region: (startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString)]), originalString: NSString) {
+    private func sortRegion(allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)], region: (startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)]), originalString: NSString) {
         let uncheckedLines = region.lines.filter { !$0.isChecked }
         let checkedLines = region.lines.filter { $0.isChecked }
 
@@ -560,26 +578,28 @@ extension NSTextView {
     }
 
     /// 构建排序后的复选框富文本
-    private func buildSortedCheckboxAttributedText(uncheckedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)], checkedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)]) -> NSAttributedString {
+    private func buildSortedCheckboxAttributedText(uncheckedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)], checkedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString, trailingNewlines: Int)]) -> NSAttributedString {
         let result = NSMutableAttributedString()
 
-        // 辅助函数：清理文本（移除开头空格和结尾换行）
-        func cleanText(_ attrString: NSAttributedString) -> NSAttributedString {
+        // 辅助函数：清理文本（移除开头空格，保留原始换行符数量信息）
+        func cleanText(_ attrString: NSAttributedString, keepNewlines: Bool = false) -> NSAttributedString {
             let mutable = NSMutableAttributedString(attributedString: attrString)
             // 移除开头的空格
             if mutable.string.hasPrefix(" ") {
                 mutable.deleteCharacters(in: NSRange(location: 0, length: 1))
             }
-            // 移除结尾的换行符
-            while mutable.string.hasSuffix("\n") || mutable.string.hasSuffix("\r") {
-                let length = mutable.string.hasSuffix("\r\n") ? 2 : 1
-                mutable.deleteCharacters(in: NSRange(location: mutable.length - length, length: length))
+            // 如果不保留换行符，则移除结尾的换行符
+            if !keepNewlines {
+                while mutable.string.hasSuffix("\n") || mutable.string.hasSuffix("\r") {
+                    let length = mutable.string.hasSuffix("\r\n") ? 2 : 1
+                    mutable.deleteCharacters(in: NSRange(location: mutable.length - length, length: length))
+                }
             }
             return mutable
         }
 
         // 添加未完成的行
-        for (index, line) in uncheckedLines.enumerated() {
+        for (_, line) in uncheckedLines.enumerated() {
             let attachment = CheckboxTextAttachment(checked: false)
             let attrString = NSAttributedString(attachment: attachment)
             result.append(attrString)
@@ -591,14 +611,14 @@ extension NSTextView {
             } else {
                 result.append(NSAttributedString(string: " \(line.content)"))
             }
-            // 只在不是最后一行时添加换行符
-            if index < uncheckedLines.count - 1 || !checkedLines.isEmpty {
-                result.append(NSAttributedString(string: "\n"))
-            }
+            // 添加原始数量的换行符（保留空行）
+            let newlineCount = line.trailingNewlines
+            let newlines = String(repeating: "\n", count: newlineCount)
+            result.append(NSAttributedString(string: newlines))
         }
 
         // 添加已完成的行
-        for (index, line) in checkedLines.enumerated() {
+        for (_, line) in checkedLines.enumerated() {
             let attachment = CheckboxTextAttachment(checked: true)
             let attrString = NSAttributedString(attachment: attachment)
             result.append(attrString)
@@ -610,10 +630,10 @@ extension NSTextView {
             } else {
                 result.append(NSAttributedString(string: " \(line.content)"))
             }
-            // 只在不是最后一行时添加换行符
-            if index < checkedLines.count - 1 {
-                result.append(NSAttributedString(string: "\n"))
-            }
+            // 添加原始数量的换行符（保留空行）
+            let newlineCount = line.trailingNewlines
+            let newlines = String(repeating: "\n", count: newlineCount)
+            result.append(NSAttributedString(string: newlines))
         }
 
         return result
