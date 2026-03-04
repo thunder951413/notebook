@@ -1,6 +1,6 @@
-# Reminder - 极简 macOS 富文本笔记与提醒工具
+# Notebook - 极简 macOS 富文本笔记与提醒工具
 
-Reminder 是一款专为 macOS 设计的轻量级富文本笔记应用。它结合了优雅的界面设计与实用的功能，支持多层级文件夹管理、富文本编辑、音频录制以及强大的提醒系统。
+Notebook 是一款专为 macOS 设计的轻量级富文本笔记应用。它结合了优雅的界面设计与实用的功能，支持多层级文件夹管理、富文本编辑、音频录制以及强大的提醒系统。
 
 ## ✨ 功能特性
 
@@ -36,9 +36,9 @@ Reminder 是一款专为 macOS 设计的轻量级富文本笔记应用。它结�
 ### 安装与运行
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/your-username/Reminder.git
+   git clone https://github.com/your-username/Notebook.git
    ```
-2. 使用 Xcode 打开 `Reminder.xcodeproj`。
+2. 使用 Xcode 打开 `Notebook.xcodeproj`。
 3. 编译并运行项目。
 
 ## 📸 预览
