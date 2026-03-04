@@ -76,8 +76,6 @@ struct SettingsGeneralView: View {
     @State private var isChoosingDirectory = false
     @State private var errorMessage: String?
     @State private var showRestartAlert = false
-    @State private var showBackupRestoreSheet = false
-    @State private var showClearBackupConfirmation = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
 
     var body: some View {
@@ -164,73 +162,6 @@ struct SettingsGeneralView: View {
                         }
                     }
                     .padding(.vertical, 4)
-                }
-
-                Divider()
-
-                // 备份与恢复
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(l10n(L10nKeys.Backup.title))
-                        .font(.title2)
-                        .bold()
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(l10n(L10nKeys.Backup.description))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        HStack(spacing: 12) {
-                            Button(l10n(L10nKeys.Backup.restore)) {
-                                showBackupRestoreSheet = true
-                            }
-
-                            Button(l10n(L10nKeys.Backup.clear)) {
-                                showClearBackupConfirmation = true
-                            }
-                            .foregroundColor(.red)
-                        }
-
-                        // iCloud 同步
-                        Divider()
-                            .padding(.vertical, 8)
-
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(l10n(L10nKeys.Settings.iCloudSync))
-                                    .font(.headline)
-
-                                if iCloudBackupManager.shared.isiCloudAvailable {
-                                    if let lastSync = iCloudBackupManager.shared.lastSyncDate {
-                                        Text(String(format: l10n(L10nKeys.Settings.iCloudLastSync), formattedDate(lastSync)))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    } else {
-                                        Text(l10n(L10nKeys.Settings.iCloudNotSynced))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                } else {
-                                    Text(l10n(L10nKeys.Settings.iCloudUnavailable))
-                                        .font(.caption)
-                                        .foregroundColor(.red)
-                                }
-                            }
-
-                            Spacer()
-
-                            if iCloudBackupManager.shared.isSyncing {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else if iCloudBackupManager.shared.isiCloudAvailable {
-                                Button(l10n(L10nKeys.Settings.iCloudSyncNow)) {
-                                    Task {
-                                        await iCloudBackupManager.shared.syncToiCloud()
-                                    }
-                                }
-                            }
-                        }
-
-                    }
                 }
 
                 Divider()
@@ -332,18 +263,6 @@ struct SettingsGeneralView: View {
             }
         } message: {
             Text(l10n(L10nKeys.Settings.restartAlertMessage))
-        }
-        .sheet(isPresented: $showBackupRestoreSheet) {
-            BackupRestoreView()
-                .frame(minWidth: 600, minHeight: 400)
-        }
-        .alert(l10n(L10nKeys.Settings.clearBackupsTitle), isPresented: $showClearBackupConfirmation) {
-            Button(l10n(L10nKeys.common.cancel), role: .cancel) {}
-            Button(l10n(L10nKeys.Backup.clear), role: .destructive) {
-                BackupManager.shared.clearAllBackups()
-            }
-        } message: {
-            Text(l10n(L10nKeys.Settings.clearBackupsMessage))
         }
     }
 
@@ -484,6 +403,25 @@ struct DataManagementView: View {
                         }
                         .help("导入所有数据，包括配置、笔记、文件夹、标签和附件")
                     }
+                }
+
+                Divider()
+
+                // 历史备份管理
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.title3)
+                            .foregroundColor(.purple)
+                        Text("历史备份管理")
+                            .font(.headline)
+                    }
+
+                    Text("每天首次启动时自动备份所有数据到 history 目录。可以设置最大保存数量，超过时会自动删除最旧的备份。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    AutoBackupSettingsView()
                 }
 
                 Divider()

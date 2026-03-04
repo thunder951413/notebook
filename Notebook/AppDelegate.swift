@@ -41,6 +41,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 store.setContext(container.mainContext)
                 // 同时设置 NoteSaveManager 的 context
                 NoteSaveManager.shared.setContext(container.mainContext)
+                
+                // 执行自动备份（每天首次启动）
+                await AutoBackupManager.shared.performAutoBackup(context: container.mainContext)
             }
         }
 

@@ -407,7 +407,7 @@ extension NSTextView {
         let originalString = self.string as NSString
 
         // 收集所有复选框行（包括非复选框行作为分隔）
-        var allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String)] = []
+        var allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString)] = []
         var currentLocation = 0
 
         while currentLocation < originalString.length {
@@ -422,28 +422,33 @@ extension NSTextView {
                         lineRange: lineRange,
                         isCheckbox: true,
                         isChecked: checkboxInfo.isChecked,
-                        content: ""
+                        content: "",
+                        originalText: NSAttributedString()
                     ))
                     currentLocation = lineRange.upperBound
                     continue
                 }
                 let contentRange = NSRange(location: checkboxInfo.checkboxEnd, length: contentLength)
                 let content = originalString.substring(with: contentRange).trimmingCharacters(in: .whitespacesAndNewlines)
+                // 保留复选框后的原始富文本（用于重建时保持格式）
+                let originalText = self.attributedString().attributedSubstring(from: contentRange)
 
                 allLines.append((
                     lineRange: lineRange,
                     isCheckbox: true,
                     isChecked: checkboxInfo.isChecked,
-                    content: content
+                    content: content,
+                    originalText: originalText
                 ))
             } else {
-                // 非复选框行
-                let content = originalString.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+                // 非复选框行 - 保留完整的原始富文本
+                let originalText = self.attributedString().attributedSubstring(from: lineRange)
                 allLines.append((
                     lineRange: lineRange,
                     isCheckbox: false,
                     isChecked: false,
-                    content: content
+                    content: "",
+                    originalText: originalText
                 ))
             }
 
@@ -451,16 +456,16 @@ extension NSTextView {
         }
 
         // 找到需要排序的复选框区域（连续的复选框行）
-        var regions: [(startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String)])] = []
+        var regions: [(startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString)])] = []
         var currentRegionStart: Int?
-        var currentRegionLines: [(isChecked: Bool, content: String)] = []
+        var currentRegionLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)] = []
 
         for (index, line) in allLines.enumerated() {
             if line.isCheckbox {
                 if currentRegionStart == nil {
                     currentRegionStart = index
                 }
-                currentRegionLines.append((line.isChecked, line.content))
+                currentRegionLines.append((line.isChecked, line.content, line.originalText))
             } else {
                 // 遇到非复选框行，结束当前区域
                 if let start = currentRegionStart, currentRegionLines.count > 1 {
@@ -491,7 +496,7 @@ extension NSTextView {
     }
 
     /// 排序单个区域内的复选框
-    private func sortRegion(allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String)], region: (startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String)]), originalString: NSString) {
+    private func sortRegion(allLines: [(lineRange: NSRange, isCheckbox: Bool, isChecked: Bool, content: String, originalText: NSAttributedString)], region: (startIndex: Int, endIndex: Int, lines: [(isChecked: Bool, content: String, originalText: NSAttributedString)]), originalString: NSString) {
         let uncheckedLines = region.lines.filter { !$0.isChecked }
         let checkedLines = region.lines.filter { $0.isChecked }
 
@@ -555,28 +560,60 @@ extension NSTextView {
     }
 
     /// 构建排序后的复选框富文本
-    private func buildSortedCheckboxAttributedText(uncheckedLines: [(isChecked: Bool, content: String)], checkedLines: [(isChecked: Bool, content: String)]) -> NSAttributedString {
+    private func buildSortedCheckboxAttributedText(uncheckedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)], checkedLines: [(isChecked: Bool, content: String, originalText: NSAttributedString)]) -> NSAttributedString {
         let result = NSMutableAttributedString()
 
+        // 辅助函数：清理文本（移除开头空格和结尾换行）
+        func cleanText(_ attrString: NSAttributedString) -> NSAttributedString {
+            let mutable = NSMutableAttributedString(attributedString: attrString)
+            // 移除开头的空格
+            if mutable.string.hasPrefix(" ") {
+                mutable.deleteCharacters(in: NSRange(location: 0, length: 1))
+            }
+            // 移除结尾的换行符
+            while mutable.string.hasSuffix("\n") || mutable.string.hasSuffix("\r") {
+                let length = mutable.string.hasSuffix("\r\n") ? 2 : 1
+                mutable.deleteCharacters(in: NSRange(location: mutable.length - length, length: length))
+            }
+            return mutable
+        }
+
         // 添加未完成的行
-        for line in uncheckedLines {
+        for (index, line) in uncheckedLines.enumerated() {
             let attachment = CheckboxTextAttachment(checked: false)
             let attrString = NSAttributedString(attachment: attachment)
             result.append(attrString)
-            result.append(NSAttributedString(string: " \(line.content)\n"))
+            // 保留原始富文本格式
+            if line.originalText.length > 0 {
+                let cleanedText = cleanText(line.originalText)
+                result.append(NSAttributedString(string: " "))
+                result.append(cleanedText)
+            } else {
+                result.append(NSAttributedString(string: " \(line.content)"))
+            }
+            // 只在不是最后一行时添加换行符
+            if index < uncheckedLines.count - 1 || !checkedLines.isEmpty {
+                result.append(NSAttributedString(string: "\n"))
+            }
         }
 
         // 添加已完成的行
-        for line in checkedLines {
+        for (index, line) in checkedLines.enumerated() {
             let attachment = CheckboxTextAttachment(checked: true)
             let attrString = NSAttributedString(attachment: attachment)
             result.append(attrString)
-            result.append(NSAttributedString(string: " \(line.content)\n"))
-        }
-
-        // 移除最后一个换行符
-        if result.string.hasSuffix("\n"), result.length > 0 {
-            result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1))
+            // 保留原始富文本格式
+            if line.originalText.length > 0 {
+                let cleanedText = cleanText(line.originalText)
+                result.append(NSAttributedString(string: " "))
+                result.append(cleanedText)
+            } else {
+                result.append(NSAttributedString(string: " \(line.content)"))
+            }
+            // 只在不是最后一行时添加换行符
+            if index < checkedLines.count - 1 {
+                result.append(NSAttributedString(string: "\n"))
+            }
         }
 
         return result
