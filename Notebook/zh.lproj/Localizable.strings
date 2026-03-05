@@ -212,6 +212,7 @@
 "shortcut_toggle_italic" = "斜体";
 "shortcut_toggle_underline" = "下划线";
 "shortcut_toggle_strikethrough" = "删除线";
+"shortcut_clear_formatting" = "清除格式";
 "shortcut_toggle_checkbox" = "复选框";
 "shortcut_increase_indent" = "增加缩进";
 "shortcut_decrease_indent" = "减少缩进";

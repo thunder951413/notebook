@@ -97,47 +97,53 @@ struct RadialMenuContent: View {
     }
     
     private func executeAction(_ action: ShortcutAction) {
-        // 发送对应的快捷键事件
-        switch action {
-        case .newNote:
-            ShortcutActionHandler.shared.newNotePublisher.send()
-        case .saveNote:
-            ShortcutActionHandler.shared.saveNotePublisher.send()
-        case .deleteNote:
-            ShortcutActionHandler.shared.deleteNotePublisher.send()
-        case .toggleBold:
-            ShortcutActionHandler.shared.toggleBoldPublisher.send()
-        case .toggleItalic:
-            ShortcutActionHandler.shared.toggleItalicPublisher.send()
-        case .toggleUnderline:
-            ShortcutActionHandler.shared.toggleUnderlinePublisher.send()
-        case .toggleStrikethrough:
-            ShortcutActionHandler.shared.toggleStrikethroughPublisher.send()
-        case .toggleCheckbox:
-            ShortcutActionHandler.shared.toggleCheckboxPublisher.send()
-        case .increaseIndent:
-            ShortcutActionHandler.shared.increaseIndentPublisher.send()
-        case .decreaseIndent:
-            ShortcutActionHandler.shared.decreaseIndentPublisher.send()
-        case .toggleBulletList:
-            ShortcutActionHandler.shared.toggleBulletListPublisher.send()
-        case .toggleNumberedList:
-            ShortcutActionHandler.shared.toggleNumberedListPublisher.send()
-        case .toggleAIAssistant:
-            ShortcutActionHandler.shared.toggleAIAssistantPublisher.send()
-        case .insertConversation:
-            ShortcutActionHandler.shared.insertConversationPublisher.send()
-        case .toggleMarkdownPreview:
-            ShortcutActionHandler.shared.toggleMarkdownPreviewPublisher.send()
-        case .toggleTableOfContents:
-            ShortcutActionHandler.shared.toggleTableOfContentsPublisher.send()
-        case .focusSearch:
-            ShortcutActionHandler.shared.focusSearchPublisher.send()
-        case .focusEditor:
-            ShortcutActionHandler.shared.focusEditorPublisher.send()
-        }
-        
+        // 先关闭环形菜单，让主窗口重新成为 key window
         manager.hide()
+        
+        // 延迟一帧发送事件，确保主窗口已经重新成为 key window
+        DispatchQueue.main.async {
+            // 发送对应的快捷键事件
+            switch action {
+            case .newNote:
+                ShortcutActionHandler.shared.newNotePublisher.send()
+            case .saveNote:
+                ShortcutActionHandler.shared.saveNotePublisher.send()
+            case .deleteNote:
+                ShortcutActionHandler.shared.deleteNotePublisher.send()
+            case .toggleBold:
+                ShortcutActionHandler.shared.toggleBoldPublisher.send()
+            case .toggleItalic:
+                ShortcutActionHandler.shared.toggleItalicPublisher.send()
+            case .toggleUnderline:
+                ShortcutActionHandler.shared.toggleUnderlinePublisher.send()
+            case .toggleStrikethrough:
+                ShortcutActionHandler.shared.toggleStrikethroughPublisher.send()
+            case .clearFormatting:
+                ShortcutActionHandler.shared.clearFormattingPublisher.send()
+            case .toggleCheckbox:
+                ShortcutActionHandler.shared.toggleCheckboxPublisher.send()
+            case .increaseIndent:
+                ShortcutActionHandler.shared.increaseIndentPublisher.send()
+            case .decreaseIndent:
+                ShortcutActionHandler.shared.decreaseIndentPublisher.send()
+            case .toggleBulletList:
+                ShortcutActionHandler.shared.toggleBulletListPublisher.send()
+            case .toggleNumberedList:
+                ShortcutActionHandler.shared.toggleNumberedListPublisher.send()
+            case .toggleAIAssistant:
+                ShortcutActionHandler.shared.toggleAIAssistantPublisher.send()
+            case .insertConversation:
+                ShortcutActionHandler.shared.insertConversationPublisher.send()
+            case .toggleMarkdownPreview:
+                ShortcutActionHandler.shared.toggleMarkdownPreviewPublisher.send()
+            case .toggleTableOfContents:
+                ShortcutActionHandler.shared.toggleTableOfContentsPublisher.send()
+            case .focusSearch:
+                ShortcutActionHandler.shared.focusSearchPublisher.send()
+            case .focusEditor:
+                ShortcutActionHandler.shared.focusEditorPublisher.send()
+            }
+        }
     }
 }
 

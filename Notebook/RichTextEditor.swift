@@ -503,9 +503,15 @@ final class RichTextController: ObservableObject {
     }
 
     func clearFormatting() {
-        guard let tv = textView else { return }
+        guard let tv = textView else {
+            print("[RichTextController] clearFormatting: textView is nil")
+            return
+        }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
+        if range.length == 0 {
+            print("[RichTextController] clearFormatting: no selection")
+            return
+        }
 
         // 检查范围是否有效
         let textLength = tv.string.utf16.count
@@ -514,11 +520,15 @@ final class RichTextController: ObservableObject {
             return
         }
 
-        let defaultFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        // 从临近文字获取格式（优先从选中范围前的文字获取，如果没有则从后的文字获取）
+        let (inheritedFont, inheritedColor) = getFormatFromNearbyText(for: range, in: tv)
+        
+        // 如果没有继承到格式，使用默认字体
+        let targetFont = inheritedFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
         tv.textStorage?.beginEditing()
 
-        // 遍历选中范围内的每个字符，保留段落样式，只清除字体格式
+        // 遍历选中范围内的每个字符，保留段落样式，应用继承的格式
         var currentLocation = range.location
         let endLocation = range.location + range.length
 
@@ -543,12 +553,17 @@ final class RichTextController: ObservableObject {
             // 确保范围有效
             guard actualRange.length > 0 else { break }
 
-            // 保留段落样式，只更新字体
+            // 保留段落样式，应用继承的格式
             var newAttributes: [NSAttributedString.Key: Any] = [:]
             if let paragraphStyle = attributes[.paragraphStyle] {
                 newAttributes[.paragraphStyle] = paragraphStyle
             }
-            newAttributes[.font] = defaultFont
+            newAttributes[.font] = targetFont
+            
+            // 应用继承的颜色（如果有）
+            if let color = inheritedColor {
+                newAttributes[.foregroundColor] = color
+            }
 
             textStorage.setAttributes(newAttributes, range: actualRange)
 
@@ -557,6 +572,44 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.endEditing()
         tv.didChangeText()
+    }
+    
+    /// 从临近文字获取格式（用于清除格式时继承）
+    private func getFormatFromNearbyText(for range: NSRange, in textView: NSTextView) -> (font: NSFont?, color: NSColor?) {
+        guard let textStorage = textView.textStorage else { return (nil, nil) }
+        
+        var font: NSFont?
+        var color: NSColor?
+        
+        // 优先从选中范围前的文字获取格式
+        if range.location > 0 {
+            let previousLocation = range.location - 1
+            if previousLocation < textStorage.length {
+                var effectiveRange: NSRange = NSRange(location: NSNotFound, length: 0)
+                
+                // 获取字体
+                font = textStorage.attribute(.font, at: previousLocation, effectiveRange: &effectiveRange) as? NSFont
+                
+                // 获取颜色
+                color = textStorage.attribute(.foregroundColor, at: previousLocation, effectiveRange: &effectiveRange) as? NSColor
+            }
+        }
+        
+        // 如果前面没有文字，尝试从选中范围后的文字获取
+        if font == nil && color == nil {
+            let nextLocation = range.location + range.length
+            if nextLocation < textStorage.length {
+                var effectiveRange: NSRange = NSRange(location: NSNotFound, length: 0)
+                
+                // 获取字体
+                font = textStorage.attribute(.font, at: nextLocation, effectiveRange: &effectiveRange) as? NSFont
+                
+                // 获取颜色
+                color = textStorage.attribute(.foregroundColor, at: nextLocation, effectiveRange: &effectiveRange) as? NSColor
+            }
+        }
+        
+        return (font, color)
     }
 
     func insertImage() {
@@ -868,7 +921,7 @@ class RichTextView: NSTextView {
         return true
     }
 
-    /// 处理回车键 - 自动继承列表符号
+    /// 处理回车键 - 自动继承列表符号和格式
     private func handleReturnKey() -> Bool {
         let nsString = self.string as NSString
         let selectedRange = self.selectedRange()
@@ -894,7 +947,149 @@ class RichTextView: NSTextView {
             return handleNumberedListReturn(numberRange: numberRange, currentNumber: number, currentLineRange: currentLineRange, nsString: nsString)
         }
 
+        // 5. 没有列表，继承上一行的格式（字号、字体、颜色）
+        return handleFormatInheritance(currentLineRange: currentLineRange)
+    }
+
+    /// 处理格式继承 - 从当前行或上一行获取格式
+    private func handleFormatInheritance(currentLineRange: NSRange) -> Bool {
+        guard let textStorage = self.textStorage else { return false }
+
+        // 获取要继承的格式
+        let (font, color) = getFormatToInherit(from: currentLineRange)
+
+        // 如果有格式需要继承
+        if font != nil || color != nil {
+            // 插入换行
+            self.insertNewline(nil)
+
+            // 获取新行的位置
+            let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
+
+            // 应用继承的格式到新行
+            applyFormat(font: font, color: color, to: newLineRange)
+
+            return true
+        }
+
         return false
+    }
+
+    /// 获取要继承的格式（从当前行或上一行）
+    private func getFormatToInherit(from lineRange: NSRange) -> (font: NSFont?, color: NSColor?) {
+        guard let textStorage = self.textStorage else { return (nil, nil) }
+
+        var effectiveRange: NSRange = NSRange(location: NSNotFound, length: 0)
+        var font: NSFont?
+        var color: NSColor?
+
+        // 尝试从当前行获取格式（跳过列表符号部分）
+        if lineRange.location < textStorage.length {
+            // 查找行中第一个非列表符号的字符位置
+            let lineContent = (self.string as NSString).substring(with: lineRange)
+            var contentStartOffset = 0
+
+            // 跳过常见的列表前缀
+            let prefixes = ["☐ ", "☑ ", "• ", "- ", "* "]
+            for prefix in prefixes {
+                if lineContent.hasPrefix(prefix) {
+                    contentStartOffset = prefix.count
+                    break
+                }
+            }
+            // 检查数字编号 (如 "1. ", "2. ")
+            if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
+               let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.count)) {
+                contentStartOffset = match.range.length
+            }
+
+            let contentLocation = lineRange.location + contentStartOffset
+            if contentLocation < textStorage.length {
+                font = textStorage.attribute(.font, at: contentLocation, effectiveRange: &effectiveRange) as? NSFont
+                color = textStorage.attribute(.foregroundColor, at: contentLocation, effectiveRange: &effectiveRange) as? NSColor
+            }
+        }
+
+        // 如果当前行没有自定义颜色（不是默认颜色），尝试从上一行获取
+        // 检查是否是默认颜色（黑色或白色，根据主题）
+        let isDefaultColor: Bool
+        if let currentColor = color {
+            // 检查是否是默认文字颜色（黑色或白色）
+            let isDark = self.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let defaultColor = isDark ? NSColor.white : NSColor.black
+            isDefaultColor = currentColor.isEqual(to: defaultColor) || 
+                            currentColor.isEqual(to: NSColor.textColor)
+        } else {
+            isDefaultColor = true
+        }
+
+        // 如果没有自定义格式，尝试从上一行获取
+        if (font == nil || isDefaultColor) && lineRange.location > 0 {
+            // 获取上一行的范围
+            let previousLocation = lineRange.location - 1
+            if previousLocation < textStorage.length {
+                let previousLineRange = (self.string as NSString).lineRange(for: NSRange(location: previousLocation, length: 0))
+
+                // 从上一行获取格式（跳过列表符号）
+                let prevLineContent = (self.string as NSString).substring(with: previousLineRange)
+                var prevContentOffset = 0
+                let prefixes = ["☐ ", "☑ ", "• ", "- ", "* "]
+                for prefix in prefixes {
+                    if prevLineContent.hasPrefix(prefix) {
+                        prevContentOffset = prefix.count
+                        break
+                    }
+                }
+                if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
+                   let match = regex.firstMatch(in: prevLineContent, options: [], range: NSRange(location: 0, length: prevLineContent.count)) {
+                    prevContentOffset = match.range.length
+                }
+
+                let prevContentLocation = previousLineRange.location + prevContentOffset
+                if prevContentLocation < textStorage.length {
+                    // 优先使用上一行的颜色（如果是自定义颜色）
+                    if let prevColor = textStorage.attribute(.foregroundColor, at: prevContentLocation, effectiveRange: &effectiveRange) as? NSColor {
+                        // 检查上一行是否是自定义颜色
+                        let isPrevDefault: Bool
+                        let isDark = self.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        let defaultColor = isDark ? NSColor.white : NSColor.black
+                        isPrevDefault = prevColor.isEqual(to: defaultColor) ||
+                                        prevColor.isEqual(to: NSColor.textColor)
+
+                        if !isPrevDefault {
+                            color = prevColor
+                        }
+                    }
+
+                    // 如果当前没有字体，使用上一行的字体
+                    if font == nil {
+                        font = textStorage.attribute(.font, at: prevContentLocation, effectiveRange: &effectiveRange) as? NSFont
+                    }
+                }
+            }
+        }
+
+        return (font, color)
+    }
+
+    /// 应用格式到指定范围
+    private func applyFormat(font: NSFont?, color: NSColor?, to range: NSRange) {
+        guard let textStorage = self.textStorage else { return }
+
+        if range.location < textStorage.length {
+            textStorage.beginEditing()
+
+            if let font = font {
+                textStorage.addAttribute(.font, value: font, range: range)
+            }
+            if let color = color {
+                textStorage.addAttribute(.foregroundColor, value: color, range: range)
+            }
+
+            textStorage.endEditing()
+        }
+
+        self.didChangeText()
     }
 
     /// 处理复选框回车
@@ -911,6 +1106,9 @@ class RichTextView: NSTextView {
             self.didChangeText()
             return true
         } else {
+            // 获取要继承的格式
+            let (font, color) = getFormatToInherit(from: currentLineRange)
+
             // 有内容，先插入换行
             self.insertNewline(nil)
 
@@ -922,7 +1120,10 @@ class RichTextView: NSTextView {
             mutableAttr.append(NSAttributedString(string: " "))
 
             self.textStorage?.insert(mutableAttr, at: newLineRange.location)
-            self.didChangeText()
+
+            // 应用继承的格式
+            applyFormat(font: font, color: color, to: newLineRange)
+
             return true
         }
     }
@@ -941,13 +1142,19 @@ class RichTextView: NSTextView {
             self.didChangeText()
             return true
         } else {
+            // 获取要继承的格式
+            let (font, color) = getFormatToInherit(from: currentLineRange)
+
             // 有内容，先插入换行
             self.insertNewline(nil)
 
             // 在新行插入相同的前缀
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
             self.textStorage?.insert(NSAttributedString(string: prefix), at: newLineRange.location)
-            self.didChangeText()
+
+            // 应用继承的格式
+            applyFormat(font: font, color: color, to: newLineRange)
+
             return true
         }
     }
@@ -968,6 +1175,9 @@ class RichTextView: NSTextView {
             self.didChangeText()
             return true
         } else {
+            // 获取要继承的格式
+            let (font, color) = getFormatToInherit(from: currentLineRange)
+
             // 有内容，先插入换行
             self.insertNewline(nil)
 
@@ -976,7 +1186,10 @@ class RichTextView: NSTextView {
             let nextNumber = currentNumber + 1
             let newPrefix = "\(nextNumber). "
             self.textStorage?.insert(NSAttributedString(string: newPrefix), at: newLineRange.location)
-            self.didChangeText()
+
+            // 应用继承的格式
+            applyFormat(font: font, color: color, to: newLineRange)
+
             return true
         }
     }

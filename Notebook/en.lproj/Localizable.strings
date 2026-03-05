@@ -212,6 +212,7 @@
 "shortcut_toggle_italic" = "Italic";
 "shortcut_toggle_underline" = "Underline";
 "shortcut_toggle_strikethrough" = "Strikethrough";
+"shortcut_clear_formatting" = "Clear Formatting";
 "shortcut_toggle_checkbox" = "Checkbox";
 "shortcut_increase_indent" = "Increase Indent";
 "shortcut_decrease_indent" = "Decrease Indent";

@@ -309,6 +309,9 @@ struct ContentView: View {
         .onReceive(ShortcutActionHandler.shared.toggleStrikethroughPublisher) { _ in
             richTextController.toggleStrikethrough()
         }
+        .onReceive(ShortcutActionHandler.shared.clearFormattingPublisher) { _ in
+            richTextController.clearFormatting()
+        }
         // 列表与缩进快捷键
         .onReceive(ShortcutActionHandler.shared.toggleCheckboxPublisher) { _ in
             richTextController.toggleCheckbox()

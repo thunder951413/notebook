@@ -19,6 +19,7 @@ final class ShortcutActionHandler: ObservableObject {
     let toggleItalicPublisher = PassthroughSubject<Void, Never>()
     let toggleUnderlinePublisher = PassthroughSubject<Void, Never>()
     let toggleStrikethroughPublisher = PassthroughSubject<Void, Never>()
+    let clearFormattingPublisher = PassthroughSubject<Void, Never>()
     let toggleCheckboxPublisher = PassthroughSubject<Void, Never>()
     let increaseIndentPublisher = PassthroughSubject<Void, Never>()
     let decreaseIndentPublisher = PassthroughSubject<Void, Never>()
@@ -173,6 +174,8 @@ final class ShortcutActionHandler: ObservableObject {
             toggleUnderlinePublisher.send()
         case .toggleStrikethrough:
             toggleStrikethroughPublisher.send()
+        case .clearFormatting:
+            clearFormattingPublisher.send()
         case .toggleCheckbox:
             toggleCheckboxPublisher.send()
         case .increaseIndent:

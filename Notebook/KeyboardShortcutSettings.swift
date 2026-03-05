@@ -12,6 +12,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case toggleItalic = "toggle_italic"
     case toggleUnderline = "toggle_underline"
     case toggleStrikethrough = "toggle_strikethrough"
+    case clearFormatting = "clear_formatting"
     case toggleCheckbox = "toggle_checkbox"
     case increaseIndent = "increase_indent"
     case decreaseIndent = "decrease_indent"
@@ -35,6 +36,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleItalic: return l10n(L10nKeys.Shortcut.toggleItalic)
         case .toggleUnderline: return l10n(L10nKeys.Shortcut.toggleUnderline)
         case .toggleStrikethrough: return l10n(L10nKeys.Shortcut.toggleStrikethrough)
+        case .clearFormatting: return l10n(L10nKeys.Shortcut.clearFormatting)
         case .toggleCheckbox: return l10n(L10nKeys.Shortcut.toggleCheckbox)
         case .increaseIndent: return l10n(L10nKeys.Shortcut.increaseIndent)
         case .decreaseIndent: return l10n(L10nKeys.Shortcut.decreaseIndent)
@@ -58,6 +60,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleItalic: return "italic"
         case .toggleUnderline: return "underline"
         case .toggleStrikethrough: return "strikethrough"
+        case .clearFormatting: return "eraser"
         case .toggleCheckbox: return "checkmark.square"
         case .increaseIndent: return "increase.indent"
         case .decreaseIndent: return "decrease.indent"
@@ -81,6 +84,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleItalic: return KeyboardShortcut(key: .i, modifiers: [.command])
         case .toggleUnderline: return KeyboardShortcut(key: .u, modifiers: [.command])
         case .toggleStrikethrough: return nil
+        case .clearFormatting: return nil
         case .toggleCheckbox: return nil
         case .increaseIndent: return KeyboardShortcut(key: .tab, modifiers: [])
         case .decreaseIndent: return KeyboardShortcut(key: .tab, modifiers: [.shift])
@@ -252,6 +256,7 @@ extension L10nKeys {
         static let toggleItalic = "shortcut_toggle_italic"
         static let toggleUnderline = "shortcut_toggle_underline"
         static let toggleStrikethrough = "shortcut_toggle_strikethrough"
+        static let clearFormatting = "shortcut_clear_formatting"
         static let toggleCheckbox = "shortcut_toggle_checkbox"
         static let increaseIndent = "shortcut_increase_indent"
         static let decreaseIndent = "shortcut_decrease_indent"
