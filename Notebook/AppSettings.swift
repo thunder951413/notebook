@@ -30,6 +30,7 @@ final class AppSettings: ObservableObject {
         static let editorFontName = "editor_font_name" // 编辑器字体名称
         static let editorFontSize = "editor_font_size" // 编辑器字号
         static let tagsFilterMode = "tags_filter_mode" // 标签过滤模式: "current" 当前目录, "all" 所有标签
+        static let editorFontColor = "editor_font_color" // 编辑器字体颜色
     }
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
@@ -180,6 +181,72 @@ final class AppSettings: ObservableObject {
             return NSFont.systemFont(ofSize: size)
         }
         return NSFont(name: editorFontName, size: size) ?? NSFont.systemFont(ofSize: size)
+    }
+
+    // MARK: - 编辑器字体颜色
+
+    /// 主题颜色（5行 x 10列）
+    static let themeColors: [(color: Color, name: String)] = [
+        // 第1行 - 浅色
+        (Color.white, "白色"), (Color.black, "黑色"), (Color(red: 0.95, green: 0.95, blue: 0.95), "浅灰1"),
+        (Color(red: 0.2, green: 0.4, blue: 0.6), "深蓝"), (Color(red: 0.4, green: 0.6, blue: 0.8), "中蓝"),
+        (Color(red: 0.8, green: 0.3, blue: 0.3), "砖红"), (Color(red: 0.6, green: 0.8, blue: 0.4), "黄绿"),
+        (Color(red: 0.6, green: 0.4, blue: 0.8), "紫罗兰"), (Color(red: 0.4, green: 0.8, blue: 0.9), "天蓝"),
+        (Color(red: 1.0, green: 0.6, blue: 0.3), "浅橙"),
+        // 第2行
+        (Color(red: 0.95, green: 0.95, blue: 0.95), "浅灰2"), (Color(red: 0.5, green: 0.5, blue: 0.5), "中灰"),
+        (Color(red: 0.85, green: 0.9, blue: 0.75), "淡绿"), (Color(red: 0.75, green: 0.85, blue: 0.95), "淡蓝"),
+        (Color(red: 0.9, green: 0.95, blue: 1.0), "极淡蓝"), (Color(red: 1.0, green: 0.9, blue: 0.9), "淡红"),
+        (Color(red: 0.95, green: 1.0, blue: 0.9), "淡黄绿"), (Color(red: 0.95, green: 0.9, blue: 0.95), "淡紫"),
+        (Color(red: 0.9, green: 0.95, blue: 1.0), "冰蓝"), (Color(red: 1.0, green: 0.95, blue: 0.9), "奶油"),
+        // 第3行
+        (Color(red: 0.9, green: 0.9, blue: 0.9), "浅灰3"), (Color(red: 0.4, green: 0.4, blue: 0.4), "深灰"),
+        (Color(red: 0.7, green: 0.75, blue: 0.6), "橄榄淡"), (Color(red: 0.6, green: 0.75, blue: 0.9), "天蓝淡"),
+        (Color(red: 0.85, green: 0.75, blue: 0.75), "玫瑰淡"), (Color(red: 0.8, green: 0.9, blue: 0.7), "苹果淡"),
+        (Color(red: 0.85, green: 0.8, blue: 0.9), "薰衣草"), (Color(red: 0.75, green: 0.9, blue: 0.95), "青蓝淡"),
+        (Color(red: 1.0, green: 0.85, blue: 0.75), "桃色"),
+        // 第4行
+        (Color(red: 0.75, green: 0.75, blue: 0.75), "中灰2"), (Color(red: 0.3, green: 0.3, blue: 0.3), "炭灰"),
+        (Color(red: 0.5, green: 0.55, blue: 0.35), "橄榄"), (Color(red: 0.4, green: 0.55, blue: 0.75), "钢蓝"),
+        (Color(red: 0.75, green: 0.55, blue: 0.55), "玫瑰"), (Color(red: 0.7, green: 0.85, blue: 0.55), "草绿"),
+        (Color(red: 0.75, green: 0.7, blue: 0.85), "淡紫罗兰"), (Color(red: 0.55, green: 0.8, blue: 0.9), "天青"),
+        (Color(red: 0.95, green: 0.7, blue: 0.55), "蜜瓜"),
+        // 第5行
+        (Color(red: 0.6, green: 0.6, blue: 0.6), "深灰2"), (Color(red: 0.15, green: 0.15, blue: 0.15), "近黑"),
+        (Color(red: 0.35, green: 0.4, blue: 0.2), "深橄榄"), (Color(red: 0.2, green: 0.35, blue: 0.55), "深海蓝"),
+        (Color(red: 0.65, green: 0.35, blue: 0.35), "深砖红"), (Color(red: 0.5, green: 0.65, blue: 0.3), "深黄绿"),
+        (Color(red: 0.55, green: 0.4, blue: 0.7), "深紫"), (Color(red: 0.3, green: 0.6, blue: 0.7), "深青"),
+        (Color(red: 0.8, green: 0.5, blue: 0.25), "深橙"),
+    ]
+
+    /// 标准色
+    static let standardColors: [Color] = [
+        Color(red: 0.8, green: 0.0, blue: 0.0),    // 深红
+        Color(red: 1.0, green: 0.0, blue: 0.0),    // 红
+        Color(red: 1.0, green: 0.5, blue: 0.0),    // 橙
+        Color(red: 1.0, green: 1.0, blue: 0.0),    // 黄
+        Color(red: 0.5, green: 1.0, blue: 0.0),    // 黄绿
+        Color(red: 0.0, green: 0.8, blue: 0.0),    // 绿
+        Color(red: 0.0, green: 1.0, blue: 1.0),    // 青
+        Color(red: 0.0, green: 0.5, blue: 1.0),    // 蓝
+        Color(red: 0.0, green: 0.0, blue: 0.5),    // 深蓝
+        Color(red: 0.5, green: 0.0, blue: 1.0),    // 紫
+    ]
+
+    /// 编辑器字体颜色（默认跟随系统 textColor）
+    var editorFontColor: NSColor {
+        get {
+            guard let colorData = defaults.data(forKey: Keys.editorFontColor),
+                  let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: colorData) else {
+                return NSColor.textColor // 默认跟随系统
+            }
+            return color
+        }
+        set {
+            if let colorData = try? NSKeyedArchiver.archivedData(withRootObject: newValue, requiringSecureCoding: false) {
+                defaults.set(colorData, forKey: Keys.editorFontColor)
+            }
+        }
     }
 
     // MARK: - 标签过滤模式

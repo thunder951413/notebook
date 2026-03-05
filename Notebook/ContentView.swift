@@ -1175,6 +1175,9 @@ private struct EditorTopBarView: View {
             .foregroundStyle(.secondary)
             .frame(minWidth: 40)
 
+            // 字体颜色选择
+            colorPickerMenu
+
             Divider().frame(height: 18)
 
             // 列表菜单（合并所有列表类型）
@@ -1368,6 +1371,117 @@ private struct EditorTopBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(AppColors.editorBackground(colorScheme))
+    }
+    
+    // MARK: - 颜色选择器
+    
+    @State private var showingColorPicker = false
+    
+    private var colorPickerMenu: some View {
+        Button {
+            showingColorPicker.toggle()
+        } label: {
+            // A 图标带下划线
+            ZStack(alignment: .bottom) {
+                Text("A")
+                    .font(.system(size: 14, weight: .medium))
+                Rectangle()
+                    .fill(Color.blue)
+                    .frame(width: 12, height: 2)
+                    .offset(y: 2)
+            }
+            .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .frame(minWidth: 20)
+        .popover(isPresented: $showingColorPicker, arrowEdge: .bottom) {
+            ColorPickerPopover(controller: controller, isPresented: $showingColorPicker)
+        }
+    }
+}
+
+// MARK: - 颜色选择器弹窗
+
+private struct ColorPickerPopover: View {
+    @ObservedObject var controller: RichTextController
+    @Binding var isPresented: Bool
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // 自动颜色
+            Button {
+                controller.setFontColor(NSColor.textColor)
+                isPresented = false
+            } label: {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.black)
+                        .frame(width: 16, height: 16)
+                    Text("自动")
+                        .foregroundColor(.primary)
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            
+            Divider()
+            
+            // 主题颜色网格
+            VStack(spacing: 4) {
+                ForEach(0..<5) { row in
+                    HStack(spacing: 4) {
+                        ForEach(0..<10) { col in
+                            let index = row * 10 + col
+                            if index < AppSettings.themeColors.count {
+                                let colorItem = AppSettings.themeColors[index]
+                                Button {
+                                    controller.setFontColor(NSColor(colorItem.color))
+                                    isPresented = false
+                                } label: {
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(colorItem.color)
+                                        .frame(width: 18, height: 18)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Divider()
+            
+            Text("标准色")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            // 标准色网格
+            HStack(spacing: 4) {
+                ForEach(0..<AppSettings.standardColors.count, id: \.self) { index in
+                    let color = AppSettings.standardColors[index]
+                    Button {
+                        controller.setFontColor(NSColor(color))
+                        isPresented = false
+                    } label: {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(color)
+                            .frame(width: 18, height: 18)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 2)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 220)
     }
 }
 

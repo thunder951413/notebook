@@ -300,6 +300,30 @@ final class RichTextController: ObservableObject {
         tv.didChangeText()
     }
 
+    /// 设置选中区域的字体颜色
+    func setFontColor(_ color: NSColor) {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        tv.textStorage?.beginEditing()
+        tv.textStorage?.addAttribute(.foregroundColor, value: color, range: range)
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
+    }
+
+    /// 获取选中区域的字体颜色
+    func getSelectedFontColor() -> NSColor? {
+        guard let tv = textView,
+              let textStorage = tv.textStorage else { return nil }
+        let range = tv.selectedRange()
+        if range.length == 0 { return nil }
+
+        var effectiveRange: NSRange = NSRange(location: NSNotFound, length: 0)
+        let color = textStorage.attribute(.foregroundColor, at: range.location, effectiveRange: &effectiveRange) as? NSColor
+        return color
+    }
+
     func toggleCheckbox() {
         guard let tv = textView else { return }
         tv.toggleCheckboxForCurrentLine()
@@ -1043,7 +1067,8 @@ struct RichTextEditor: NSViewRepresentable {
 
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
-        textView.textColor = (scheme == .dark) ? .white : .black
+        // 不要设置 textColor，让富文本属性控制颜色
+        // textView.textColor = (scheme == .dark) ? .white : .black
         // 使用用户设置的字体
         textView.font = AppSettings.shared.editorFont
         textView.delegate = context.coordinator
@@ -1072,7 +1097,8 @@ struct RichTextEditor: NSViewRepresentable {
         let scheme = colorScheme
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
-        textView.textColor = (scheme == .dark) ? .white : .black
+        // 不要设置 textColor，让富文本属性控制颜色
+        // textView.textColor = (scheme == .dark) ? .white : .black
         nsView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
 
         // 关键：切换笔记时强制刷新内容；同一笔记编辑时避免 update 覆盖用户输入。
