@@ -87,7 +87,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleBulletList: return nil
         case .toggleNumberedList: return nil
         case .toggleAIAssistant: return KeyboardShortcut(key: .a, modifiers: [.command, .shift])
-        case .insertConversation: return KeyboardShortcut(key: .returnKey, modifiers: [.command])
+        case .insertConversation: return nil
         case .toggleMarkdownPreview: return KeyboardShortcut(key: .m, modifiers: [.command, .shift])
         case .toggleTableOfContents: return KeyboardShortcut(key: .t, modifiers: [.command, .shift])
         case .focusSearch: return KeyboardShortcut(key: .f, modifiers: [.command, .shift])

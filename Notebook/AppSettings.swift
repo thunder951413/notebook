@@ -27,6 +27,9 @@ final class AppSettings: ObservableObject {
         static let startupBehavior = "startup_behavior" // "restore", "none", "all_notes"
         static let accentColor = "accent_color" // 主题色
         static let iCloudSyncEnabled = "icloud_sync_enabled"
+        static let editorFontName = "editor_font_name" // 编辑器字体名称
+        static let editorFontSize = "editor_font_size" // 编辑器字号
+        static let tagsFilterMode = "tags_filter_mode" // 标签过滤模式: "current" 当前目录, "all" 所有标签
     }
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
@@ -121,6 +124,90 @@ final class AppSettings: ObservableObject {
         Color(red: 0.0, green: 0.73, blue: 0.83),   // 青色
         Color(red: 0.4, green: 0.4, blue: 0.4),     // 灰色
     ]
+
+    // MARK: - 编辑器字体设置
+
+    /// 可用的字体列表
+    static let availableFonts: [(name: String, displayName: String)] = [
+        ("System", "系统默认"),
+        ("PingFang SC", "苹方"),
+        ("Heiti SC", "黑体"),
+        ("Songti SC", "宋体"),
+        ("Kaiti SC", "楷体"),
+        ("Hiragino Sans GB", "冬青黑体"),
+        ("Helvetica Neue", "Helvetica Neue"),
+        ("Arial", "Arial"),
+        ("Times New Roman", "Times New Roman"),
+        ("Menlo", "Menlo"),
+        ("Monaco", "Monaco"),
+    ]
+
+    /// 字号范围
+    static let minFontSize: CGFloat = 10
+    static let maxFontSize: CGFloat = 32
+    static let defaultFontSize: CGFloat = 15
+
+    /// 编辑器字体名称
+    var editorFontName: String {
+        get {
+            return defaults.string(forKey: Keys.editorFontName) ?? "System"
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.editorFontName)
+            // 发送通知让编辑器更新字体
+            NotificationCenter.default.post(name: .editorFontDidChange, object: nil)
+        }
+    }
+
+    /// 编辑器字号
+    var editorFontSize: CGFloat {
+        get {
+            let size = defaults.double(forKey: Keys.editorFontSize)
+            return size == 0 ? AppSettings.defaultFontSize : CGFloat(size)
+        }
+        set {
+            let clampedSize = min(max(newValue, AppSettings.minFontSize), AppSettings.maxFontSize)
+            defaults.set(Double(clampedSize), forKey: Keys.editorFontSize)
+            // 发送通知让编辑器更新字体
+            NotificationCenter.default.post(name: .editorFontDidChange, object: nil)
+        }
+    }
+
+    /// 获取编辑器字体
+    var editorFont: NSFont {
+        let size = editorFontSize
+        if editorFontName == "System" {
+            return NSFont.systemFont(ofSize: size)
+        }
+        return NSFont(name: editorFontName, size: size) ?? NSFont.systemFont(ofSize: size)
+    }
+
+    // MARK: - 标签过滤模式
+
+    enum TagsFilterMode: String, CaseIterable {
+        case currentFolder = "current"  // 只显示当前目录下的标签
+        case allTags = "all"            // 显示所有标签
+
+        var displayName: String {
+            switch self {
+            case .currentFolder: return "当前目录"
+            case .allTags: return "所有标签"
+            }
+        }
+    }
+
+    var tagsFilterMode: TagsFilterMode {
+        get {
+            guard let rawValue = defaults.string(forKey: Keys.tagsFilterMode),
+                  let mode = TagsFilterMode(rawValue: rawValue) else {
+                return .currentFolder  // 默认只显示当前目录的标签
+            }
+            return mode
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.tagsFilterMode)
+        }
+    }
 
     var accentColor: Color {
         get {

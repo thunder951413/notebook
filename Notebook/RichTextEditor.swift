@@ -142,6 +142,19 @@ final class RichTextController: ObservableObject {
         tv.didChangeText()
     }
 
+    /// 获取当前选中区域的字体信息
+    func getSelectedFontInfo() -> (name: String, size: CGFloat)? {
+        guard let tv = textView else { return nil }
+        let range = tv.selectedRange()
+        if range.length == 0 { return nil }
+
+        guard let font = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont else {
+            return nil
+        }
+
+        return (font.fontName, font.pointSize)
+    }
+
     /// 在当前光标位置插入文本
     func insertTextAtCursor(_ text: String) {
         guard let tv = textView else { return }
@@ -240,6 +253,51 @@ final class RichTextController: ObservableObject {
         tv.textStorage?.addAttributes([
             .font: NSFont.systemFont(ofSize: size, weight: .semibold)
         ], range: range.length == 0 ? NSRange(location: 0, length: tv.string.utf16.count) : range)
+    }
+
+    // MARK: - 字体设置
+
+    /// 设置选中区域的字体
+    func setFont(name: String) {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 获取当前字体
+        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let fontSize = currentFont.pointSize
+
+        // 创建新字体
+        let newFont: NSFont
+        if name == "System" {
+            newFont = NSFont.systemFont(ofSize: fontSize)
+        } else {
+            newFont = NSFont(name: name, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
+        }
+
+        tv.textStorage?.beginEditing()
+        tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
+    }
+
+    /// 设置选中区域的字号
+    func setFontSize(_ size: CGFloat) {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 { return }
+
+        // 获取当前字体
+        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+
+        // 创建新字体，保持其他属性
+        let fontManager = NSFontManager.shared
+        let newFont = fontManager.convert(currentFont, toSize: size)
+
+        tv.textStorage?.beginEditing()
+        tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        tv.textStorage?.endEditing()
+        tv.didChangeText()
     }
 
     func toggleCheckbox() {
@@ -986,10 +1044,11 @@ struct RichTextEditor: NSViewRepresentable {
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
         textView.textColor = (scheme == .dark) ? .white : .black
-        textView.font = NSFont.systemFont(ofSize: 15)
+        // 使用用户设置的字体
+        textView.font = AppSettings.shared.editorFont
         textView.delegate = context.coordinator
         textView.pasteCoordinator = context.coordinator
-        
+
         textView.textStorage?.setAttributedString(attributedText)
 
         textView.isSelectable = true
@@ -1060,9 +1119,34 @@ struct RichTextEditor: NSViewRepresentable {
         /// 延迟更新的内容
         private var pendingContent: NSAttributedString?
 
+        private var fontChangeCancellable: AnyCancellable?
+
         init(attributedText: Binding<NSAttributedString>, controller: RichTextController) {
             _attributedText = attributedText
             self.controller = controller
+            super.init()
+
+            // 监听字体变化通知
+            fontChangeCancellable = NotificationCenter.default.publisher(for: .editorFontDidChange)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.applyFontSetting()
+                }
+        }
+
+        /// 应用字体设置到当前文本视图
+        private func applyFontSetting() {
+            guard let textView = controller?.textView else { return }
+            let font = AppSettings.shared.editorFont
+            textView.font = font
+
+            // 更新整个文本存储的字体
+            textView.textStorage?.enumerateAttributes(in: NSRange(location: 0, length: textView.textStorage?.length ?? 0), options: []) { attrs, range, stop in
+                // 只更新没有特定字体属性的文本（保留用户手动设置的字体）
+                var newAttrs = attrs
+                newAttrs[.font] = font
+                textView.textStorage?.setAttributes(newAttrs, range: range)
+            }
         }
         
         /// 检查是否有 marked text（输入法正在编辑）

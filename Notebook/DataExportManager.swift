@@ -32,6 +32,9 @@ final class DataExportManager {
         // 导出应用设置
         try exportAppSettings(to: exportDir)
 
+        // 导出 AI 配置
+        try exportAIConfig(to: exportDir)
+
         // 创建 zip 文件
         let zipURL = tempDir.appendingPathComponent("NotebookConfig_\(formattedDate()).zip")
         try createZip(from: exportDir, to: zipURL)
@@ -58,6 +61,9 @@ final class DataExportManager {
         try exportKeyboardShortcuts(to: configDir)
         try exportRadialMenuSettings(to: configDir)
         try exportAppSettings(to: configDir)
+
+        // 导出 AI 配置
+        try exportAIConfig(to: configDir)
 
         // 导出所有笔记
         try await exportAllNotes(to: exportDir.appendingPathComponent("Notes"), context: context)
@@ -190,6 +196,25 @@ final class DataExportManager {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try PropertyListSerialization.data(fromPropertyList: config, format: .xml, options: 0)
             .write(to: configURL)
+    }
+
+    private func exportAIConfig(to directory: URL) throws {
+        let aiManager = AIConfigManager.shared
+
+        // 导出 AI 服务配置
+        let configsData = try JSONEncoder().encode(aiManager.configs)
+        let configsURL = directory.appendingPathComponent("AIConfigs.json")
+        try configsData.write(to: configsURL)
+
+        // 导出选中的配置 ID
+        let selectedConfig: [String: String?] = [
+            "selectedConfigID": aiManager.selectedConfigID?.uuidString
+        ]
+        let selectedConfigURL = directory.appendingPathComponent("AISelectedConfig.plist")
+        try PropertyListSerialization.data(fromPropertyList: selectedConfig, format: .xml, options: 0)
+            .write(to: selectedConfigURL)
+
+        print("[Export] 已导出 \(aiManager.configs.count) 个 AI 配置")
     }
 
     private func exportAllNotes(to directory: URL, context: ModelContext) async throws {
@@ -609,6 +634,7 @@ final class DataExportManager {
         try importKeyboardShortcuts(from: extractDir)
         try importRadialMenuSettings(from: extractDir)
         try importAppSettings(from: extractDir)
+        try importAIConfig(from: extractDir)
 
         // 清理
         try? FileManager.default.removeItem(at: extractDir)
@@ -644,6 +670,7 @@ final class DataExportManager {
             try importKeyboardShortcuts(from: configDir)
             try importRadialMenuSettings(from: configDir)
             try importAppSettings(from: configDir)
+            try importAIConfig(from: configDir)
         }
 
         // 导入笔记
@@ -954,6 +981,32 @@ final class DataExportManager {
         let defaults = UserDefaults.standard
         for (key, value) in settings {
             defaults.set(value, forKey: key)
+        }
+    }
+
+    private func importAIConfig(from directory: URL) throws {
+        // 导入 AI 服务配置
+        let configsURL = directory.appendingPathComponent("AIConfigs.json")
+        if FileManager.default.fileExists(atPath: configsURL.path) {
+            let configsData = try Data(contentsOf: configsURL)
+            if let configs = try? JSONDecoder().decode([AIServiceConfig].self, from: configsData) {
+                // 保存到 UserDefaults
+                if let encoded = try? JSONEncoder().encode(configs) {
+                    UserDefaults.standard.set(encoded, forKey: "ai.serviceConfigs")
+                }
+                print("[Import] 已导入 \(configs.count) 个 AI 配置")
+            }
+        }
+
+        // 导入选中的配置 ID
+        let selectedConfigURL = directory.appendingPathComponent("AISelectedConfig.plist")
+        if FileManager.default.fileExists(atPath: selectedConfigURL.path) {
+            guard let selectedConfig = try PropertyListSerialization.propertyList(from: Data(contentsOf: selectedConfigURL), format: nil) as? [String: String?] else {
+                return
+            }
+            if let selectedID = selectedConfig["selectedConfigID"] {
+                UserDefaults.standard.set(selectedID, forKey: "ai.selectedConfigID")
+            }
         }
     }
 

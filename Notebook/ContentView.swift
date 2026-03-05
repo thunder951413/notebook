@@ -447,6 +447,7 @@ private struct SidebarView: View {
     @State private var showingTagManagement = false
     @State private var isFoldersExpanded: Bool = AppSettings.shared.isFoldersExpanded
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
+    @State private var tagsFilterMode: AppSettings.TagsFilterMode = AppSettings.shared.tagsFilterMode
 
     var body: some View {
         GeometryReader { geometry in
@@ -588,10 +589,16 @@ private struct SidebarView: View {
         .padding(.top, 8)
     }
 
-    /// 根据当前选中的文件夹获取应该显示的标签
+    /// 根据当前选中的文件夹和过滤模式获取应该显示的标签
     /// - 选择"全部笔记"时显示所有标签
-    /// - 选择其他文件夹时只显示该文件夹下笔记拥有的标签
+    /// - 选择"所有标签"模式时显示所有标签
+    /// - 选择"当前目录"模式时只显示该文件夹下笔记拥有的标签
     private var filteredTags: [Tag] {
+        // 如果选择显示所有标签，直接返回所有标签
+        if tagsFilterMode == .allTags {
+            return store.tags
+        }
+        
         // 获取当前文件夹下的所有笔记（不考虑标签筛选）
         let notesInCurrentFolder: [Note]
         
@@ -637,6 +644,18 @@ private struct SidebarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    // 标签过滤模式切换按钮（在设置齿轮左侧）
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            tagsFilterMode = tagsFilterMode == .allTags ? .currentFolder : .allTags
+                            AppSettings.shared.tagsFilterMode = tagsFilterMode
+                        }
+                    } label: {
+                        Text(tagsFilterMode == .allTags ? "All" : "Cur")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
                     Button {
                         showingTagManagement = true
                     } label: {
@@ -1052,6 +1071,14 @@ private struct EditorTopBarView: View {
         ]
     }
 
+    /// 获取字体的显示名称
+    private func fontDisplayName(for fontName: String) -> String {
+        if let font = AppSettings.availableFonts.first(where: { $0.name == fontName }) {
+            return font.displayName
+        }
+        return "系统默认"
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             // 格式菜单（合并所有文本样式）
@@ -1087,11 +1114,66 @@ private struct EditorTopBarView: View {
                     Label(l10n(L10nKeys.Editor.clearFormatting), systemImage: "textformat.clear")
                 }
             } label: {
-                Image(systemName: "textformat")
+                Text("格式")
+                    .font(.caption)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
+            .frame(minWidth: 40)
+
+            // 字体选择
+            Menu {
+                ForEach(AppSettings.availableFonts, id: \.name) { font in
+                    Button {
+                        controller.setFont(name: font.name)
+                    } label: {
+                        HStack {
+                            Text(font.displayName)
+                            // 显示当前选中区域使用的字体
+                            if let fontInfo = controller.getSelectedFontInfo() {
+                                let currentFontName = fontInfo.name
+                                let isMatch = (font.name == "System" && (currentFontName.contains(".AppleSystemUIFont") || currentFontName.contains("SF"))) ||
+                                             currentFontName.contains(font.name)
+                                if isMatch {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text("字体")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .frame(minWidth: 40)
+
+            // 字号选择
+            Menu {
+                ForEach(Array(stride(from: Int(AppSettings.minFontSize), through: Int(AppSettings.maxFontSize), by: 1)), id: \.self) { size in
+                    Button {
+                        controller.setFontSize(CGFloat(size))
+                    } label: {
+                        HStack {
+                            Text("\(size)pt")
+                            // 显示当前选中区域使用的字号
+                            if let fontInfo = controller.getSelectedFontInfo(),
+                               Int(fontInfo.size) == size {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text("字号")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .frame(minWidth: 40)
 
             Divider().frame(height: 18)
 
