@@ -76,6 +76,7 @@ struct SettingsGeneralView: View {
     @State private var isChoosingDirectory = false
     @State private var errorMessage: String?
     @State private var showRestartAlert = false
+    @State private var showPasswordSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
 
     var body: some View {
@@ -212,6 +213,35 @@ struct SettingsGeneralView: View {
 
                 Divider()
 
+                // 密码设置
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("安全设置")
+                            .font(.title2)
+                            .bold()
+
+                        Spacer()
+
+                        Button {
+                            showPasswordSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: PasswordManager.shared.hasPassword ? "lock.fill" : "lock.open")
+                                Text(PasswordManager.shared.hasPassword ? "修改密码" : "设置密码")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Text(PasswordManager.shared.hasPassword
+                         ? "已启用密码保护"
+                         : "未设置密码")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider()
+
                 // 关于/帮助信息
                 VStack(alignment: .leading, spacing: 12) {
                     Text(l10n(L10nKeys.About.title))
@@ -263,6 +293,9 @@ struct SettingsGeneralView: View {
             }
         } message: {
             Text(l10n(L10nKeys.Settings.restartAlertMessage))
+        }
+        .sheet(isPresented: $showPasswordSheet) {
+            PasswordSettingsView()
         }
     }
 

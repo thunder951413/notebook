@@ -15,6 +15,7 @@ struct SettingsRootView: View {
     @State private var showBackupRestoreSheet = false
     @State private var showClearBackupConfirmation = false
     @State private var showAutoBackupSheet = false
+    @State private var showPasswordSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
 
     var body: some View {
@@ -228,6 +229,35 @@ struct SettingsRootView: View {
                 }
             }
 
+            Divider()
+
+            // 密码设置
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("安全设置")
+                        .font(.title2)
+                        .bold()
+
+                    Spacer()
+
+                    Button {
+                        showPasswordSheet = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: PasswordManager.shared.hasPassword ? "lock.fill" : "lock.open")
+                            Text(PasswordManager.shared.hasPassword ? "修改密码" : "设置密码")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Text(PasswordManager.shared.hasPassword
+                     ? "已启用密码保护"
+                     : "未设置密码")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
                 if let errorMessage {
                     Text(errorMessage)
                         .foregroundColor(.red)
@@ -254,6 +284,9 @@ struct SettingsRootView: View {
         .sheet(isPresented: $showAutoBackupSheet) {
             AutoBackupSettingsView()
                 .frame(minWidth: 600, minHeight: 500)
+        }
+        .sheet(isPresented: $showPasswordSheet) {
+            PasswordSettingsView()
         }
         .alert(l10n(L10nKeys.Settings.clearBackupsTitle), isPresented: $showClearBackupConfirmation) {
             Button(l10n(L10nKeys.common.cancel), role: .cancel) {}

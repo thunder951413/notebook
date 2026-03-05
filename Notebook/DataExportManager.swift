@@ -65,6 +65,15 @@ final class DataExportManager {
         // 导出 AI 配置
         try exportAIConfig(to: configDir)
 
+        // 导出密码配置
+        try exportPasswordConfig(to: configDir)
+
+        // 导出加密文件夹配置
+        try exportEncryptedFolders(to: configDir)
+
+        // 导出加密相关数据
+        try exportEncryptedData(to: configDir)
+
         // 导出所有笔记
         try await exportAllNotes(to: exportDir.appendingPathComponent("Notes"), context: context)
 
@@ -215,6 +224,51 @@ final class DataExportManager {
             .write(to: selectedConfigURL)
 
         print("[Export] 已导出 \(aiManager.configs.count) 个 AI 配置")
+    }
+
+    private func exportPasswordConfig(to directory: URL) throws {
+        // 导出密码配置（哈希和盐值）
+        if let passwordConfig = PasswordManager.shared.exportPasswordConfig() {
+            let passwordURL = directory.appendingPathComponent("PasswordConfig.plist")
+            try PropertyListSerialization.data(fromPropertyList: passwordConfig, format: .xml, options: 0)
+                .write(to: passwordURL)
+            print("[Export] 已导出密码配置")
+        } else {
+            print("[Export] 没有设置密码，跳过导出")
+        }
+    }
+
+    private func exportEncryptedFolders(to directory: URL) throws {
+        // 从 UserDefaults 导出加密文件夹列表
+        let foldersKey = "encryptedFolders"
+        let folderNamesKey = "encrypted_folder_names"
+        
+        var config: [String: Any] = [:]
+        
+        // 导出加密文件夹列表
+        if let foldersData = UserDefaults.standard.data(forKey: foldersKey) {
+            config["foldersData"] = foldersData.base64EncodedString()
+        }
+        
+        // 导出文件夹名称映射
+        if let folderNames = UserDefaults.standard.dictionary(forKey: folderNamesKey) {
+            config["folderNames"] = folderNames
+        }
+        
+        let configURL = directory.appendingPathComponent("EncryptedFolders.plist")
+        try PropertyListSerialization.data(fromPropertyList: config, format: .xml, options: 0)
+            .write(to: configURL)
+        print("[Export] 已导出加密文件夹配置")
+    }
+
+    private func exportEncryptedData(to directory: URL) throws {
+        // 导出加密相关数据（加密笔记ID列表和映射关系）
+        let encryptedData = EncryptedFolderManager.shared.exportEncryptedData()
+        
+        let configURL = directory.appendingPathComponent("EncryptedData.plist")
+        try PropertyListSerialization.data(fromPropertyList: encryptedData, format: .xml, options: 0)
+            .write(to: configURL)
+        print("[Export] 已导出加密数据")
     }
 
     private func exportAllNotes(to directory: URL, context: ModelContext) async throws {
@@ -671,6 +725,9 @@ final class DataExportManager {
             try importRadialMenuSettings(from: configDir)
             try importAppSettings(from: configDir)
             try importAIConfig(from: configDir)
+            try importPasswordConfig(from: configDir)
+            try importEncryptedFolders(from: configDir)
+            try importEncryptedData(from: configDir)
         }
 
         // 导入笔记
@@ -1008,6 +1065,67 @@ final class DataExportManager {
                 UserDefaults.standard.set(selectedID, forKey: "ai.selectedConfigID")
             }
         }
+    }
+
+    private func importPasswordConfig(from directory: URL) throws {
+        let passwordURL = directory.appendingPathComponent("PasswordConfig.plist")
+        guard FileManager.default.fileExists(atPath: passwordURL.path) else {
+            print("[Import] 未找到密码配置文件")
+            return
+        }
+
+        guard let passwordConfig = try PropertyListSerialization.propertyList(from: Data(contentsOf: passwordURL), format: nil) as? [String: String] else {
+            print("[Import] 密码配置格式错误")
+            return
+        }
+
+        if PasswordManager.shared.importPasswordConfig(passwordConfig) {
+            print("[Import] 已导入密码配置")
+        } else {
+            print("[Import Warning] 密码配置导入失败")
+        }
+    }
+
+    private func importEncryptedFolders(from directory: URL) throws {
+        let configURL = directory.appendingPathComponent("EncryptedFolders.plist")
+        guard FileManager.default.fileExists(atPath: configURL.path) else {
+            print("[Import] 未找到加密文件夹配置")
+            return
+        }
+
+        guard let config = try PropertyListSerialization.propertyList(from: Data(contentsOf: configURL), format: nil) as? [String: Any] else {
+            print("[Import] 加密文件夹配置格式错误")
+            return
+        }
+
+        // 导入加密文件夹列表
+        if let foldersDataString = config["foldersData"] as? String,
+           let foldersData = Data(base64Encoded: foldersDataString) {
+            UserDefaults.standard.set(foldersData, forKey: "encryptedFolders")
+        }
+
+        // 导入文件夹名称映射
+        if let folderNames = config["folderNames"] as? [String: String] {
+            UserDefaults.standard.set(folderNames, forKey: "encrypted_folder_names")
+        }
+
+        print("[Import] 已导入加密文件夹配置")
+    }
+
+    private func importEncryptedData(from directory: URL) throws {
+        let configURL = directory.appendingPathComponent("EncryptedData.plist")
+        guard FileManager.default.fileExists(atPath: configURL.path) else {
+            print("[Import] 未找到加密数据配置")
+            return
+        }
+
+        guard let encryptedData = try PropertyListSerialization.propertyList(from: Data(contentsOf: configURL), format: nil) as? [String: Any] else {
+            print("[Import] 加密数据格式错误")
+            return
+        }
+
+        EncryptedFolderManager.shared.importEncryptedData(encryptedData)
+        print("[Import] 已导入加密数据")
     }
 
     private func importAllNotes(from directory: URL, context: ModelContext) async throws {

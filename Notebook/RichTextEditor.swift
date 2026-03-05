@@ -1072,11 +1072,22 @@ class RichTextView: NSTextView {
         return (font, color)
     }
 
-    /// 应用格式到指定范围
+    /// 应用格式到指定范围，同时设置 typingAttributes 以便新输入继承格式
     private func applyFormat(font: NSFont?, color: NSColor?, to range: NSRange) {
         guard let textStorage = self.textStorage else { return }
 
-        if range.location < textStorage.length {
+        // 设置 typingAttributes，让新输入的文字继承格式
+        var newTypingAttributes = self.typingAttributes
+        if let font = font {
+            newTypingAttributes[.font] = font
+        }
+        if let color = color {
+            newTypingAttributes[.foregroundColor] = color
+        }
+        self.typingAttributes = newTypingAttributes
+
+        // 如果范围有效，也应用到现有文本
+        if range.location < textStorage.length && range.length > 0 {
             textStorage.beginEditing()
 
             if let font = font {
@@ -1121,8 +1132,13 @@ class RichTextView: NSTextView {
 
             self.textStorage?.insert(mutableAttr, at: newLineRange.location)
 
-            // 应用继承的格式
-            applyFormat(font: font, color: color, to: newLineRange)
+            // 应用继承的格式到复选框之后的内容（跳过复选框和空格）
+            let contentStartLocation = newLineRange.location + mutableAttr.length
+            let contentRange = NSRange(location: contentStartLocation, length: 0)
+            applyFormat(font: font, color: color, to: contentRange)
+            
+            // 设置光标位置在复选框之后
+            self.setSelectedRange(NSRange(location: contentStartLocation, length: 0))
 
             return true
         }
@@ -1152,8 +1168,13 @@ class RichTextView: NSTextView {
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
             self.textStorage?.insert(NSAttributedString(string: prefix), at: newLineRange.location)
 
-            // 应用继承的格式
-            applyFormat(font: font, color: color, to: newLineRange)
+            // 应用继承的格式到前缀之后的内容
+            let contentStartLocation = newLineRange.location + prefix.count
+            let contentRange = NSRange(location: contentStartLocation, length: 0)
+            applyFormat(font: font, color: color, to: contentRange)
+            
+            // 设置光标位置在前缀之后
+            self.setSelectedRange(NSRange(location: contentStartLocation, length: 0))
 
             return true
         }
@@ -1187,8 +1208,13 @@ class RichTextView: NSTextView {
             let newPrefix = "\(nextNumber). "
             self.textStorage?.insert(NSAttributedString(string: newPrefix), at: newLineRange.location)
 
-            // 应用继承的格式
-            applyFormat(font: font, color: color, to: newLineRange)
+            // 应用继承的格式到编号之后的内容
+            let contentStartLocation = newLineRange.location + newPrefix.count
+            let contentRange = NSRange(location: contentStartLocation, length: 0)
+            applyFormat(font: font, color: color, to: contentRange)
+            
+            // 设置光标位置在编号之后
+            self.setSelectedRange(NSRange(location: contentStartLocation, length: 0))
 
             return true
         }

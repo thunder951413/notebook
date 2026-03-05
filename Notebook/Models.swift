@@ -72,6 +72,7 @@ class NoteStore: ObservableObject {
     @Published var notes: [Note] = []
     @Published var folders: [Folder] = []
     @Published var tags: [Tag] = []
+    @Published var encryptedFolders: [EncryptedFolder] = []
     
     /// 用于菜单栏 Popover 跳转的选中笔记 ID
     @Published var selectedNoteId: UUID?
@@ -80,6 +81,13 @@ class NoteStore: ObservableObject {
     
     private var modelContext: ModelContext?
     private var cancellables = Set<AnyCancellable>()
+    
+    private let encryptedFoldersKey = "encrypted_folders"
+    
+    /// 获取所有加密笔记
+    var encryptedNotes: [Note] {
+        return notes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
+    }
     
     init() {
         // 延迟初始化，等 SwiftData 注入后再 fetch
@@ -147,11 +155,16 @@ class NoteStore: ObservableObject {
             let allNoteIDs = entities.map { $0.id }
             AttachmentManager.shared.cleanupOrphanedAttachments(allNoteIDs: allNoteIDs)
             
-            // 修复笔记的 folderID 和 folderName 不一致问题
+            // 修复笔记的 folderID 和 folderName 不一致问题（跳过加密文件夹笔记）
             var needsSave = false
             for entity in entities {
                 let folderName = entity.folderName
                 let folderID = entity.folderID
+                
+                // 跳过加密文件夹笔记（folderName 以 "🔒 " 开头）
+                if folderName.hasPrefix("🔒 ") {
+                    continue
+                }
                 
                 // folderName 不为空时，检查 folderID 是否正确
                 if !folderName.isEmpty {
@@ -265,6 +278,10 @@ class NoteStore: ObservableObject {
             let tagDescriptor = FetchDescriptor<TagEntity>(sortBy: [SortDescriptor(\.sortOrder)])
             let tagEntities = try context.fetch(tagDescriptor)
             self.tags = tagEntities.map { Tag(id: $0.id, name: $0.name, color: $0.color, sortOrder: $0.sortOrder, createdAt: $0.createdAt) }
+            
+            // 加载加密文件夹
+            loadEncryptedFolders()
+            
         } catch {
             print("Fetch failed: \(error)")
         }
@@ -787,6 +804,155 @@ class NoteStore: ObservableObject {
             try? context.save()
             fetchData()
         }
+    }
+    
+    // MARK: - Encrypted Folder Management
+    
+    /// 加载加密文件夹
+    func loadEncryptedFolders() {
+        if let data = UserDefaults.standard.data(forKey: encryptedFoldersKey),
+           let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: data) {
+            self.encryptedFolders = folders.sorted { $0.order < $1.order }
+        }
+    }
+    
+    /// 保存加密文件夹
+    private func saveEncryptedFolders() {
+        if let data = try? JSONEncoder().encode(encryptedFolders) {
+            UserDefaults.standard.set(data, forKey: encryptedFoldersKey)
+        }
+    }
+    
+    /// 创建加密文件夹
+    func createEncryptedFolder(name: String) {
+        let maxOrder = encryptedFolders.map { $0.order }.max() ?? 0
+        let newFolder = EncryptedFolder(name: name, order: maxOrder + 1)
+        encryptedFolders.append(newFolder)
+        saveEncryptedFolders()
+        
+        // 保存文件夹名称到 UserDefaults 以便查找
+        let key = "encrypted_folder_name_\(newFolder.id.uuidString)"
+        UserDefaults.standard.set(name, forKey: key)
+    }
+    
+    /// 删除加密文件夹
+    func deleteEncryptedFolder(id: UUID) {
+        // 将该文件夹中的笔记移出加密状态
+        let notesInFolder = notes.filter { 
+            EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == id 
+        }
+        for note in notesInFolder {
+            moveNote(id: note.id, toFolderID: nil, toFolderName: "未分类")
+        }
+        
+        encryptedFolders.removeAll { $0.id == id }
+        saveEncryptedFolders()
+        
+        // 删除文件夹名称
+        let key = "encrypted_folder_name_\(id.uuidString)"
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+    
+    /// 重命名加密文件夹
+    func renameEncryptedFolder(id: UUID, newName: String) {
+        if let index = encryptedFolders.firstIndex(where: { $0.id == id }) {
+            encryptedFolders[index].name = newName
+            saveEncryptedFolders()
+        }
+        
+        // 更新文件夹名称
+        let key = "encrypted_folder_name_\(id.uuidString)"
+        UserDefaults.standard.set(newName, forKey: key)
+        
+        // 更新该文件夹中所有笔记的 folder 名称
+        let notesInFolder = notes.filter { 
+            EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == id 
+        }
+        for var note in notesInFolder {
+            // 使用 encryptNote 来更新笔记信息
+            EncryptedFolderManager.shared.encryptNote(&note, to: id)
+            // 更新 folder 名称
+            note.folder = "🔒 " + newName
+            // 保存到数据库
+            moveNote(id: note.id, toFolderID: note.folderID, toFolderName: note.folder)
+        }
+    }
+    
+    /// 排序加密文件夹
+    func reorderEncryptedFolders(fromOffsets: IndexSet, toOffset: Int) {
+        var reordered = encryptedFolders
+        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        for (index, folder) in reordered.enumerated() {
+            if let idx = encryptedFolders.firstIndex(where: { $0.id == folder.id }) {
+                encryptedFolders[idx].order = index
+            }
+        }
+        saveEncryptedFolders()
+    }
+    
+    /// 创建加密笔记
+    func createEncryptedNote(in folderID: UUID? = nil) -> Note? {
+        guard let context = modelContext else { return nil }
+        
+        // 先确定加密文件夹的信息
+        let targetFolderID: UUID?
+        let encryptedFolderName: String
+        if let folderID = folderID,
+           let folder = encryptedFolders.first(where: { $0.id == folderID }) {
+            targetFolderID = folderID
+            encryptedFolderName = "🔒 " + folder.name
+        } else {
+            // 默认放入第一个加密文件夹
+            if let firstFolder = encryptedFolders.first {
+                targetFolderID = firstFolder.id
+                encryptedFolderName = "🔒 " + firstFolder.name
+            } else {
+                // 没有加密文件夹，创建一个默认的
+                let defaultFolderID = UUID()
+                targetFolderID = defaultFolderID
+                encryptedFolderName = "🔒 加密笔记"
+                // 保存文件夹名称
+                let key = "encrypted_folder_name_\(defaultFolderID.uuidString)"
+                UserDefaults.standard.set("加密笔记", forKey: key)
+            }
+        }
+        
+        // 先创建普通笔记
+        let entity = NoteEntity(
+            title: "",
+            folderID: targetFolderID,
+            folderName: encryptedFolderName
+        )
+        context.insert(entity)
+        try? context.save()
+        
+        // 重新加载数据
+        fetchData()
+        
+        // 获取刚创建的笔记并转换为加密笔记
+        if var note = notes.first(where: { $0.id == entity.id }) {
+            // 使用 EncryptedFolderManager 来标记为加密笔记
+            EncryptedFolderManager.shared.encryptNote(&note, to: targetFolderID)
+            
+            // 更新数据库中的笔记信息（folderID 和 folderName 已被 encryptNote 修改）
+            let idToMatch = note.id
+            let descriptor = FetchDescriptor<NoteEntity>(
+                predicate: #Predicate { $0.id == idToMatch }
+            )
+            if let entityToUpdate = try? context.fetch(descriptor).first {
+                entityToUpdate.folderID = note.folderID
+                entityToUpdate.folderName = note.folder
+                try? context.save()
+            }
+            
+            // 重新加载以获取更新后的数据
+            fetchData()
+            
+            // 返回更新后的笔记
+            return notes.first(where: { $0.id == note.id })
+        }
+        
+        return nil
     }
 }
 

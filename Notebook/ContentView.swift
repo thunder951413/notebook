@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var searchText: String = ""
     @State private var selectedFolder: String = l10n(L10nKeys.Folder.allNotes)
     @State private var selectedTagID: UUID?
+    @State private var selectedEncryptedFolderID: UUID? = nil
     @State private var searchInAllFolders: Bool = false
     @StateObject private var richTextController = RichTextController()
 
@@ -31,6 +32,12 @@ struct ContentView: View {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         var notes = store.notes
         print("[Search] Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
+
+        // 0. 排除加密文件夹的笔记（除非当前正在查看加密文件夹）
+        if selectedFolder != EncryptedFolderView.folderName {
+            notes = notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
+            print("[Search] After excluding encrypted notes: \(notes.count) notes")
+        }
 
         // 1. 标签筛选
         if let tagID = selectedTagID {
@@ -42,6 +49,7 @@ struct ContentView: View {
         // 如果有搜索词且选择搜索所有文件夹，则跳过文件夹筛选
         let shouldApplyFolderFilter = selectedFolder != l10n(L10nKeys.Folder.allNotes) &&
                                        selectedFolder != "未分类" &&
+                                       selectedFolder != EncryptedFolderView.folderName &&
                                        !(searchInAllFolders && !q.isEmpty)
         if shouldApplyFolderFilter {
             // 通过文件夹名称找到对应的文件夹ID，然后通过ID筛选
@@ -60,6 +68,17 @@ struct ContentView: View {
                 return !existingFolderIDs.contains(folderID)
             }
             print("[Search] After uncategorized filter: \(notes.count) notes")
+        } else if selectedFolder == EncryptedFolderView.folderName {
+            // 显示加密文件夹中的笔记
+            notes = notes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
+            // 如果选择了特定的加密子文件夹，进一步筛选
+            if let encryptedFolderID = selectedEncryptedFolderID {
+                notes = notes.filter {
+                    EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == encryptedFolderID
+                }
+                print("[Search] After encrypted subfolder filter: \(notes.count) notes")
+            }
+            print("[Search] After encrypted folder filter: \(notes.count) notes")
         } else if searchInAllFolders && !q.isEmpty {
             print("[Search] Skipping folder filter (searching all folders)")
         }
@@ -134,7 +153,13 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(selectedFolder: $selectedFolder, selectedTagID: $selectedTagID, selection: $selection, onCreateNote: createNote)
+            SidebarView(
+                selectedFolder: $selectedFolder,
+                selectedTagID: $selectedTagID,
+                selection: $selection,
+                selectedEncryptedFolderID: $selectedEncryptedFolderID,
+                onCreateNote: createNote
+            )
         } content: {
             NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
@@ -349,6 +374,16 @@ struct ContentView: View {
     }
 
     private func createNote() {
+        // 检查是否在加密文件夹中
+        if selectedFolder == EncryptedFolderManager.folderName,
+           let encryptedFolderID = selectedEncryptedFolderID {
+            // 在加密文件夹的子目录中创建加密笔记
+            if let newNote = store.createEncryptedNote(in: encryptedFolderID) {
+                selection = newNote.id
+            }
+            return
+        }
+        
         let folderName = selectedFolder == l10n(L10nKeys.Folder.allNotes) ? l10n(L10nKeys.Folder.uncategorized) : selectedFolder
         let folderID = store.folders.first { $0.name == folderName }?.id
         store.addNote(title: l10n(L10nKeys.Note.new), folderID: folderID, folderName: folderName)
@@ -444,23 +479,30 @@ private struct SidebarView: View {
     @Binding var selectedFolder: String
     @Binding var selectedTagID: UUID?
     @Binding var selection: Note.ID?
+    @Binding var selectedEncryptedFolderID: UUID?
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
     @State private var showingTagManagement = false
+    @State private var showingEncryptedFolderManagement = false
+    @State private var showingEncryptedFolder = false
     @State private var isFoldersExpanded: Bool = AppSettings.shared.isFoldersExpanded
+    @State private var isEncryptedFolderExpanded: Bool = false
+    @State private var isEncryptedFolderUnlocked: Bool = false
+    @State private var shouldOpenManagementAfterUnlock: Bool = false
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
     @State private var tagsFilterMode: AppSettings.TagsFilterMode = AppSettings.shared.tagsFilterMode
 
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                // 主内容区域：全部笔记 + 未分类 + 文件夹（可滚动）
+                // 主内容区域：全部笔记 + 未分类 + 文件夹 + 加密文件夹（可滚动）
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         allNotesRow
                         uncategorizedNotesRow
                         foldersSection
+                        encryptedFolderRow
                     }
                 }
                 .frame(maxHeight: .infinity)
@@ -596,29 +638,35 @@ private struct SidebarView: View {
     /// - 选择"全部笔记"时显示所有标签
     /// - 选择"所有标签"模式时显示所有标签
     /// - 选择"当前目录"模式时只显示该文件夹下笔记拥有的标签
+    /// - 加密笔记的标签永远不会显示
     private var filteredTags: [Tag] {
-        // 如果选择显示所有标签，直接返回所有标签
+        // 排除加密笔记（加密笔记的标签不显示）
+        let nonEncryptedNotes = store.notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
+        
+        // 如果选择显示所有标签，只显示非加密笔记的标签
         if tagsFilterMode == .allTags {
-            return store.tags
+            let tagIDsInNonEncryptedNotes = Set(nonEncryptedNotes.flatMap { $0.tagIDs })
+            return store.tags.filter { tagIDsInNonEncryptedNotes.contains($0.id) }
         }
         
-        // 获取当前文件夹下的所有笔记（不考虑标签筛选）
+        // 获取当前文件夹下的所有笔记（不考虑标签筛选，且排除加密笔记）
         let notesInCurrentFolder: [Note]
         
         if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
-            // 全部笔记：显示所有标签
-            return store.tags
+            // 全部笔记：只显示非加密笔记的标签
+            let tagIDsInNonEncryptedNotes = Set(nonEncryptedNotes.flatMap { $0.tagIDs })
+            return store.tags.filter { tagIDsInNonEncryptedNotes.contains($0.id) }
         } else if selectedFolder == "未分类" {
-            // 未分类：显示未分类笔记中的标签
+            // 未分类：显示未分类笔记中的标签（排除加密笔记）
             let existingFolderIDs = Set(store.folders.map { $0.id })
-            notesInCurrentFolder = store.notes.filter { note in
+            notesInCurrentFolder = nonEncryptedNotes.filter { note in
                 guard let folderID = note.folderID else { return true }
                 return !existingFolderIDs.contains(folderID)
             }
         } else {
             // 特定文件夹：显示该文件夹下的笔记标签
             if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
-                notesInCurrentFolder = store.notes.filter { $0.folderID == folder.id }
+                notesInCurrentFolder = nonEncryptedNotes.filter { $0.folderID == folder.id }
             } else {
                 notesInCurrentFolder = []
             }
@@ -779,6 +827,134 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 8)
     }
+
+    // MARK: - 加密文件夹区域
+    private var encryptedFolderRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // 加密文件夹标题行（可点击展开/折叠）
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if isEncryptedFolderExpanded {
+                        // 折叠时直接折叠，并重置解锁状态
+                        isEncryptedFolderExpanded = false
+                        isEncryptedFolderUnlocked = false
+                    } else {
+                        // 展开时需要验证密码
+                        if isEncryptedFolderUnlocked {
+                            // 已经解锁过，直接展开
+                            isEncryptedFolderExpanded = true
+                        } else {
+                            // 需要密码验证
+                            showingEncryptedFolder = true
+                        }
+                    }
+                }
+            } label: {
+                HStack {
+                    Image(systemName: isEncryptedFolderExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("🔒 加密")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    // 设置按钮（需要密码验证）
+                    Button {
+                        openEncryptedFolderManagement()
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+
+            // 展开后显示加密文件夹列表
+            if isEncryptedFolderExpanded && isEncryptedFolderUnlocked {
+                if store.encryptedFolders.isEmpty {
+                    Text("无加密文件夹")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(store.encryptedFolders) { folder in
+                        encryptedFolderItemRow(folder)
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showingEncryptedFolder, onDismiss: {
+            // 如果用户取消验证，重置管理界面标志
+            if !isEncryptedFolderUnlocked {
+                shouldOpenManagementAfterUnlock = false
+            }
+        }) {
+            PasswordVerificationView(
+                isUnlocked: $isEncryptedFolderUnlocked,
+                isExpanded: $isEncryptedFolderExpanded,
+                onUnlock: {
+                    // 如果是为了打开管理界面而验证密码，验证成功后打开管理界面
+                    if shouldOpenManagementAfterUnlock {
+                        shouldOpenManagementAfterUnlock = false
+                        showingEncryptedFolderManagement = true
+                    }
+                }
+            )
+            .frame(width: 400, height: 300)
+            .environmentObject(themeManager)
+        }
+        .sheet(isPresented: $showingEncryptedFolderManagement) {
+            EncryptedFolderManagementView()
+                .environmentObject(store)
+        }
+    }
+
+    // MARK: - 打开加密文件夹管理
+    private func openEncryptedFolderManagement() {
+        if isEncryptedFolderUnlocked {
+            // 已经解锁过，直接打开管理界面
+            showingEncryptedFolderManagement = true
+        } else {
+            // 需要密码验证，验证成功后打开管理界面
+            shouldOpenManagementAfterUnlock = true
+            showingEncryptedFolder = true
+        }
+    }
+
+    // MARK: - 加密文件夹项行
+    private func encryptedFolderItemRow(_ folder: EncryptedFolder) -> some View {
+        let isSelected = selectedEncryptedFolderID == folder.id
+        let notesInFolder = store.encryptedNotes.filter { 
+            EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == folder.id 
+        }
+        
+        return HStack {
+            Image(systemName: "folder")
+                .foregroundStyle(isSelected ? .white : .red)
+            Text(folder.name)
+                .lineLimit(1)
+            Spacer()
+            Text("\(notesInFolder.count)")
+                .font(.caption)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedEncryptedFolderID = folder.id
+            // 切换到加密文件夹视图
+            selectedFolder = EncryptedFolderManager.folderName
+            selectedTagID = nil
+        }
+        .padding(.horizontal, 8)
+    }
 }
 
 private struct NotesListView: View {
@@ -812,7 +988,7 @@ private struct NotesListView: View {
     }
 }
 
-private struct NoteRowView: View {
+struct NoteRowView: View {
     let note: Note
     let isSelected: Bool
     @Environment(\.colorScheme) private var colorScheme
