@@ -838,6 +838,18 @@ private struct SidebarView: View {
                         // 折叠时直接折叠，并重置解锁状态
                         isEncryptedFolderExpanded = false
                         isEncryptedFolderUnlocked = false
+                        selectedEncryptedFolderID = nil
+                        
+                        // 如果当前正在查看加密笔记，清除选中状态并切换到全部笔记
+                        if selectedFolder == EncryptedFolderView.folderName {
+                            selectedFolder = l10n(L10nKeys.Folder.allNotes)
+                            // 如果当前选中的笔记是加密笔记，清除选中状态
+                            if let currentSelection = selection,
+                               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+                               EncryptedFolderManager.shared.isEncrypted(note: selectedNote) {
+                                selection = nil
+                            }
+                        }
                     } else {
                         // 展开时需要验证密码
                         if isEncryptedFolderUnlocked {
