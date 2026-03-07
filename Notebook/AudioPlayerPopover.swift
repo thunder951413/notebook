@@ -50,12 +50,12 @@ struct AudioPlayerPopoverContent: View {
                     HStack {
                         Text("麦克风")
                         Slider(value: $micGain, in: 0...2)
-                            .onChange(of: micGain) { _ in updateRealtimeMixVolume() }
+                            .onChange(of: micGain) { _, _ in updateRealtimeMixVolume() }
                     }
                     HStack {
                         Text("系统")
                         Slider(value: $systemGain, in: 0...2)
-                            .onChange(of: systemGain) { _ in updateRealtimeMixVolume() }
+                            .onChange(of: systemGain) { _, _ in updateRealtimeMixVolume() }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -109,7 +109,7 @@ struct AudioPlayerPopoverContent: View {
             loadTrackManifest()
             setupPlayerForCurrentRoute()
         }
-        .onChange(of: selectedRoute) { _ in
+        .onChange(of: selectedRoute) { _, _ in
             stopPlayback()
             setupPlayerForCurrentRoute()
         }
@@ -152,7 +152,11 @@ struct AudioPlayerPopoverContent: View {
         case .system:
             if let systemTrackURL { setupSimplePlayer(with: systemTrackURL) }
         case .realtimeMix:
-            duration = min(trackDuration(micTrackURL), trackDuration(systemTrackURL))
+            Task {
+                async let micDuration = trackDuration(micTrackURL)
+                async let systemDuration = trackDuration(systemTrackURL)
+                duration = min(await micDuration, await systemDuration)
+            }
             currentTime = 0
         }
     }
@@ -283,10 +287,16 @@ struct AudioPlayerPopoverContent: View {
         timer = nil
     }
 
-    private func trackDuration(_ url: URL?) -> TimeInterval {
+    private func trackDuration(_ url: URL?) async -> TimeInterval {
         guard let url else { return 0 }
         let asset = AVURLAsset(url: url)
-        return CMTimeGetSeconds(asset.duration)
+        do {
+            let duration = try await asset.load(.duration)
+            return CMTimeGetSeconds(duration)
+        } catch {
+            print("[AudioPlayerPopoverContent] 无法加载时长: \(error)")
+            return 0
+        }
     }
 
     private func formatTime(_ time: TimeInterval) -> String {

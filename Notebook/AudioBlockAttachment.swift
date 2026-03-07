@@ -69,6 +69,14 @@ final class AudioBlockAttachment: NSTextAttachment {
         print("[AudioBlockAttachment] 编码保存路径: \(fileURL.path)")
     }
     
+    /// 检测当前是否为暗色模式
+    private var isDarkMode: Bool {
+        if let appearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) {
+            return appearance == .darkAqua
+        }
+        return false
+    }
+
     /// 创建音频卡片图像（仿苹果备忘录）
     private func createCardImage() -> NSImage {
         let cardWidth: CGFloat = 229  // 185(按钮X) + 32(按钮宽) + 12(右边距)
@@ -76,18 +84,31 @@ final class AudioBlockAttachment: NSTextAttachment {
         let size = NSSize(width: cardWidth, height: cardHeight)
         let image = NSImage(size: size)
 
+        // 在 lockFocus 前获取颜色设置
+        let darkMode = isDarkMode
+        let primaryTextColor = darkMode ? NSColor.white : NSColor.black
+        let secondaryTextColor = darkMode
+            ? NSColor(calibratedWhite: 0.75, alpha: 0.95)
+            : NSColor(calibratedWhite: 0.35, alpha: 0.95)
+        let cardBgColor = darkMode
+            ? NSColor(calibratedWhite: 0.25, alpha: 0.95)
+            : NSColor(calibratedWhite: 0.92, alpha: 0.95)
+        let buttonBgColor = darkMode
+            ? NSColor(calibratedWhite: 0.15, alpha: 0.95)
+            : NSColor(calibratedWhite: 0.85, alpha: 0.95)
+
         image.lockFocus()
 
         // 背景卡片
         let rect = CGRect(x: 0, y: 0, width: cardWidth, height: cardHeight)
         let cardPath = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-        NSColor(calibratedWhite: 0.36, alpha: 0.92).setFill()
+        cardBgColor.setFill()
         cardPath.fill()
 
         // 日期（去掉"新录音"标题）- 更紧凑
         let dateAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.white
+            .foregroundColor: primaryTextColor
         ]
         let dateText = formatDate(createDate)
         dateText.draw(at: CGPoint(x: 12, y: 32), withAttributes: dateAttributes)
@@ -95,7 +116,7 @@ final class AudioBlockAttachment: NSTextAttachment {
         // 副标题（音频·时长）
         let subAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor(calibratedWhite: 0.86, alpha: 0.95)
+            .foregroundColor: secondaryTextColor
         ]
         let durationText = "\(max(1, Int(duration.rounded())))秒"
         let subText = "音频 · \(durationText)"
@@ -105,7 +126,7 @@ final class AudioBlockAttachment: NSTextAttachment {
         if hasDualTrackManifest() {
             let dualTrackAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-                .foregroundColor: NSColor(calibratedWhite: 0.86, alpha: 0.95)
+                .foregroundColor: secondaryTextColor
             ]
             // 计算"音频 · 3秒"的宽度，在其后绘制" 双轨"
             let subTextWidth = subText.size(withAttributes: subAttributes).width
@@ -120,13 +141,13 @@ final class AudioBlockAttachment: NSTextAttachment {
         let buttonY = (cardHeight - buttonSize) / 2
         let buttonRect = CGRect(x: buttonX, y: buttonY, width: buttonSize, height: buttonSize)
         let buttonPath = NSBezierPath(roundedRect: buttonRect, xRadius: 6, yRadius: 6)
-        NSColor(calibratedWhite: 0.09, alpha: 0.95).setFill()
+        buttonBgColor.setFill()
         buttonPath.fill()
 
         // 播放图标（在正方形按钮内居中）
         if let playImage = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil) {
             playImage.isTemplate = true
-            NSColor.white.set()
+            primaryTextColor.set()
             // 图标稍小于按钮，居中
             let iconSize: CGFloat = 16
             let iconX = buttonRect.midX - iconSize / 2

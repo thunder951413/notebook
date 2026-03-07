@@ -1321,14 +1321,17 @@ class RichTextView: NSTextView {
     private func applyFormat(font: NSFont?, color: NSColor?, to range: NSRange) {
         guard let textStorage = self.textStorage else { return }
 
-        // 设置 typingAttributes，让新输入的文字继承格式
+        // 根据当前外观模式确定默认颜色
+        let isDark = self.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let defaultColor = isDark ? NSColor.white : NSColor.black
+        let effectiveColor = color ?? defaultColor
+
+        // 设置 typingAttributes ，让新输入的文字继承格式
         var newTypingAttributes = self.typingAttributes
         if let font = font {
             newTypingAttributes[.font] = font
         }
-        if let color = color {
-            newTypingAttributes[.foregroundColor] = color
-        }
+        newTypingAttributes[.foregroundColor] = effectiveColor
         self.typingAttributes = newTypingAttributes
 
         // 如果范围有效，也应用到现有文本
@@ -1338,9 +1341,7 @@ class RichTextView: NSTextView {
             if let font = font {
                 textStorage.addAttribute(.font, value: font, range: range)
             }
-            if let color = color {
-                textStorage.addAttribute(.foregroundColor, value: color, range: range)
-            }
+            textStorage.addAttribute(.foregroundColor, value: effectiveColor, range: range)
 
             textStorage.endEditing()
         }
@@ -1558,6 +1559,11 @@ struct RichTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.pasteCoordinator = context.coordinator
 
+        // 设置默认 typingAttributes，根据外观模式设置默认文字颜色
+        let isDark = (colorScheme == .dark)
+        let defaultTextColor = isDark ? NSColor.white : NSColor.black
+        textView.typingAttributes[.foregroundColor] = defaultTextColor
+
         textView.textStorage?.setAttributedString(attributedText)
         textView.migrateAudioAttachmentLinksIfNeeded()
 
@@ -1585,6 +1591,13 @@ struct RichTextEditor: NSViewRepresentable {
         // 不要设置 textColor，让富文本属性控制颜色
         // textView.textColor = (scheme == .dark) ? .white : .black
         nsView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
+
+        // 更新 typingAttributes 中的默认文字颜色，以适应外观模式变化
+        let defaultTextColor = (scheme == .dark) ? NSColor.white : NSColor.black
+        textView.typingAttributes[.foregroundColor] = defaultTextColor
+
+        // 更新已有文字中使用的系统默认颜色（黑色/白色）以适应新的外观模式
+        updateDefaultTextColors(in: textView, for: scheme)
 
         // 关键：切换笔记时强制刷新内容；同一笔记编辑时避免 update 覆盖用户输入。
         if context.coordinator.lastAppliedNoteID != noteID {
@@ -1614,6 +1627,36 @@ struct RichTextEditor: NSViewRepresentable {
 
             print("[RichTextEditor] After update - textView length: \(textView.string.count)")
         }
+    }
+
+    /// 更新已有文字中的系统默认颜色（纯黑或纯白）以适应新的外观模式
+    /// 这样不会破坏用户显式设置的其他颜色
+    private func updateDefaultTextColors(in textView: RichTextView, for scheme: ColorScheme) {
+        guard let textStorage = textView.textStorage else { return }
+
+        let targetColor: NSColor = (scheme == .dark) ? .white : .black
+        let oldDefaultColors: [NSColor] = (scheme == .dark)
+            ? [.black, NSColor(calibratedWhite: 0, alpha: 1)]
+            : [.white, NSColor(calibratedWhite: 1, alpha: 1)]
+
+        textStorage.beginEditing()
+
+        // 遍历所有文字范围
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.foregroundColor, in: fullRange, options: []) { value, range, stop in
+            if let color = value as? NSColor {
+                // 检查是否是旧的默认颜色（纯黑或纯白）
+                let isOldDefault = oldDefaultColors.contains { oldColor in
+                    color.isEqual(to: oldColor)
+                }
+
+                if isOldDefault {
+                    textStorage.addAttribute(.foregroundColor, value: targetColor, range: range)
+                }
+            }
+        }
+
+        textStorage.endEditing()
     }
 
     func makeCoordinator() -> Coordinator {

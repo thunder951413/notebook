@@ -983,32 +983,85 @@ private struct SidebarView: View {
     }
 }
 
+/// 笔记排序方式
+enum NoteSortOption: String, CaseIterable {
+    case modifiedDate = "最近修改"
+    case title = "标题首字母"
+}
+
 private struct NotesListView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("noteSortOption") private var sortOption: NoteSortOption = .modifiedDate
 
     let notes: [Note]
     @Binding var selection: Note.ID?
 
-    var body: some View {
-        List(selection: $selection) {
-            Section(l10n(L10nKeys.common.notes)) {
-                ForEach(notes) { note in
-                    NoteRowView(note: note, isSelected: selection == note.id)
-                        .tag(note.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selection = note.id
-                        }
-                        .contextMenu {
-                            Button(l10n(L10nKeys.common.delete)) {
-                                store.deleteNote(id: note.id)
-                            }
-                        }
-                }
+    /// 根据排序选项排序后的笔记
+    private var sortedNotes: [Note] {
+        switch sortOption {
+        case .modifiedDate:
+            return notes.sorted { $0.updatedAt > $1.updatedAt }
+        case .title:
+            return notes.sorted {
+                let title1 = $0.title.isEmpty ? l10n(L10nKeys.common.noTitle) : $0.title
+                let title2 = $1.title.isEmpty ? l10n(L10nKeys.common.noTitle) : $1.title
+                return title1.localizedCompare(title2) == .orderedAscending
             }
         }
-        .listStyle(.plain)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            List(selection: $selection) {
+                Section {
+                    ForEach(sortedNotes) { note in
+                        NoteRowView(note: note, isSelected: selection == note.id)
+                            .tag(note.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selection = note.id
+                            }
+                            .contextMenu {
+                                Button(l10n(L10nKeys.common.delete)) {
+                                    store.deleteNote(id: note.id)
+                                }
+                            }
+                    }
+                } header: {
+                    // 笔记标题行，右侧放置排序按钮
+                    HStack {
+                        Text(l10n(L10nKeys.common.notes))
+                        Spacer()
+                        Menu {
+                            ForEach(NoteSortOption.allCases, id: \.self) { option in
+                                Button {
+                                    sortOption = option
+                                } label: {
+                                    HStack {
+                                        Text(option.rawValue)
+                                        if sortOption == option {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.caption2)
+                                Text(sortOption.rawValue)
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .menuStyle(.borderlessButton)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .listStyle(.plain)
+        }
         .frame(minWidth: 220, maxWidth: 280)
         .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
     }
