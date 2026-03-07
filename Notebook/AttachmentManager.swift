@@ -79,8 +79,14 @@ final class AttachmentManager {
 
                 for fileURL in allFiles {
                     let filename = fileURL.lastPathComponent
-                    // 如果文件未被引用，则删除
+
+                    // 如果文件未被引用，先做“新文件保护”：避免录音刚生成但尚未完成插入时被误删
                     if !referencedFiles.contains(filename) {
+                        if self.shouldKeepAsRecentlyCreated(fileURL) {
+                            print("[AttachmentManager] Skip deleting recent attachment: \(filename)")
+                            continue
+                        }
+
                         try FileManager.default.removeItem(at: fileURL)
                         print("[AttachmentManager] Deleted unused attachment: \(filename)")
                         deletedCount += 1
@@ -104,15 +110,57 @@ final class AttachmentManager {
     private func extractReferencedAttachmentFiles(from content: NSAttributedString) -> Set<String> {
         var referencedFiles = Set<String>()
         let range = NSRange(location: 0, length: content.length)
+        let audioExts: Set<String> = ["m4a", "caf", "wav", "aiff", "mp3", "json"]
 
         content.enumerateAttribute(.attachment, in: range, options: []) { value, _, _ in
             if let attachment = value as? AttachmentTextAttachment {
                 let filename = attachment.attachmentFileURL.lastPathComponent
                 referencedFiles.insert(filename)
+            } else if let audioAttachment = value as? AudioBlockAttachment {
+                // 音频块附件使用独立类型，需要单独识别，避免被误删
+                let filename = audioAttachment.fileURL.lastPathComponent
+                referencedFiles.insert(filename)
+            } else if let attachment = value as? NSTextAttachment,
+                      let filename = attachment.fileWrapper?.preferredFilename,
+                      !filename.isEmpty {
+                // RTFD 反序列化后可能退化为 NSTextAttachment，兜底识别 fileWrapper 文件名
+                referencedFiles.insert(filename)
+            }
+        }
+
+        // 关键兜底：即使附件类型退化，也可通过 link 属性保留音频引用
+        content.enumerateAttribute(.link, in: range, options: []) { value, _, _ in
+            let url: URL?
+            if let u = value as? URL {
+                url = u
+            } else if let s = value as? String {
+                url = URL(string: s)
+            } else {
+                url = nil
+            }
+
+            guard let fileURL = url else { return }
+            let ext = fileURL.pathExtension.lowercased()
+            guard audioExts.contains(ext) else { return }
+            referencedFiles.insert(fileURL.lastPathComponent)
+            if ext == "m4a" {
+                let manifestName = fileURL.deletingPathExtension().lastPathComponent + ".tracks.json"
+                referencedFiles.insert(manifestName)
             }
         }
 
         return referencedFiles
+    }
+
+    /// 新创建附件保护窗口（秒）
+    private var recentAttachmentProtectionWindow: TimeInterval { 30 }
+
+    /// 判断文件是否属于“刚创建”，用于避免保存时序造成的误删
+    private func shouldKeepAsRecentlyCreated(_ fileURL: URL) -> Bool {
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+        let ts = values?.contentModificationDate ?? values?.creationDate
+        guard let ts else { return false }
+        return Date().timeIntervalSince(ts) < recentAttachmentProtectionWindow
     }
 
     /// 清理所有孤儿附件（启动时调用）

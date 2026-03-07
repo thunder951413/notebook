@@ -125,7 +125,7 @@ class PasswordManager: ObservableObject {
         guard let data = value.data(using: .utf8) else { return false }
         
         // 先删除已存在的
-        deleteFromKeychain(key: key)
+        _ = deleteFromKeychain(key: key)
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

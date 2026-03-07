@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Combine
 import UniformTypeIdentifiers
+import AVFoundation
 
 @MainActor
 final class RichTextController: ObservableObject {
@@ -109,14 +110,9 @@ final class RichTextController: ObservableObject {
         
         // 结束当前的编辑状态
         tv.breakUndoCoalescing()
-        
-        // 强制第一响应者状态更新
-        if tv.window?.firstResponder === tv {
-            tv.window?.makeFirstResponder(nil)
-            tv.window?.makeFirstResponder(tv)
-        }
-        
-        // 获取当前 attributedString 的副本
+
+        // 注意：不要在这里切换 firstResponder，避免 appBlur 阶段触发临时空快照
+        // 直接返回当前内容副本
         return tv.attributedString().copy() as? NSAttributedString
     }
     
@@ -633,8 +629,22 @@ final class RichTextController: ObservableObject {
 
     func insertAudio(from fileURL: URL) {
         guard let tv = textView else { return }
-        let attachment = AudioBlockAttachment(fileURL: fileURL)
-        let attr = NSAttributedString(attachment: attachment)
+        
+        // 获取音频时长
+        var duration: TimeInterval = 0
+        do {
+            let player = try AVAudioPlayer(contentsOf: fileURL)
+            duration = player.duration
+        } catch {
+            print("[RichTextEditor] 无法获取音频时长: \(error)")
+        }
+        
+        let attachment = AudioBlockAttachment(fileURL: fileURL, duration: duration, createDate: Date())
+        let attr = NSMutableAttributedString(attachment: attachment)
+        // 给附件字符挂一个可持久化 link，重启后可直接按 URL 识别并播放
+        attr.addAttribute(.link, value: fileURL, range: NSRange(location: 0, length: attr.length))
+        // 在音频后添加换行
+        attr.append(NSAttributedString(string: "\n"))
         tv.textStorage?.insert(attr, at: tv.selectedRange().location)
         tv.didChangeText()
     }
@@ -726,6 +736,7 @@ protocol PasteCoordinatorProtocol: AnyObject {
 /// 自定义 NSTextView 以支持图片粘贴
 class RichTextView: NSTextView {
     weak var pasteCoordinator: PasteCoordinatorProtocol?
+    private var audioPlayerPanel: NSPanel?
 
     override func paste(_ sender: Any?) {
         print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
@@ -788,6 +799,40 @@ class RichTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         let point = self.convert(event.locationInWindow, from: nil)
 
+        // 0) 最高优先级：按 link 属性识别音频 URL（跨重启最稳）
+        if let layoutManager = self.layoutManager,
+           let textContainer = self.textContainer {
+            let textContainerPoint = CGPoint(
+                x: point.x - self.textContainerInset.width,
+                y: point.y - self.textContainerInset.height
+            )
+            let idx = layoutManager.characterIndex(
+                for: textContainerPoint,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+            let safeIdx = max(0, min(idx, max(0, self.attributedString().length - 1)))
+            if self.attributedString().length > 0 {
+                let value = self.attributedString().attribute(.link, at: safeIdx, effectiveRange: nil)
+                if let url = value as? URL, isAudioURL(url) {
+                    let fallbackAttachment = AudioBlockAttachment(fileURL: url)
+                    let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
+                    print("[RichTextEditor] 通过 link 打开音频播放器: \(url.lastPathComponent)")
+                    showAudioPlayerPopover(for: fallbackAttachment, at: rect)
+                    return
+                }
+                if let str = value as? String,
+                   let url = URL(string: str),
+                   isAudioURL(url) {
+                    let fallbackAttachment = AudioBlockAttachment(fileURL: url)
+                    let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
+                    print("[RichTextEditor] 通过 link(字符串) 打开音频播放器: \(url.lastPathComponent)")
+                    showAudioPlayerPopover(for: fallbackAttachment, at: rect)
+                    return
+                }
+            }
+        }
+
         // 尝试多种方式获取点击位置的字符索引
         var index = self.characterIndexForInsertion(at: point)
 
@@ -807,46 +852,246 @@ class RichTextView: NSTextView {
             let endIndex = min(attr.length - 1, index + checkRange)
 
             // 确保范围有效（当文本为空时 attr.length 为 0，endIndex 会是 -1）
-            guard startIndex <= endIndex else { return }
+            if startIndex <= endIndex {
+                for checkIndex in startIndex...endIndex {
+                    var effectiveRange = NSRange(location: NSNotFound, length: 0)
 
-            for checkIndex in startIndex...endIndex {
-                var effectiveRange = NSRange(location: NSNotFound, length: 0)
+                    if let attachment = normalizedCheckboxAttachment(at: checkIndex, effectiveRange: &effectiveRange) {
+                        let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+                        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                        attachmentRect.origin.x += self.textContainerInset.width
+                        attachmentRect.origin.y += self.textContainerInset.height
 
-                if let attachment = normalizedCheckboxAttachment(at: checkIndex, effectiveRange: &effectiveRange) {
-                    let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
-                    var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-                    attachmentRect.origin.x += self.textContainerInset.width
-                    attachmentRect.origin.y += self.textContainerInset.height
+                        // 接近 macOS 备忘录：仅略微扩大点击热区，避免误触文本
+                        let expandedRect = attachmentRect.insetBy(dx: -5, dy: -5)
+                        if expandedRect.contains(point) {
+                            let wasChecked = attachment.isChecked
+                            attachment.toggle()
+                            let isNowChecked = attachment.isChecked
 
-                    // 接近 macOS 备忘录：仅略微扩大点击热区，避免误触文本
-                    let expandedRect = attachmentRect.insetBy(dx: -5, dy: -5)
-                    if expandedRect.contains(point) {
-                        let wasChecked = attachment.isChecked
-                        attachment.toggle()
-                        let isNowChecked = attachment.isChecked
+                            self.textStorage?.beginEditing()
+                            self.textStorage?.setAttributes([.attachment: attachment], range: effectiveRange)
+                            self.textStorage?.endEditing()
+                            self.didChangeText()
 
-                        self.textStorage?.beginEditing()
-                        self.textStorage?.setAttributes([.attachment: attachment], range: effectiveRange)
-                        self.textStorage?.endEditing()
-                        self.didChangeText()
-
-                        if !wasChecked && isNowChecked {
-                            Task { @MainActor [weak self] in
-                                try? await Task.sleep(for: .milliseconds(300))
-                                self?.sortCheckboxesIfNeeded()
+                            if !wasChecked && isNowChecked {
+                                Task { @MainActor [weak self] in
+                                    try? await Task.sleep(for: .milliseconds(300))
+                                    self?.sortCheckboxesIfNeeded()
+                                }
                             }
-                        }
 
-                        if let coordinator = self.delegate as? RichTextEditor.Coordinator {
-                            coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: self))
+                            if let coordinator = self.delegate as? RichTextEditor.Coordinator {
+                                coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: self))
+                            }
+                            return
                         }
-                        return
                     }
                 }
             }
         }
 
+        // 检查是否点击了音频附件
+        if let layoutManager = self.layoutManager,
+           let textContainer = self.textContainer {
+            let attr = self.attributedString()
+
+            // 先用点击位置反查字符索引（比遍历所有附件更稳定）
+            let textContainerPoint = CGPoint(
+                x: point.x - self.textContainerInset.width,
+                y: point.y - self.textContainerInset.height
+            )
+            var clickedIndex = layoutManager.characterIndex(
+                for: textContainerPoint,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+
+            if clickedIndex >= attr.length {
+                clickedIndex = max(0, attr.length - 1)
+            }
+
+            // 优先检查点击点附近（快路径）
+            let candidateIndexes = [clickedIndex - 1, clickedIndex, clickedIndex + 1].filter { $0 >= 0 && $0 < attr.length }
+            let hitNearby = candidateIndexes.contains { idx in
+                openAudioAttachmentIfHit(at: idx, in: attr, layoutManager: layoutManager, textContainer: textContainer, clickPoint: point)
+            }
+            if hitNearby { return }
+
+            // 兜底：全量扫描所有附件（修复重启后点击索引偏移导致的点不开）
+            var found = false
+            attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length), options: []) { value, range, stop in
+                guard !found, value is NSTextAttachment else { return }
+                let opened = openAudioAttachmentIfHit(at: range.location, in: attr, layoutManager: layoutManager, textContainer: textContainer, clickPoint: point)
+                if opened {
+                    found = true
+                    stop.pointee = true
+                }
+            }
+            if found { return }
+        }
+
         super.mouseDown(with: event)
+    }
+    
+    private func openAudioAttachmentIfHit(
+        at index: Int,
+        in attr: NSAttributedString,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer,
+        clickPoint: CGPoint
+    ) -> Bool {
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        guard let rawAttachment = attr.attribute(.attachment, at: index, effectiveRange: &effectiveRange) as? NSTextAttachment else {
+            return false
+        }
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+        if let audioAttachment = rawAttachment as? AudioBlockAttachment {
+            if attachmentRect.width < audioAttachment.bounds.width * 0.7 {
+                attachmentRect.size = audioAttachment.bounds.size
+            }
+
+            attachmentRect.origin.x += self.textContainerInset.width
+            attachmentRect.origin.y += self.textContainerInset.height
+
+            let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
+            guard expandedRect.contains(clickPoint) else { return false }
+
+            print("[RichTextEditor] 打开音频播放器: \(audioAttachment.fileURL.lastPathComponent)")
+            showAudioPlayerPopover(for: audioAttachment, at: attachmentRect)
+            return true
+        }
+
+        if let fallbackURL = resolveAudioURLFromAttachment(rawAttachment) {
+            let fallbackAttachment = AudioBlockAttachment(fileURL: fallbackURL)
+            if attachmentRect.width < fallbackAttachment.bounds.width * 0.7 {
+                attachmentRect.size = fallbackAttachment.bounds.size
+            }
+
+            attachmentRect.origin.x += self.textContainerInset.width
+            attachmentRect.origin.y += self.textContainerInset.height
+
+            let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
+            guard expandedRect.contains(clickPoint) else { return false }
+
+            print("[RichTextEditor] 打开音频播放器(兼容模式): \(fallbackURL.lastPathComponent)")
+            showAudioPlayerPopover(for: fallbackAttachment, at: attachmentRect)
+            return true
+        }
+
+        return false
+    }
+
+    private func isAudioURL(_ url: URL) -> Bool {
+        let audioExts: Set<String> = ["m4a", "caf", "wav", "aiff", "mp3"]
+        return audioExts.contains(url.pathExtension.lowercased())
+    }
+
+    func migrateAudioAttachmentLinksIfNeeded() {
+        guard let textStorage else { return }
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+
+        textStorage.beginEditing()
+        defer { textStorage.endEditing() }
+
+        textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+
+            let hasLink = textStorage.attribute(.link, at: range.location, effectiveRange: nil) != nil
+            if hasLink { return }
+
+            if let audioAttachment = attachment as? AudioBlockAttachment {
+                textStorage.addAttribute(.link, value: audioAttachment.fileURL, range: range)
+                return
+            }
+
+            if let fallbackURL = resolveAudioURLFromAttachment(attachment) {
+                textStorage.addAttribute(.link, value: fallbackURL, range: range)
+            }
+        }
+    }
+
+    private func resolveAudioURLFromAttachment(_ attachment: NSTextAttachment) -> URL? {
+        let audioExts: Set<String> = ["m4a", "caf", "wav", "aiff", "mp3"]
+
+        // 1) 优先 fileWrapper 文件名
+        if let filename = attachment.fileWrapper?.preferredFilename,
+           audioExts.contains(URL(fileURLWithPath: filename).pathExtension.lowercased()) {
+            let location = StorageLocationManager.shared
+            if let base = location.baseDirectoryURL {
+                var found: URL?
+                location.withSecurityScopedAccess(base) {
+                    if let attachmentsDir = try? location.attachmentsDirectoryURL(),
+                       let noteDirs = try? FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil) {
+                        for noteDir in noteDirs {
+                            let candidate = noteDir.appendingPathComponent(filename)
+                            if FileManager.default.fileExists(atPath: candidate.path) {
+                                found = candidate
+                                break
+                            }
+                        }
+                    }
+                }
+                if found != nil { return found }
+            }
+        }
+
+        // 2) 再尝试 attachment.fileType
+        if let fileType = attachment.fileType,
+           audioExts.contains(fileType.lowercased()),
+           let fileWrapper = attachment.fileWrapper,
+           let filename = fileWrapper.preferredFilename {
+            return URL(fileURLWithPath: filename)
+        }
+
+        return nil
+    }
+
+    /// 显示音频播放器弹窗
+    private func showAudioPlayerPopover(for attachment: AudioBlockAttachment, at rect: CGRect) {
+        guard FileManager.default.fileExists(atPath: attachment.fileURL.path) else {
+            print("[RichTextEditor] 音频文件不存在: \(attachment.fileURL.path)")
+            return
+        }
+
+        // 关闭上一个播放器窗口，避免叠加/失焦
+        audioPlayerPanel?.close()
+        audioPlayerPanel = nil
+
+        // 创建弹窗窗口
+        let popoverWindow = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        popoverWindow.title = "录音"
+        popoverWindow.isFloatingPanel = true
+        popoverWindow.level = .floating
+
+        // 创建播放器视图
+        let playerView = AudioPlayerPopoverContent(fileURL: attachment.fileURL)
+        let hostingView = NSHostingView(rootView: playerView)
+        hostingView.frame = popoverWindow.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 320, height: 300)
+        hostingView.autoresizingMask = [.width, .height]
+        popoverWindow.contentView = hostingView
+
+        // 定位窗口在附件附近
+        if self.window?.screen != nil {
+            let windowRect = self.convert(rect, to: nil)
+            let screenPoint = self.window?.convertPoint(toScreen: windowRect.origin) ?? .zero
+            let x = screenPoint.x + rect.width / 2 - 160
+            let y = screenPoint.y - 320 - 10
+            popoverWindow.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+
+        // 强引用，防止窗口被释放导致“偶现点击无效”
+        audioPlayerPanel = popoverWindow
+        popoverWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// 检查是否需要排序复选框
@@ -953,7 +1198,7 @@ class RichTextView: NSTextView {
 
     /// 处理格式继承 - 从当前行或上一行获取格式
     private func handleFormatInheritance(currentLineRange: NSRange) -> Bool {
-        guard let textStorage = self.textStorage else { return false }
+        guard self.textStorage != nil else { return false }
 
         // 获取要继承的格式
         let (font, color) = getFormatToInherit(from: currentLineRange)
@@ -1314,6 +1559,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.pasteCoordinator = context.coordinator
 
         textView.textStorage?.setAttributedString(attributedText)
+        textView.migrateAudioAttachmentLinksIfNeeded()
 
         textView.isSelectable = true
         textView.isEditable = true
@@ -1358,6 +1604,7 @@ struct RichTextEditor: NSViewRepresentable {
             }
 
             textView.textStorage?.setAttributedString(attributedText)
+            textView.migrateAudioAttachmentLinksIfNeeded()
             textView.setSelectedRange(NSRange(location: 0, length: 0))
 
             context.coordinator.isProgrammaticUpdate = false

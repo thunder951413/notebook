@@ -448,7 +448,7 @@
 				INFOPLIST_FILE = Notebook/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Notebook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_LSUIElement = 0;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于录制语音备忘并插入到笔记中。";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -500,7 +500,7 @@
 				INFOPLIST_FILE = Notebook/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Notebook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_LSUIElement = 0;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于录制语音备忘并插入到笔记中。";
 				LD_RUNPATH_SEARCH_PATHS = (

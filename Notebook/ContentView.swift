@@ -140,12 +140,26 @@ struct ContentView: View {
             return
         }
         
-        // 从编辑器获取内容
+        // 从编辑器获取内容；若快照异常为空，回退到内存，避免误清空笔记
         guard let editorContent = richTextController.snapshotAttributedString() else {
-            print("[SAVE DEBUG] Editor content is nil, skipping save")
+            print("[SAVE DEBUG] Editor content is nil, fallback to in-memory content")
+            if let index = store.notes.firstIndex(where: { $0.id == targetNoteID }) {
+                let memoryContent = store.notes[index].content
+                saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
+            }
             return
         }
         print("[SAVE DEBUG] Editor content length: \(editorContent.length)")
+
+        // 保护：当编辑器快照为空但内存中有内容时，不用空快照覆盖
+        if editorContent.length == 0,
+           let index = store.notes.firstIndex(where: { $0.id == targetNoteID }),
+           store.notes[index].content.length > 0 {
+            let memoryContent = store.notes[index].content
+            print("[SAVE WARNING] Editor snapshot is empty, fallback to memory content length=\(memoryContent.length)")
+            saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
+            return
+        }
         
         // 执行保存
         saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
@@ -1054,7 +1068,9 @@ private struct NoteEditorView: View {
     @EnvironmentObject private var store: NoteStore
     
     @StateObject private var recorder = AudioRecorderManager()
+    @StateObject private var mixedRecorder = MixedAudioRecorder()
     @State private var showingReminderPopover = false
+    @State private var showingRecordingMenu = false
     
     @State private var lastSavedTitle: String = ""
     @State private var lastSavedContentHash: Int = 0
@@ -1071,8 +1087,10 @@ private struct NoteEditorView: View {
                     EditorTopBarView(
                         controller: controller,
                         recorder: recorder,
+                        mixedRecorder: mixedRecorder,
                         note: $note,
-                        showingReminderPopover: $showingReminderPopover
+                        showingReminderPopover: $showingReminderPopover,
+                        showingRecordingMenu: $showingRecordingMenu
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -1246,12 +1264,16 @@ private struct EditorTopBarView: View {
 
     @ObservedObject var controller: RichTextController
     @ObservedObject var recorder: AudioRecorderManager
+    @ObservedObject var mixedRecorder: MixedAudioRecorder
     @Binding var note: Note
     @Binding var showingReminderPopover: Bool
+    @Binding var showingRecordingMenu: Bool
     @StateObject private var windowState = WindowStateManager.shared
+    @EnvironmentObject private var themeManager: ThemeManager
 
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
+    @State private var currentRecordingMode: AudioRecordingMode = .microphone
 
     var recurrenceOptions: [(String, String)] {
         [
@@ -1558,10 +1580,90 @@ private struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .help("AI 助手")
+            
+            Divider().frame(height: 18)
+            
+            // 录音按钮
+            recordingButton
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(AppColors.editorBackground(colorScheme))
+    }
+    
+    // MARK: - 录音按钮
+    
+    @State private var audioRecorderPanel: NSPanel?
+    
+    private var recordingButton: some View {
+        Button {
+            presentAudioRecorderPanel()
+        } label: {
+            Image(systemName: "waveform")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("录音")
+    }
+
+    private func presentAudioRecorderPanel() {
+        // 避免重复创建，存在则直接置前
+        if let existing = audioRecorderPanel {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "录音"
+        panel.isFloatingPanel = false
+        panel.level = .normal
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+
+        if #available(macOS 12.3, *) {
+            let view = AudioRecorderView(
+                noteID: note.id,
+                onRecordingComplete: { url in
+                    controller.insertAudio(from: url)
+                },
+                onRequestClose: {
+                    closeAudioRecorderPanel()
+                }
+            )
+            panel.contentViewController = NSHostingController(rootView: view)
+        } else {
+            let view = LegacyAudioRecorderView(
+                noteID: note.id,
+                onRecordingComplete: { url in
+                    controller.insertAudio(from: url)
+                },
+                onRequestClose: {
+                    closeAudioRecorderPanel()
+                }
+            )
+            panel.contentViewController = NSHostingController(rootView: view)
+        }
+
+        if let parentWindow = NSApp.keyWindow {
+            panel.setFrameOrigin(NSPoint(x: parentWindow.frame.midX - 210, y: parentWindow.frame.midY - 270))
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        audioRecorderPanel = panel
+    }
+
+    private func closeAudioRecorderPanel() {
+        audioRecorderPanel?.orderOut(nil)
+        audioRecorderPanel?.close()
+        audioRecorderPanel = nil
     }
     
     // MARK: - 颜色选择器
