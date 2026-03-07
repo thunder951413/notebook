@@ -7,37 +7,30 @@ final class AttachmentTextAttachment: NSTextAttachment {
 
     let attachmentFileURL: URL
     let kind: AttachmentKind
+    private let embeddedFileData: Data?
+
+    private static func uniqueTemporaryFileURL(directoryName: String, preferredFilename: String) -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let ext = URL(fileURLWithPath: preferredFilename).pathExtension
+        let base = URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent
+        let safeBase = base.isEmpty ? "attachment" : base
+        let uniqueName = "\(safeBase)-\(UUID().uuidString)" + (ext.isEmpty ? "" : ".\(ext)")
+        return directory.appendingPathComponent(uniqueName, isDirectory: false)
+    }
 
     init(fileURL: URL, kind: AttachmentKind) {
         self.attachmentFileURL = fileURL
         self.kind = kind
+        self.embeddedFileData = try? Data(contentsOf: fileURL)
         super.init(data: nil, ofType: nil)
 
-        if let wrapper = try? FileWrapper(url: fileURL, options: []) {
-            self.fileWrapper = wrapper
-        }
-
+        // 运行时不要挂 fileWrapper，避免 NSTextView 把它当成“文件附件”并显示右上角系统菜单
         if kind == .audio {
             self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
         } else if kind == .image {
-            // 加载图片并设置合适的尺寸
-            if let image = NSImage(contentsOf: fileURL) {
-                // 限制图片显示的最大尺寸
-                let maxWidth: CGFloat = 600
-                let maxHeight: CGFloat = 400
-                let imageSize = image.size
-                
-                var newSize = imageSize
-                if imageSize.width > maxWidth || imageSize.height > maxHeight {
-                    let widthRatio = maxWidth / imageSize.width
-                    let heightRatio = maxHeight / imageSize.height
-                    let ratio = min(widthRatio, heightRatio)
-                    newSize = NSSize(width: imageSize.width * ratio, height: imageSize.height * ratio)
-                }
-                
-                self.image = image
-                self.bounds = NSRect(origin: .zero, size: newSize)
-            }
+            applyImagePresentationIfNeeded()
         }
     }
 
@@ -49,14 +42,14 @@ final class AttachmentTextAttachment: NSTextAttachment {
         print("[AttachmentTextAttachment] Decoded wrapper: \(decodedWrapper != nil)")
 
         if let wrapper = decodedWrapper, let filename = wrapper.preferredFilename {
-            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("NotebookExtracted", isDirectory: true)
-            try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-            let out = tmp.appendingPathComponent(filename)
+            let out = Self.uniqueTemporaryFileURL(directoryName: "NotebookExtracted", preferredFilename: filename)
             try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
             self.attachmentFileURL = out
+            self.embeddedFileData = wrapper.regularFileContents
             print("[AttachmentTextAttachment] File URL set to: \(out.path)")
         } else {
             self.attachmentFileURL = FileManager.default.temporaryDirectory
+            self.embeddedFileData = nil
             print("[AttachmentTextAttachment] No wrapper or filename, using temp directory")
         }
 
@@ -71,13 +64,14 @@ final class AttachmentTextAttachment: NSTextAttachment {
         super.init(coder: coder)
         print("[AttachmentTextAttachment] super.init completed")
 
-        // super.init 之后再赋值 fileWrapper，避免 "self used before super.init"
-        if let wrapper = decodedWrapper {
-            self.fileWrapper = wrapper
-        }
+        // 关键：清掉运行时 fileWrapper，避免被 NSTextView 识别为“文件附件”并出现系统浮层
+        self.fileWrapper = nil
 
+        // 解码后保留 attachmentFileURL 供我们自己的图片/音频渲染与播放。
         if kind == .audio {
             self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
+        } else if kind == .image {
+            applyImagePresentationIfNeeded()
         }
         
         print("[AttachmentTextAttachment] Decoding completed")
@@ -86,8 +80,62 @@ final class AttachmentTextAttachment: NSTextAttachment {
     override func encode(with coder: NSCoder) {
         super.encode(with: coder)
         coder.encode(kind.rawValue as NSString, forKey: "NotebookAttachmentKind")
-        if let wrapper = fileWrapper {
+
+        // 持久化优先使用内嵌数据，避免依赖运行时文件路径（可能已被清理）
+        if let data = embeddedFileData {
+            let filename = attachmentFileURL.lastPathComponent.isEmpty ? "attachment.bin" : attachmentFileURL.lastPathComponent
+            let wrapper = FileWrapper(regularFileWithContents: data)
+            wrapper.preferredFilename = filename
+            coder.encode(wrapper, forKey: "NSFileWrapper")
+        } else if let wrapper = try? FileWrapper(url: attachmentFileURL, options: []) {
             coder.encode(wrapper, forKey: "NSFileWrapper")
         }
+    }
+
+    func attachmentData() -> Data? {
+        if let data = try? Data(contentsOf: attachmentFileURL) {
+            return data
+        }
+        if let embeddedFileData {
+            return embeddedFileData
+        }
+        if let wrapperData = fileWrapper?.regularFileContents {
+            return wrapperData
+        }
+        return nil
+    }
+
+    func refreshPresentationIfNeeded() {
+        if kind == .image {
+            applyImagePresentationIfNeeded()
+        } else if kind == .audio {
+            self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
+        }
+    }
+
+    private func applyImagePresentationIfNeeded() {
+        guard let data = attachmentData(),
+              let image = NSImage(data: data) else { return }
+
+        // 如果附件已经有有效尺寸（例如用户拖拽缩放后持久化的 bounds），优先保留
+        if bounds.width > 1, bounds.height > 1 {
+            self.image = image
+            return
+        }
+
+        let maxWidth: CGFloat = 600
+        let maxHeight: CGFloat = 400
+        let imageSize = image.size
+
+        var newSize = imageSize
+        if imageSize.width > maxWidth || imageSize.height > maxHeight {
+            let widthRatio = maxWidth / imageSize.width
+            let heightRatio = maxHeight / imageSize.height
+            let ratio = min(widthRatio, heightRatio)
+            newSize = NSSize(width: imageSize.width * ratio, height: imageSize.height * ratio)
+        }
+
+        self.image = image
+        self.bounds = NSRect(origin: .zero, size: newSize)
     }
 }

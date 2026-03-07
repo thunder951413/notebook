@@ -63,8 +63,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // 设置窗口为屏幕大小
         window.setFrame(screenFrame, display: true, animate: false)
         
-        // 标记为最大化状态
-        windowState.isMaximized = true
+        // 标记为最大化状态（避免在窗口更新周期内直接发布）
+        DispatchQueue.main.async { [weak self] in
+            self?.windowState.isMaximized = true
+        }
         
         isRestoringState = false
     }
@@ -103,12 +105,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     
     func windowDidEnterFullScreen(_ notification: Notification) {
-        windowState.isMaximized = true
+        DispatchQueue.main.async { [weak self] in
+            self?.windowState.isMaximized = true
+        }
     }
     
     func windowDidExitFullScreen(_ notification: Notification) {
-        windowState.isMaximized = false
-        saveWindowState()
+        DispatchQueue.main.async { [weak self] in
+            self?.windowState.isMaximized = false
+            self?.saveWindowState()
+        }
     }
     
     // 检测最大化状态变化 - 使用更可靠的方法
@@ -128,7 +134,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let isMaximized = widthMatch && heightMatch && xMatch && yMatch
         
         if windowState.isMaximized != isMaximized {
-            windowState.isMaximized = isMaximized
+            DispatchQueue.main.async { [weak self] in
+                self?.windowState.isMaximized = isMaximized
+            }
         }
     }
     

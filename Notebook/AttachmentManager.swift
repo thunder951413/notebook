@@ -130,16 +130,25 @@ final class AttachmentManager {
 
         // 关键兜底：即使附件类型退化，也可通过 link 属性保留音频引用
         content.enumerateAttribute(.link, in: range, options: []) { value, _, _ in
-            let url: URL?
+            let raw: String
             if let u = value as? URL {
-                url = u
+                raw = u.absoluteString
             } else if let s = value as? String {
-                url = URL(string: s)
+                raw = s
             } else {
-                url = nil
+                return
             }
 
-            guard let fileURL = url else { return }
+            if raw.hasPrefix("notebook-image://") {
+                let payload = String(raw.dropFirst("notebook-image://".count))
+                let filePart = payload.split(separator: "#", maxSplits: 1).map(String.init).first ?? payload
+                if let fileURL = URL(string: filePart), !fileURL.lastPathComponent.isEmpty {
+                    referencedFiles.insert(fileURL.lastPathComponent)
+                }
+                return
+            }
+
+            guard let fileURL = URL(string: raw) else { return }
             let ext = fileURL.pathExtension.lowercased()
             guard audioExts.contains(ext) else { return }
             referencedFiles.insert(fileURL.lastPathComponent)

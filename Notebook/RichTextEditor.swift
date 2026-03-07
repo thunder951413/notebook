@@ -618,13 +618,21 @@ final class RichTextController: ObservableObject {
             do {
                 let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: url, noteID: noteID, kind: .image)
                 let attachment = AttachmentTextAttachment(fileURL: destURL, kind: .image)
-                let attr = NSAttributedString(attachment: attachment)
-                tv.textStorage?.insert(attr, at: tv.selectedRange().location)
+                let mutableAttr = NSMutableAttributedString(attachment: attachment)
+                let imageLink = imageMetadataLink(for: destURL, size: attachment.bounds.size)
+                mutableAttr.addAttribute(.link, value: imageLink, range: NSRange(location: 0, length: mutableAttr.length))
+                tv.textStorage?.insert(mutableAttr, at: tv.selectedRange().location)
                 tv.didChangeText()
             } catch {
                 print("Failed to insert image: \(error)")
             }
         }
+    }
+
+    private func imageMetadataLink(for fileURL: URL, size: CGSize) -> String {
+        let w = max(1, Int(size.width.rounded()))
+        let h = max(1, Int(size.height.rounded()))
+        return "notebook-image://\(fileURL.absoluteString)#w=\(w)&h=\(h)"
     }
 
     func insertAudio(from fileURL: URL) {
@@ -738,6 +746,18 @@ class RichTextView: NSTextView {
     weak var pasteCoordinator: PasteCoordinatorProtocol?
     private var audioPlayerPanel: NSPanel?
 
+    private struct ImageResizeState {
+        let range: NSRange
+        let initialPoint: CGPoint
+        let initialSize: CGSize
+        let aspectRatio: CGFloat
+        let freeResize: Bool
+    }
+
+    private var imageResizeState: ImageResizeState?
+    private let minImageWidth: CGFloat = 120
+    private let maxImageWidth: CGFloat = 1200
+
     override func paste(_ sender: Any?) {
         print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
         // 首先尝试让 coordinator 处理图片粘贴
@@ -795,11 +815,86 @@ class RichTextView: NSTextView {
         return super.validateMenuItem(menuItem)
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawImageResizeHandles()
+    }
+
+    private func drawImageResizeHandles() {
+        guard let layoutManager = self.layoutManager,
+              let textContainer = self.textContainer,
+              let textStorage = self.textStorage,
+              textStorage.length > 0 else {
+            return
+        }
+
+        textStorage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: textStorage.length), options: []) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment,
+                  isImageAttachment(attachment) else { return }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            attachmentRect.origin.x += self.textContainerInset.width
+            attachmentRect.origin.y += self.textContainerInset.height
+
+            let visualRect = attachmentRectForImage(attachment, glyphRange: glyphRange, layoutManager: layoutManager, textContainer: textContainer)
+
+            let handleSize: CGFloat = 10
+            let handleRect = CGRect(
+                x: visualRect.maxX - handleSize - 2,
+                y: visualRect.minY + 2,
+                width: handleSize,
+                height: handleSize
+            )
+
+            let path = NSBezierPath(roundedRect: handleRect, xRadius: 2, yRadius: 2)
+            NSColor.white.withAlphaComponent(0.9).setFill()
+            path.fill()
+
+            NSColor.black.withAlphaComponent(0.45).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let layoutManager = self.layoutManager,
+              let textContainer = self.textContainer,
+              let textStorage = self.textStorage,
+              textStorage.length > 0 else {
+            return
+        }
+
+        textStorage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: textStorage.length), options: []) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment,
+                  isImageAttachment(attachment) else { return }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let visualRect = attachmentRectForImage(attachment, glyphRange: glyphRange, layoutManager: layoutManager, textContainer: textContainer)
+
+            let handleSize: CGFloat = 16
+            let handleRect = CGRect(
+                x: visualRect.maxX - handleSize - 2,
+                y: visualRect.minY,
+                width: handleSize,
+                height: handleSize
+            ).insetBy(dx: -8, dy: -8)
+
+            self.addCursorRect(handleRect, cursor: .crosshair)
+        }
+    }
+
     // 处理鼠标点击事件 - 用于切换复选框
     override func mouseDown(with event: NSEvent) {
         let point = self.convert(event.locationInWindow, from: nil)
 
-        // 0) 最高优先级：按 link 属性识别音频 URL（跨重启最稳）
+        // 0) 图片右下角拖拽缩放
+        if beginImageResizeIfNeeded(at: point, event: event) {
+            return
+        }
+
+        // 1) 最高优先级：按 link 属性识别音频 URL（跨重启最稳）
         if let layoutManager = self.layoutManager,
            let textContainer = self.textContainer {
             let textContainerPoint = CGPoint(
@@ -933,6 +1028,159 @@ class RichTextView: NSTextView {
 
         super.mouseDown(with: event)
     }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let state = imageResizeState,
+              let textStorage = self.textStorage,
+              let attachment = textStorage.attribute(.attachment, at: state.range.location, effectiveRange: nil) as? NSTextAttachment,
+              isImageAttachment(attachment) else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let currentPoint = self.convert(event.locationInWindow, from: nil)
+        let deltaX = currentPoint.x - state.initialPoint.x
+        let deltaY = state.initialPoint.y - currentPoint.y
+
+        var targetWidth = state.initialSize.width + deltaX
+        var targetHeight = state.initialSize.height + deltaY
+
+        if state.freeResize {
+            targetWidth = min(max(targetWidth, minImageWidth), maxImageWidth)
+            targetHeight = min(max(targetHeight, minImageWidth * 0.5), maxImageWidth)
+        } else {
+            targetWidth = min(max(targetWidth, minImageWidth), maxImageWidth)
+            targetHeight = max(minImageWidth / max(state.aspectRatio, 0.001), targetWidth / max(state.aspectRatio, 0.001))
+        }
+
+        let newSize = CGSize(width: targetWidth, height: targetHeight)
+
+        attachment.bounds = NSRect(origin: .zero, size: newSize)
+
+        textStorage.beginEditing()
+        textStorage.addAttribute(.attachment, value: attachment, range: state.range)
+        textStorage.addAttribute(.notebookImageWidth, value: newSize.width, range: state.range)
+        textStorage.addAttribute(.notebookImageHeight, value: newSize.height, range: state.range)
+        if let typedAttachment = attachment as? AttachmentTextAttachment {
+            let imageLink = imageMetadataLink(for: typedAttachment.attachmentFileURL, size: newSize)
+            textStorage.addAttribute(.link, value: imageLink, range: state.range)
+        }
+        textStorage.endEditing()
+
+        if let currentW = textStorage.attribute(.notebookImageWidth, at: state.range.location, effectiveRange: nil) as? CGFloat,
+           let currentH = textStorage.attribute(.notebookImageHeight, at: state.range.location, effectiveRange: nil) as? CGFloat,
+           let currentLink = textStorage.attribute(.link, at: state.range.location, effectiveRange: nil) {
+            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=\(currentW)x\(currentH), link=\(currentLink), freeResize=\(state.freeResize)")
+        } else {
+            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=<missing>, freeResize=\(state.freeResize)")
+        }
+        self.didChangeText()
+        if let coordinator = self.delegate as? RichTextEditor.Coordinator {
+            coordinator.syncBindingFromTextView(self)
+        }
+        self.needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if imageResizeState != nil {
+            imageResizeState = nil
+            if let coordinator = self.delegate as? RichTextEditor.Coordinator {
+                coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: self))
+            }
+            return
+        }
+
+        super.mouseUp(with: event)
+    }
+
+    private func attachmentRectForImage(_ attachment: NSTextAttachment,
+                                        glyphRange: NSRange,
+                                        layoutManager: NSLayoutManager,
+                                        textContainer: NSTextContainer) -> CGRect {
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+        // 关键：优先使用 attachment.bounds 的真实尺寸，避免 glyph rect 过小导致命中偏移
+        if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+            attachmentRect.size = attachment.bounds.size
+        }
+
+        attachmentRect.origin.x += self.textContainerInset.width
+        attachmentRect.origin.y += self.textContainerInset.height
+        return attachmentRect
+    }
+
+    private func beginImageResizeIfNeeded(at point: CGPoint, event: NSEvent) -> Bool {
+        guard let layoutManager = self.layoutManager,
+              let textContainer = self.textContainer,
+              let textStorage = self.textStorage,
+              textStorage.length > 0 else {
+            return false
+        }
+
+        let textContainerPoint = CGPoint(
+            x: point.x - self.textContainerInset.width,
+            y: point.y - self.textContainerInset.height
+        )
+
+        var index = layoutManager.characterIndex(
+            for: textContainerPoint,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        index = max(0, min(index, textStorage.length - 1))
+
+        for checkIndex in [index - 1, index, index + 1] where checkIndex >= 0 && checkIndex < textStorage.length {
+            var effectiveRange = NSRange(location: NSNotFound, length: 0)
+            guard let attachment = textStorage.attribute(.attachment, at: checkIndex, effectiveRange: &effectiveRange) as? NSTextAttachment,
+                  isImageAttachment(attachment) else {
+                continue
+            }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+            let visualRect = attachmentRectForImage(attachment, glyphRange: glyphRange, layoutManager: layoutManager, textContainer: textContainer)
+
+            let handleSize: CGFloat = 16
+            let handleRect = CGRect(
+                x: visualRect.maxX - handleSize - 2,
+                y: visualRect.minY,
+                width: handleSize,
+                height: handleSize
+            ).insetBy(dx: -8, dy: -8)
+
+            if handleRect.contains(point) {
+                let initialSize = attachment.bounds.size
+                let safeWidth = max(initialSize.width, 1)
+                let safeHeight = max(initialSize.height, 1)
+                let useFreeResize = event.modifierFlags.contains(.shift)
+                imageResizeState = ImageResizeState(
+                    range: effectiveRange,
+                    initialPoint: point,
+                    initialSize: initialSize,
+                    aspectRatio: safeWidth / safeHeight,
+                    freeResize: useFreeResize
+                )
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func isImageAttachment(_ attachment: NSTextAttachment) -> Bool {
+        if let typed = attachment as? AttachmentTextAttachment {
+            return typed.kind == .image
+        }
+        if attachment is AudioBlockAttachment {
+            return false
+        }
+        if attachment.image != nil {
+            return true
+        }
+        if let filename = attachment.fileWrapper?.preferredFilename {
+            return mimeTypeForFilename(filename).hasPrefix("image/")
+        }
+        return false
+    }
     
     private func openAudioAttachmentIfHit(
         at index: Int,
@@ -990,7 +1238,7 @@ class RichTextView: NSTextView {
         return audioExts.contains(url.pathExtension.lowercased())
     }
 
-    func migrateAudioAttachmentLinksIfNeeded() {
+    func normalizeAttachmentsAfterLoad() {
         guard let textStorage else { return }
         let fullRange = NSRange(location: 0, length: textStorage.length)
 
@@ -1000,6 +1248,45 @@ class RichTextView: NSTextView {
         textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
             guard let attachment = value as? NSTextAttachment else { return }
 
+            // 0) 先做图片附件自愈：把普通 NSTextAttachment 的图片替换为自定义 AttachmentTextAttachment
+            //    目的是避免系统把它当“文件附件”显示右上角浮层（标记/更多）。
+            if !(attachment is AttachmentTextAttachment), !(attachment is AudioBlockAttachment),
+               let converted = convertLegacyImageAttachmentIfNeeded(attachment) {
+                textStorage.addAttribute(.attachment, value: converted, range: range)
+            }
+
+            if let textAttachment = textStorage.attribute(.attachment, at: range.location, effectiveRange: nil) as? AttachmentTextAttachment {
+                // 1) 图片附件：优先恢复持久化尺寸，再刷新展示
+                if textAttachment.kind == .image {
+                    var restored = false
+
+                    let savedWidth = textStorage.attribute(.notebookImageWidth, at: range.location, effectiveRange: nil) as? CGFloat
+                    let savedHeight = textStorage.attribute(.notebookImageHeight, at: range.location, effectiveRange: nil) as? CGFloat
+                    if let savedWidth, let savedHeight, savedWidth > 1, savedHeight > 1 {
+                        textAttachment.bounds = NSRect(x: 0, y: 0, width: savedWidth, height: savedHeight)
+                        print("[Attachment Load] Restored image bounds from attrs: \(savedWidth)x\(savedHeight)")
+                        restored = true
+                    }
+
+                    if !restored,
+                       let parsed = parseImageMetadataLink(textStorage.attribute(.link, at: range.location, effectiveRange: nil)) {
+                        textAttachment.bounds = NSRect(x: 0, y: 0, width: parsed.width, height: parsed.height)
+                        textStorage.addAttribute(.notebookImageWidth, value: parsed.width, range: range)
+                        textStorage.addAttribute(.notebookImageHeight, value: parsed.height, range: range)
+                        print("[Attachment Load] Restored image bounds from link: \(parsed.width)x\(parsed.height)")
+                    }
+                }
+                textAttachment.refreshPresentationIfNeeded()
+
+                // 2) 音频附件：确保 link 属性存在，便于点击播放和 Markdown 提取
+                let hasLink = textStorage.attribute(.link, at: range.location, effectiveRange: nil) != nil
+                if !hasLink, textAttachment.kind == .audio {
+                    textStorage.addAttribute(.link, value: textAttachment.attachmentFileURL, range: range)
+                }
+                return
+            }
+
+            // 3) 其他音频附件兜底
             let hasLink = textStorage.attribute(.link, at: range.location, effectiveRange: nil) != nil
             if hasLink { return }
 
@@ -1012,6 +1299,123 @@ class RichTextView: NSTextView {
                 textStorage.addAttribute(.link, value: fallbackURL, range: range)
             }
         }
+    }
+
+    private func convertLegacyImageAttachmentIfNeeded(_ attachment: NSTextAttachment) -> AttachmentTextAttachment? {
+        func uniqueMigratedFileURL(preferredFilename: String) -> URL {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("NotebookMigrated", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+
+            let ext = URL(fileURLWithPath: preferredFilename).pathExtension
+            let base = URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent
+            let safeBase = base.isEmpty ? "attachment" : base
+            let uniqueName = "\(safeBase)-\(UUID().uuidString)" + (ext.isEmpty ? "" : ".\(ext)")
+            return tmp.appendingPathComponent(uniqueName, isDirectory: false)
+        }
+
+        // 先尝试从 fileWrapper 恢复原图
+        if let fileWrapper = attachment.fileWrapper,
+           let data = fileWrapper.regularFileContents,
+           let filename = fileWrapper.preferredFilename {
+            let mimeType = mimeTypeForFilename(filename)
+            if mimeType.hasPrefix("image/") {
+                let out = uniqueMigratedFileURL(preferredFilename: filename)
+                do {
+                    try data.write(to: out, options: .atomic)
+                    let newAttachment = AttachmentTextAttachment(fileURL: out, kind: .image)
+                    // 尽量保留旧 bounds
+                    if attachment.bounds.width > 1, attachment.bounds.height > 1 {
+                        newAttachment.bounds = attachment.bounds
+                    }
+                    return newAttachment
+                } catch {
+                    print("[Attachment Migrate] Failed writing legacy image data: \(error)")
+                }
+            }
+        }
+
+        // 再尝试从 image 导出 PNG
+        if let image = attachment.image,
+           let tiffData = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiffData),
+           let pngData = bitmap.representation(using: .png, properties: [:]) {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("NotebookMigrated", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let out = tmp.appendingPathComponent("legacy-\(UUID().uuidString).png")
+            do {
+                try pngData.write(to: out, options: .atomic)
+                let newAttachment = AttachmentTextAttachment(fileURL: out, kind: .image)
+                if attachment.bounds.width > 1, attachment.bounds.height > 1 {
+                    newAttachment.bounds = attachment.bounds
+                }
+                return newAttachment
+            } catch {
+                print("[Attachment Migrate] Failed exporting legacy image: \(error)")
+            }
+        }
+
+        return nil
+    }
+
+    private func mimeTypeForFilename(_ filename: String) -> String {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg": return "image/jpeg"
+        case "png": return "image/png"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "heic": return "image/heic"
+        case "bmp": return "image/bmp"
+        case "tif", "tiff": return "image/tiff"
+        case "m4a": return "audio/mp4"
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "aiff": return "audio/aiff"
+        case "caf": return "audio/x-caf"
+        default: return "application/octet-stream"
+        }
+    }
+
+    private func imageMetadataLink(for fileURL: URL, size: CGSize) -> String {
+        let w = max(1, Int(size.width.rounded()))
+        let h = max(1, Int(size.height.rounded()))
+        return "notebook-image://\(fileURL.absoluteString)#w=\(w)&h=\(h)"
+    }
+
+    private func parseImageMetadataLink(_ value: Any?) -> (url: URL, width: CGFloat, height: CGFloat)? {
+        let raw: String
+        if let str = value as? String {
+            raw = str
+        } else if let url = value as? URL {
+            raw = url.absoluteString
+        } else {
+            return nil
+        }
+
+        guard raw.hasPrefix("notebook-image://") else { return nil }
+
+        let payload = String(raw.dropFirst("notebook-image://".count))
+        let parts = payload.split(separator: "#", maxSplits: 1).map(String.init)
+        guard let filePart = parts.first, !filePart.isEmpty,
+              let fileURL = URL(string: filePart) else {
+            return nil
+        }
+
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        if parts.count == 2 {
+            for item in parts[1].split(separator: "&") {
+                let kv = item.split(separator: "=", maxSplits: 1).map(String.init)
+                guard kv.count == 2 else { continue }
+                if kv[0] == "w" { width = CGFloat(Double(kv[1]) ?? 0) }
+                if kv[0] == "h" { height = CGFloat(Double(kv[1]) ?? 0) }
+            }
+        }
+
+        guard width > 1, height > 1 else { return nil }
+        return (fileURL, width, height)
     }
 
     private func resolveAudioURLFromAttachment(_ attachment: NSTextAttachment) -> URL? {
@@ -1565,7 +1969,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.typingAttributes[.foregroundColor] = defaultTextColor
 
         textView.textStorage?.setAttributedString(attributedText)
-        textView.migrateAudioAttachmentLinksIfNeeded()
+        textView.normalizeAttachmentsAfterLoad()
 
         textView.isSelectable = true
         textView.isEditable = true
@@ -1617,7 +2021,7 @@ struct RichTextEditor: NSViewRepresentable {
             }
 
             textView.textStorage?.setAttributedString(attributedText)
-            textView.migrateAudioAttachmentLinksIfNeeded()
+            textView.normalizeAttachmentsAfterLoad()
             textView.setSelectedRange(NSRange(location: 0, length: 0))
 
             context.coordinator.isProgrammaticUpdate = false
@@ -1716,6 +2120,13 @@ struct RichTextEditor: NSViewRepresentable {
             guard let content = pendingContent else { return }
             self.attributedText = content
             pendingContent = nil
+        }
+
+        /// 在非文本编辑场景（如附件缩放）主动同步绑定
+        func syncBindingFromTextView(_ textView: NSTextView) {
+            guard !isProgrammaticUpdate,
+                  let content = textView.attributedString().copy() as? NSAttributedString else { return }
+            self.attributedText = content
         }
 
         func textDidChange(_ notification: Notification) {
@@ -1883,12 +2294,26 @@ struct RichTextEditor: NSViewRepresentable {
         /// 插入附件到文本视图
         private func insertAttachment(at fileURL: URL, kind: AttachmentKind, in textView: NSTextView) {
             let attachment = AttachmentTextAttachment(fileURL: fileURL, kind: kind)
-            let attr = NSAttributedString(attachment: attachment)
-            
+            let inserted: NSAttributedString
+
+            if kind == .image {
+                let mutable = NSMutableAttributedString(attachment: attachment)
+                let size = attachment.bounds.size
+                if size.width > 1, size.height > 1 {
+                    mutable.addAttribute(.notebookImageWidth, value: size.width, range: NSRange(location: 0, length: mutable.length))
+                    mutable.addAttribute(.notebookImageHeight, value: size.height, range: NSRange(location: 0, length: mutable.length))
+                    let imageLink = "notebook-image://\(fileURL.absoluteString)#w=\(Int(size.width.rounded()))&h=\(Int(size.height.rounded()))"
+                    mutable.addAttribute(.link, value: imageLink, range: NSRange(location: 0, length: mutable.length))
+                }
+                inserted = mutable
+            } else {
+                inserted = NSAttributedString(attachment: attachment)
+            }
+
             let selectedRange = textView.selectedRange()
-            textView.textStorage?.insert(attr, at: selectedRange.location)
+            textView.textStorage?.insert(inserted, at: selectedRange.location)
             textView.didChangeText()
-            
+
             // 触发绑定更新
             if let content = textView.attributedString().copy() as? NSAttributedString {
                 self.attributedText = content

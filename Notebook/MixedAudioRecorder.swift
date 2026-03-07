@@ -54,7 +54,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 
                 systemAudioURL = folder.appendingPathComponent("system_\(UUID().uuidString).m4a")
-                microphoneURL = folder.appendingPathComponent("mic_\(UUID().uuidString).m4a")
+                microphoneURL = folder.appendingPathComponent("mic_\(UUID().uuidString).caf")
             }
             
             // 1. 先启动系统音频（可能触发音频路由重配）
@@ -112,10 +112,13 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         }
         
         let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVSampleRateKey: 44100.0,
             AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
         ]
 
         microphoneRecorder = try AVAudioRecorder(url: url, settings: settings)

@@ -559,12 +559,14 @@ private struct SidebarView: View {
     }
 
     private var allNotesRow: some View {
-        HStack {
+        // 全部笔记（排除加密文件夹的笔记）
+        let allNotesCount = store.notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
+        return HStack {
             Image(systemName: "tray.fill")
                 .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white : .orange)
             Text(l10n(L10nKeys.Folder.allNotes))
             Spacer()
-            Text("\(store.notes.count)")
+            Text("\(allNotesCount)")
                 .font(.caption)
                 .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
         }
@@ -585,8 +587,11 @@ private struct SidebarView: View {
         // 未分类包括：
         // 1. folderID 为 nil 的笔记
         // 2. folderID 指向不存在文件夹的笔记（孤儿笔记）
+        // 3. 排除加密文件夹的笔记
         let existingFolderIDs = Set(store.folders.map { $0.id })
         let uncategorizedCount = store.notes.filter { note in
+            // 排除加密文件夹的笔记
+            guard !EncryptedFolderManager.shared.isEncrypted(note: note) else { return false }
             guard let folderID = note.folderID else { return true }
             return !existingFolderIDs.contains(folderID)
         }.count
@@ -1175,7 +1180,7 @@ private struct NoteEditorView: View {
                             }
                         case .preview:
                             // Markdown 预览模式
-                            NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme, noteID: note.id)
+                            NoteMarkdownPreviewView(content: note.content, colorScheme: colorScheme, noteID: note.id)
                                 .frame(maxHeight: .infinity)
                         case .split:
                             // 分屏预览模式
@@ -1198,7 +1203,7 @@ private struct NoteEditorView: View {
                                     .foregroundStyle(Color.gray.opacity(0.3))
 
                                 // 右侧预览
-                                NoteMarkdownPreviewView(content: note.content.string, colorScheme: colorScheme, noteID: note.id)
+                                NoteMarkdownPreviewView(content: note.content, colorScheme: colorScheme, noteID: note.id)
                                     .frame(maxHeight: .infinity)
                             }
                         }
@@ -2418,18 +2423,71 @@ private struct AIPanelView: View {
 // MARK: - 笔记 Markdown 预览视图
 
 private struct NoteMarkdownPreviewView: View {
-    let content: String
+    let content: NSAttributedString
     let colorScheme: ColorScheme
     let noteID: UUID
     @State private var webViewHeight: CGFloat = 500
     @State private var scrollOffset: CGFloat = 0
+    @State private var renderedContent: NSAttributedString = NSAttributedString(string: "")
+    @State private var renderWorkItem: DispatchWorkItem?
+
+    private var contentRevision: Int {
+        // 不能只看 content.string：附件尺寸变化不会触发
+        // 也不能只看 RTFD：自定义尺寸属性不会稳定进入 RTFD
+        var hasher = Hasher()
+        hasher.combine(content.string)
+        hasher.combine(content.length)
+
+        let fullRange = NSRange(location: 0, length: content.length)
+        content.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+            if let attachment = attrs[.attachment] as? NSTextAttachment {
+                hasher.combine(range.location)
+                hasher.combine(range.length)
+                hasher.combine(Int(attachment.bounds.width.rounded()))
+                hasher.combine(Int(attachment.bounds.height.rounded()))
+            }
+
+            if let w = attrs[.notebookImageWidth] as? CGFloat {
+                hasher.combine(Int(w.rounded()))
+            }
+            if let h = attrs[.notebookImageHeight] as? CGFloat {
+                hasher.combine(Int(h.rounded()))
+            }
+            if let link = attrs[.link] as? String, link.hasPrefix("notebook-image://") {
+                hasher.combine(link)
+            }
+        }
+
+        return hasher.finalize()
+    }
 
     var body: some View {
-        MarkdownWebView(markdown: content, colorScheme: colorScheme, height: $webViewHeight, noteID: noteID)
-            .frame(maxHeight: .infinity)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(AppColors.editorBackground(colorScheme))
+        MarkdownWebView(
+            markdown: renderedContent.string,
+            attributedContent: renderedContent,
+            colorScheme: colorScheme,
+            height: $webViewHeight,
+            noteID: noteID
+        )
+        .frame(maxHeight: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(AppColors.editorBackground(colorScheme))
+        .onAppear {
+            renderedContent = content.copy() as? NSAttributedString ?? content
+        }
+        .onDisappear {
+            renderWorkItem?.cancel()
+        }
+        .onChange(of: contentRevision) { _, _ in
+            renderWorkItem?.cancel()
+            let snapshot = content.copy() as? NSAttributedString ?? content
+            let workItem = DispatchWorkItem {
+                renderedContent = snapshot
+            }
+            renderWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
+        }
     }
 }
 
@@ -3408,6 +3466,7 @@ final class NonScrollingWKWebView: WKWebView {
 
 struct MarkdownWebView: NSViewRepresentable {
     let markdown: String
+    let attributedContent: NSAttributedString?
     let colorScheme: ColorScheme
     @Binding var height: CGFloat
     let noteID: UUID
@@ -3430,13 +3489,32 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        let html = generateHTML(from: markdown, colorScheme: colorScheme)
+        let html = generateHTML(from: markdown, attributed: attributedContent, colorScheme: colorScheme)
+
+        // 避免重复加载同一份 HTML，减少闪烁
+        if context.coordinator.lastLoadedHTML == html {
+            return
+        }
+
         // 调试：打印生成的 HTML 内容
         if markdown.contains("```mermaid") {
             print("[Mermaid Debug] Generated HTML preview:")
             print(String(html.prefix(2000)))
         }
-        webView.loadHTMLString(html, baseURL: nil)
+
+        context.coordinator.reloadWorkItem?.cancel()
+        let isFirstLoad = context.coordinator.lastLoadedHTML == nil
+        let workItem = DispatchWorkItem {
+            webView.loadHTMLString(html, baseURL: nil)
+            context.coordinator.lastLoadedHTML = html
+        }
+        context.coordinator.reloadWorkItem = workItem
+
+        if isFirstLoad {
+            workItem.perform()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -3446,6 +3524,8 @@ struct MarkdownWebView: NSViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: MarkdownWebView
         var webView: WKWebView?
+        var lastLoadedHTML: String?
+        var reloadWorkItem: DispatchWorkItem?
 
         init(_ parent: MarkdownWebView) {
             self.parent = parent
@@ -3461,6 +3541,21 @@ struct MarkdownWebView: NSViewRepresentable {
                     }
                 }
             }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard navigationAction.navigationType == .linkActivated,
+                  let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+
+            let scheme = url.scheme?.lowercased() ?? ""
+            let allowedSchemes: Set<String> = ["http", "https", "mailto"]
+            if allowedSchemes.contains(scheme) {
+                NSWorkspace.shared.open(url)
+            }
+            decisionHandler(.cancel)
         }
 
         @objc func scrollToHeading(_ notification: Notification) {
@@ -3503,6 +3598,7 @@ struct MarkdownWebView: NSViewRepresentable {
         }
 
         deinit {
+            reloadWorkItem?.cancel()
             NotificationCenter.default.removeObserver(self)
         }
     }
@@ -3516,16 +3612,26 @@ struct MarkdownWebView: NSViewRepresentable {
         return regex.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: replacement)
     }
 
-    private func generateHTML(from markdown: String, colorScheme: ColorScheme) -> String {
+    private func generateHTML(from markdown: String, attributed: NSAttributedString?, colorScheme: ColorScheme) -> String {
         let textColor = colorScheme == .dark ? "#FFFFFF" : "#000000"
         let linkColor = colorScheme == .dark ? "#4A9EFF" : "#0066CC"
 
+        let markdownSource: String
+        var attachmentBlocks: [(placeholder: String, html: String)] = []
+        if let attributed {
+            let conversion = attributedToMarkdownWithAttachments(attributed)
+            markdownSource = conversion.markdown
+            attachmentBlocks = conversion.blocks
+        } else {
+            markdownSource = markdown
+        }
+
         // 提取目录项用于生成锚点
-        let tocItems = extractTableOfContents(from: markdown)
+        let tocItems = extractTableOfContents(from: markdownSource)
         var anchorIndex = 0
 
         // 先处理代码块（在转义之前），避免代码块内的内容被转义
-        var html = markdown
+        var html = markdownSource
 
         // 第一步：提取并保护代码块（包括 Mermaid）
         var codeBlocks: [(placeholder: String, content: String, isMermaid: Bool)] = []
@@ -3575,21 +3681,7 @@ struct MarkdownWebView: NSViewRepresentable {
         html = html.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
         html = html.replacingOccurrences(of: #"\*(.+?)\*"#, with: "<em>$1</em>", options: .regularExpression)
 
-        // 链接 [text](url) - 支持多行和 [text]\n(url) 格式
-        let linkPattern = #"\[([^\]]+)\]\s*\(([^\)]+)\)"#
-        if let linkRegex = try? NSRegularExpression(pattern: linkPattern, options: [.dotMatchesLineSeparators]) {
-            let matches = linkRegex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
-            print("[Link Debug] Found \(matches.count) links in HTML")
-            for match in matches {
-                if let textRange = Range(match.range(at: 1), in: html),
-                   let urlRange = Range(match.range(at: 2), in: html) {
-                    let text = String(html[textRange])
-                    let url = String(html[urlRange])
-                    print("[Link Debug] Found link: [\(text)](\(url))")
-                }
-            }
-        }
-        html = html.replacingOccurrences(of: linkPattern, with: "<a href=\"$2\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">$1</a>", options: .regularExpression)
+        html = processMarkdownLinks(html, linkColor: linkColor)
 
         // 自动链接（纯 URL）
         html = processAutoLinks(html, linkColor: linkColor)
@@ -3606,6 +3698,27 @@ struct MarkdownWebView: NSViewRepresentable {
                 replacement = "<pre><code>\(content)</code></pre>"
             }
             html = html.replacingOccurrences(of: placeholder, with: replacement)
+        }
+
+        // 第五步：恢复附件 HTML 块（避免被转义和自动换行污染）
+        for block in attachmentBlocks {
+            html = html.replacingOccurrences(of: block.placeholder, with: block.html)
+        }
+
+        let mermaidScripts: String
+        if markdownSource.contains("```mermaid") {
+            mermaidScripts = """
+            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script>
+                mermaid.initialize({
+                    startOnLoad: true,
+                    theme: '\(colorScheme == .dark ? "dark" : "default")',
+                    securityLevel: 'strict'
+                });
+            </script>
+            """
+        } else {
+            mermaidScripts = ""
         }
 
         return """
@@ -3675,21 +3788,255 @@ struct MarkdownWebView: NSViewRepresentable {
                     border-radius: 8px;
                     margin: 8px 0;
                 }
+                .note-image {
+                    border-radius: 8px;
+                    display: block;
+                    margin: 8px 0;
+                    object-fit: contain;
+                }
+                .note-image-auto {
+                    max-width: 100%;
+                    height: auto;
+                }
+                audio {
+                    width: min(420px, 100%);
+                    margin-top: 8px;
+                }
+                .audio-caption {
+                    color: \(colorScheme == .dark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.6)");
+                    font-size: 12px;
+                    margin: 4px 0 8px 0;
+                }
             </style>
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-            <script>
-                mermaid.initialize({
-                    startOnLoad: true,
-                    theme: '\(colorScheme == .dark ? "dark" : "default")',
-                    securityLevel: 'loose'
-                });
-            </script>
+            \(mermaidScripts)
         </head>
         <body>
             \(html)
         </body>
         </html>
         """
+    }
+
+    private func attributedToMarkdownWithAttachments(_ attributed: NSAttributedString) -> (markdown: String, blocks: [(placeholder: String, html: String)]) {
+        let nsText = attributed.string as NSString
+        var output = ""
+        var blocks: [(placeholder: String, html: String)] = []
+        var blockIndex = 0
+        let fullRange = NSRange(location: 0, length: attributed.length)
+
+        func appendBlock(_ html: String) {
+            let placeholder = "ATTACHMENT_BLOCK_\(blockIndex)_END"
+            blockIndex += 1
+            blocks.append((placeholder: placeholder, html: html))
+            output += "\n\(placeholder)\n"
+        }
+
+        attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+            if let attachment = attrs[.attachment] {
+                if let textAttachment = attachment as? AttachmentTextAttachment {
+                    switch textAttachment.kind {
+                    case .image:
+                        if let imageData = textAttachment.attachmentData() {
+                            let mimeType = mimeTypeForPath(path: textAttachment.attachmentFileURL.path)
+                            let base64 = imageData.base64EncodedString()
+
+                            let storedWidth = (attrs[.notebookImageWidth] as? CGFloat) ?? 0
+                            let storedHeight = (attrs[.notebookImageHeight] as? CGFloat) ?? 0
+
+                            let linkedSize: (CGFloat, CGFloat)? = {
+                                let raw: String
+                                if let s = attrs[.link] as? String {
+                                    raw = s
+                                } else if let u = attrs[.link] as? URL {
+                                    raw = u.absoluteString
+                                } else {
+                                    return nil
+                                }
+                                guard raw.hasPrefix("notebook-image://") else { return nil }
+                                let parts = raw.split(separator: "#", maxSplits: 1).map(String.init)
+                                guard parts.count == 2 else { return nil }
+                                var w: CGFloat = 0
+                                var h: CGFloat = 0
+                                for item in parts[1].split(separator: "&") {
+                                    let kv = item.split(separator: "=", maxSplits: 1).map(String.init)
+                                    guard kv.count == 2 else { continue }
+                                    if kv[0] == "w" { w = CGFloat(Double(kv[1]) ?? 0) }
+                                    if kv[0] == "h" { h = CGFloat(Double(kv[1]) ?? 0) }
+                                }
+                                return (w > 1 && h > 1) ? (w, h) : nil
+                            }()
+
+                            let resolvedW = textAttachment.bounds.width > 1 ? textAttachment.bounds.width : (storedWidth > 1 ? storedWidth : (linkedSize?.0 ?? 0))
+                            let resolvedH = textAttachment.bounds.height > 1 ? textAttachment.bounds.height : (storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? 0))
+                            let width = Int(resolvedW.rounded())
+                            let height = Int(resolvedH.rounded())
+                            print("[Markdown Image] note=\(noteID) AttachmentTextAttachment bounds=\(textAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                            if width > 1 && height > 1 {
+                                appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
+                            } else {
+                                appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image note-image-auto\" />")
+                            }
+                        } else {
+                            print("[Markdown Preview] Failed to read image attachment data (all sources empty)")
+                        }
+                    case .audio:
+                        if let data = textAttachment.attachmentData() {
+                            let mimeType = mimeTypeForPath(path: textAttachment.attachmentFileURL.path)
+                            let base64 = data.base64EncodedString()
+                            let filename = textAttachment.attachmentFileURL.lastPathComponent
+                            appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename)</div>")
+                        } else {
+                            print("[Markdown Preview] Failed to read audio attachment data (all sources empty)")
+                        }
+                    }
+                    return
+                }
+
+                if let audioAttachment = attachment as? AudioBlockAttachment {
+                    do {
+                        let data = try Data(contentsOf: audioAttachment.fileURL)
+                        let mimeType = mimeTypeForPath(path: audioAttachment.fileURL.path)
+                        let base64 = data.base64EncodedString()
+                        let duration = Int(audioAttachment.duration.rounded())
+                        let filename = htmlTextEscaped(audioAttachment.fileURL.lastPathComponent)
+                        appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename) · \(max(1, duration))秒</div>")
+                    } catch {
+                        print("[Markdown Preview] Failed to read audio attachment: \(error)")
+                    }
+                    return
+                }
+
+                if let nsAttachment = attachment as? NSTextAttachment {
+                    if let image = nsAttachment.image,
+                       let tiffData = image.tiffRepresentation,
+                       let bitmap = NSBitmapImageRep(data: tiffData),
+                       let pngData = bitmap.representation(using: .png, properties: [:]) {
+                        let base64 = pngData.base64EncodedString()
+
+                        let storedWidth = (attrs[.notebookImageWidth] as? CGFloat) ?? 0
+                        let storedHeight = (attrs[.notebookImageHeight] as? CGFloat) ?? 0
+                        let linkedSize: (CGFloat, CGFloat)? = {
+                            let raw: String
+                            if let s = attrs[.link] as? String {
+                                raw = s
+                            } else if let u = attrs[.link] as? URL {
+                                raw = u.absoluteString
+                            } else {
+                                return nil
+                            }
+                            guard raw.hasPrefix("notebook-image://") else { return nil }
+                            let parts = raw.split(separator: "#", maxSplits: 1).map(String.init)
+                            guard parts.count == 2 else { return nil }
+                            var w: CGFloat = 0
+                            var h: CGFloat = 0
+                            for item in parts[1].split(separator: "&") {
+                                let kv = item.split(separator: "=", maxSplits: 1).map(String.init)
+                                guard kv.count == 2 else { continue }
+                                if kv[0] == "w" { w = CGFloat(Double(kv[1]) ?? 0) }
+                                if kv[0] == "h" { h = CGFloat(Double(kv[1]) ?? 0) }
+                            }
+                            return (w > 1 && h > 1) ? (w, h) : nil
+                        }()
+                        let resolvedW = storedWidth > 1 ? storedWidth : (linkedSize?.0 ?? nsAttachment.bounds.width)
+                        let resolvedH = storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? nsAttachment.bounds.height)
+                        let width = Int(resolvedW.rounded())
+                        let height = Int(resolvedH.rounded())
+                        print("[Markdown Image] note=\(noteID) NSTextAttachment(image) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                        if width > 1 && height > 1 {
+                            appendBlock("<img src=\"data:image/png;base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
+                        } else {
+                            appendBlock("<img src=\"data:image/png;base64,\(base64)\" alt=\"image\" class=\"note-image note-image-auto\" />")
+                        }
+                        return
+                    }
+
+                    if let fileWrapper = nsAttachment.fileWrapper,
+                       let data = fileWrapper.regularFileContents,
+                       let filename = fileWrapper.preferredFilename {
+                        let mimeType = mimeTypeForPath(path: filename)
+                        if mimeType.hasPrefix("image/") {
+                            let base64 = data.base64EncodedString()
+                            let storedWidth = (attrs[.notebookImageWidth] as? CGFloat) ?? 0
+                            let storedHeight = (attrs[.notebookImageHeight] as? CGFloat) ?? 0
+                            let linkedSize: (CGFloat, CGFloat)? = {
+                                let raw: String
+                                if let s = attrs[.link] as? String {
+                                    raw = s
+                                } else if let u = attrs[.link] as? URL {
+                                    raw = u.absoluteString
+                                } else {
+                                    return nil
+                                }
+                                guard raw.hasPrefix("notebook-image://") else { return nil }
+                                let parts = raw.split(separator: "#", maxSplits: 1).map(String.init)
+                                guard parts.count == 2 else { return nil }
+                                var w: CGFloat = 0
+                                var h: CGFloat = 0
+                                for item in parts[1].split(separator: "&") {
+                                    let kv = item.split(separator: "=", maxSplits: 1).map(String.init)
+                                    guard kv.count == 2 else { continue }
+                                    if kv[0] == "w" { w = CGFloat(Double(kv[1]) ?? 0) }
+                                    if kv[0] == "h" { h = CGFloat(Double(kv[1]) ?? 0) }
+                                }
+                                return (w > 1 && h > 1) ? (w, h) : nil
+                            }()
+                            let resolvedW = storedWidth > 1 ? storedWidth : (linkedSize?.0 ?? nsAttachment.bounds.width)
+                            let resolvedH = storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? nsAttachment.bounds.height)
+                            let width = Int(resolvedW.rounded())
+                            let height = Int(resolvedH.rounded())
+                            print("[Markdown Image] note=\(noteID) NSTextAttachment(fileWrapper) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                            if width > 1 && height > 1 {
+                                appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
+                            } else {
+                                appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image note-image-auto\" />")
+                            }
+                            return
+                        }
+
+                        if mimeType.hasPrefix("audio/") {
+                            let src = "data:\(mimeType);base64,\(data.base64EncodedString())"
+                            let safeFilename = htmlTextEscaped(filename)
+                            appendBlock("<audio controls preload=\"metadata\" src=\"\(src)\"></audio><div class=\"audio-caption\">\(safeFilename)</div>")
+                            return
+                        }
+                    }
+
+                    if let linkValue = attrs[.link] {
+                        let url: URL?
+                        if let u = linkValue as? URL {
+                            url = u
+                        } else if let s = linkValue as? String {
+                            url = URL(string: s)
+                        } else {
+                            url = nil
+                        }
+
+                        if let url {
+                            let mimeType = mimeTypeForPath(path: url.path)
+                            if mimeType.hasPrefix("audio/") {
+                                do {
+                                    let data = try Data(contentsOf: url)
+                                    let base64 = data.base64EncodedString()
+                                    let safeFilename = htmlTextEscaped(url.lastPathComponent)
+                                    appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(safeFilename)</div>")
+                                } catch {
+                                    print("[Markdown Preview] Failed to read linked audio: \(error)")
+                                }
+                                return
+                            }
+                        }
+                    }
+                }
+
+                output += "\n"
+                return
+            }
+
+            let chunk = nsText.substring(with: range)
+            output += chunk
+        }
+
+        return (output, blocks)
     }
 
     /// 处理 Mermaid 代码块
@@ -3742,19 +4089,81 @@ struct MarkdownWebView: NSViewRepresentable {
 
     /// 处理自动链接（纯 URL）
     private func processAutoLinks(_ html: String, linkColor: String) -> String {
-        // 匹配 http://, https://, ftp:// 等 URL
         let pattern = #"(?<![\"\'>])(https?://[^\s\<\>\"\']+)"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return html
         }
 
-        let range = NSRange(html.startIndex..., in: html)
-        return regex.stringByReplacingMatches(
-            in: html,
-            options: [],
-            range: range,
-            withTemplate: "<a href=\"$1\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">$1</a>"
-        )
+        var result = html
+        let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range(at: 1), in: result) else { continue }
+            let rawURL = String(result[fullRange])
+            let escapedText = htmlTextEscaped(rawURL)
+            let replacement: String
+            if let safeHref = safeExternalHref(rawURL) {
+                replacement = "<a href=\"\(safeHref)\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">\(escapedText)</a>"
+            } else {
+                replacement = escapedText
+            }
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+        return result
+    }
+
+    private func processMarkdownLinks(_ html: String, linkColor: String) -> String {
+        let pattern = #"\[([^\]]+)\]\s*\(([^\)]+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
+            return html
+        }
+
+        var result = html
+        let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: result),
+                  let textRange = Range(match.range(at: 1), in: result),
+                  let urlRange = Range(match.range(at: 2), in: result) else { continue }
+
+            let text = String(result[textRange])
+            let url = String(result[urlRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let escapedText = htmlTextEscaped(text)
+            let replacement: String
+            if let safeHref = safeExternalHref(url) {
+                replacement = "<a href=\"\(safeHref)\" target=\"_blank\" style=\"color: \(linkColor); text-decoration: none;\">\(escapedText)</a>"
+            } else {
+                replacement = escapedText
+            }
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+        return result
+    }
+
+    private func safeExternalHref(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed),
+              let url = URL(string: encoded),
+              let scheme = url.scheme?.lowercased() else {
+            return nil
+        }
+        let allowedSchemes: Set<String> = ["http", "https", "mailto"]
+        guard allowedSchemes.contains(scheme) else { return nil }
+        return htmlAttributeEscaped(trimmed)
+    }
+
+    private func htmlTextEscaped(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    private func htmlAttributeEscaped(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     private func replaceHeadingsWithAnchors(_ html: String, tocItems: [TableOfContentsItem], anchorIndex: inout Int) -> String {
@@ -3809,6 +4218,34 @@ struct MarkdownWebView: NSViewRepresentable {
         return result
     }
     
+    private func mimeTypeForPath(path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "png":
+            return "image/png"
+        case "gif":
+            return "image/gif"
+        case "webp":
+            return "image/webp"
+        case "heic":
+            return "image/heic"
+        case "m4a":
+            return "audio/mp4"
+        case "mp3":
+            return "audio/mpeg"
+        case "wav":
+            return "audio/wav"
+        case "aiff":
+            return "audio/aiff"
+        case "caf":
+            return "audio/x-caf"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
     private func convertTableToHTML(_ tableText: String) -> String {
         let lines = tableText.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n")
         guard lines.count >= 2 else { return tableText }
@@ -3872,7 +4309,7 @@ private struct MessageBubble: View {
                             }
                         }
                 } else {
-                    MarkdownWebView(markdown: message.content, colorScheme: colorScheme, height: $webViewHeight, noteID: UUID())
+                    MarkdownWebView(markdown: message.content, attributedContent: nil, colorScheme: colorScheme, height: $webViewHeight, noteID: UUID())
                         .frame(height: webViewHeight)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)

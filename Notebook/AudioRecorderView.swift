@@ -20,7 +20,7 @@ struct AudioRecorderView: View {
     var onRequestClose: (() -> Void)? = nil
     
     @StateObject private var recorder = AppleStyleAudioRecorder()
-    @State private var recordingMode: AudioRecordingMode = .mixed
+    @State private var recordingMode: AudioRecordingMode = .microphone
     
     var body: some View {
         VStack(spacing: 8) {

@@ -956,6 +956,11 @@ class NoteStore: ObservableObject {
     }
 }
 
+extension NSAttributedString.Key {
+    static let notebookImageWidth = NSAttributedString.Key("NotebookImageWidth")
+    static let notebookImageHeight = NSAttributedString.Key("NotebookImageHeight")
+}
+
 extension NSAttributedString {
     func cleanedForStorage() -> NSAttributedString {
         let range = NSRange(location: 0, length: self.length)
@@ -972,7 +977,9 @@ extension NSAttributedString {
             .attachment,
             .link,
             .kern,
-            .baselineOffset
+            .baselineOffset,
+            .notebookImageWidth,
+            .notebookImageHeight
         ]
 
         // 先确保所有复选框附件的图像已生成

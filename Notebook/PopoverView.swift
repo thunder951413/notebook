@@ -4,8 +4,13 @@ struct PopoverView: View {
     @EnvironmentObject private var store: NoteStore
     @State private var query: String = ""
 
+    /// 排除加密文件夹的笔记
+    private var nonEncryptedNotes: [Note] {
+        store.notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
+    }
+
     private var recentNotes: [Note] {
-        Array(store.notes.prefix(10))
+        Array(nonEncryptedNotes.prefix(10))
     }
 
     private var filteredNotes: [Note] {
@@ -13,7 +18,7 @@ struct PopoverView: View {
         guard !q.isEmpty else { return recentNotes }
         let lower = q.lowercased()
 
-        return store.notes.filter { note in
+        return nonEncryptedNotes.filter { note in
             if note.title.lowercased().contains(lower) { return true }
             let content = note.content.string.lowercased()
             return content.contains(lower)

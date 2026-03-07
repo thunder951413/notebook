@@ -32,7 +32,8 @@ final class AudioBlockAttachment: NSTextAttachment {
         if let savedPath = coder.decodeObject(of: NSString.self, forKey: Self.fileURLKey) as String? {
             self.fileURL = URL(fileURLWithPath: savedPath)
             print("[AudioBlockAttachment] 从保存路径恢复: \(savedPath)")
-        } else if let fileWrapper = coder.decodeObject(of: FileWrapper.self, forKey: NSAttributedString.Key.attachment.rawValue),
+        } else if let fileWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
+            ?? coder.decodeObject(of: FileWrapper.self, forKey: NSAttributedString.Key.attachment.rawValue),
                   let filename = fileWrapper.preferredFilename,
                   let resolved = Self.resolveAudioFileURL(fromFilename: filename) {
             // 兼容 RTFD 反序列化为普通 NSTextAttachment 的场景：优先根据文件名定位真实附件
