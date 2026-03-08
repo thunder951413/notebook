@@ -1167,6 +1167,12 @@ class RichTextView: NSTextView {
     }
 
     private func isImageAttachment(_ attachment: NSTextAttachment) -> Bool {
+        if attachment is CheckboxTextAttachment {
+            return false
+        }
+        if CheckboxTextAttachment.looksLikeCheckbox(attachment) {
+            return false
+        }
         if let typed = attachment as? AttachmentTextAttachment {
             return typed.kind == .image
         }
