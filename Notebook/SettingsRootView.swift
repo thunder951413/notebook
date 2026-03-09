@@ -16,6 +16,7 @@ struct SettingsRootView: View {
     @State private var showClearBackupConfirmation = false
     @State private var showAutoBackupSheet = false
     @State private var showPasswordSheet = false
+    @State private var showSSHSettingsSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
 
     var body: some View {
@@ -126,6 +127,36 @@ struct SettingsRootView: View {
                             showClearBackupConfirmation = true
                         }
                         .foregroundColor(.red)
+                    }
+
+                    // SSH 同步配置
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("SSH 同步")
+                                .font(.headline)
+
+                            if SSHConfigManager.shared.isConfigured {
+                                let config = SSHConfigManager.shared.config
+                                Text("已配置: \(config.username)@\(config.host)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text("未配置 SSH 服务器")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        Button {
+                            showSSHSettingsSheet = true
+                        } label: {
+                            Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
+                        }
                     }
 
                     // iCloud 同步
@@ -287,6 +318,9 @@ struct SettingsRootView: View {
         }
         .sheet(isPresented: $showPasswordSheet) {
             PasswordSettingsView()
+        }
+        .sheet(isPresented: $showSSHSettingsSheet) {
+            SSHSettingsView()
         }
         .alert(l10n(L10nKeys.Settings.clearBackupsTitle), isPresented: $showClearBackupConfirmation) {
             Button(l10n(L10nKeys.common.cancel), role: .cancel) {}

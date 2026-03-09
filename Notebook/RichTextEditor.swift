@@ -758,6 +758,13 @@ class RichTextView: NSTextView {
     private let minImageWidth: CGFloat = 120
     private let maxImageWidth: CGFloat = 1200
 
+    // 双击检测相关属性
+    private var lastClickTime: TimeInterval = 0
+    private var lastClickLocation: CGPoint = .zero
+    private let doubleClickInterval: TimeInterval = 0.3 // 双击时间间隔（秒）
+    private let doubleClickDistanceThreshold: CGFloat = 10.0 // 双击位置最大偏移（像素）
+    private var suppressNextMouseUp = false // 用于阻止双击后的 mouseUp 触发链接
+
     override func paste(_ sender: Any?) {
         print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
         // 首先尝试让 coordinator 处理图片粘贴
@@ -1026,7 +1033,208 @@ class RichTextView: NSTextView {
             if found { return }
         }
 
+        // 检测双击图片 - 用系统预览打开
+        var doubleClickHandled = false
+        if isDoubleClick(event, at: point) {
+            if let layoutManager = self.layoutManager,
+               let textContainer = self.textContainer {
+                let attr = self.attributedString()
+                let textContainerPoint = CGPoint(
+                    x: point.x - self.textContainerInset.width,
+                    y: point.y - self.textContainerInset.height
+                )
+                var clickedIndex = layoutManager.characterIndex(
+                    for: textContainerPoint,
+                    in: textContainer,
+                    fractionOfDistanceBetweenInsertionPoints: nil
+                )
+                if clickedIndex >= attr.length {
+                    clickedIndex = max(0, attr.length - 1)
+                }
+
+                // 优先检查点击点附近
+                let candidateIndexes = [clickedIndex - 1, clickedIndex, clickedIndex + 1].filter { $0 >= 0 && $0 < attr.length }
+                for idx in candidateIndexes {
+                    if openImageInPreviewIfHit(at: idx, in: attr, layoutManager: layoutManager, textContainer: textContainer, clickPoint: point) {
+                        doubleClickHandled = true
+                        break
+                    }
+                }
+
+                // 兜底：全量扫描所有附件
+                if !doubleClickHandled {
+                    attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length), options: []) { value, range, stop in
+                        guard !doubleClickHandled, value is NSTextAttachment else { return }
+                        if openImageInPreviewIfHit(at: range.location, in: attr, layoutManager: layoutManager, textContainer: textContainer, clickPoint: point) {
+                            doubleClickHandled = true
+                            stop.pointee = true
+                        }
+                    }
+                }
+            }
+        }
+
+        // 如果双击成功打开了图片，不再调用 super.mouseDown，避免触发 link 的默认行为
+        if doubleClickHandled {
+            // 重置点击记录，避免三击被识别为双击
+            lastClickTime = 0
+            lastClickLocation = .zero
+            suppressNextMouseUp = true // 标记需要阻止接下来的 mouseUp
+            return
+        }
+
+        // 检测单击是否点在图片上，如果是则阻止系统处理 link 的默认行为（避免弹出"未设定用来打开 URL"的弹窗）
+        if let layoutManager = self.layoutManager,
+           let textContainer = self.textContainer {
+            let attr = self.attributedString()
+            let textContainerPoint = CGPoint(
+                x: point.x - self.textContainerInset.width,
+                y: point.y - self.textContainerInset.height
+            )
+            var clickedIndex = layoutManager.characterIndex(
+                for: textContainerPoint,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+            if clickedIndex >= attr.length {
+                clickedIndex = max(0, attr.length - 1)
+            }
+
+            // 检查是否点在图片上
+            let candidateIndexes = [clickedIndex - 1, clickedIndex, clickedIndex + 1].filter { $0 >= 0 && $0 < attr.length }
+            var clickedOnImage = false
+            for idx in candidateIndexes {
+                if isImageAttachmentAt(at: idx, in: attr, layoutManager: layoutManager, textContainer: textContainer, clickPoint: point) {
+                    clickedOnImage = true
+                    break
+                }
+            }
+
+            // 如果点在图片上，阻止默认行为，只记录点击信息用于双击检测
+            if clickedOnImage {
+                // 记录本次点击时间和位置（用于下次双击检测）
+                lastClickTime = Date.timeIntervalSinceReferenceDate
+                lastClickLocation = point
+                suppressNextMouseUp = true // 阻止 mouseUp 触发 link
+                return
+            }
+        }
+
+        // 记录本次点击时间和位置（用于下次双击检测）
+        lastClickTime = Date.timeIntervalSinceReferenceDate
+        lastClickLocation = point
+
         super.mouseDown(with: event)
+    }
+
+    /// 检查指定位置是否为图片附件且点击位置在图片范围内
+    private func isImageAttachmentAt(
+        at index: Int,
+        in attr: NSAttributedString,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer,
+        clickPoint: CGPoint
+    ) -> Bool {
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        guard let attachment = attr.attribute(.attachment, at: index, effectiveRange: &effectiveRange) as? NSTextAttachment,
+              isImageAttachment(attachment) else {
+            return false
+        }
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+        // 使用 attachment.bounds 的真实尺寸
+        if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+            attachmentRect.size = attachment.bounds.size
+        }
+
+        attachmentRect.origin.x += self.textContainerInset.width
+        attachmentRect.origin.y += self.textContainerInset.height
+
+        // 扩大点击热区，便于命中
+        let expandedRect = attachmentRect.insetBy(dx: -10, dy: -10)
+        return expandedRect.contains(clickPoint)
+    }
+
+    /// 判断是否为双击事件
+    private func isDoubleClick(_ event: NSEvent, at point: CGPoint) -> Bool {
+        let currentTime = Date.timeIntervalSinceReferenceDate
+        let timeDelta = currentTime - lastClickTime
+        let distance = hypot(point.x - lastClickLocation.x, point.y - lastClickLocation.y)
+        return timeDelta < doubleClickInterval && distance < doubleClickDistanceThreshold
+    }
+
+    /// 如果点击位置是图片附件，则用系统预览打开
+    private func openImageInPreviewIfHit(
+        at index: Int,
+        in attr: NSAttributedString,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer,
+        clickPoint: CGPoint
+    ) -> Bool {
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        guard let attachment = attr.attribute(.attachment, at: index, effectiveRange: &effectiveRange) as? NSTextAttachment,
+              isImageAttachment(attachment) else {
+            return false
+        }
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+        // 使用 attachment.bounds 的真实尺寸
+        if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+            attachmentRect.size = attachment.bounds.size
+        }
+
+        attachmentRect.origin.x += self.textContainerInset.width
+        attachmentRect.origin.y += self.textContainerInset.height
+
+        // 扩大点击热区，便于命中
+        let expandedRect = attachmentRect.insetBy(dx: -10, dy: -10)
+        guard expandedRect.contains(clickPoint) else { return false }
+
+        // 获取图片文件 URL
+        var imageURL: URL?
+        if let typedAttachment = attachment as? AttachmentTextAttachment {
+            imageURL = typedAttachment.attachmentFileURL
+        } else if let fileWrapper = attachment.fileWrapper,
+                  let filename = fileWrapper.preferredFilename {
+            // 尝试从附件目录中查找
+            let location = StorageLocationManager.shared
+            if let base = location.baseDirectoryURL {
+                location.withSecurityScopedAccess(base) {
+                    if let attachmentsDir = try? location.attachmentsDirectoryURL(),
+                       let noteDirs = try? FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil) {
+                        for noteDir in noteDirs {
+                            let candidate = noteDir.appendingPathComponent(filename)
+                            if FileManager.default.fileExists(atPath: candidate.path) {
+                                imageURL = candidate
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let url = imageURL, FileManager.default.fileExists(atPath: url.path) else {
+            print("[RichTextEditor] 图片文件不存在")
+            return false
+        }
+
+        print("[RichTextEditor] 双击打开图片: \(url.lastPathComponent)")
+
+        // 使用系统预览打开图片
+        NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Preview.app"), configuration: NSWorkspace.OpenConfiguration()) { app, error in
+            if let error = error {
+                print("[RichTextEditor] 打开预览失败: \(error)")
+                // 失败时使用默认方式打开
+                NSWorkspace.shared.open(url)
+            }
+        }
+
+        return true
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -1082,6 +1290,12 @@ class RichTextView: NSTextView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        // 如果标记了阻止 mouseUp，直接返回
+        if suppressNextMouseUp {
+            suppressNextMouseUp = false
+            return
+        }
+
         if imageResizeState != nil {
             imageResizeState = nil
             if let coordinator = self.delegate as? RichTextEditor.Coordinator {

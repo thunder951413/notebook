@@ -363,6 +363,7 @@ struct SettingsGeneralView: View {
 struct DataManagementView: View {
     @EnvironmentObject private var persistence: PersistenceController
     @State private var errorMessage: String?
+    @State private var showSSHSettingsSheet = false
 
     var body: some View {
         ScrollView {
@@ -371,6 +372,44 @@ struct DataManagementView: View {
                 Text("数据管理")
                     .font(.title2)
                     .bold()
+
+                // SSH 同步配置
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "network")
+                            .font(.title3)
+                            .foregroundColor(.orange)
+                        Text("SSH 同步")
+                            .font(.headline)
+                    }
+
+                    if SSHConfigManager.shared.isConfigured {
+                        let config = SSHConfigManager.shared.config
+                        Text("已配置: \(config.username)@\(config.host):\(config.repositoryPath)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("配置 SSH 服务器，将笔记数据同步到 NAS 或其他远程服务器。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            showSSHSettingsSheet = true
+                        } label: {
+                            Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
+                        }
+
+                        if SSHConfigManager.shared.isConfigured {
+                            Button("立即同步") {
+                                // TODO: 实现同步功能
+                            }
+                        }
+                    }
+                }
+
+                Divider()
 
                 // 数据导出
                 VStack(alignment: .leading, spacing: 12) {
@@ -492,6 +531,9 @@ struct DataManagementView: View {
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $showSSHSettingsSheet) {
+            SSHSettingsView()
         }
     }
 
