@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// SSH 配置模型
 struct SSHConfig: Codable {
@@ -18,31 +19,34 @@ struct SSHConfig: Codable {
 }
 
 /// SSH 配置管理器
-class SSHConfigManager {
+class SSHConfigManager: ObservableObject {
     static let shared = SSHConfigManager()
-    
+
     private let configKey = "ssh_config"
-    
-    var config: SSHConfig {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: configKey),
-                  let config = try? JSONDecoder().decode(SSHConfig.self, from: data) else {
-                return .default
-            }
-            return config
-        }
-        set {
-            if let data = try? JSONEncoder().encode(newValue) {
+
+    @Published var config: SSHConfig {
+        didSet {
+            if let data = try? JSONEncoder().encode(config) {
                 UserDefaults.standard.set(data, forKey: configKey)
             }
         }
     }
-    
+
     var isConfigured: Bool {
         !config.host.isEmpty && !config.username.isEmpty
     }
-    
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: configKey),
+           let config = try? JSONDecoder().decode(SSHConfig.self, from: data) {
+            self.config = config
+        } else {
+            self.config = .default
+        }
+    }
+
     func clearConfig() {
         UserDefaults.standard.removeObject(forKey: configKey)
+        config = .default
     }
 }

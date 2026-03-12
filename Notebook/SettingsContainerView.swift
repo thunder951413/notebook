@@ -364,6 +364,13 @@ struct DataManagementView: View {
     @EnvironmentObject private var persistence: PersistenceController
     @State private var errorMessage: String?
     @State private var showSSHSettingsSheet = false
+    @State private var isSyncing = false
+    @State private var syncResult: SyncResult?
+
+    enum SyncResult {
+        case success(String)
+        case failure(String)
+    }
 
     var body: some View {
         ScrollView {
@@ -402,10 +409,31 @@ struct DataManagementView: View {
                         }
 
                         if SSHConfigManager.shared.isConfigured {
-                            Button("立即同步") {
-                                // TODO: 实现同步功能
+                            Button {
+                                performSync()
+                            } label: {
+                                if isSyncing {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                        .frame(width: 60)
+                                } else {
+                                    Text("立即同步")
+                                }
                             }
+                            .disabled(isSyncing)
                         }
+                    }
+
+                    // 同步结果显示
+                    if let result = syncResult {
+                        HStack {
+                            Image(systemName: result.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(result.isSuccess ? .green : .red)
+                            Text(result.message)
+                                .foregroundStyle(result.isSuccess ? .green : .red)
+                                .font(.caption)
+                        }
+                        .padding(.top, 4)
                     }
                 }
 
@@ -786,6 +814,57 @@ struct DataManagementView: View {
             await MainActor.run {
                 errorMessage = "重置失败: \(error.localizedDescription)"
             }
+        }
+    }
+
+    // MARK: - SSH 同步
+
+    private func performSync() {
+        guard !isSyncing else { return }
+
+        isSyncing = true
+        syncResult = nil
+
+        Task {
+            do {
+                let config = SSHConfigManager.shared.config
+
+                // 获取数据目录
+                let dataURL = try StorageLocationManager.shared.notebookDataDirectoryURL()
+
+                // 执行同步
+                try await SSHSyncManager.shared.syncToRemote(localURL: dataURL, config: config)
+
+                await MainActor.run {
+                    syncResult = .success("同步成功完成")
+                    isSyncing = false
+
+                    // 3秒后清除结果
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        syncResult = nil
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    syncResult = .failure("同步失败: \(error.localizedDescription)")
+                    isSyncing = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - SyncResult 扩展
+extension DataManagementView.SyncResult {
+    var isSuccess: Bool {
+        if case .success = self { return true }
+        return false
+    }
+
+    var message: String {
+        switch self {
+        case .success(let msg): return msg
+        case .failure(let msg): return msg
         }
     }
 }
