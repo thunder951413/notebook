@@ -28,6 +28,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[AppDelegate] applicationDidFinishLaunching - 程序启动")
 
+        // 注册表格视图提供器（TextKit 2）
+        if #available(macOS 12.0, *) {
+            TableTextAttachment.registerViewProvider()
+        }
+
         // 配置关于面板信息
         setupAboutPanel()
 

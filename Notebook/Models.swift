@@ -2,6 +2,9 @@ import SwiftUI
 import SwiftData
 import Combine
 
+/// 调试开关
+private let isCheckboxDebugEnabled = false
+
 /// 颜色系统：支持浅色/深色并随系统自动切换（默认）。
 struct AppColors {
     static func sidebarBackground(_ scheme: ColorScheme) -> Color {
@@ -336,7 +339,7 @@ class NoteStore: ObservableObject {
             if image == nil, let contents = attachment.contents {
                 image = NSImage(data: contents)
                 imageSource = "contents"
-                print("[CheckboxDebug] Restored image from contents at pos=\(location), size=\(image?.size ?? .zero)")
+                if isCheckboxDebugEnabled { print("[CheckboxDebug] Restored image from contents at pos=\(location), size=\(image?.size ?? .zero)") }
             }
 
             // 如果仍然没有图像，尝试通过 fileWrapper 恢复
@@ -344,7 +347,7 @@ class NoteStore: ObservableObject {
                 if let data = fileWrapper.regularFileContents {
                     image = NSImage(data: data)
                     imageSource = "fileWrapper"
-                    print("[CheckboxDebug] Restored image from fileWrapper at pos=\(location), size=\(image?.size ?? .zero)")
+                    if isCheckboxDebugEnabled { print("[CheckboxDebug] Restored image from fileWrapper at pos=\(location), size=\(image?.size ?? .zero)") }
                 }
             }
 
@@ -375,7 +378,7 @@ class NoteStore: ObservableObject {
         }
         
         // 打印调试信息
-        if !debugInfo.isEmpty {
+        if isCheckboxDebugEnabled && !debugInfo.isEmpty {
             print("[CheckboxDebug] Found \(debugInfo.count) attachments:")
             for (location, type, isChecked) in debugInfo {
                 print("  [CheckboxDebug] pos=\(location), type=\(type), checked=\(isChecked)")
@@ -401,7 +404,7 @@ class NoteStore: ObservableObject {
         // 未选中的复选框中心是白色/透明
         
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            print("[CheckboxDebug] Failed to get CGImage")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] Failed to get CGImage") }
             return false
         }
         
@@ -423,7 +426,7 @@ class NoteStore: ObservableObject {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            print("[CheckboxDebug] Failed to create CGContext")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] Failed to create CGContext") }
             return false
         }
         
@@ -438,7 +441,7 @@ class NoteStore: ObservableObject {
         let b = CGFloat(pixelData[2]) / 255.0
         let a = CGFloat(pixelData[3]) / 255.0
         
-        print("[CheckboxDebug] Center pixel: R=\(String(format: "%.2f", r)), G=\(String(format: "%.2f", g)), B=\(String(format: "%.2f", b)), A=\(String(format: "%.2f", a))")
+        if isCheckboxDebugEnabled { print("[CheckboxDebug] Center pixel: R=\(String(format: "%.2f", r)), G=\(String(format: "%.2f", g)), B=\(String(format: "%.2f", b)), A=\(String(format: "%.2f", a))") }
         
         // 判断逻辑：
         // - 已选中：中心有黄色（R高，G高，B低）或深色
@@ -446,17 +449,17 @@ class NoteStore: ObservableObject {
         
         // 如果透明度很低，认为是未选中
         if a < 0.5 {
-            print("[CheckboxDebug] Low alpha, assuming unchecked")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] Low alpha, assuming unchecked") }
             return false
         }
         
         // 计算亮度
         let brightness = (r + g + b) / 3.0
-        print("[CheckboxDebug] Brightness: \(String(format: "%.2f", brightness))")
+        if isCheckboxDebugEnabled { print("[CheckboxDebug] Brightness: \(String(format: "%.2f", brightness))") }
         
         // 如果亮度很高（接近白色），认为是未选中
         if brightness > 0.9 {
-            print("[CheckboxDebug] High brightness, assuming unchecked")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] High brightness, assuming unchecked") }
             return false
         }
         
@@ -464,17 +467,17 @@ class NoteStore: ObservableObject {
         // 黄色：R和G都很高，B很低
         let isYellow = r > 0.7 && g > 0.7 && b < 0.5
         if isYellow {
-            print("[CheckboxDebug] Yellow detected, assuming checked")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] Yellow detected, assuming checked") }
             return true
         }
         
         // 如果亮度中等偏低，可能是填充色（选中）
         if brightness < 0.7 {
-            print("[CheckboxDebug] Medium brightness, assuming checked")
+            if isCheckboxDebugEnabled { print("[CheckboxDebug] Medium brightness, assuming checked") }
             return true
         }
         
-        print("[CheckboxDebug] Uncertain, defaulting to unchecked")
+        if isCheckboxDebugEnabled { print("[CheckboxDebug] Uncertain, defaulting to unchecked") }
         return false
     }
     
@@ -982,10 +985,16 @@ extension NSAttributedString {
             .notebookImageHeight
         ]
 
-        // 先确保所有复选框附件的图像已生成
+        // 先确保所有复选框附件和表格附件的图像已生成
+        print("[StorageDebug] cleanedForStorage: checking attachments...")
         mutable.enumerateAttribute(.attachment, in: range, options: []) { value, attrRange, _ in
             if let checkbox = value as? CheckboxTextAttachment {
+                print("[StorageDebug] Found CheckboxTextAttachment, calling prepareForSaving")
                 checkbox.prepareForSaving()
+            }
+            if let tableAttachment = value as? TableTextAttachment {
+                print("[StorageDebug] Found TableTextAttachment, calling prepareForSaving")
+                tableAttachment.prepareForSaving()
             }
         }
 

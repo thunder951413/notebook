@@ -238,8 +238,11 @@ extension NoteSaveManager {
         content: NSAttributedString,
         reason: String
     ) -> SaveRequest? {
+        print("[SaveManager] createRequest: cleaning content for storage...")
         let cleaned = content.cleanedForStorage()
+        print("[SaveManager] createRequest: content cleaned, length: \(cleaned.length)")
 
+        print("[SaveManager] createRequest: converting to RTFD data...")
         guard let rtfdData = try? cleaned.data(
             from: NSRange(location: 0, length: cleaned.length),
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
@@ -247,6 +250,7 @@ extension NoteSaveManager {
             print("[SaveManager] ERROR: Failed to serialize content - id=\(noteID)")
             return nil
         }
+        print("[SaveManager] createRequest: RTFD data created, size: \(rtfdData.count) bytes")
 
         return SaveRequest(
             noteID: noteID,

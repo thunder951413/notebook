@@ -1332,6 +1332,7 @@ private struct EditorTopBarView: View {
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
     @State private var currentRecordingMode: AudioRecordingMode = .microphone
+    @State private var showingInsertTableDialog = false
 
     var recurrenceOptions: [(String, String)] {
         [
@@ -1480,6 +1481,21 @@ private struct EditorTopBarView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .frame(minWidth: 20)
+
+            // 表格按钮
+            Button {
+                showingInsertTableDialog = true
+            } label: {
+                Image(systemName: "tablecells")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .frame(minWidth: 20)
+            .popover(isPresented: $showingInsertTableDialog, arrowEdge: .bottom) {
+                InsertTableDialog(isPresented: $showingInsertTableDialog) { rows, columns in
+                    controller.insertTable(rows: rows, columns: columns)
+                }
+            }
 
             Divider().frame(height: 18)
 

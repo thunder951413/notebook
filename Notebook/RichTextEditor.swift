@@ -673,6 +673,20 @@ final class RichTextController: ObservableObject {
         }
     }
 
+    func insertTable(rows: Int, columns: Int) {
+        guard let tv = textView else { return }
+        
+        let tableData = TableData(rows: rows, columns: columns)
+        let attachment = TableTextAttachment()
+        attachment.tableData = tableData
+        attachment.updateImage()
+        
+        let attr = NSAttributedString(attachment: attachment)
+        let selectedRange = tv.selectedRange()
+        tv.textStorage?.insert(attr, at: selectedRange.location)
+        tv.didChangeText()
+    }
+
     private func insertText(_ text: String) {
         guard let tv = textView else { return }
         tv.insertText(text, replacementRange: tv.selectedRange())
@@ -898,6 +912,11 @@ class RichTextView: NSTextView {
 
         // 0) 图片右下角拖拽缩放
         if beginImageResizeIfNeeded(at: point, event: event) {
+            return
+        }
+
+        // 0.5) 检测表格点击（单击或双击都打开编辑器）
+        if handleTableClick(at: point, event: event) {
             return
         }
 
@@ -1381,6 +1400,10 @@ class RichTextView: NSTextView {
     }
 
     private func isImageAttachment(_ attachment: NSTextAttachment) -> Bool {
+        // 排除表格附件
+        if attachment is TableTextAttachment {
+            return false
+        }
         if attachment is CheckboxTextAttachment {
             return false
         }
@@ -1401,7 +1424,131 @@ class RichTextView: NSTextView {
         }
         return false
     }
-    
+
+    // MARK: - 表格点击处理
+
+    private func handleTableClick(at point: CGPoint, event: NSEvent) -> Bool {
+        guard let layoutManager = self.layoutManager,
+              let textContainer = self.textContainer,
+              let textStorage = self.textStorage,
+              textStorage.length > 0 else {
+            return false
+        }
+
+        let textContainerPoint = CGPoint(
+            x: point.x - self.textContainerInset.width,
+            y: point.y - self.textContainerInset.height
+        )
+
+        var index = layoutManager.characterIndex(
+            for: textContainerPoint,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        index = max(0, min(index, textStorage.length - 1))
+
+        for checkIndex in [index - 1, index, index + 1] where checkIndex >= 0 && checkIndex < textStorage.length {
+            var effectiveRange = NSRange(location: NSNotFound, length: 0)
+            guard let tableAttachment = textStorage.attribute(.attachment, at: checkIndex, effectiveRange: &effectiveRange) as? TableTextAttachment else {
+                continue
+            }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
+            var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            attachmentRect.origin.x += self.textContainerInset.width
+            attachmentRect.origin.y += self.textContainerInset.height
+
+            let expandedRect = attachmentRect.insetBy(dx: -5, dy: -5)
+            if expandedRect.contains(point) {
+                // 单击或双击都显示编辑器
+                showTableEditor(for: tableAttachment, at: attachmentRect, range: effectiveRange)
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private var activeTableEditor: TableInlineEditorView?
+    private var activeTableAttachment: TableTextAttachment?
+    private var activeTableRange: NSRange?
+
+    private func showTableEditor(for attachment: TableTextAttachment, at rect: CGRect, range: NSRange) {
+        // 如果已经有活动的编辑器，先关闭它
+        hideActiveTableEditor()
+
+        // 保存当前附件和范围
+        activeTableAttachment = attachment
+        activeTableRange = range
+
+        // 创建内联编辑器
+        let editorView = TableInlineEditorView(
+            tableData: attachment.tableData,
+            onDataChanged: { [weak self, weak attachment] newData in
+                attachment?.tableData = newData
+                attachment?.updateImage()
+                // 更新文本存储以刷新显示
+                if let self = self, let range = self.activeTableRange {
+                    self.textStorage?.edited(.editedAttributes, range: range, changeInLength: 0)
+                }
+            },
+            onCellEdited: { [weak attachment] row, col, value in
+                attachment?.updateCell(row: row, column: col, value: value)
+            }
+        )
+
+        editorView.frame = NSRect(
+            x: rect.origin.x,
+            y: rect.origin.y - editorView.frame.height + rect.height,
+            width: editorView.frame.width,
+            height: editorView.frame.height
+        )
+
+        addSubview(editorView)
+        activeTableEditor = editorView
+
+        // 临时用空白字符替换表格附件，隐藏原始表格
+        if let textStorage = self.textStorage {
+            let blankAttachment = NSTextAttachment()
+            blankAttachment.bounds = editorView.frame
+            let blankAttr = NSAttributedString(attachment: blankAttachment)
+            textStorage.replaceCharacters(in: range, with: blankAttr)
+        }
+
+        // 点击外部时关闭编辑器
+        DispatchQueue.main.async { [weak self] in
+            NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self = self, let editor = self.activeTableEditor else { return event }
+                let point = self.convert(event.locationInWindow, from: nil)
+                if !editor.frame.contains(point) {
+                    self.hideActiveTableEditor()
+                }
+                return event
+            }
+        }
+    }
+
+    private func hideActiveTableEditor() {
+        guard let editor = activeTableEditor, let attachment = activeTableAttachment, let range = activeTableRange else {
+            activeTableEditor?.removeFromSuperview()
+            activeTableEditor = nil
+            activeTableAttachment = nil
+            activeTableRange = nil
+            return
+        }
+
+        // 恢复原始表格附件
+        if let textStorage = self.textStorage {
+            let attrString = NSAttributedString(attachment: attachment)
+            textStorage.replaceCharacters(in: range, with: attrString)
+        }
+
+        editor.removeFromSuperview()
+        activeTableEditor = nil
+        activeTableAttachment = nil
+        activeTableRange = nil
+    }
+
     private func openAudioAttachmentIfHit(
         at index: Int,
         in attr: NSAttributedString,
@@ -1461,16 +1608,22 @@ class RichTextView: NSTextView {
     func normalizeAttachmentsAfterLoad() {
         guard let textStorage else { return }
         let fullRange = NSRange(location: 0, length: textStorage.length)
+        
+        print("[LoadDebug] normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)")
 
         textStorage.beginEditing()
         defer { textStorage.endEditing() }
 
         textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
             guard let attachment = value as? NSTextAttachment else { return }
+            
+            print("[LoadDebug] Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))")
 
             // 0) 先做图片附件自愈：把普通 NSTextAttachment 的图片替换为自定义 AttachmentTextAttachment
             //    目的是避免系统把它当“文件附件”显示右上角浮层（标记/更多）。
-            if !(attachment is AttachmentTextAttachment), !(attachment is AudioBlockAttachment),
+            if !(attachment is AttachmentTextAttachment),
+               !(attachment is AudioBlockAttachment),
+               !(attachment is TableTextAttachment),
                let converted = convertLegacyImageAttachmentIfNeeded(attachment) {
                 textStorage.addAttribute(.attachment, value: converted, range: range)
             }
@@ -1506,7 +1659,45 @@ class RichTextView: NSTextView {
                 return
             }
 
-            // 3) 其他音频附件兜底
+            // 3) 表格附件：检查并刷新
+            if let tableAttachment = attachment as? TableTextAttachment {
+                print("[LoadDebug] Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)")
+                print("[LoadDebug] TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
+                tableAttachment.updateImage()
+                print("[LoadDebug] TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
+                return
+            }
+            
+            // 3.5) 尝试从普通 NSTextAttachment 恢复表格附件
+            // RTFD 保存时可能丢失了自定义类信息，需要根据特征识别表格附件
+            let attachmentClassName = String(describing: type(of: attachment))
+            let isKnownCustomType = attachment is AttachmentTextAttachment ||
+                                   attachment is AudioBlockAttachment ||
+                                   attachment is TableTextAttachment ||
+                                   attachment is CheckboxTextAttachment
+            print("[LoadDebug] Attachment class: \(attachmentClassName), isKnownCustom: \(isKnownCustomType)")
+            
+            if !isKnownCustomType {
+                print("[LoadDebug] Unknown attachment type, checking if looks like table...")
+                print("[LoadDebug] Attachment bounds: \(attachment.bounds.width) x \(attachment.bounds.height)")
+                print("[LoadDebug] Attachment contents: \(attachment.contents?.count ?? 0) bytes")
+                print("[LoadDebug] Attachment image: \(attachment.image != nil ? "exists" : "nil")")
+                
+                if TableTextAttachment.looksLikeTable(attachment) {
+                    print("[LoadDebug] Found potential table attachment, attempting recovery...")
+                    
+                    // 尝试恢复表格附件
+                    if let recovered = TableTextAttachment.recover(from: attachment) {
+                        textStorage.addAttribute(.attachment, value: recovered, range: range)
+                        print("[LoadDebug] Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
+                        return
+                    }
+                } else {
+                    print("[LoadDebug] Does not look like table")
+                }
+            }
+
+            // 4) 其他音频附件兜底
             let hasLink = textStorage.attribute(.link, at: range.location, effectiveRange: nil) != nil
             if hasLink { return }
 
@@ -2449,11 +2640,87 @@ struct RichTextEditor: NSViewRepresentable {
             }
             print("[Coordinator] No image found in pasteboard")
 
+            // 3. 尝试读取HTML表格并转换为TableTextAttachment
+            if let htmlString = pasteboard.string(forType: .html) ?? pasteboard.string(forType: NSPasteboard.PasteboardType("public.html")) {
+                print("[Coordinator] HTML content found, checking for table")
+                if let tableData = parseHTMLTable(htmlString) {
+                    print("[Coordinator] Table detected in HTML, converting to TableTextAttachment")
+                    insertTableAttachment(tableData: tableData, in: textView)
+                    return true
+                }
+            }
+
             // 如果不是图片或文件，返回false让系统处理其他粘贴类型
             print("[Coordinator] No file URLs found, falling back to default paste")
             return false
         }
-        
+
+        /// 解析HTML表格并转换为TableData
+        private func parseHTMLTable(_ html: String) -> TableData? {
+            // 简单解析HTML表格
+            let rowPattern = "<tr[^>]*>(.*?)</tr>"
+            let cellPattern = "<t[dh][^>]*>(.*?)</t[dh]>"
+
+            guard let rowRegex = try? NSRegularExpression(pattern: rowPattern, options: [.dotMatchesLineSeparators, .caseInsensitive]),
+                  let cellRegex = try? NSRegularExpression(pattern: cellPattern, options: [.dotMatchesLineSeparators, .caseInsensitive]) else {
+                return nil
+            }
+
+            let htmlRange = NSRange(html.startIndex..., in: html)
+            let rowMatches = rowRegex.matches(in: html, options: [], range: htmlRange)
+
+            var rows: [[String]] = []
+            var maxColumns = 0
+
+            for rowMatch in rowMatches {
+                let rowContent = (html as NSString).substring(with: rowMatch.range(at: 1))
+                let cellMatches = cellRegex.matches(in: rowContent, options: [], range: NSRange(rowContent.startIndex..., in: rowContent))
+
+                var cells: [String] = []
+                for cellMatch in cellMatches {
+                    let cellContent = (rowContent as NSString).substring(with: cellMatch.range(at: 1))
+                    // 移除HTML标签
+                    let cleanText = cellContent.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "&nbsp;", with: " ")
+                        .replacingOccurrences(of: "&lt;", with: "<")
+                        .replacingOccurrences(of: "&gt;", with: ">")
+                        .replacingOccurrences(of: "&amp;", with: "&")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    cells.append(cleanText)
+                }
+
+                if !cells.isEmpty {
+                    rows.append(cells)
+                    maxColumns = max(maxColumns, cells.count)
+                }
+            }
+
+            guard !rows.isEmpty else { return nil }
+
+            // 确保所有行有相同数量的列
+            for i in 0..<rows.count {
+                while rows[i].count < maxColumns {
+                    rows[i].append("")
+                }
+            }
+
+            var tableData = TableData(rows: rows.count, columns: maxColumns)
+            tableData.rows = rows
+            return tableData
+        }
+
+        /// 插入表格附件到文本视图
+        private func insertTableAttachment(tableData: TableData, in textView: NSTextView) {
+            let attachment = TableTextAttachment()
+            attachment.tableData = tableData
+            attachment.updateImage()
+
+            let attributedString = NSAttributedString(attachment: attachment)
+            let selectedRange = textView.selectedRange()
+            textView.textStorage?.insert(attributedString, at: selectedRange.location)
+            textView.didChangeText()
+        }
+
         /// 从剪贴板读取图片数据（支持多种格式）
         private func readImageFromPasteboard(_ pasteboard: NSPasteboard) -> NSImage? {
             // 尝试直接读取NSImage

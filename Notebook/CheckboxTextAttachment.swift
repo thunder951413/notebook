@@ -1,5 +1,8 @@
 import AppKit
 
+/// 调试开关
+private let isDebugEnabled = false
+
 /// 复选框附件 - 用于待办列表，仿照 macOS 备忘录样式
 final class CheckboxTextAttachment: NSTextAttachment {
     private static let checkedKey = "checkbox_isChecked"
@@ -185,7 +188,7 @@ final class CheckboxTextAttachment: NSTextAttachment {
         // 将图像转换为 PNG 数据并设置到 contents
         // 这样 RTFD 保存时就能包含图像数据
         guard let image = self.image else {
-            print("[CheckboxDebug] prepareForSaving: image is nil")
+            if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: image is nil") }
             return
         }
 
@@ -194,7 +197,7 @@ final class CheckboxTextAttachment: NSTextAttachment {
             if let pngData = bitmapRep.representation(using: .png, properties: [:]) {
                 self.contents = pngData
                 self.fileType = "public.png"
-                print("[CheckboxDebug] prepareForSaving: saved via bitmapRep, size=", pngData.count)
+                if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: saved via bitmapRep, size=", pngData.count) }
                 return
             }
         }
@@ -206,7 +209,7 @@ final class CheckboxTextAttachment: NSTextAttachment {
             if let pngData = rep.representation(using: .png, properties: [:]) {
                 self.contents = pngData
                 self.fileType = "public.png"
-                print("[CheckboxDebug] prepareForSaving: saved via CGImage, size=", pngData.count)
+                if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: saved via CGImage, size=", pngData.count) }
                 return
             }
         }
@@ -214,7 +217,7 @@ final class CheckboxTextAttachment: NSTextAttachment {
         // 方法3: 创建新的 bitmap representation
         let size = image.size
         guard size.width > 0, size.height > 0 else {
-            print("[CheckboxDebug] prepareForSaving: invalid image size")
+            if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: invalid image size") }
             return
         }
 
@@ -227,11 +230,11 @@ final class CheckboxTextAttachment: NSTextAttachment {
            let pngData = bitmapRep.representation(using: .png, properties: [:]) {
             self.contents = pngData
             self.fileType = "public.png"
-            print("[CheckboxDebug] prepareForSaving: saved via new bitmap, size=", pngData.count)
+            if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: saved via new bitmap, size=", pngData.count) }
             return
         }
 
-        print("[CheckboxDebug] prepareForSaving: failed to save image")
+        if isDebugEnabled { print("[CheckboxDebug] prepareForSaving: failed to save image") }
     }
 }
 
