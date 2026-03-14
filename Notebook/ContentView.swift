@@ -706,16 +706,16 @@ private struct SidebarView: View {
         let allNotesCount = store.activeNotes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
         return HStack {
             Image(systemName: "tray.fill")
-                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white : .orange)
+                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? .white : .orange)
             Text(l10n(L10nKeys.Folder.allNotes))
             Spacer()
             Text("\(allNotesCount)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? themeManager.accentColor : Color.clear)
+        .background(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -784,7 +784,6 @@ private struct SidebarView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             selectedTagID = nil
-            selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedEncryptedFolderID = nil
             isEncryptedFolderUnlocked = false
             isRecycleBinSelected = true
