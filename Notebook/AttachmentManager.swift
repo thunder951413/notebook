@@ -121,10 +121,22 @@ final class AttachmentManager {
                 let filename = audioAttachment.fileURL.lastPathComponent
                 referencedFiles.insert(filename)
             } else if let attachment = value as? NSTextAttachment,
-                      let filename = attachment.fileWrapper?.preferredFilename,
-                      !filename.isEmpty {
-                // RTFD 反序列化后可能退化为 NSTextAttachment，兜底识别 fileWrapper 文件名
-                referencedFiles.insert(filename)
+                      let fileWrapper = attachment.fileWrapper {
+                if fileWrapper.isDirectory {
+                    let dirName = fileWrapper.preferredFilename ?? ""
+                    if !dirName.isEmpty {
+                        referencedFiles.insert(dirName)
+                    }
+                    if let children = fileWrapper.fileWrappers {
+                        for (name, _) in children {
+                            referencedFiles.insert(name)
+                        }
+                    }
+                } else if let filename = fileWrapper.preferredFilename,
+                          !filename.isEmpty {
+                    // RTFD 反序列化后可能退化为 NSTextAttachment，兜底识别 fileWrapper 文件名
+                    referencedFiles.insert(filename)
+                }
             }
         }
 

@@ -167,9 +167,11 @@ final class NoteSaveManager {
             // 保存到数据库
             try context.save()
 
-            // 清理未引用的附件
-            if let content = try? NSAttributedString(data: request.rtfdData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
-                AttachmentManager.shared.cleanupUnusedAttachments(for: noteID, content: content)
+            // 清理未引用的附件（避免 appBlur 时序造成误删）
+            if request.reason != "appBlur" {
+                if let content = try? NSAttributedString(data: request.rtfdData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+                    AttachmentManager.shared.cleanupUnusedAttachments(for: noteID, content: content)
+                }
             }
 
             return .success

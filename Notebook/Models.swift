@@ -343,7 +343,7 @@ class NoteStore: ObservableObject {
             }
 
             // 如果仍然没有图像，尝试通过 fileWrapper 恢复
-            if image == nil, let fileWrapper = attachment.fileWrapper {
+            if image == nil, let fileWrapper = attachment.fileWrapper, fileWrapper.isRegularFile {
                 if let data = fileWrapper.regularFileContents {
                     image = NSImage(data: data)
                     imageSource = "fileWrapper"
@@ -962,6 +962,7 @@ class NoteStore: ObservableObject {
 extension NSAttributedString.Key {
     static let notebookImageWidth = NSAttributedString.Key("NotebookImageWidth")
     static let notebookImageHeight = NSAttributedString.Key("NotebookImageHeight")
+    static let notebookTableData = NSAttributedString.Key("NotebookTableData")
 }
 
 extension NSAttributedString {
@@ -982,7 +983,8 @@ extension NSAttributedString {
             .kern,
             .baselineOffset,
             .notebookImageWidth,
-            .notebookImageHeight
+            .notebookImageHeight,
+            .notebookTableData
         ]
 
         // 先确保所有复选框附件和表格附件的图像已生成
@@ -995,6 +997,12 @@ extension NSAttributedString {
             if let tableAttachment = value as? TableTextAttachment {
                 print("[StorageDebug] Found TableTextAttachment, calling prepareForSaving")
                 tableAttachment.prepareForSaving()
+                if let data = try? JSONEncoder().encode(tableAttachment.tableData) {
+                    print("[TableTrace] cleanedForStorage write notebookTableData bytes=\(data.count) rows=\(tableAttachment.tableData.rowCount)")
+                    mutable.addAttribute(.notebookTableData, value: data, range: attrRange)
+                } else {
+                    print("[TableTrace] cleanedForStorage failed to encode tableData")
+                }
             }
         }
 

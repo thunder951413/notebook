@@ -226,6 +226,14 @@ class TableInlineEditorView: NSView {
         editingCell = nil
         needsDisplay = true
     }
+
+    func finalizeEditing() {
+        commitEditing()
+    }
+
+    func currentTableData() -> TableData {
+        return tableData
+    }
     
     private func showContextMenu(at location: NSPoint) {
         let menu = NSMenu()

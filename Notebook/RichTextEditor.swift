@@ -95,6 +95,24 @@ final class RichTextController: ObservableObject {
             print("[RichTextController] snapshot: textView is nil, returning nil to use memory content")
             return nil
         }
+
+        // 确保表格内联编辑器已写回附件
+        if let richTextView = tv as? RichTextView {
+            richTextView.finalizeActiveTableEditorIfNeeded()
+        }
+
+        // 保存前强制修正表格附件的 fileType，避免 appBlur 变成文件图标
+        if let textStorage = tv.textStorage {
+            let range = NSRange(location: 0, length: textStorage.length)
+            textStorage.enumerateAttribute(.attachment, in: range, options: []) { value, _, _ in
+                if let tableAttachment = value as? TableTextAttachment {
+                    if tableAttachment.fileType == nil || tableAttachment.fileType?.hasPrefix("dyn.") == true {
+                        tableAttachment.fileType = "com.notebook.table"
+                    }
+                    tableAttachment.updateImage()
+                }
+            }
+        }
         
         let content = tv.attributedString()
         print("[RichTextController] snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
@@ -1507,12 +1525,10 @@ class RichTextView: NSTextView {
         addSubview(editorView)
         activeTableEditor = editorView
 
-        // 临时用空白字符替换表格附件，隐藏原始表格
+        // 不再替换为空白附件，保留真实表格附件以确保保存/恢复
+        // 通过 editorView 覆盖展示即可
         if let textStorage = self.textStorage {
-            let blankAttachment = NSTextAttachment()
-            blankAttachment.bounds = editorView.frame
-            let blankAttr = NSAttributedString(attachment: blankAttachment)
-            textStorage.replaceCharacters(in: range, with: blankAttr)
+            textStorage.edited(.editedAttributes, range: range, changeInLength: 0)
         }
 
         // 点击外部时关闭编辑器
@@ -1537,16 +1553,54 @@ class RichTextView: NSTextView {
             return
         }
 
+        // 关闭前强制提交编辑内容
+        editor.finalizeEditing()
+        attachment.tableData = editor.currentTableData()
+        attachment.updateImage()
+
         // 恢复原始表格附件
-        if let textStorage = self.textStorage {
+        if let textStorage = self.textStorage,
+           range.location >= 0,
+           range.location + range.length <= textStorage.length {
             let attrString = NSAttributedString(attachment: attachment)
             textStorage.replaceCharacters(in: range, with: attrString)
+            if let data = try? JSONEncoder().encode(attachment.tableData) {
+                print("[TableTrace] hideActiveTableEditor write notebookTableData bytes=\(data.count) rows=\(attachment.tableData.rowCount)")
+                textStorage.addAttribute(.notebookTableData, value: data, range: NSRange(location: range.location, length: 1))
+            }
+            textStorage.edited(.editedAttributes, range: range, changeInLength: 0)
         }
 
         editor.removeFromSuperview()
         activeTableEditor = nil
         activeTableAttachment = nil
         activeTableRange = nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window = self.window {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowDidResignKey(_:)), name: NSWindow.didResignKeyNotification, object: window)
+            NotificationCenter.default.addObserver(self, selector: #selector(windowDidBecomeKey(_:)), name: NSWindow.didBecomeKeyNotification, object: window)
+        }
+    }
+
+    @objc private func windowDidResignKey(_ notification: Notification) {
+        hideActiveTableEditor()
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        // 强制刷新表格渲染，避免切回应用后出现空渲染
+        normalizeAttachmentsAfterLoad()
+        setNeedsDisplay(self.bounds)
+    }
+
+
+    /// 在保存/切换笔记前强制提交表格编辑状态
+    func finalizeActiveTableEditorIfNeeded() {
+        if activeTableEditor != nil {
+            hideActiveTableEditor()
+        }
     }
 
     private func openAudioAttachmentIfHit(
@@ -1621,9 +1675,11 @@ class RichTextView: NSTextView {
 
             // 0) 先做图片附件自愈：把普通 NSTextAttachment 的图片替换为自定义 AttachmentTextAttachment
             //    目的是避免系统把它当“文件附件”显示右上角浮层（标记/更多）。
+            //    注意：表格附件可能退化为普通 NSTextAttachment，需先跳过（避免被误转成图片）。
             if !(attachment is AttachmentTextAttachment),
                !(attachment is AudioBlockAttachment),
                !(attachment is TableTextAttachment),
+               !TableTextAttachment.looksLikeTable(attachment),
                let converted = convertLegacyImageAttachmentIfNeeded(attachment) {
                 textStorage.addAttribute(.attachment, value: converted, range: range)
             }
@@ -1662,6 +1718,59 @@ class RichTextView: NSTextView {
             // 3) 表格附件：检查并刷新
             if let tableAttachment = attachment as? TableTextAttachment {
                 print("[LoadDebug] Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)")
+                if let rawData = textStorage.attribute(.notebookTableData, at: range.location, effectiveRange: nil) as? Data,
+                   let decoded = try? JSONDecoder().decode(TableData.self, from: rawData) {
+                    print("[TableTrace] load notebookTableData bytes=\(rawData.count) rows=\(decoded.rowCount)")
+                    tableAttachment.tableData = decoded
+                } else if let (tableData, _) = TableTextAttachment.extractTableData(from: tableAttachment.contents) {
+                    print("[TableTrace] load from contents rows=\(tableData.rowCount)")
+                    tableAttachment.tableData = tableData
+                    if let encoded = try? JSONEncoder().encode(tableData) {
+                        textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
+                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                    }
+                } else if let wrapper = tableAttachment.fileWrapper,
+                          wrapper.isDirectory,
+                          let jsonData = wrapper.fileWrappers?["table.json"]?.regularFileContents,
+                          let tableData = try? JSONDecoder().decode(TableData.self, from: jsonData) {
+                    print("[TableTrace] load from fileWrapper json bytes=\(jsonData.count) rows=\(tableData.rowCount)")
+                    tableAttachment.tableData = tableData
+                    if let encoded = try? JSONEncoder().encode(tableData) {
+                        textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
+                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                    }
+                    if let pngData = wrapper.fileWrappers?["table.png"]?.regularFileContents, !pngData.isEmpty {
+                        tableAttachment.contents = pngData
+                    }
+                } else if let wrapper = tableAttachment.fileWrapper,
+                          wrapper.isRegularFile,
+                          let data = wrapper.regularFileContents,
+                          let (tableData, _) = TableTextAttachment.extractTableData(from: data) {
+                    print("[TableTrace] load from fileWrapper bytes=\(data.count) rows=\(tableData.rowCount)")
+                    tableAttachment.tableData = tableData
+                    tableAttachment.contents = data
+                    if let encoded = try? JSONEncoder().encode(tableData) {
+                        textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
+                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                    }
+                } else {
+                    print("[TableTrace] load failed: no table data")
+                }
+                if (tableAttachment.contents?.isEmpty ?? true),
+                   let wrapper = tableAttachment.fileWrapper {
+                    if wrapper.isDirectory,
+                       let pngData = wrapper.fileWrappers?["table.png"]?.regularFileContents,
+                       !pngData.isEmpty {
+                        tableAttachment.contents = pngData
+                    } else if wrapper.isRegularFile,
+                              let data = wrapper.regularFileContents,
+                              !data.isEmpty {
+                        tableAttachment.contents = data
+                    }
+                }
+                if tableAttachment.fileType == nil || tableAttachment.fileType?.hasPrefix("dyn.") == true {
+                    tableAttachment.fileType = "public.png"
+                }
                 print("[LoadDebug] TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
                 tableAttachment.updateImage()
                 print("[LoadDebug] TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
@@ -1688,7 +1797,11 @@ class RichTextView: NSTextView {
                     
                     // 尝试恢复表格附件
                     if let recovered = TableTextAttachment.recover(from: attachment) {
+                        let tableDataAttr = textStorage.attribute(.notebookTableData, at: range.location, effectiveRange: nil)
                         textStorage.addAttribute(.attachment, value: recovered, range: range)
+                        if let tableDataAttr {
+                            textStorage.addAttribute(.notebookTableData, value: tableDataAttr, range: range)
+                        }
                         print("[LoadDebug] Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
                         return
                     }
