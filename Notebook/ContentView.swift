@@ -25,13 +25,16 @@ struct ContentView: View {
     @State private var selectedFolder: String = l10n(L10nKeys.Folder.allNotes)
     @State private var selectedTagID: UUID?
     @State private var selectedEncryptedFolderID: UUID? = nil
+    @State private var isRecycleBinSelected: Bool = false
+    @State private var showingDeleteConfirm = false
+    @State private var pendingDeleteNoteID: UUID?
     @State private var searchInAllFolders: Bool = false
     @State private var isEncryptedFolderUnlocked: Bool = false
     @StateObject private var richTextController = RichTextController()
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        var notes = store.notes
+        var notes = store.activeNotes
         Logger.shared.log(.search, .debug, "Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
 
         // 0. 排除加密文件夹的笔记（除非当前正在查看加密文件夹）
@@ -174,10 +177,14 @@ struct ContentView: View {
                 selection: $selection,
                 selectedEncryptedFolderID: $selectedEncryptedFolderID,
                 isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
+                isRecycleBinSelected: $isRecycleBinSelected,
                 onCreateNote: createNote
             )
         } content: {
-            NotesListView(notes: filteredNotes, selection: Binding(
+            if isRecycleBinSelected {
+                RecycleBinView(selection: $selection)
+            } else {
+                NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
                 set: { newSelection in
                     // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
@@ -221,9 +228,17 @@ struct ContentView: View {
                         AppSettings.shared.lastSelectedNoteID = newSelection
                     }
                 }
-            ))
+            ), onDeleteRequest: { id in
+                pendingDeleteNoteID = id
+                showingDeleteConfirm = true
+            })
+            }
         } detail: {
-            if let currentId = selection, let index = store.notes.firstIndex(where: { $0.id == currentId }) {
+            if isRecycleBinSelected {
+                ContentUnavailableView("回收站", systemImage: "trash")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.editorBackground(colorScheme))
+            } else if let currentId = selection, let index = store.notes.firstIndex(where: { $0.id == currentId }) {
                 let noteBinding = $store.notes[index]
                 NoteEditorView(
                     note: noteBinding,
@@ -246,11 +261,11 @@ struct ContentView: View {
                 }
 
                 Button {
-                    deleteSelectedNote()
+                    confirmDeleteSelectedNote()
                 } label: {
                     Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                 }
-                .disabled(selection == nil)
+                .disabled(selection == nil || isRecycleBinSelected)
             }
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
@@ -265,9 +280,13 @@ struct ContentView: View {
                 didSyncSelectionFromStore = true
             }
             if selection == nil {
-                selection = store.notes.first?.id
+                selection = store.activeNotes.first?.id
             }
             store.fetchData()
+
+        if isRecycleBinSelected {
+            selection = nil
+        }
 
             // 启动定期自动保存（每30秒）
             richTextController.startAutoSave(interval: 30.0) { [weak store] in
@@ -318,6 +337,22 @@ struct ContentView: View {
                 richTextController.insertTextAtCursor(text)
             }
         }
+        .alert("移动到回收站？", isPresented: $showingDeleteConfirm) {
+            Button("删除", role: .destructive) {
+                if let id = pendingDeleteNoteID {
+                    store.deleteNote(id: id)
+                    if selection == id {
+                        selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                    }
+                }
+                pendingDeleteNoteID = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteNoteID = nil
+            }
+        } message: {
+            Text("删除后可在回收站恢复，或彻底删除。")
+        }
         // 快捷键处理
         .onReceive(ShortcutActionHandler.shared.newNotePublisher) { _ in
             createNote()
@@ -332,7 +367,9 @@ struct ContentView: View {
             }
         }
         .onReceive(ShortcutActionHandler.shared.deleteNotePublisher) { _ in
-            deleteSelectedNote()
+            if !isRecycleBinSelected {
+                confirmDeleteSelectedNote()
+            }
         }
         .onReceive(ShortcutActionHandler.shared.focusSearchPublisher) { _ in
             // 聚焦搜索框 - 通过发送通知让搜索框获得焦点
@@ -404,13 +441,13 @@ struct ContentView: View {
         let folderName = selectedFolder == l10n(L10nKeys.Folder.allNotes) ? l10n(L10nKeys.Folder.uncategorized) : selectedFolder
         let folderID = store.folders.first { $0.name == folderName }?.id
         store.addNote(title: l10n(L10nKeys.Note.new), folderID: folderID, folderName: folderName)
-        selection = store.notes.first?.id
+        selection = store.activeNotes.first?.id
     }
 
-    private func deleteSelectedNote() {
+    private func confirmDeleteSelectedNote() {
         guard let id = selection else { return }
-        store.deleteNote(id: id)
-        selection = filteredNotes.first?.id
+        pendingDeleteNoteID = id
+        showingDeleteConfirm = true
     }
 
     /// 启动时恢复选中的笔记和文件夹
@@ -451,7 +488,7 @@ struct ContentView: View {
             // 恢复笔记选择
             if let lastID = AppSettings.shared.lastSelectedNoteID {
                 // 检查笔记是否存在，并且在当前文件夹中
-                if let note = store.notes.first(where: { $0.id == lastID }) {
+                if let note = store.activeNotes.first(where: { $0.id == lastID }) {
                     let allNotesTitle = l10n(L10nKeys.Folder.allNotes)
                     let noteInCurrentFolder = selectedFolder == allNotesTitle || note.folder == selectedFolder
 
@@ -460,16 +497,16 @@ struct ContentView: View {
                         print("[Launch] Restored last selected note: \(lastID)")
                     } else {
                         // 笔记不在当前文件夹中，选择当前文件夹的第一个笔记
-                        selection = filteredNotes.first?.id
+                        selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
                         print("[Launch] Last note not in current folder, selecting first note in folder")
                     }
                 } else {
                     // 笔记不存在，选择当前文件夹的第一个笔记
-                    selection = filteredNotes.first?.id
+                    selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
                     print("[Launch] Last note not found, selecting first note in folder")
                 }
             } else {
-                selection = filteredNotes.first?.id
+                selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
                 print("[Launch] No last note saved, selecting first note")
             }
 
@@ -482,9 +519,104 @@ struct ContentView: View {
         case .showAllNotes:
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
-            selection = store.notes.first?.id
+            selection = store.activeNotes.first?.id
             print("[Launch] Showing all notes")
         }
+    }
+}
+
+private struct MarqueeText: View {
+    let text: String
+    var font: Font = .system(size: 13)
+    var speed: Double = 20
+    var delay: Double = 1
+    var spacing: CGFloat = 24
+
+    @State private var textWidth: CGFloat = 0
+    @State private var availableWidth: CGFloat = 0
+    @State private var animate = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack(alignment: .leading) {
+                if textWidth <= width || width == 0 {
+                    Text(text)
+                        .font(font)
+                        .lineLimit(1)
+                } else {
+                    HStack(spacing: spacing) {
+                        Text(text)
+                            .font(font)
+                            .lineLimit(1)
+                        Text(text)
+                            .font(font)
+                            .lineLimit(1)
+                    }
+                    .offset(x: animate ? -(textWidth + spacing) : 0)
+                    .animation(.linear(duration: speed).repeatForever(autoreverses: false), value: animate)
+                    .onAppear {
+                        startAnimationIfNeeded(width: width)
+                    }
+                    .onChange(of: width) { _, newWidth in
+                        startAnimationIfNeeded(width: newWidth)
+                    }
+                    .onChange(of: textWidth) { _, _ in
+                        startAnimationIfNeeded(width: width)
+                    }
+                }
+            }
+            .frame(width: width, alignment: .leading)
+            .clipped()
+            .onAppear {
+                availableWidth = width
+            }
+        }
+        .frame(height: 18)
+        .overlay(
+            TextWidthReader(text: text, font: font)
+                .opacity(0)
+                .allowsHitTesting(false)
+        )
+        .onPreferenceChange(TextWidthPreferenceKey.self) { newWidth in
+            textWidth = newWidth
+        }
+    }
+
+    private func startAnimationIfNeeded(width: CGFloat) {
+        availableWidth = width
+        guard textWidth > width, width > 0 else {
+            animate = false
+            return
+        }
+        animate = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            animate = true
+        }
+    }
+}
+
+private struct TextWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct TextWidthReader: View {
+    let text: String
+    let font: Font
+
+    var body: some View {
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .fixedSize()
+            .background(
+                GeometryReader { geometry in
+                    Color.clear.preference(key: TextWidthPreferenceKey.self, value: geometry.size.width)
+                }
+            )
     }
 }
 
@@ -498,6 +630,7 @@ private struct SidebarView: View {
     @Binding var selection: Note.ID?
     @Binding var selectedEncryptedFolderID: UUID?
     @Binding var isEncryptedFolderUnlocked: Bool
+    @Binding var isRecycleBinSelected: Bool
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
@@ -510,6 +643,26 @@ private struct SidebarView: View {
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
     @State private var tagsFilterMode: AppSettings.TagsFilterMode = AppSettings.shared.tagsFilterMode
 
+    private let maxSidebarTitleLength = 8
+    private let maxTagDisplayCount = 10
+
+    private var sidebarWidth: CGFloat {
+        let titles = store.folders.map { $0.name } + [l10n(L10nKeys.Folder.allNotes), "未分类"]
+        let longest = titles.map { $0.count }.max() ?? 0
+        let clamped = min(longest, maxSidebarTitleLength)
+        let baseWidth: CGFloat = 132
+        let perCharWidth: CGFloat = 16
+        return baseWidth + CGFloat(clamped) * perCharWidth
+    }
+
+    private var tagsSectionHeight: CGFloat {
+        let count = max(min(filteredTags.count, maxTagDisplayCount), 1)
+        let rowHeight: CGFloat = 28
+        let headerHeight: CGFloat = 26
+        let padding: CGFloat = 8
+        return headerHeight + CGFloat(count) * rowHeight + padding
+    }
+
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
@@ -518,39 +671,26 @@ private struct SidebarView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         allNotesRow
                         uncategorizedNotesRow
+                        recycleBinRow
                         foldersSection
                         encryptedFolderRow
                     }
                 }
                 .frame(maxHeight: .infinity)
 
-                // 动态布局：根据展开状态决定标签位置
-                if isTagsExpanded {
-                    // 标签展开时：显示在内容下方，标签本身也可滚动
-                    Divider()
-                        .padding(.vertical, 8)
-                    
-                    // 标签展开时占用剩余空间并可以滚动
-                    ScrollView {
-                        tagsSection
-                    }
-                    .frame(maxHeight: .infinity)
-                } else {
-                    // 标签折叠时：固定在底部，但留出一些空间避免显示不全
-                    Spacer(minLength: 20)
-                    
-                    Divider()
-                        .padding(.vertical, 8)
-                    
-                    tagsSection
-                    
-                    // 底部留出一些内边距
-                    Spacer(minLength: 8)
-                }
+                Spacer(minLength: 0)
+
+                Divider()
+                    .padding(.vertical, 8)
+
+                // 标签固定在底部，最多显示 10 个
+                tagsSection
+                    .frame(height: tagsSectionHeight)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
         }
+        .frame(width: sidebarWidth)
         .sheet(isPresented: $showingFolderManagement) {
             FolderManagementView()
                 .environmentObject(store)
@@ -563,7 +703,7 @@ private struct SidebarView: View {
 
     private var allNotesRow: some View {
         // 全部笔记（排除加密文件夹的笔记）
-        let allNotesCount = store.notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
+        let allNotesCount = store.activeNotes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
         return HStack {
             Image(systemName: "tray.fill")
                 .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil ? .white : .orange)
@@ -581,6 +721,12 @@ private struct SidebarView: View {
         .onTapGesture {
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
+            isRecycleBinSelected = false
+        }
+        .onChange(of: isRecycleBinSelected) { _, newValue in
+            if newValue {
+                selection = nil
+            }
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
@@ -592,7 +738,7 @@ private struct SidebarView: View {
         // 2. folderID 指向不存在文件夹的笔记（孤儿笔记）
         // 3. 排除加密文件夹的笔记
         let existingFolderIDs = Set(store.folders.map { $0.id })
-        let uncategorizedCount = store.notes.filter { note in
+        let uncategorizedCount = store.activeNotes.filter { note in
             // 排除加密文件夹的笔记
             guard !EncryptedFolderManager.shared.isEncrypted(note: note) else { return false }
             guard let folderID = note.folderID else { return true }
@@ -600,21 +746,49 @@ private struct SidebarView: View {
         }.count
         return HStack {
             Image(systemName: "tray")
-                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil ? .white : .secondary)
+                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? .white : .secondary)
             Text("未分类")
             Spacer()
             Text("\(uncategorizedCount)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == "未分类" && selectedTagID == nil ? themeManager.accentColor : Color.clear)
+        .background(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             selectedFolder = "未分类"
             selectedTagID = nil
+            isRecycleBinSelected = false
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private var recycleBinRow: some View {
+        let recycleCount = store.recycledNotes.count
+        return HStack {
+            Image(systemName: "trash")
+                .foregroundStyle(isRecycleBinSelected ? .white : .secondary)
+            Text("回收站")
+            Spacer()
+            Text("\(recycleCount)")
+                .font(.caption)
+                .foregroundStyle(isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(isRecycleBinSelected ? themeManager.accentColor : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedTagID = nil
+            selectedFolder = l10n(L10nKeys.Folder.allNotes)
+            selectedEncryptedFolderID = nil
+            isEncryptedFolderUnlocked = false
+            isRecycleBinSelected = true
+            selection = nil
         }
         .padding(.horizontal, 8)
     }
@@ -663,7 +837,7 @@ private struct SidebarView: View {
     /// - 加密笔记的标签永远不会显示
     private var filteredTags: [Tag] {
         // 排除加密笔记（加密笔记的标签不显示）
-        let nonEncryptedNotes = store.notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
+        let nonEncryptedNotes = store.activeNotes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
         
         // 如果选择显示所有标签，只显示非加密笔记的标签
         if tagsFilterMode == .allTags {
@@ -742,17 +916,21 @@ private struct SidebarView: View {
             .padding(.horizontal, 16)
 
             if isTagsExpanded {
-                let tags = filteredTags
-                if tags.isEmpty {
+                if filteredTags.isEmpty {
                     Text("无标签")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach(tags) { tag in
-                        tagRow(tag)
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(filteredTags) { tag in
+                                tagRow(tag)
+                            }
+                        }
                     }
+                    .frame(maxHeight: tagsSectionHeight - 34)
                 }
             }
         }
@@ -764,11 +942,11 @@ private struct SidebarView: View {
         
         if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
             // 全部笔记：统计所有包含该标签的笔记
-            notesWithTag = store.notes.filter { $0.tagIDs.contains(tag.id) }.count
+            notesWithTag = store.activeNotes.filter { $0.tagIDs.contains(tag.id) }.count
         } else if selectedFolder == "未分类" {
             // 未分类：统计未分类笔记中包含该标签的笔记
             let existingFolderIDs = Set(store.folders.map { $0.id })
-            notesWithTag = store.notes.filter { note in
+            notesWithTag = store.activeNotes.filter { note in
                 let isUncategorized = {
                     guard let folderID = note.folderID else { return true }
                     return !existingFolderIDs.contains(folderID)
@@ -778,7 +956,7 @@ private struct SidebarView: View {
         } else {
             // 特定文件夹：统计该文件夹下包含该标签的笔记
             if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
-                notesWithTag = store.notes.filter { $0.folderID == folder.id && $0.tagIDs.contains(tag.id) }.count
+                notesWithTag = store.activeNotes.filter { $0.folderID == folder.id && $0.tagIDs.contains(tag.id) }.count
             } else {
                 notesWithTag = 0
             }
@@ -788,7 +966,7 @@ private struct SidebarView: View {
             Circle()
                 .fill(tag.swiftUIColor)
                 .frame(width: 8, height: 8)
-            Text(tag.name)
+            MarqueeText(text: tag.name)
                 .lineLimit(1)
             Spacer()
             Text("\(notesWithTag)")
@@ -803,7 +981,7 @@ private struct SidebarView: View {
         .onTapGesture {
             // 检查当前选中的笔记是否包含新标签
             if let currentSelection = selection,
-               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+               let selectedNote = store.activeNotes.first(where: { $0.id == currentSelection }),
                !selectedNote.tagIDs.contains(tag.id) {
                 // 当前笔记没有新标签，清空选中状态（延迟到下一个runloop避免 Publishing changes 警告）
                 DispatchQueue.main.async {
@@ -813,6 +991,7 @@ private struct SidebarView: View {
             }
             selectedTagID = tag.id
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
+            isRecycleBinSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -824,7 +1003,7 @@ private struct SidebarView: View {
             Text(folder.name)
                 .lineLimit(1)
             Spacer()
-            Text("\(store.notes.filter { $0.folderID == folder.id }.count)")
+            Text("\(store.activeNotes.filter { $0.folderID == folder.id }.count)")
                 .font(.caption)
                 .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
         }
@@ -836,7 +1015,7 @@ private struct SidebarView: View {
         .onTapGesture {
             // 检查当前选中的笔记是否在新文件夹中
             if let currentSelection = selection,
-               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+               let selectedNote = store.activeNotes.first(where: { $0.id == currentSelection }),
                selectedNote.folderID != folder.id {
                 // 当前笔记不在新文件夹中，清空选中状态（延迟到下一个runloop避免 Publishing changes 警告）
                 DispatchQueue.main.async {
@@ -846,6 +1025,7 @@ private struct SidebarView: View {
             }
             selectedFolder = folder.name
             selectedTagID = nil
+            isRecycleBinSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -867,7 +1047,7 @@ private struct SidebarView: View {
                             selectedFolder = l10n(L10nKeys.Folder.allNotes)
                             // 如果当前选中的笔记是加密笔记，清除选中状态
                             if let currentSelection = selection,
-                               let selectedNote = store.notes.first(where: { $0.id == currentSelection }),
+                               let selectedNote = store.activeNotes.first(where: { $0.id == currentSelection }),
                                EncryptedFolderManager.shared.isEncrypted(note: selectedNote) {
                                 selection = nil
                             }
@@ -991,6 +1171,7 @@ private struct SidebarView: View {
             // 切换到加密文件夹视图
             selectedFolder = EncryptedFolderManager.folderName
             selectedTagID = nil
+            isRecycleBinSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -1009,6 +1190,7 @@ private struct NotesListView: View {
 
     let notes: [Note]
     @Binding var selection: Note.ID?
+    let onDeleteRequest: (Note.ID) -> Void
 
     /// 根据排序选项排序后的笔记
     private var sortedNotes: [Note] {
@@ -1037,7 +1219,7 @@ private struct NotesListView: View {
                             }
                             .contextMenu {
                                 Button(l10n(L10nKeys.common.delete)) {
-                                    store.deleteNote(id: note.id)
+                                    onDeleteRequest(note.id)
                                 }
                             }
                     }
@@ -2479,6 +2661,151 @@ private struct AIPanelView: View {
             object: nil,
             userInfo: ["text": conversationText]
         )
+    }
+}
+
+// MARK: - 回收站视图
+
+private struct RecycleBinView: View {
+    @EnvironmentObject private var store: NoteStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var selection: Note.ID?
+
+    @State private var showingDeleteConfirm = false
+    @State private var pendingDeleteNote: Note?
+    @State private var showingEmptyConfirm = false
+
+    private var sortedNotes: [Note] {
+        store.recycledNotes.sorted { $0.deletedAt ?? .distantPast > $1.deletedAt ?? .distantPast }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("回收站")
+                    .font(.headline)
+                Spacer()
+                Button("清空") {
+                    showingEmptyConfirm = true
+                }
+                .buttonStyle(.plain)
+                .disabled(sortedNotes.isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(AppColors.editorBackground(colorScheme))
+
+            Divider()
+
+            if sortedNotes.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                    Text("回收站为空")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $selection) {
+                    ForEach(sortedNotes) { note in
+                        RecycleBinRow(note: note)
+                            .tag(note.id)
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                Button("恢复到原文件夹") {
+                                    store.restoreNote(id: note.id)
+                                    if selection == note.id {
+                                        selection = nil
+                                    }
+                                }
+                                Button(role: .destructive) {
+                                    pendingDeleteNote = note
+                                    showingDeleteConfirm = true
+                                } label: {
+                                    Label("彻底删除", systemImage: "trash")
+                                }
+                            }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(minWidth: 220, maxWidth: 280)
+        .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
+        .alert("彻底删除该笔记？", isPresented: $showingDeleteConfirm) {
+            Button("删除", role: .destructive) {
+                if let note = pendingDeleteNote {
+                    store.deleteNotePermanently(id: note.id)
+                    if selection == note.id {
+                        selection = nil
+                    }
+                }
+                pendingDeleteNote = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteNote = nil
+            }
+        } message: {
+            Text("删除后将无法恢复。")
+        }
+        .alert("清空回收站？", isPresented: $showingEmptyConfirm) {
+            Button("清空", role: .destructive) {
+                for note in sortedNotes {
+                    store.deleteNotePermanently(id: note.id)
+                }
+                if let current = selection,
+                   store.recycledNotes.contains(where: { $0.id == current }) {
+                    selection = nil
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将永久删除回收站中的所有笔记。")
+        }
+    }
+}
+
+private struct RecycleBinRow: View {
+    let note: Note
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var themeManager = ThemeManager.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(note.title.isEmpty ? l10n(L10nKeys.common.noTitle) : note.title)
+                    .font(.system(size: 14, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            Text(preview(from: note.content))
+                .font(.system(size: 12))
+                .lineLimit(2)
+                .foregroundStyle(.secondary)
+            HStack {
+                if let deletedAt = note.deletedAt {
+                    Text(deletedAt, style: .date)
+                }
+                Spacer()
+                Text(note.originalFolderName ?? "未分类")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .background(Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func preview(from attributed: NSAttributedString) -> String {
+        let str = attributed.string
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.components(separatedBy: .newlines)
+        return lines.prefix(2).joined(separator: " ")
     }
 }
 

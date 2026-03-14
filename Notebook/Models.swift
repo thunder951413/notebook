@@ -76,6 +76,16 @@ class NoteStore: ObservableObject {
     @Published var folders: [Folder] = []
     @Published var tags: [Tag] = []
     @Published var encryptedFolders: [EncryptedFolder] = []
+
+    /// 非回收站的笔记
+    var activeNotes: [Note] {
+        notes.filter { !$0.isInRecycleBin }
+    }
+
+    /// 回收站中的笔记
+    var recycledNotes: [Note] {
+        notes.filter { $0.isInRecycleBin }
+    }
     
     /// 用于菜单栏 Popover 跳转的选中笔记 ID
     @Published var selectedNoteId: UUID?
@@ -89,7 +99,7 @@ class NoteStore: ObservableObject {
     
     /// 获取所有加密笔记
     var encryptedNotes: [Note] {
-        return notes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
+        return activeNotes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
     }
     
     init() {
@@ -265,13 +275,17 @@ class NoteStore: ObservableObject {
                     title: entity.title,
                     content: fixedContent,
                     createdAt: entity.createdAt,
+                    updatedAt: entity.updatedAt,
                     folderID: entity.folderID,
                     folder: entity.folderName,
                     reminderAt: entity.reminderAt,
                     recurrenceRule: entity.recurrenceRule ?? "none",
                     version: entity.version,
                     tagIDs: tagIDArray,
-                    viewMode: viewMode
+                    viewMode: viewMode,
+                    deletedAt: entity.deletedAt,
+                    originalFolderID: entity.originalFolderID,
+                    originalFolderName: entity.originalFolderName
                 )
             }
             
@@ -779,12 +793,70 @@ class NoteStore: ObservableObject {
     }
     
     func deleteNote(id: UUID) {
+        moveNoteToRecycleBin(id: id)
+    }
+
+    /// 移动到回收站（软删除）
+    func moveNoteToRecycleBin(id: UUID) {
         guard let context = modelContext else { return }
         let idToMatch = id
         let descriptor = FetchDescriptor<NoteEntity>(
             predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
         )
-        
+
+        if let entity = try? context.fetch(descriptor).first {
+            guard entity.deletedAt == nil else { return }
+            entity.deletedAt = Date()
+            entity.originalFolderID = entity.folderID
+            entity.originalFolderName = entity.folderName
+            try? context.save()
+            fetchData()
+        }
+    }
+
+    /// 从回收站恢复
+    func restoreNote(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<NoteEntity>(
+            predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
+        )
+
+        if let entity = try? context.fetch(descriptor).first {
+            let fallbackFolderName = "未分类"
+            var restoredFolderID = entity.originalFolderID
+            var restoredFolderName = entity.originalFolderName ?? fallbackFolderName
+
+            if let folderID = entity.originalFolderID {
+                let folderDescriptor = FetchDescriptor<FolderEntity>(
+                    predicate: #Predicate<FolderEntity> { $0.id == folderID }
+                )
+                let folderExists = (try? context.fetch(folderDescriptor).first) != nil
+                if !folderExists {
+                    restoredFolderID = nil
+                    restoredFolderName = fallbackFolderName
+                }
+            }
+
+            entity.deletedAt = nil
+            entity.folderID = restoredFolderID
+            entity.folderName = restoredFolderName
+            entity.originalFolderID = nil
+            entity.originalFolderName = nil
+            entity.updatedAt = Date()
+            try? context.save()
+            fetchData()
+        }
+    }
+
+    /// 彻底删除
+    func deleteNotePermanently(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<NoteEntity>(
+            predicate: #Predicate<NoteEntity> { $0.id == idToMatch }
+        )
+
         if let entity = try? context.fetch(descriptor).first {
             AttachmentManager.shared.deleteAttachments(for: id)
             context.delete(entity)
@@ -1098,8 +1170,19 @@ struct Note: Identifiable, Hashable {
     var tagIDs: [UUID]
     var viewMode: NoteViewMode
 
+    /// 回收站：删除时间（非空表示在回收站）
+    var deletedAt: Date?
+    /// 原始文件夹ID（用于恢复）
+    var originalFolderID: UUID?
+    /// 原始文件夹名称（用于恢复）
+    var originalFolderName: String?
+
     var hasReminder: Bool {
         return reminderAt != nil
+    }
+
+    var isInRecycleBin: Bool {
+        return deletedAt != nil
     }
 
     init(
@@ -1114,7 +1197,10 @@ struct Note: Identifiable, Hashable {
         recurrenceRule: String = "none",
         version: Int64 = 0,
         tagIDs: [UUID] = [],
-        viewMode: NoteViewMode = .text
+        viewMode: NoteViewMode = .text,
+        deletedAt: Date? = nil,
+        originalFolderID: UUID? = nil,
+        originalFolderName: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -1128,6 +1214,9 @@ struct Note: Identifiable, Hashable {
         self.version = version
         self.tagIDs = tagIDs
         self.viewMode = viewMode
+        self.deletedAt = deletedAt
+        self.originalFolderID = originalFolderID
+        self.originalFolderName = originalFolderName
     }
     
     func hash(into hasher: inout Hasher) {

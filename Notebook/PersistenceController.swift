@@ -100,6 +100,13 @@ final class NoteEntity {
     /// 视图模式：text, preview, split
     var viewMode: String?
 
+    /// 回收站：删除时间（非空表示在回收站）
+    var deletedAt: Date?
+    /// 原始文件夹ID（用于恢复）
+    var originalFolderID: UUID?
+    /// 原始文件夹名称（用于恢复）
+    var originalFolderName: String?
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -112,7 +119,10 @@ final class NoteEntity {
         recurrenceRule: String? = "none",
         version: Int64 = 0,
         tagIDs: String? = nil,
-        viewMode: String? = "text"
+        viewMode: String? = "text",
+        deletedAt: Date? = nil,
+        originalFolderID: UUID? = nil,
+        originalFolderName: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -126,5 +136,8 @@ final class NoteEntity {
         self.version = version
         self.tagIDs = tagIDs
         self.viewMode = viewMode
+        self.deletedAt = deletedAt
+        self.originalFolderID = originalFolderID
+        self.originalFolderName = originalFolderName
     }
 }
