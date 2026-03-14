@@ -78,6 +78,8 @@ struct SettingsGeneralView: View {
     @State private var showRestartAlert = false
     @State private var showPasswordSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
+    @State private var showLogExportAlert = false
+    @State private var logExportMessage = ""
 
     var body: some View {
         ScrollView {
@@ -242,6 +244,33 @@ struct SettingsGeneralView: View {
 
                 Divider()
 
+                // 日志导出
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("日志")
+                        .font(.title2)
+                        .bold()
+
+                    Text("日志保存在内存中，可按模块导出用于排查问题")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 12) {
+                        Button("导出全部日志") {
+                            exportLogs(module: nil)
+                        }
+
+                        Menu("按模块导出") {
+                            ForEach([LogModule.app, .editor, .table, .save, .storage, .attachment, .search], id: \.self) { module in
+                                Button(module.rawValue) {
+                                    exportLogs(module: module)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
                 // 关于/帮助信息
                 VStack(alignment: .leading, spacing: 12) {
                     Text(l10n(L10nKeys.About.title))
@@ -294,6 +323,11 @@ struct SettingsGeneralView: View {
         } message: {
             Text(l10n(L10nKeys.Settings.restartAlertMessage))
         }
+        .alert("日志导出", isPresented: $showLogExportAlert) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(logExportMessage)
+        }
         .sheet(isPresented: $showPasswordSheet) {
             PasswordSettingsView()
         }
@@ -342,6 +376,27 @@ struct SettingsGeneralView: View {
                 errorMessage = error.localizedDescription
             }
             isChoosingDirectory = false
+        }
+    }
+
+    /// 导出日志
+    private func exportLogs(module: LogModule?) {
+        let savePanel = NSSavePanel()
+        let suffix = module?.rawValue ?? "all"
+        savePanel.nameFieldStringValue = "Notebook-Logs-\(suffix).log"
+        savePanel.allowedContentTypes = [UTType.plainText]
+
+        if savePanel.runModal() == .OK, let url = savePanel.url {
+            let content = module == nil
+                ? Logger.shared.exportLogsGroupedByModule()
+                : Logger.shared.exportLogs(module: module)
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                logExportMessage = "日志已导出到: \(url.path)"
+            } catch {
+                logExportMessage = "日志导出失败: \(error.localizedDescription)"
+            }
+            showLogExportAlert = true
         }
     }
 

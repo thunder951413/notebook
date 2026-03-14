@@ -26,23 +26,24 @@ struct ContentView: View {
     @State private var selectedTagID: UUID?
     @State private var selectedEncryptedFolderID: UUID? = nil
     @State private var searchInAllFolders: Bool = false
+    @State private var isEncryptedFolderUnlocked: Bool = false
     @StateObject private var richTextController = RichTextController()
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         var notes = store.notes
-        print("[Search] Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
+        Logger.shared.log(.search, .debug, "Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
 
         // 0. 排除加密文件夹的笔记（除非当前正在查看加密文件夹）
         if selectedFolder != EncryptedFolderView.folderName {
             notes = notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
-            print("[Search] After excluding encrypted notes: \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After excluding encrypted notes: \(notes.count) notes")
         }
 
         // 1. 标签筛选
         if let tagID = selectedTagID {
             notes = notes.filter { $0.tagIDs.contains(tagID) }
-            print("[Search] After tag filter: \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After tag filter: \(notes.count) notes")
         }
 
         // 2. 文件夹筛选
@@ -59,7 +60,7 @@ struct ContentView: View {
                 // 如果找不到对应的文件夹，显示空结果
                 notes = []
             }
-            print("[Search] After folder filter: \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After folder filter: \(notes.count) notes")
         } else if selectedFolder == "未分类" {
             // 显示未分类（没有 folderID 或 folderID 指向不存在文件夹的笔记）
             let existingFolderIDs = Set(store.folders.map { $0.id })
@@ -67,7 +68,7 @@ struct ContentView: View {
                 guard let folderID = note.folderID else { return true }
                 return !existingFolderIDs.contains(folderID)
             }
-            print("[Search] After uncategorized filter: \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After uncategorized filter: \(notes.count) notes")
         } else if selectedFolder == EncryptedFolderView.folderName {
             // 显示加密文件夹中的笔记
             notes = notes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
@@ -76,11 +77,11 @@ struct ContentView: View {
                 notes = notes.filter {
                     EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == encryptedFolderID
                 }
-                print("[Search] After encrypted subfolder filter: \(notes.count) notes")
+                Logger.shared.log(.search, .debug, "After encrypted subfolder filter: \(notes.count) notes")
             }
-            print("[Search] After encrypted folder filter: \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After encrypted folder filter: \(notes.count) notes")
         } else if searchInAllFolders && !q.isEmpty {
-            print("[Search] Skipping folder filter (searching all folders)")
+            Logger.shared.log(.search, .debug, "Skipping folder filter (searching all folders)")
         }
 
         // 3. 搜索词筛选
@@ -89,7 +90,7 @@ struct ContentView: View {
                 $0.title.localizedCaseInsensitiveContains(q) ||
                 $0.content.string.localizedCaseInsensitiveContains(q)
             }
-            print("[Search] After search filter '\(q)': \(notes.count) notes")
+            Logger.shared.log(.search, .debug, "After search filter '\(q)': \(notes.count) notes")
         }
 
         return notes
@@ -101,7 +102,7 @@ struct ContentView: View {
         
         let note = store.notes[index]
         let preview = String(content.string.prefix(30)).replacingOccurrences(of: "\n", with: "\\n")
-        print("[SAVE] '\(note.title)' [\(reason)]: '\(preview)' (\(content.length))")
+        Logger.shared.log(.save, .info, "'\(note.title)' [\(reason)]: '\(preview)' (\(content.length))")
         
         guard let request = NoteSaveManager.shared.createRequest(
             noteID: noteID,
@@ -123,7 +124,7 @@ struct ContentView: View {
         let boundIDStr = richTextController.boundNoteID?.uuidString.prefix(8) ?? "nil"
         let selIDStr = selection?.uuidString.prefix(8) ?? "nil"
         
-        print("[SAVE DEBUG] reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
+        Logger.shared.log(.save, .debug, "reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
         
         let targetNoteID: UUID
         if let boundID = richTextController.boundNoteID,
@@ -131,32 +132,32 @@ struct ContentView: View {
            boundID == selID {
             targetNoteID = boundID
         } else if let selID = selection {
-            print("[SAVE WARNING] boundNoteID and selection mismatch, using selection: \(selID)")
+            Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using selection: \(selID)")
             targetNoteID = selID
         } else if let boundID = richTextController.boundNoteID {
             targetNoteID = boundID
         } else {
-            print("[SAVE ERROR] No target note ID available")
+            Logger.shared.log(.save, .error, "No target note ID available")
             return
         }
         
         // 从编辑器获取内容；若快照异常为空，回退到内存，避免误清空笔记
         guard let editorContent = richTextController.snapshotAttributedString() else {
-            print("[SAVE DEBUG] Editor content is nil, fallback to in-memory content")
+            Logger.shared.log(.save, .warn, "Editor content is nil, fallback to in-memory content")
             if let index = store.notes.firstIndex(where: { $0.id == targetNoteID }) {
                 let memoryContent = store.notes[index].content
                 saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
             }
             return
         }
-        print("[SAVE DEBUG] Editor content length: \(editorContent.length)")
+        Logger.shared.log(.save, .debug, "Editor content length: \(editorContent.length)")
 
         // 保护：当编辑器快照为空但内存中有内容时，不用空快照覆盖
         if editorContent.length == 0,
            let index = store.notes.firstIndex(where: { $0.id == targetNoteID }),
            store.notes[index].content.length > 0 {
             let memoryContent = store.notes[index].content
-            print("[SAVE WARNING] Editor snapshot is empty, fallback to memory content length=\(memoryContent.length)")
+            Logger.shared.log(.save, .warn, "Editor snapshot is empty, fallback to memory content length=\(memoryContent.length)")
             saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
             return
         }
@@ -172,6 +173,7 @@ struct ContentView: View {
                 selectedTagID: $selectedTagID,
                 selection: $selection,
                 selectedEncryptedFolderID: $selectedEncryptedFolderID,
+                isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
                 onCreateNote: createNote
             )
         } content: {
@@ -225,7 +227,8 @@ struct ContentView: View {
                 let noteBinding = $store.notes[index]
                 NoteEditorView(
                     note: noteBinding,
-                    controller: richTextController
+                    controller: richTextController,
+                    isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
                 )
             } else {
                 ContentUnavailableView(l10n(L10nKeys.Note.noSelection), systemImage: "note")
@@ -494,6 +497,7 @@ private struct SidebarView: View {
     @Binding var selectedTagID: UUID?
     @Binding var selection: Note.ID?
     @Binding var selectedEncryptedFolderID: UUID?
+    @Binding var isEncryptedFolderUnlocked: Bool
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
@@ -502,7 +506,6 @@ private struct SidebarView: View {
     @State private var showingEncryptedFolder = false
     @State private var isFoldersExpanded: Bool = AppSettings.shared.isFoldersExpanded
     @State private var isEncryptedFolderExpanded: Bool = false
-    @State private var isEncryptedFolderUnlocked: Bool = false
     @State private var shouldOpenManagementAfterUnlock: Bool = false
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
     @State private var tagsFilterMode: AppSettings.TagsFilterMode = AppSettings.shared.tagsFilterMode
@@ -942,6 +945,11 @@ private struct SidebarView: View {
             EncryptedFolderManagementView()
                 .environmentObject(store)
         }
+        .onChange(of: selectedFolder) { _, newValue in
+            if newValue != EncryptedFolderView.folderName {
+                selectedEncryptedFolderID = nil
+            }
+        }
     }
 
     // MARK: - 打开加密文件夹管理
@@ -1123,6 +1131,7 @@ private struct NoteEditorView: View {
 
     @Binding var note: Note
     @ObservedObject var controller: RichTextController
+    @Binding var isEncryptedFolderUnlocked: Bool
     @EnvironmentObject private var store: NoteStore
     
     @StateObject private var recorder = AudioRecorderManager()
@@ -1148,7 +1157,8 @@ private struct NoteEditorView: View {
                         mixedRecorder: mixedRecorder,
                         note: $note,
                         showingReminderPopover: $showingReminderPopover,
-                        showingRecordingMenu: $showingRecordingMenu
+                        showingRecordingMenu: $showingRecordingMenu,
+                        isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -1328,11 +1338,30 @@ private struct EditorTopBarView: View {
     @Binding var showingRecordingMenu: Bool
     @StateObject private var windowState = WindowStateManager.shared
     @EnvironmentObject private var themeManager: ThemeManager
+    @Binding var isEncryptedFolderUnlocked: Bool
 
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
     @State private var currentRecordingMode: AudioRecordingMode = .microphone
     @State private var showingInsertTableDialog = false
+
+    private func moveNoteToEncryptedFolder(_ folder: EncryptedFolder) {
+        let noteTitle = note.title.isEmpty ? "(无标题)" : note.title
+        let noteIDPrefix = note.id.uuidString.prefix(8)
+
+        guard !EncryptedFolderManager.shared.isEncrypted(note: note) else {
+            note.folderID = folder.id
+            note.folder = "🔒 " + folder.name
+            Logger.shared.log(.encryption, .info, "Move encrypted note [\(noteIDPrefix)] '\(noteTitle)' to encrypted folder '\(folder.name)'")
+            return
+        }
+
+        var updatedNote = note
+        EncryptedFolderManager.shared.encryptNote(&updatedNote, to: folder.id)
+        updatedNote.folder = "🔒 " + folder.name
+        note = updatedNote
+        Logger.shared.log(.encryption, .info, "Encrypt note [\(noteIDPrefix)] '\(noteTitle)' into encrypted folder '\(folder.name)'")
+    }
 
     var recurrenceOptions: [(String, String)] {
         [
@@ -1520,6 +1549,23 @@ private struct EditorTopBarView: View {
                 ForEach(store.folders) { folder in
                     Button(folder.name) {
                         note.folder = folder.name
+                        note.folderID = folder.id
+                    }
+                }
+
+                if isEncryptedFolderUnlocked {
+                    Divider()
+
+                    Menu("🔒 加密文件夹") {
+                        if store.encryptedFolders.isEmpty {
+                            Text("无加密文件夹")
+                        } else {
+                            ForEach(store.encryptedFolders) { folder in
+                                Button(folder.name) {
+                                    moveNoteToEncryptedFolder(folder)
+                                }
+                            }
+                        }
                     }
                 }
             } label: {

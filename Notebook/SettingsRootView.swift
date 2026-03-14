@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 /// 设置界面根视图：展示/修改数据存储路径
 struct SettingsRootView: View {
@@ -18,6 +19,8 @@ struct SettingsRootView: View {
     @State private var showPasswordSheet = false
     @State private var showSSHSettingsSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
+    @State private var showLogExportAlert = false
+    @State private var logExportMessage = ""
 
     var body: some View {
         ScrollView {
@@ -222,6 +225,33 @@ struct SettingsRootView: View {
 
             Divider()
 
+            // 日志导出
+            VStack(alignment: .leading, spacing: 12) {
+                Text("日志")
+                    .font(.title2)
+                    .bold()
+
+                Text("日志保存在内存中，可按模块导出用于排查问题")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 12) {
+                    Button("导出全部日志") {
+                        exportLogs(module: nil)
+                    }
+
+                    Menu("按模块导出") {
+                        ForEach([LogModule.app, .editor, .table, .save, .storage, .attachment, .search], id: \.self) { module in
+                            Button(module.rawValue) {
+                                exportLogs(module: module)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
             // 数据存储位置
             VStack(alignment: .leading, spacing: 12) {
                 Text(l10n(L10nKeys.Settings.storageLocation))
@@ -330,6 +360,11 @@ struct SettingsRootView: View {
         } message: {
             Text(l10n(L10nKeys.Settings.clearBackupsMessage))
         }
+        .alert("日志导出", isPresented: $showLogExportAlert) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(logExportMessage)
+        }
     }
 
     /// 检查颜色是否被选中
@@ -348,6 +383,23 @@ struct SettingsRootView: View {
         return abs(currentR - compareR) < tolerance &&
                abs(currentG - compareG) < tolerance &&
                abs(currentB - compareB) < tolerance
+    }
+
+    private func exportLogs(module: LogModule?) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = module == nil ? "notebook-logs.txt" : "notebook-\(module!.rawValue.lowercased())-logs.txt"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            let content = module == nil ? Logger.shared.exportLogsGroupedByModule() : Logger.shared.exportLogs(module: module)
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                logExportMessage = "日志已导出到: \(url.path)"
+            } catch {
+                logExportMessage = "日志导出失败: \(error.localizedDescription)"
+            }
+            showLogExportAlert = true
+        }
     }
 
     /// 格式化日期
