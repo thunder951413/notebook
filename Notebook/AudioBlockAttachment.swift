@@ -6,16 +6,38 @@ final class AudioBlockAttachment: NSTextAttachment {
     override static var supportsSecureCoding: Bool { true }
 
     let fileURL: URL
+    let attachmentFilename: String
+    let manifestFilename: String?
     let duration: TimeInterval
     let createDate: Date
+    private let embeddedAudioData: Data?
+    private let embeddedManifestData: Data?
     private static var fileURLKey: String { "AudioBlockAttachment.fileURL" }
+    private static var filenameKey: String { "AudioBlockAttachment.filename" }
+    private static var manifestFilenameKey: String { "AudioBlockAttachment.manifestFilename" }
     private static var durationKey: String { "AudioBlockAttachment.duration" }
     private static var dateKey: String { "AudioBlockAttachment.date" }
+    private static var audioWrapperKey: String { "AudioBlockAttachment.audioWrapper" }
+    private static var manifestWrapperKey: String { "AudioBlockAttachment.manifestWrapper" }
 
-    init(fileURL: URL, duration: TimeInterval = 0, createDate: Date = Date()) {
+    init(
+        fileURL: URL,
+        duration: TimeInterval = 0,
+        createDate: Date = Date(),
+        embeddedAudioData: Data? = nil,
+        attachmentFilename: String? = nil,
+        embeddedManifestData: Data? = nil
+    ) {
         self.fileURL = fileURL
+        self.attachmentFilename = attachmentFilename ?? fileURL.lastPathComponent
+        let candidateManifestFilename = Self.manifestFilename(for: self.attachmentFilename)
+        let manifestURL = fileURL.deletingPathExtension().appendingPathExtension("tracks.json")
+        let resolvedManifestData = embeddedManifestData ?? (try? Data(contentsOf: manifestURL))
+        self.manifestFilename = resolvedManifestData != nil ? candidateManifestFilename : nil
         self.duration = duration
         self.createDate = createDate
+        self.embeddedAudioData = embeddedAudioData ?? (try? Data(contentsOf: fileURL))
+        self.embeddedManifestData = resolvedManifestData
         super.init(data: nil, ofType: nil)
         
         // 设置附件大小（更紧凑的尺寸，适合文本编辑器）
@@ -28,22 +50,43 @@ final class AudioBlockAttachment: NSTextAttachment {
     }
 
     required init?(coder: NSCoder) {
-        // 尝试解码保存的数据
-        if let savedPath = coder.decodeObject(of: NSString.self, forKey: Self.fileURLKey) as String? {
+        let decodedFilename = coder.decodeObject(of: NSString.self, forKey: Self.filenameKey) as String?
+        self.attachmentFilename = decodedFilename?.isEmpty == false ? String(decodedFilename!) : "attachment.m4a"
+
+        let decodedManifestFilename = coder.decodeObject(of: NSString.self, forKey: Self.manifestFilenameKey) as String?
+        let audioWrapper = coder.decodeObject(of: FileWrapper.self, forKey: Self.audioWrapperKey)
+            ?? coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
+            ?? coder.decodeObject(of: FileWrapper.self, forKey: NSAttributedString.Key.attachment.rawValue)
+        let manifestWrapper = coder.decodeObject(of: FileWrapper.self, forKey: Self.manifestWrapperKey)
+
+        self.embeddedAudioData = audioWrapper?.regularFileContents
+        self.embeddedManifestData = manifestWrapper?.regularFileContents
+        self.manifestFilename = decodedManifestFilename?.isEmpty == false
+            ? String(decodedManifestFilename!)
+            : (self.embeddedManifestData != nil ? Self.manifestFilename(for: self.attachmentFilename) : nil)
+
+        if let audioWrapper {
+            let extractedURL = Self.uniqueTemporaryFileURL(directoryName: "NotebookAudioExtracted", preferredFilename: attachmentFilename)
+            try? audioWrapper.write(to: extractedURL, options: .atomic, originalContentsURL: nil)
+            self.fileURL = extractedURL
+            if let manifestWrapper, let manifestFilename {
+                let manifestURL = extractedURL.deletingPathExtension().appendingPathExtension("tracks.json")
+                let wrapper = manifestWrapper
+                wrapper.preferredFilename = manifestFilename
+                try? wrapper.write(to: manifestURL, options: .atomic, originalContentsURL: nil)
+            }
+            print("[AudioBlockAttachment] 从嵌入数据恢复: \(extractedURL.path)")
+        } else if let savedPath = coder.decodeObject(of: NSString.self, forKey: Self.fileURLKey) as String? {
             self.fileURL = URL(fileURLWithPath: savedPath)
             print("[AudioBlockAttachment] 从保存路径恢复: \(savedPath)")
-        } else if let fileWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
-            ?? coder.decodeObject(of: FileWrapper.self, forKey: NSAttributedString.Key.attachment.rawValue),
-                  let filename = fileWrapper.preferredFilename,
-                  let resolved = Self.resolveAudioFileURL(fromFilename: filename) {
-            // 兼容 RTFD 反序列化为普通 NSTextAttachment 的场景：优先根据文件名定位真实附件
+        } else if let resolved = Self.resolveAudioFileURL(fromFilename: attachmentFilename) {
             self.fileURL = resolved
-            print("[AudioBlockAttachment] 从 fileWrapper 恢复: \(resolved.path)")
+            print("[AudioBlockAttachment] 从文件名恢复: \(resolved.path)")
         } else {
-            self.fileURL = FileManager.default.temporaryDirectory
-            print("[AudioBlockAttachment] 未找到可恢复路径，使用临时目录")
+            self.fileURL = Self.uniqueTemporaryFileURL(directoryName: "NotebookAudioExtracted", preferredFilename: attachmentFilename)
+            print("[AudioBlockAttachment] 未找到可恢复路径，使用临时文件")
         }
-        
+
         self.duration = coder.decodeDouble(forKey: Self.durationKey)
         if let date = coder.decodeObject(of: NSDate.self, forKey: Self.dateKey) as Date? {
             self.createDate = date
@@ -65,9 +108,38 @@ final class AudioBlockAttachment: NSTextAttachment {
     override func encode(with coder: NSCoder) {
         super.encode(with: coder)
         coder.encode(fileURL.path as NSString, forKey: Self.fileURLKey)
+        coder.encode(attachmentFilename as NSString, forKey: Self.filenameKey)
+        if let manifestFilename {
+            coder.encode(manifestFilename as NSString, forKey: Self.manifestFilenameKey)
+        }
         coder.encode(duration, forKey: Self.durationKey)
         coder.encode(createDate, forKey: Self.dateKey)
+        if let audioData = audioData() {
+            let wrapper = FileWrapper(regularFileWithContents: audioData)
+            wrapper.preferredFilename = attachmentFilename
+            coder.encode(wrapper, forKey: Self.audioWrapperKey)
+        }
+        if let manifestData = manifestData(), let manifestFilename {
+            let wrapper = FileWrapper(regularFileWithContents: manifestData)
+            wrapper.preferredFilename = manifestFilename
+            coder.encode(wrapper, forKey: Self.manifestWrapperKey)
+        }
         print("[AudioBlockAttachment] 编码保存路径: \(fileURL.path)")
+    }
+
+    func audioData() -> Data? {
+        if let data = try? Data(contentsOf: fileURL) {
+            return data
+        }
+        return embeddedAudioData
+    }
+
+    func manifestData() -> Data? {
+        let manifestURL = fileURL.deletingPathExtension().appendingPathExtension("tracks.json")
+        if let data = try? Data(contentsOf: manifestURL) {
+            return data
+        }
+        return embeddedManifestData
     }
     
     /// 检测当前是否为暗色模式
@@ -175,6 +247,9 @@ final class AudioBlockAttachment: NSTextAttachment {
     }
 
     private func hasDualTrackManifest() -> Bool {
+        if embeddedManifestData != nil {
+            return true
+        }
         let manifestURL = fileURL.deletingPathExtension().appendingPathExtension("tracks.json")
         return FileManager.default.fileExists(atPath: manifestURL.path)
     }
@@ -199,5 +274,19 @@ final class AudioBlockAttachment: NSTextAttachment {
             }
         }
         return result
+    }
+
+    private static func uniqueTemporaryFileURL(directoryName: String, preferredFilename: String) -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let ext = URL(fileURLWithPath: preferredFilename).pathExtension
+        let base = URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent
+        let safeBase = base.isEmpty ? "attachment" : base
+        let uniqueName = "\(safeBase)-\(UUID().uuidString)" + (ext.isEmpty ? "" : ".\(ext)")
+        return directory.appendingPathComponent(uniqueName, isDirectory: false)
+    }
+
+    private static func manifestFilename(for audioFilename: String) -> String {
+        URL(fileURLWithPath: audioFilename).deletingPathExtension().lastPathComponent + ".tracks.json"
     }
 }

@@ -81,6 +81,14 @@ final class RichTextController: ObservableObject {
         self.currentNoteID = noteID
     }
 
+    func attachmentTargetNoteID() -> UUID? {
+        AttachmentTargetNoteResolver.resolve(
+            boundNoteID: boundNoteID,
+            currentNoteID: currentNoteID,
+            hasActiveTextView: textView != nil
+        )
+    }
+
     /// 检查是否有输入法正在编辑的 marked text
     var hasMarkedText: Bool {
         guard let tv = textView else { return false }
@@ -627,7 +635,7 @@ final class RichTextController: ObservableObject {
     }
 
     func insertImage() {
-        guard let tv = textView, let noteID = currentNoteID else { return }
+        guard let tv = textView, let noteID = attachmentTargetNoteID() else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .gif]
         panel.allowsMultipleSelection = false
@@ -676,7 +684,7 @@ final class RichTextController: ObservableObject {
     }
 
     func insertAudio() {
-        guard let noteID = currentNoteID else { return }
+        guard let noteID = attachmentTargetNoteID() else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType.mp3, UTType.wav, UTType.mpeg4Audio, UTType.aiff]
         panel.allowsMultipleSelection = false
@@ -1673,15 +1681,16 @@ class RichTextView: NSTextView {
             
             print("[LoadDebug] Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))")
 
-            // 0) 先做图片附件自愈：把普通 NSTextAttachment 的图片替换为自定义 AttachmentTextAttachment
-            //    目的是避免系统把它当“文件附件”显示右上角浮层（标记/更多）。
-            //    注意：表格附件可能退化为普通 NSTextAttachment，需先跳过（避免被误转成图片）。
+            // 0) 先做附件自愈：把普通 NSTextAttachment 的图片/音频替换为自定义附件
             if !(attachment is AttachmentTextAttachment),
                !(attachment is AudioBlockAttachment),
                !(attachment is TableTextAttachment),
-               !TableTextAttachment.looksLikeTable(attachment),
-               let converted = convertLegacyImageAttachmentIfNeeded(attachment) {
-                textStorage.addAttribute(.attachment, value: converted, range: range)
+               !TableTextAttachment.looksLikeTable(attachment) {
+                if let convertedAudio = convertLegacyAudioAttachmentIfNeeded(attachment) {
+                    textStorage.addAttribute(.attachment, value: convertedAudio, range: range)
+                } else if let convertedImage = convertLegacyImageAttachmentIfNeeded(attachment) {
+                    textStorage.addAttribute(.attachment, value: convertedImage, range: range)
+                }
             }
 
             if let textAttachment = textStorage.attribute(.attachment, at: range.location, effectiveRange: nil) as? AttachmentTextAttachment {
@@ -1883,6 +1892,39 @@ class RichTextView: NSTextView {
         return nil
     }
 
+    private func convertLegacyAudioAttachmentIfNeeded(_ attachment: NSTextAttachment) -> AudioBlockAttachment? {
+        if let fileWrapper = attachment.fileWrapper,
+           let data = fileWrapper.regularFileContents,
+           let filename = fileWrapper.preferredFilename {
+            let mimeType = mimeTypeForFilename(filename)
+            if mimeType.hasPrefix("audio/") {
+                let out = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("NotebookMigrated", isDirectory: true)
+                try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                let destination = out.appendingPathComponent("\(UUID().uuidString)-\(filename)")
+                do {
+                    try data.write(to: destination, options: .atomic)
+                    return AudioBlockAttachment(
+                        fileURL: destination,
+                        embeddedAudioData: data,
+                        attachmentFilename: filename
+                    )
+                } catch {
+                    print("[Attachment Migrate] Failed writing legacy audio data: \(error)")
+                }
+            }
+        }
+
+        if let resolvedURL = resolveAudioURLFromAttachment(attachment) {
+            return AudioBlockAttachment(
+                fileURL: resolvedURL,
+                attachmentFilename: resolvedURL.lastPathComponent
+            )
+        }
+
+        return nil
+    }
+
     private func mimeTypeForFilename(_ filename: String) -> String {
         let ext = (filename as NSString).pathExtension.lowercased()
         switch ext {
@@ -2039,6 +2081,16 @@ class RichTextView: NSTextView {
 
     // 处理键盘事件 - 用于回车自动继承复选框
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            if hasInputMarkedText() {
+                clearInputMarkedText()
+                return
+            }
+
+            super.keyDown(with: event)
+            return
+        }
+
         // 检查是否是回车键
         if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
             // 先检查是否有 marked text（输入法正在编辑中）
@@ -2052,15 +2104,16 @@ class RichTextView: NSTextView {
             }
         }
 
-        // 检查是否是 ESC 键
-        if event.keyCode == 53 { // 53 = Escape
-            if hasInputMarkedText() {
-                clearInputMarkedText()
-                return
-            }
+        super.keyDown(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if hasInputMarkedText() {
+            clearInputMarkedText()
+            return
         }
 
-        super.keyDown(with: event)
+        super.cancelOperation(sender)
     }
 
     private func hasInputMarkedText() -> Bool {
@@ -2070,10 +2123,16 @@ class RichTextView: NSTextView {
 
     private func clearInputMarkedText() {
         let markedRange = self.markedRange()
-        guard markedRange.location != NSNotFound, markedRange.length > 0 else { return }
-        
-        self.textStorage?.deleteCharacters(in: markedRange)
-        self.setSelectedRange(NSRange(location: markedRange.location, length: 0))
+        self.inputContext?.discardMarkedText()
+
+        if markedRange.location != NSNotFound, markedRange.length > 0 {
+            self.textStorage?.deleteCharacters(in: markedRange)
+            self.setSelectedRange(NSRange(location: markedRange.location, length: 0))
+        }
+
+        if let coordinator = self.delegate as? RichTextEditor.Coordinator {
+            coordinator.handleMarkedTextFinished(in: self)
+        }
     }
 
     private func commitMarkedTextIfNeeded() -> Bool {
@@ -2449,6 +2508,7 @@ class RichTextView: NSTextView {
 struct RichTextEditor: NSViewRepresentable {
     @Binding var attributedText: NSAttributedString
     let controller: RichTextController
+    let isEditable: Bool
     @Environment(\.colorScheme) var colorScheme
 
     /// 当前显示的笔记 ID，用来判断是否发生了“切换笔记”（从而强制刷新内容）
@@ -2496,7 +2556,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.normalizeAttachmentsAfterLoad()
 
         textView.isSelectable = true
-        textView.isEditable = true
+        textView.isEditable = isEditable
 
         // 注册拖放类型以支持图片拖放
         textView.registerForDraggedTypes([.fileURL, .png, .tiff, NSPasteboard.PasteboardType("NSFilenamesPboardType")])
@@ -2523,6 +2583,7 @@ struct RichTextEditor: NSViewRepresentable {
         // 更新 typingAttributes 中的默认文字颜色，以适应外观模式变化
         let defaultTextColor = (scheme == .dark) ? NSColor.white : NSColor.black
         textView.typingAttributes[.foregroundColor] = defaultTextColor
+        textView.isEditable = isEditable
 
         // 更新已有文字中使用的系统默认颜色（黑色/白色）以适应新的外观模式
         updateDefaultTextColors(in: textView, for: scheme)
@@ -2639,10 +2700,10 @@ struct RichTextEditor: NSViewRepresentable {
             return (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
         }
         
-        /// 执行实际的绑定更新
-        private func flushPendingContent() {
-            guard let content = pendingContent else { return }
-            self.attributedText = content
+        private func flushPendingContent(from textView: NSTextView) {
+            if let content = textView.attributedString().copy() as? NSAttributedString {
+                self.attributedText = content
+            }
             pendingContent = nil
         }
 
@@ -2651,6 +2712,11 @@ struct RichTextEditor: NSViewRepresentable {
             guard !isProgrammaticUpdate,
                   let content = textView.attributedString().copy() as? NSAttributedString else { return }
             self.attributedText = content
+        }
+
+        func handleMarkedTextFinished(in textView: NSTextView) {
+            hasMarkedText = false
+            flushPendingContent(from: textView)
         }
 
         func textDidChange(_ notification: Notification) {
@@ -2688,8 +2754,7 @@ struct RichTextEditor: NSViewRepresentable {
             
             // 如果之前有 marked text，现在没有了，说明输入法已提交
             if hasMarkedText && !checkHasMarkedText(tv) {
-                hasMarkedText = false
-                flushPendingContent()
+                handleMarkedTextFinished(in: tv)
             }
         }
         
@@ -2701,7 +2766,7 @@ struct RichTextEditor: NSViewRepresentable {
             let pasteboard = NSPasteboard.general
 
             // 获取当前笔记ID
-            guard let noteID = controller?.currentNoteID else {
+            guard let noteID = controller?.attachmentTargetNoteID() else {
                 print("[Coordinator] No noteID available")
                 return false
             }
@@ -2875,7 +2940,7 @@ struct RichTextEditor: NSViewRepresentable {
         func handleDroppedImage(fileURL: URL, in textView: NSTextView) -> Bool {
             print("[Coordinator] handleDroppedImage called: \(fileURL)")
             
-            guard let noteID = controller?.currentNoteID else {
+            guard let noteID = controller?.attachmentTargetNoteID() else {
                 print("[Coordinator] No noteID available for drop")
                 return false
             }
@@ -2947,5 +3012,14 @@ struct RichTextEditor: NSViewRepresentable {
                 return dest
             }
         }
+    }
+}
+
+struct AttachmentTargetNoteResolver {
+    static func resolve(boundNoteID: UUID?, currentNoteID: UUID?, hasActiveTextView: Bool) -> UUID? {
+        if hasActiveTextView, let boundNoteID {
+            return boundNoteID
+        }
+        return currentNoteID ?? boundNoteID
     }
 }

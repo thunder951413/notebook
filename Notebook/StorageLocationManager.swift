@@ -146,4 +146,9 @@ final class StorageLocationManager: ObservableObject {
             return nil
         }
     }
+
+    func setBaseDirectoryForTesting(_ url: URL?) {
+        stopAccessIfNeeded()
+        baseDirectoryURL = url
+    }
 }

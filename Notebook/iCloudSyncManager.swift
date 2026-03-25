@@ -506,6 +506,9 @@ extension Note {
         self.reminderAt = record["reminderAt"] as? Date
         self.recurrenceRule = record["recurrenceRule"] as? String ?? "none"
         self.version = record["version"] as? Int64 ?? 0
+        self.deletedAt = nil
+        self.originalFolderID = nil
+        self.originalFolderName = nil
         
         // 解析 viewMode
         if let viewModeString = record["viewMode"] as? String,

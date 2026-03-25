@@ -39,6 +39,10 @@ final class NoteSaveManager {
     static let shared = NoteSaveManager()
     
     private var modelContext: ModelContext?
+    private let jsonEncoder = JSONEncoder()
+    private let rtfdReadOptions: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+        .documentType: NSAttributedString.DocumentType.rtfd
+    ]
     
     // 保存队列 - 确保同一时间只有一个保存操作在执行
     private let saveQueue = DispatchQueue(label: "com.notebook.save", qos: .userInitiated)
@@ -141,44 +145,440 @@ final class NoteSaveManager {
 
         // 执行保存
         do {
-            let descriptor = FetchDescriptor<NoteEntity>(
-                predicate: #Predicate<NoteEntity> { $0.id == noteID }
-            )
-
-            let entities = try context.fetch(descriptor)
-            guard let entity = entities.first else {
-                return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
-            }
-
-            // 验证数据完整性
             guard validateData(request.rtfdData) else {
                 return .failure(NSError(domain: "SaveManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Data validation failed"]))
             }
 
-            // 更新实体
-            entity.title = request.title
-            entity.updatedAt = Date()
-            entity.folderID = request.folderID
-            entity.folderName = request.folder
-            entity.rtfdData = request.rtfdData
-            entity.reminderAt = request.reminderAt
-            entity.recurrenceRule = request.recurrenceRule
-
-            // 保存到数据库
-            try context.save()
-
-            // 清理未引用的附件（避免 appBlur 时序造成误删）
-            if request.reason != "appBlur" {
-                if let content = try? NSAttributedString(data: request.rtfdData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
-                    AttachmentManager.shared.cleanupUnusedAttachments(for: noteID, content: content)
-                }
+            let blockDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+            )
+            let blockEntities = try context.fetch(blockDescriptor)
+            if let blockEntity = blockEntities.first {
+                try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
+                return .success
             }
 
-            return .success
-            
+            return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
         } catch {
             return .failure(error)
         }
+    }
+
+    private func saveBlockDocumentNote(
+        entity: BlockDocumentNoteEntity,
+        request: SaveRequest,
+        context: ModelContext
+    ) throws {
+        let decodedContent = decodeAttributedString(from: request.rtfdData)
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotebookBlockSave_\(request.noteID.uuidString)_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        let conversion = try LegacyNoteDocumentConverter(noteID: request.noteID, noteDirectory: temporaryDirectory)
+            .convert(content: decodedContent)
+        let attachmentsRoot = try persistentAttachmentsRootDirectory()
+        let persistedAssetsByID = try persistBlockAssets(
+            document: conversion.document,
+            noteID: request.noteID,
+            noteDirectory: temporaryDirectory,
+            attachmentsRoot: attachmentsRoot
+        )
+        let normalizedContent = normalizeContentForBlockSave(
+            decodedContent,
+            document: conversion.document,
+            persistedAssetsByID: persistedAssetsByID,
+            attachmentsRoot: attachmentsRoot
+        )
+
+        let noteID = request.noteID
+        let oldBlockDescriptor = FetchDescriptor<BlockDocumentBlockEntity>(
+            predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == noteID }
+        )
+        let oldAssetDescriptor = FetchDescriptor<BlockDocumentAssetEntity>(
+            predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
+        )
+        let previousAssets = try context.fetch(oldAssetDescriptor)
+
+        for block in try context.fetch(oldBlockDescriptor) {
+            context.delete(block)
+        }
+        for asset in previousAssets {
+            context.delete(asset)
+        }
+
+        let updatedAt = Date()
+        entity.title = request.title
+        entity.updatedAt = updatedAt
+        entity.folderID = request.folderID
+        entity.folderName = request.folder
+        entity.reminderAt = request.reminderAt
+        entity.recurrenceRule = request.recurrenceRule
+        entity.version = max(entity.version + 1, 1)
+        entity.documentSchemaVersion = conversion.document.schemaVersion
+        entity.documentSource = conversion.document.source
+        entity.blockCount = conversion.document.blocks.count
+        entity.assetCount = persistedAssetsByID.count
+
+        let orderedPersistedAssets = conversion.document.blocks
+            .compactMap(\.asset)
+            .compactMap { persistedAssetsByID[$0.id] }
+
+        for persistedAsset in orderedPersistedAssets {
+            context.insert(
+                BlockDocumentAssetEntity(
+                    noteID: request.noteID,
+                    assetID: persistedAsset.reference.id,
+                    kind: persistedAsset.reference.kind,
+                    sourceKind: persistedAsset.reference.kind,
+                    filename: persistedAsset.reference.filename,
+                    mimeType: persistedAsset.reference.mimeType,
+                    width: persistedAsset.reference.width,
+                    height: persistedAsset.reference.height,
+                    duration: persistedAsset.reference.duration,
+                    createdAt: persistedAsset.reference.createdAt,
+                    relativeFilePath: persistedAsset.relativeFilePath,
+                    sidecarPathsPayload: try encodeJSON(persistedAsset.sidecarRelativePaths)
+                )
+            )
+        }
+
+        for (position, block) in conversion.document.blocks.enumerated() {
+            context.insert(
+                BlockDocumentBlockEntity(
+                    noteID: request.noteID,
+                    position: position,
+                    blockID: block.id,
+                    kind: block.type,
+                    sourceType: block.type,
+                    textPayload: try encodeTextPayload(block.text ?? []),
+                    level: block.level,
+                    listStyle: block.listStyle,
+                    order: block.order,
+                    checked: block.checked,
+                    indent: block.indent,
+                    assetID: block.asset?.id,
+                    tablePayload: try encodeTablePayload(block.table)
+                )
+            )
+        }
+
+        try context.save()
+
+        let preservedRelativePaths = Set(
+            persistedAssetsByID.values.flatMap { persistedAsset in
+                [persistedAsset.relativeFilePath] + persistedAsset.sidecarRelativePaths
+            }
+        )
+        cleanupBlockArtifactFiles(
+            relativePaths: staleRelativePaths(
+                previousAssets: previousAssets
+            ),
+            preservedRelativePaths: preservedRelativePaths,
+            attachmentsRoot: attachmentsRoot,
+            noteID: request.noteID
+        )
+
+        if request.reason != "appBlur" {
+            AttachmentManager.shared.cleanupUnusedAttachments(for: request.noteID, content: normalizedContent)
+        }
+    }
+
+    private func decodeAttributedString(from data: Data) -> NSAttributedString {
+        if let content = try? NSAttributedString(
+            data: data,
+            options: rtfdReadOptions,
+            documentAttributes: nil
+        ) {
+            return content
+        }
+        if let plain = String(data: data, encoding: .utf8) {
+            return NSAttributedString(string: plain)
+        }
+        return NSAttributedString(string: "")
+    }
+
+    private func persistBlockAssets(
+        document: MigratedDocument,
+        noteID: UUID,
+        noteDirectory: URL,
+        attachmentsRoot: URL
+    ) throws -> [String: PersistedBlockAsset] {
+        var persistedAssetsByID: [String: PersistedBlockAsset] = [:]
+
+        for reference in document.blocks.compactMap(\.asset) {
+            guard persistedAssetsByID[reference.id] == nil else { continue }
+
+            let sourceURL = noteDirectory.appendingPathComponent(reference.filename)
+            guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+                throw NSError(
+                    domain: "SaveManager",
+                    code: -4,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing converted asset at \(reference.filename)"]
+                )
+            }
+
+            let baseRelativeDirectory = "BlockDocuments/\(noteID.uuidString)/\(reference.id)"
+            let relativeFilePath = "\(baseRelativeDirectory)/\(sourceURL.lastPathComponent)"
+            try copyItemReplacingIfNeeded(
+                from: sourceURL,
+                to: attachmentsRoot.appendingPathComponent(relativeFilePath)
+            )
+
+            let sidecarRelativePaths = try reference.sidecarFiles.map { sidecarPath in
+                let sourceSidecarURL = noteDirectory.appendingPathComponent(sidecarPath)
+                let relativeSidecarPath = "\(baseRelativeDirectory)/\(sourceSidecarURL.lastPathComponent)"
+                try copyItemReplacingIfNeeded(
+                    from: sourceSidecarURL,
+                    to: attachmentsRoot.appendingPathComponent(relativeSidecarPath)
+                )
+                return relativeSidecarPath
+            }
+
+            let persistedReference = MigratedAssetReference(
+                id: reference.id,
+                kind: reference.kind,
+                filename: sourceURL.lastPathComponent,
+                mimeType: reference.mimeType,
+                width: reference.width,
+                height: reference.height,
+                duration: reference.duration,
+                createdAt: reference.createdAt,
+                sidecarFiles: sidecarRelativePaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+            )
+
+            persistedAssetsByID[reference.id] = PersistedBlockAsset(
+                reference: persistedReference,
+                relativeFilePath: relativeFilePath,
+                sidecarRelativePaths: sidecarRelativePaths
+            )
+        }
+
+        return persistedAssetsByID
+    }
+
+    private func normalizeContentForBlockSave(
+        _ content: NSAttributedString,
+        document: MigratedDocument,
+        persistedAssetsByID: [String: PersistedBlockAsset],
+        attachmentsRoot: URL
+    ) -> NSAttributedString {
+        let orderedAssets = document.blocks
+            .compactMap(\.asset)
+            .compactMap { persistedAssetsByID[$0.id] }
+        guard !orderedAssets.isEmpty else {
+            return content
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: content)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        var attachmentEntries: [(range: NSRange, attachment: NSTextAttachment, attributes: [NSAttributedString.Key: Any])] = []
+
+        mutable.enumerateAttribute(.attachment, in: fullRange, options: []) { value, subrange, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            if attachment is CheckboxTextAttachment {
+                return
+            }
+
+            let attributes = mutable.attributes(at: subrange.location, effectiveRange: nil)
+            if attachment is TableTextAttachment {
+                return
+            }
+            if attributes[.notebookTableData] is Data {
+                return
+            }
+            if TableTextAttachment.looksLikeTable(attachment) {
+                return
+            }
+
+            attachmentEntries.append((subrange, attachment, attributes))
+        }
+
+        for (entry, persistedAsset) in zip(attachmentEntries.reversed(), orderedAssets.reversed()) {
+            guard let replacement = replacementAttachmentString(
+                from: entry.attachment,
+                attributes: entry.attributes,
+                persistedAsset: persistedAsset,
+                attachmentsRoot: attachmentsRoot
+            ) else {
+                continue
+            }
+            mutable.replaceCharacters(in: entry.range, with: replacement)
+        }
+
+        return mutable
+    }
+
+    private func replacementAttachmentString(
+        from originalAttachment: NSTextAttachment,
+        attributes: [NSAttributedString.Key: Any],
+        persistedAsset: PersistedBlockAsset,
+        attachmentsRoot: URL
+    ) -> NSAttributedString? {
+        let fileURL = attachmentsRoot.appendingPathComponent(persistedAsset.relativeFilePath)
+        let replacement = NSMutableAttributedString()
+
+        switch persistedAsset.reference.kind {
+        case "image":
+            let attachment = AttachmentTextAttachment(fileURL: fileURL, kind: .image)
+            if originalAttachment.bounds.width > 1, originalAttachment.bounds.height > 1 {
+                attachment.bounds = originalAttachment.bounds
+            }
+            replacement.append(NSAttributedString(attachment: attachment))
+            applyAttributes(attributes, to: replacement)
+
+            let width = (attributes[.notebookImageWidth] as? CGFloat) ?? attachment.bounds.width
+            let height = (attributes[.notebookImageHeight] as? CGFloat) ?? attachment.bounds.height
+            if width > 1, height > 1 {
+                replacement.addAttribute(.notebookImageWidth, value: width, range: NSRange(location: 0, length: replacement.length))
+                replacement.addAttribute(.notebookImageHeight, value: height, range: NSRange(location: 0, length: replacement.length))
+                let imageLink = "notebook-image://\(fileURL.absoluteString)#w=\(Int(width.rounded()))&h=\(Int(height.rounded()))"
+                replacement.addAttribute(.link, value: imageLink, range: NSRange(location: 0, length: replacement.length))
+            }
+            return replacement
+        case "audio":
+            let duration = persistedAsset.reference.duration ?? (originalAttachment as? AudioBlockAttachment)?.duration ?? 0
+            let createdAt = persistedAsset.reference.createdAt ?? (originalAttachment as? AudioBlockAttachment)?.createDate ?? Date()
+            let attachment = AudioBlockAttachment(fileURL: fileURL, duration: duration, createDate: createdAt)
+            if !originalAttachment.bounds.isEmpty {
+                attachment.bounds = originalAttachment.bounds
+            }
+            replacement.append(NSAttributedString(attachment: attachment))
+            applyAttributes(attributes, to: replacement)
+            replacement.addAttribute(.link, value: fileURL, range: NSRange(location: 0, length: replacement.length))
+            return replacement
+        default:
+            return nil
+        }
+    }
+
+    private func applyAttributes(
+        _ attributes: [NSAttributedString.Key: Any],
+        to attributedString: NSMutableAttributedString
+    ) {
+        let range = NSRange(location: 0, length: attributedString.length)
+        for (key, value) in attributes {
+            if key == .attachment || key == .link || key == .notebookImageWidth || key == .notebookImageHeight {
+                continue
+            }
+            attributedString.addAttribute(key, value: value, range: range)
+        }
+    }
+
+    private func persistentAttachmentsRootDirectory() throws -> URL {
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else {
+            throw NSError(domain: "SaveManager", code: -5, userInfo: [NSLocalizedDescriptionKey: "Storage not configured"])
+        }
+
+        return try storage.withSecurityScopedAccess(base) {
+            try storage.ensureDirectoryStructureExists()
+            let attachmentsRoot = try storage.attachmentsDirectoryURL()
+            try FileManager.default.createDirectory(at: attachmentsRoot, withIntermediateDirectories: true)
+            return attachmentsRoot
+        }
+    }
+
+    private func copyItemReplacingIfNeeded(from sourceURL: URL, to destinationURL: URL) throws {
+        try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+    }
+
+    func cleanupBlockArtifactFiles(
+        relativePaths: [String],
+        preservedRelativePaths: Set<String>,
+        attachmentsRoot: URL,
+        noteID: UUID
+    ) {
+        let fileManager = FileManager.default
+        for relativePath in Set(relativePaths) {
+            guard !preservedRelativePaths.contains(relativePath) else { continue }
+            let fileURL = attachmentsRoot.appendingPathComponent(relativePath)
+            guard fileManager.fileExists(atPath: fileURL.path) else { continue }
+            try? fileManager.removeItem(at: fileURL)
+            removeEmptyParents(startingAt: fileURL.deletingLastPathComponent(), stopAt: attachmentsRoot)
+        }
+
+        let noteDirectory = attachmentsRoot
+            .appendingPathComponent("BlockDocuments", isDirectory: true)
+            .appendingPathComponent(noteID.uuidString, isDirectory: true)
+        removeEmptyParents(startingAt: noteDirectory, stopAt: attachmentsRoot)
+    }
+
+    func staleRelativePaths(
+        previousAssets: [BlockDocumentAssetEntity]
+    ) -> [String] {
+        var paths: [String] = []
+        for asset in previousAssets {
+            paths.append(asset.relativeFilePath)
+            if let sidecarPayload = asset.sidecarPathsPayload,
+               let sidecarPaths = try? JSONDecoder().decode([String].self, from: sidecarPayload) {
+                paths.append(contentsOf: sidecarPaths)
+            }
+        }
+        return paths
+    }
+
+    private func removeEmptyParents(startingAt directoryURL: URL, stopAt rootURL: URL) {
+        let fileManager = FileManager.default
+        let rootPath = rootURL.standardizedFileURL.path
+        var currentDirectory = directoryURL.standardizedFileURL
+
+        while currentDirectory.path.hasPrefix(rootPath),
+              currentDirectory.path != rootPath,
+              fileManager.fileExists(atPath: currentDirectory.path) {
+            let children = (try? fileManager.contentsOfDirectory(atPath: currentDirectory.path)) ?? []
+            if !children.isEmpty {
+                break
+            }
+            try? fileManager.removeItem(at: currentDirectory)
+            currentDirectory.deleteLastPathComponent()
+        }
+    }
+
+    private func encodeTextPayload(_ spans: [MigratedInlineText]) throws -> Data? {
+        guard !spans.isEmpty else {
+            return nil
+        }
+
+        let payload = spans.map {
+            BlockDocumentTextSpanPayload(
+                text: $0.text,
+                bold: $0.bold,
+                italic: $0.italic,
+                underline: $0.underline,
+                strikethrough: $0.strikethrough,
+                textColor: $0.textColor,
+                backgroundColor: $0.backgroundColor,
+                link: $0.link,
+                fontFamily: $0.fontFamily,
+                fontSize: $0.fontSize
+            )
+        }
+        return try encodeJSON(payload)
+    }
+
+    private func encodeTablePayload(_ table: MigratedTable?) throws -> Data? {
+        guard let table else {
+            return nil
+        }
+
+        return try encodeJSON(
+            BlockDocumentTablePayload(
+                rows: table.rows,
+                columnWidths: table.columnWidths,
+                rowHeights: table.rowHeights
+            )
+        )
+    }
+
+    private func encodeJSON<T: Encodable>(_ value: T) throws -> Data {
+        try jsonEncoder.encode(value)
     }
     
     /// 等待并重试保存
@@ -226,6 +626,12 @@ final class NoteSaveManager {
     }
 }
 
+private struct PersistedBlockAsset {
+    let reference: MigratedAssetReference
+    let relativeFilePath: String
+    let sidecarRelativePaths: [String]
+}
+
 // MARK: - 便捷方法
 
 extension NoteSaveManager {
@@ -241,7 +647,8 @@ extension NoteSaveManager {
         reason: String
     ) -> SaveRequest? {
         Logger.shared.log(.save, .debug, "createRequest: cleaning content for storage...")
-        let cleaned = content.cleanedForStorage()
+        let normalized = AttachmentManager.shared.normalizedContentForSaving(content, noteID: noteID)
+        let cleaned = normalized.cleanedForStorage()
         Logger.shared.log(.save, .debug, "createRequest: content cleaned, length: \(cleaned.length)")
 
         Logger.shared.log(.save, .debug, "createRequest: converting to RTFD data...")

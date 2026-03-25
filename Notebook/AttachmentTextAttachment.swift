@@ -6,6 +6,7 @@ final class AttachmentTextAttachment: NSTextAttachment {
     override static var supportsSecureCoding: Bool { true }
 
     let attachmentFileURL: URL
+    let attachmentFilename: String
     let kind: AttachmentKind
     private let embeddedFileData: Data?
 
@@ -20,10 +21,11 @@ final class AttachmentTextAttachment: NSTextAttachment {
         return directory.appendingPathComponent(uniqueName, isDirectory: false)
     }
 
-    init(fileURL: URL, kind: AttachmentKind) {
+    init(fileURL: URL, kind: AttachmentKind, embeddedFileData: Data? = nil, attachmentFilename: String? = nil) {
         self.attachmentFileURL = fileURL
+        self.attachmentFilename = attachmentFilename ?? (fileURL.lastPathComponent.isEmpty ? Self.defaultFilename(for: kind) : fileURL.lastPathComponent)
         self.kind = kind
-        self.embeddedFileData = try? Data(contentsOf: fileURL)
+        self.embeddedFileData = embeddedFileData ?? (try? Data(contentsOf: fileURL))
         super.init(data: nil, ofType: nil)
 
         // 运行时不要挂 fileWrapper，避免 NSTextView 把它当成“文件附件”并显示右上角系统菜单
@@ -36,22 +38,6 @@ final class AttachmentTextAttachment: NSTextAttachment {
 
     required init?(coder: NSCoder) {
         print("[AttachmentTextAttachment] Decoding started...")
-        
-        // 仅解码我们明确支持的类型，避免使用过宽的 allowedClasses
-        let decodedWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
-        print("[AttachmentTextAttachment] Decoded wrapper: \(decodedWrapper != nil)")
-
-        if let wrapper = decodedWrapper, let filename = wrapper.preferredFilename {
-            let out = Self.uniqueTemporaryFileURL(directoryName: "NotebookExtracted", preferredFilename: filename)
-            try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
-            self.attachmentFileURL = out
-            self.embeddedFileData = wrapper.regularFileContents
-            print("[AttachmentTextAttachment] File URL set to: \(out.path)")
-        } else {
-            self.attachmentFileURL = FileManager.default.temporaryDirectory
-            self.embeddedFileData = nil
-            print("[AttachmentTextAttachment] No wrapper or filename, using temp directory")
-        }
 
         if let raw = coder.decodeObject(of: NSString.self, forKey: "NotebookAttachmentKind") as String? {
             self.kind = AttachmentKind(rawValue: raw) ?? .image
@@ -59,6 +45,27 @@ final class AttachmentTextAttachment: NSTextAttachment {
         } else {
             self.kind = .image
             print("[AttachmentTextAttachment] No kind found, defaulting to image")
+        }
+
+        let decodedFilename = coder.decodeObject(of: NSString.self, forKey: "NotebookAttachmentFilename") as String?
+        let fallbackFilename = decodedFilename.flatMap { $0.isEmpty ? nil : String($0) } ?? Self.defaultFilename(for: kind)
+        
+        let decodedWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
+        print("[AttachmentTextAttachment] Decoded wrapper: \(decodedWrapper != nil)")
+
+        if let wrapper = decodedWrapper {
+            let filename = wrapper.preferredFilename?.isEmpty == false ? wrapper.preferredFilename! : fallbackFilename
+            self.attachmentFilename = filename
+            let out = Self.uniqueTemporaryFileURL(directoryName: "NotebookExtracted", preferredFilename: filename)
+            try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
+            self.attachmentFileURL = out
+            self.embeddedFileData = wrapper.regularFileContents
+            print("[AttachmentTextAttachment] File URL set to: \(out.path)")
+        } else {
+            self.attachmentFilename = fallbackFilename
+            self.attachmentFileURL = Self.uniqueTemporaryFileURL(directoryName: "NotebookExtracted", preferredFilename: fallbackFilename)
+            self.embeddedFileData = nil
+            print("[AttachmentTextAttachment] No wrapper found, using temp file path")
         }
 
         super.init(coder: coder)
@@ -80,14 +87,14 @@ final class AttachmentTextAttachment: NSTextAttachment {
     override func encode(with coder: NSCoder) {
         super.encode(with: coder)
         coder.encode(kind.rawValue as NSString, forKey: "NotebookAttachmentKind")
+        coder.encode(attachmentFilename as NSString, forKey: "NotebookAttachmentFilename")
 
-        // 持久化优先使用内嵌数据，避免依赖运行时文件路径（可能已被清理）
         if let data = embeddedFileData {
-            let filename = attachmentFileURL.lastPathComponent.isEmpty ? "attachment.bin" : attachmentFileURL.lastPathComponent
             let wrapper = FileWrapper(regularFileWithContents: data)
-            wrapper.preferredFilename = filename
+            wrapper.preferredFilename = attachmentFilename
             coder.encode(wrapper, forKey: "NSFileWrapper")
         } else if let wrapper = try? FileWrapper(url: attachmentFileURL, options: []) {
+            wrapper.preferredFilename = attachmentFilename
             coder.encode(wrapper, forKey: "NSFileWrapper")
         }
     }
@@ -137,5 +144,14 @@ final class AttachmentTextAttachment: NSTextAttachment {
 
         self.image = image
         self.bounds = NSRect(origin: .zero, size: newSize)
+    }
+
+    private static func defaultFilename(for kind: AttachmentKind) -> String {
+        switch kind {
+        case .image:
+            return "attachment.png"
+        case .audio:
+            return "attachment.m4a"
+        }
     }
 }

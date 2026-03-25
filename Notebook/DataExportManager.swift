@@ -8,6 +8,17 @@ import Compression
 final class DataExportManager {
     static let shared = DataExportManager()
 
+    enum BlockLibraryExportError: LocalizedError {
+        case libraryUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .libraryUnavailable:
+                return "当前没有可导出的块级文档库"
+            }
+        }
+    }
+
     private init() {}
 
     // MARK: - 导出配置
@@ -77,12 +88,6 @@ final class DataExportManager {
         // 导出所有笔记
         try await exportAllNotes(to: exportDir.appendingPathComponent("Notes"), context: context)
 
-        // 导出文件夹
-        try await exportFolders(to: exportDir.appendingPathComponent("Folders"), context: context)
-
-        // 导出标签
-        try await exportTags(to: exportDir.appendingPathComponent("Tags"), context: context)
-
         // 导出附件
         try exportAttachments(to: exportDir.appendingPathComponent("Attachments"))
 
@@ -120,6 +125,10 @@ final class DataExportManager {
         try? FileManager.default.removeItem(at: exportDir)
 
         return zipURL
+    }
+
+    func extractArchive(at zipURL: URL, to destinationURL: URL) throws {
+        try unzipFile(at: zipURL, to: destinationURL)
     }
 
     // MARK: - 私有方法
@@ -272,111 +281,220 @@ final class DataExportManager {
     }
 
     private func exportAllNotes(to directory: URL, context: ModelContext) async throws {
-        let descriptor = FetchDescriptor<NoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-        let notes = try context.fetch(descriptor)
+        try await exportDocumentMigrationData(to: directory, context: context)
+    }
 
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func exportDocumentMigrationData(to directory: URL, context: ModelContext) async throws {
+        let library = try latestBlockLibrary(in: context)
+        let folders = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
+            .filter { $0.libraryID == library.id }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        let tags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
+            .filter { $0.libraryID == library.id }
+            .sorted { $0.createdAt < $1.createdAt }
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
+            .filter { $0.libraryID == library.id }
+        let blocks = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
+        let assets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
+        let attachmentsRoot = try persistentAttachmentsRootDirectory()
+        let blocksByNoteID = Dictionary(grouping: blocks, by: \.noteID)
+        let assetsByNoteID = Dictionary(grouping: assets, by: \.noteID)
 
-        // 创建元数据文件
-        var metadata: [[String: Any]] = []
+        let notesDirectory = directory.appendingPathComponent("Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
+
+        var exportedNotes: [DocumentMigrationPackage.NoteItem] = []
 
         for note in notes {
-            let noteDir = directory.appendingPathComponent(note.id.uuidString)
-            try FileManager.default.createDirectory(at: noteDir, withIntermediateDirectories: true)
+            let noteDirectory = notesDirectory.appendingPathComponent(note.id.uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: noteDirectory, withIntermediateDirectories: true)
+            let noteAssets = assetsByNoteID[note.id] ?? []
+            let migratedAssets = try exportPersistedAssets(noteAssets, attachmentsRoot: attachmentsRoot, noteDirectory: noteDirectory)
+            let assetByID = Dictionary(uniqueKeysWithValues: migratedAssets.map { ($0.id, $0) })
+            let document = try buildMigratedDocument(
+                from: (blocksByNoteID[note.id] ?? []).sorted { $0.position < $1.position },
+                assetsByID: assetByID
+            )
+            try writeJSON(document, to: noteDirectory.appendingPathComponent("document.json"))
 
-            // 保存笔记内容 (RTFD 数据)
-            if let rtfdData = note.rtfdData {
-                let contentURL = noteDir.appendingPathComponent("content.rtfd")
-                // 直接保存原始数据
-                do {
-                    try rtfdData.write(to: contentURL)
-                    print("[Export] 已保存笔记内容: \(contentURL.path)")
-                } catch {
-                    print("[Export Warning] 无法保存 RTFD 数据: \(error)")
-                }
-            }
-
-            // 保存元数据（确保没有 nil 值）
-            var noteMeta: [String: Any] = [
-                "id": note.id.uuidString,
-                "title": note.title,
-                "folderName": note.folderName,
-                "tagIDs": note.tagIDs ?? "",
-                "createdAt": note.createdAt.timeIntervalSince1970,
-                "updatedAt": note.updatedAt.timeIntervalSince1970,
-                "viewMode": note.viewMode ?? "text",
-                "recurrenceRule": note.recurrenceRule ?? "none",
-                "version": note.version
-            ]
-            // 可选字段只在有值时添加
-            if let reminderAt = note.reminderAt {
-                noteMeta["reminderAt"] = reminderAt.timeIntervalSince1970
-            }
-            // 导出 folderID（优先使用ID关联）
-            if let folderID = note.folderID {
-                noteMeta["folderID"] = folderID.uuidString
-            }
-            metadata.append(noteMeta)
+            exportedNotes.append(
+                .init(
+                    id: note.id,
+                    title: note.title,
+                    createdAt: note.createdAt,
+                    updatedAt: note.updatedAt,
+                    folderID: note.folderID,
+                    folderName: note.folderName,
+                    reminderAt: note.reminderAt,
+                    recurrenceRule: note.recurrenceRule,
+                    version: note.version,
+                    tagIDs: decodeUUIDList(note.tagIDs),
+                    viewMode: note.viewMode,
+                    deletedAt: note.deletedAt,
+                    originalFolderID: note.originalFolderID,
+                    originalFolderName: note.originalFolderName,
+                    blockCount: document.blocks.count,
+                    assetCount: migratedAssets.count,
+                    documentPath: "Notes/\(note.id.uuidString)/document.json"
+                )
+            )
         }
 
-        // 保存元数据 plist
-        let metadataURL = directory.appendingPathComponent("metadata.plist")
-        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
-            .write(to: metadataURL)
+        let package = DocumentMigrationPackage(
+            schemaVersion: library.schemaVersion,
+            exportedAt: library.sourceExportedAt,
+            notes: exportedNotes,
+            folders: folders.map {
+                .init(
+                    id: $0.id,
+                    name: $0.name,
+                    sortOrder: $0.sortOrder,
+                    isSystem: $0.isSystem,
+                    createdAt: $0.createdAt
+                )
+            },
+            tags: tags.map {
+                .init(
+                    id: $0.id,
+                    name: $0.name,
+                    color: $0.color,
+                    createdAt: $0.createdAt
+                )
+            }
+        )
+
+        try writeJSON(package, to: directory.appendingPathComponent("manifest.json"))
     }
 
-    private func exportFolders(to directory: URL, context: ModelContext) async throws {
-        let descriptor = FetchDescriptor<FolderEntity>()
-        let folders = try context.fetch(descriptor)
-
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        var metadata: [[String: Any]] = []
-
-        for folder in folders {
-            var folderMeta: [String: Any] = [
-                "id": folder.id.uuidString,
-                "name": folder.name,
-                "sortOrder": folder.sortOrder ?? 0,
-                "isSystem": folder.isSystem ?? false
-            ]
-            // 可选字段只在有值时添加
-            if let createdAt = folder.createdAt {
-                folderMeta["createdAt"] = createdAt.timeIntervalSince1970
-            }
-            metadata.append(folderMeta)
-        }
-
-        let metadataURL = directory.appendingPathComponent("folders.plist")
-        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
-            .write(to: metadataURL)
-
-        print("[Export] 已导出 \(folders.count) 个文件夹")
+    private func decodeUUIDList(_ raw: String) -> [UUID] {
+        raw
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .compactMap(UUID.init(uuidString:))
     }
 
-    private func exportTags(to directory: URL, context: ModelContext) async throws {
-        let descriptor = FetchDescriptor<TagEntity>()
-        let tags = try context.fetch(descriptor)
+    private func latestBlockLibrary(in context: ModelContext) throws -> BlockDocumentLibraryEntity {
+        let libraries = try context.fetch(FetchDescriptor<BlockDocumentLibraryEntity>())
+        guard let library = libraries.max(by: { $0.importedAt < $1.importedAt }) else {
+            throw BlockLibraryExportError.libraryUnavailable
+        }
+        return library
+    }
 
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func buildMigratedDocument(
+        from blocks: [BlockDocumentBlockEntity],
+        assetsByID: [String: MigratedAssetReference]
+    ) throws -> MigratedDocument {
+        MigratedDocument(
+            schemaVersion: "1.0",
+            source: "NotebookBlockDocument",
+            blocks: try blocks.map { block in
+                MigratedDocumentBlock(
+                    id: block.blockID,
+                    type: block.sourceType,
+                    text: try decodeTextPayload(block.textPayload),
+                    level: block.level,
+                    listStyle: block.listStyle,
+                    order: block.order,
+                    checked: block.checked,
+                    indent: block.indent,
+                    asset: block.assetID.flatMap { assetsByID[$0] },
+                    table: try decodeTablePayload(block.tablePayload)
+                )
+            }
+        )
+    }
 
-        var metadata: [[String: Any]] = []
+    private func exportPersistedAssets(
+        _ assets: [BlockDocumentAssetEntity],
+        attachmentsRoot: URL,
+        noteDirectory: URL
+    ) throws -> [MigratedAssetReference] {
+        let assetsDirectory = noteDirectory.appendingPathComponent("Assets", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
 
-        for tag in tags {
-            let tagMeta: [String: Any] = [
-                "id": tag.id.uuidString,
-                "name": tag.name,
-                "color": tag.color,
-                "createdAt": tag.createdAt.timeIntervalSince1970
-            ]
-            metadata.append(tagMeta)
+        return try assets.map { asset in
+            let exportedFilename = exportedAssetFilename(for: asset.assetID, originalFilename: asset.filename)
+            let sourceFileURL = attachmentsRoot.appendingPathComponent(asset.relativeFilePath)
+            let destinationFileURL = assetsDirectory.appendingPathComponent(exportedFilename)
+            try copyItemReplacingIfNeeded(from: sourceFileURL, to: destinationFileURL)
+
+            let sidecarRelativePaths = try decodeStringListPayload(asset.sidecarPathsPayload)
+            let exportedSidecars = try sidecarRelativePaths.map { relativePath -> String in
+                let sidecarSourceURL = attachmentsRoot.appendingPathComponent(relativePath)
+                let sidecarFilename = exportedAssetFilename(for: asset.assetID, originalFilename: sidecarSourceURL.lastPathComponent)
+                let sidecarDestinationURL = assetsDirectory.appendingPathComponent(sidecarFilename)
+                try copyItemReplacingIfNeeded(from: sidecarSourceURL, to: sidecarDestinationURL)
+                return "Assets/\(sidecarFilename)"
+            }
+
+            return MigratedAssetReference(
+                id: asset.assetID,
+                kind: asset.sourceKind,
+                filename: "Assets/\(exportedFilename)",
+                mimeType: asset.mimeType,
+                width: asset.width,
+                height: asset.height,
+                duration: asset.duration,
+                createdAt: asset.createdAt,
+                sidecarFiles: exportedSidecars
+            )
+        }
+    }
+
+    private func exportedAssetFilename(for assetID: String, originalFilename: String) -> String {
+        let safeFilename = originalFilename.isEmpty ? assetID : originalFilename
+        return "\(assetID)_\(safeFilename)"
+    }
+
+    private func decodeTextPayload(_ payload: Data?) throws -> [MigratedInlineText]? {
+        guard let payload else {
+            return nil
         }
 
-        let metadataURL = directory.appendingPathComponent("tags.plist")
-        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
-            .write(to: metadataURL)
+        let spans = try JSONDecoder().decode([BlockDocumentTextSpanPayload].self, from: payload)
+        return spans.map {
+            MigratedInlineText(
+                text: $0.text,
+                bold: $0.bold,
+                italic: $0.italic,
+                underline: $0.underline,
+                strikethrough: $0.strikethrough,
+                textColor: $0.textColor,
+                backgroundColor: $0.backgroundColor,
+                link: $0.link,
+                fontFamily: $0.fontFamily,
+                fontSize: $0.fontSize
+            )
+        }
+    }
 
-        print("[Export] 已导出 \(tags.count) 个标签")
+    private func decodeTablePayload(_ payload: Data?) throws -> MigratedTable? {
+        guard let payload else {
+            return nil
+        }
+
+        let table = try JSONDecoder().decode(BlockDocumentTablePayload.self, from: payload)
+        return MigratedTable(
+            rows: table.rows,
+            columnWidths: table.columnWidths,
+            rowHeights: table.rowHeights
+        )
+    }
+
+    private func decodeStringListPayload(_ payload: Data?) throws -> [String] {
+        guard let payload else {
+            return []
+        }
+        return try JSONDecoder().decode([String].self, from: payload)
+    }
+
+    private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(value).write(to: url)
     }
 
     private func exportAttachments(to directory: URL) throws {
@@ -696,17 +814,10 @@ final class DataExportManager {
 
     /// 导入笔记
     func importNotes(from zipURL: URL, context: ModelContext) async throws {
-        let tempDir = FileManager.default.temporaryDirectory
-        let extractDir = tempDir.appendingPathComponent("ImportNotes_\(Date().timeIntervalSince1970)")
-
-        // 解压 ZIP
-        try unzipFile(at: zipURL, to: extractDir)
-
-        // 导入笔记
-        try await importAllNotes(from: extractDir, context: context)
-
-        // 清理
-        try? FileManager.default.removeItem(at: extractDir)
+        let importer = DocumentMigrationPackageImporter()
+        let handler = SwiftDataDocumentMigrationImportHandler(modelContext: context)
+        let package = try importer.importArchive(from: zipURL, using: handler)
+        package.cleanup()
     }
 
     /// 导入所有数据
@@ -734,18 +845,6 @@ final class DataExportManager {
         let notesDir = extractDir.appendingPathComponent("Notes")
         if FileManager.default.fileExists(atPath: notesDir.path) {
             try await importAllNotes(from: notesDir, context: context)
-        }
-
-        // 导入文件夹
-        let foldersDir = extractDir.appendingPathComponent("Folders")
-        if FileManager.default.fileExists(atPath: foldersDir.path) {
-            try await importFolders(from: foldersDir, context: context)
-        }
-
-        // 导入标签
-        let tagsDir = extractDir.appendingPathComponent("Tags")
-        if FileManager.default.fileExists(atPath: tagsDir.path) {
-            try await importTags(from: tagsDir, context: context)
         }
 
         // 导入附件
@@ -1129,89 +1228,11 @@ final class DataExportManager {
     }
 
     private func importAllNotes(from directory: URL, context: ModelContext) async throws {
-        let metadataURL = directory.appendingPathComponent("metadata.plist")
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            print("[Import] 未找到元数据文件")
-            return
-        }
-
-        guard let metadata = try PropertyListSerialization.propertyList(from: Data(contentsOf: metadataURL), format: nil) as? [[String: Any]] else {
-            print("[Import] 元数据格式错误")
-            return
-        }
-
-        print("[Import] 开始导入 \(metadata.count) 个笔记")
-
-        for (index, noteMeta) in metadata.enumerated() {
-            guard let idString = noteMeta["id"] as? String,
-                  let id = UUID(uuidString: idString) else {
-                print("[Import Warning] 跳过无效笔记 ID")
-                continue
-            }
-
-            // 检查笔记是否已存在
-            let descriptor = FetchDescriptor<NoteEntity>(predicate: #Predicate { $0.id == id })
-            let existingNotes = try? context.fetch(descriptor)
-
-            // 解析 folderID（优先使用ID关联）
-            var folderID: UUID?
-            if let folderIDString = noteMeta["folderID"] as? String {
-                folderID = UUID(uuidString: folderIDString)
-            }
-            let folderName = noteMeta["folderName"] as? String ?? "未分类"
-
-            let note: NoteEntity
-            if let existing = existingNotes?.first {
-                // 更新现有笔记
-                note = existing
-                print("[Import] 更新现有笔记: \(id)")
-            } else {
-                // 创建新笔记
-                note = NoteEntity(
-                    id: id,
-                    title: noteMeta["title"] as? String ?? "",
-                    createdAt: Date(timeIntervalSince1970: noteMeta["createdAt"] as? TimeInterval ?? 0),
-                    updatedAt: Date(timeIntervalSince1970: noteMeta["updatedAt"] as? TimeInterval ?? 0),
-                    folderID: folderID,
-                    folderName: folderName
-                )
-                context.insert(note)
-                print("[Import] 创建新笔记: \(id)")
-            }
-
-            // 更新笔记属性
-            note.title = noteMeta["title"] as? String ?? ""
-            note.folderID = folderID
-            note.folderName = folderName
-            note.tagIDs = noteMeta["tagIDs"] as? String
-            note.viewMode = noteMeta["viewMode"] as? String
-            note.recurrenceRule = noteMeta["recurrenceRule"] as? String
-            note.version = Int64(noteMeta["version"] as? Int ?? 1)
-
-            if let reminderInterval = noteMeta["reminderAt"] as? TimeInterval {
-                note.reminderAt = Date(timeIntervalSince1970: reminderInterval)
-            }
-
-            // 导入笔记内容
-            let noteDir = directory.appendingPathComponent(id.uuidString)
-            let contentURL = noteDir.appendingPathComponent("content.rtfd")
-            if FileManager.default.fileExists(atPath: contentURL.path) {
-                do {
-                    note.rtfdData = try Data(contentsOf: contentURL)
-                    print("[Import] 已导入笔记内容: \(id)")
-                } catch {
-                    print("[Import Warning] 无法读取笔记内容: \(id), error: \(error)")
-                }
-            }
-
-            if index % 10 == 0 {
-                print("[Import] 进度: \(index + 1)/\(metadata.count)")
-            }
-        }
-
-        // 保存更改
-        try context.save()
-        print("[Import] 笔记导入完成")
+        let importer = DocumentMigrationPackageImporter()
+        let handler = SwiftDataDocumentMigrationImportHandler(modelContext: context)
+        let package = try importer.importDirectory(from: directory, using: handler)
+        package.cleanup()
+        print("[Import] 笔记导入完成，共 \(package.notes.count) 条")
     }
 
     private func importAttachments(from directory: URL) throws {
@@ -1232,142 +1253,48 @@ final class DataExportManager {
         print("[Import] 已导入 \(contents.count) 个附件")
     }
 
-    private func importFolders(from directory: URL, context: ModelContext) async throws {
-        let metadataURL = directory.appendingPathComponent("folders.plist")
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            print("[Import] 未找到文件夹元数据文件")
-            return
-        }
-
-        guard let metadata = try PropertyListSerialization.propertyList(from: Data(contentsOf: metadataURL), format: nil) as? [[String: Any]] else {
-            print("[Import] 文件夹元数据格式错误")
-            return
-        }
-
-        print("[Import] 开始导入 \(metadata.count) 个文件夹")
-
-        for folderMeta in metadata {
-            guard let idString = folderMeta["id"] as? String,
-                  let id = UUID(uuidString: idString) else {
-                print("[Import Warning] 跳过无效文件夹 ID")
-                continue
-            }
-
-            // 检查文件夹是否已存在
-            let descriptor = FetchDescriptor<FolderEntity>(predicate: #Predicate { $0.id == id })
-            let existingFolders = try? context.fetch(descriptor)
-
-            let folder: FolderEntity
-            if let existing = existingFolders?.first {
-                // 更新现有文件夹
-                folder = existing
-                print("[Import] 更新现有文件夹: \(id)")
-            } else {
-                // 创建新文件夹
-                folder = FolderEntity(
-                    id: id,
-                    name: folderMeta["name"] as? String ?? "",
-                    sortOrder: folderMeta["sortOrder"] as? Int ?? 0
-                )
-                context.insert(folder)
-                print("[Import] 创建新文件夹: \(id)")
-            }
-
-            // 更新文件夹属性
-            folder.name = folderMeta["name"] as? String ?? ""
-            folder.sortOrder = folderMeta["sortOrder"] as? Int ?? 0
-            folder.isSystem = folderMeta["isSystem"] as? Bool ?? false
-            if let createdAt = folderMeta["createdAt"] as? TimeInterval {
-                folder.createdAt = Date(timeIntervalSince1970: createdAt)
-            }
-        }
-
-        try context.save()
-        print("[Import] 文件夹导入完成")
-    }
-
-    private func importTags(from directory: URL, context: ModelContext) async throws {
-        let metadataURL = directory.appendingPathComponent("tags.plist")
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            print("[Import] 未找到标签元数据文件")
-            return
-        }
-
-        guard let metadata = try PropertyListSerialization.propertyList(from: Data(contentsOf: metadataURL), format: nil) as? [[String: Any]] else {
-            print("[Import] 标签元数据格式错误")
-            return
-        }
-
-        print("[Import] 开始导入 \(metadata.count) 个标签")
-
-        for tagMeta in metadata {
-            guard let idString = tagMeta["id"] as? String,
-                  let id = UUID(uuidString: idString) else {
-                print("[Import Warning] 跳过无效标签 ID")
-                continue
-            }
-
-            // 检查标签是否已存在
-            let descriptor = FetchDescriptor<TagEntity>(predicate: #Predicate { $0.id == id })
-            let existingTags = try? context.fetch(descriptor)
-
-            let tag: TagEntity
-            if let existing = existingTags?.first {
-                // 更新现有标签
-                tag = existing
-                print("[Import] 更新现有标签: \(id)")
-            } else {
-                // 创建新标签
-                tag = TagEntity(
-                    id: id,
-                    name: tagMeta["name"] as? String ?? "",
-                    color: tagMeta["color"] as? String ?? "blue"
-                )
-                tag.createdAt = Date(timeIntervalSince1970: tagMeta["createdAt"] as? TimeInterval ?? 0)
-                context.insert(tag)
-                print("[Import] 创建新标签: \(id)")
-            }
-
-            // 更新标签属性
-            tag.name = tagMeta["name"] as? String ?? ""
-            tag.color = tagMeta["color"] as? String ?? "blue"
-        }
-
-        try context.save()
-        print("[Import] 标签导入完成")
-    }
-
     // MARK: - 重置功能
 
     /// 重置所有数据（删除所有笔记、文件夹、标签、附件和配置）
     func resetAllData(context: ModelContext) async throws {
         print("[Reset] 开始重置所有数据...")
 
-        // 1. 删除所有笔记
-        let notesDescriptor = FetchDescriptor<NoteEntity>()
-        let allNotes = try context.fetch(notesDescriptor)
+        let allBlocks = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
+        for block in allBlocks {
+            context.delete(block)
+        }
+        print("[Reset] 已删除 \(allBlocks.count) 个块")
+
+        let allAssets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
+        for asset in allAssets {
+            context.delete(asset)
+        }
+        print("[Reset] 已删除 \(allAssets.count) 个资源")
+
+        let allNotes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
         for note in allNotes {
             context.delete(note)
         }
         print("[Reset] 已删除 \(allNotes.count) 个笔记")
 
-        // 2. 删除所有文件夹（包括系统文件夹）
-        let foldersDescriptor = FetchDescriptor<FolderEntity>()
-        let allFolders = try context.fetch(foldersDescriptor)
+        let allFolders = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
         for folder in allFolders {
             context.delete(folder)
         }
         print("[Reset] 已删除 \(allFolders.count) 个文件夹")
 
-        // 3. 删除所有标签
-        let tagsDescriptor = FetchDescriptor<TagEntity>()
-        let allTags = try context.fetch(tagsDescriptor)
+        let allTags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
         for tag in allTags {
             context.delete(tag)
         }
         print("[Reset] 已删除 \(allTags.count) 个标签")
 
-        // 4. 保存数据库更改
+        let allLibraries = try context.fetch(FetchDescriptor<BlockDocumentLibraryEntity>())
+        for library in allLibraries {
+            context.delete(library)
+        }
+        print("[Reset] 已删除 \(allLibraries.count) 个文档库")
+
         try context.save()
         print("[Reset] 数据库已清空")
 
@@ -1458,5 +1385,1680 @@ final class DataExportManager {
         defaults.removeObject(forKey: "radialMenuScale")
         defaults.removeObject(forKey: "radialMenuItems")
         print("[Reset] 已重置环形菜单设置")
+    }
+
+    private func persistentAttachmentsRootDirectory() throws -> URL {
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else {
+            throw NSError(
+                domain: "DataExportManager",
+                code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "未配置数据存储目录"]
+            )
+        }
+
+        return try storage.withSecurityScopedAccess(base) {
+            try storage.ensureDirectoryStructureExists()
+            let attachmentsRoot = try storage.attachmentsDirectoryURL()
+            try FileManager.default.createDirectory(at: attachmentsRoot, withIntermediateDirectories: true)
+            return attachmentsRoot
+        }
+    }
+
+    private func copyItemReplacingIfNeeded(from sourceURL: URL, to destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        let destinationDirectory = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    }
+}
+
+struct DocumentMigrationPackage: Codable {
+    let schemaVersion: String
+    let exportedAt: Date
+    let notes: [NoteItem]
+    let folders: [FolderItem]
+    let tags: [TagItem]
+
+    struct NoteItem: Codable {
+        let id: UUID
+        let title: String
+        let createdAt: Date
+        let updatedAt: Date
+        let folderID: UUID?
+        let folderName: String
+        let reminderAt: Date?
+        let recurrenceRule: String
+        let version: Int64
+        let tagIDs: [UUID]
+        let viewMode: String
+        let deletedAt: Date?
+        let originalFolderID: UUID?
+        let originalFolderName: String?
+        let blockCount: Int
+        let assetCount: Int
+        let documentPath: String
+    }
+
+    struct FolderItem: Codable {
+        let id: UUID
+        let name: String
+        let sortOrder: Int
+        let isSystem: Bool
+        let createdAt: Date?
+    }
+
+    struct TagItem: Codable {
+        let id: UUID
+        let name: String
+        let color: String
+        let createdAt: Date
+    }
+}
+
+struct MigratedDocument: Codable {
+    let schemaVersion: String
+    let source: String
+    let blocks: [MigratedDocumentBlock]
+}
+
+struct MigratedDocumentBlock: Codable {
+    let id: String
+    let type: String
+    var text: [MigratedInlineText]?
+    var level: Int?
+    var listStyle: String?
+    var order: Int?
+    var checked: Bool?
+    var indent: Int?
+    var asset: MigratedAssetReference?
+    var table: MigratedTable?
+}
+
+struct MigratedInlineText: Codable {
+    let text: String
+    let bold: Bool
+    let italic: Bool
+    let underline: Bool
+    let strikethrough: Bool
+    let textColor: String?
+    let backgroundColor: String?
+    let link: String?
+    let fontFamily: String?
+    let fontSize: Double?
+}
+
+struct MigratedAssetReference: Codable {
+    let id: String
+    let kind: String
+    let filename: String
+    let mimeType: String
+    let width: Double?
+    let height: Double?
+    let duration: Double?
+    let createdAt: Date?
+    let sidecarFiles: [String]
+}
+
+struct MigratedTable: Codable {
+    let rows: [[String]]
+    let columnWidths: [Double]
+    let rowHeights: [Double]
+}
+
+struct LoadedDocumentMigrationPackage {
+    let rootDirectory: URL
+    let isTemporary: Bool
+    let manifest: DocumentMigrationPackage
+    let notes: [LoadedDocumentMigrationNote]
+
+    func cleanup() {
+        guard isTemporary else { return }
+        try? FileManager.default.removeItem(at: rootDirectory)
+    }
+}
+
+struct LoadedDocumentMigrationNote {
+    let metadata: DocumentMigrationPackage.NoteItem
+    let document: MigratedDocument
+    let noteDirectory: URL
+    let assets: [LoadedMigratedAsset]
+}
+
+struct LoadedMigratedAsset {
+    let reference: MigratedAssetReference
+    let fileURL: URL
+    let sidecarFileURLs: [URL]
+}
+
+enum DocumentMigrationImportError: LocalizedError {
+    case missingManifest
+    case missingDocument(path: String)
+    case missingAsset(path: String)
+    case invalidAssetPath(path: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingManifest:
+            return "迁移包缺少 manifest.json"
+        case .missingDocument(let path):
+            return "迁移包缺少文档文件: \(path)"
+        case .missingAsset(let path):
+            return "迁移包缺少资源文件: \(path)"
+        case .invalidAssetPath(let path):
+            return "迁移包资源路径无效: \(path)"
+        }
+    }
+}
+
+protocol DocumentMigrationImportHandler: AnyObject {
+    func prepareImport(manifest: DocumentMigrationPackage) throws
+    func importNote(_ note: LoadedDocumentMigrationNote) throws
+    func finishImport(package: LoadedDocumentMigrationPackage) throws
+}
+
+@MainActor
+final class DocumentMigrationPackageLoader {
+    private let fileManager = FileManager.default
+
+    func loadArchive(from zipURL: URL) throws -> LoadedDocumentMigrationPackage {
+        let extractDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotebookDocumentMigrationImport_\(Date().timeIntervalSince1970)_\(UUID().uuidString)")
+        try DataExportManager.shared.extractArchive(at: zipURL, to: extractDir)
+        do {
+            return try load(from: extractDir, isTemporary: true)
+        } catch {
+            try? fileManager.removeItem(at: extractDir)
+            throw error
+        }
+    }
+
+    func loadDirectory(from directoryURL: URL) throws -> LoadedDocumentMigrationPackage {
+        try load(from: directoryURL, isTemporary: false)
+    }
+
+    private func load(from rootDirectory: URL, isTemporary: Bool) throws -> LoadedDocumentMigrationPackage {
+        let manifestURL = rootDirectory.appendingPathComponent("manifest.json")
+        guard fileManager.fileExists(atPath: manifestURL.path) else {
+            throw DocumentMigrationImportError.missingManifest
+        }
+
+        let manifest: DocumentMigrationPackage = try readJSON(from: manifestURL)
+        let notes = try manifest.notes.map { try loadNote($0, rootDirectory: rootDirectory) }
+
+        return LoadedDocumentMigrationPackage(
+            rootDirectory: rootDirectory,
+            isTemporary: isTemporary,
+            manifest: manifest,
+            notes: notes
+        )
+    }
+
+    private func loadNote(_ item: DocumentMigrationPackage.NoteItem, rootDirectory: URL) throws -> LoadedDocumentMigrationNote {
+        let documentURL = rootDirectory.appendingPathComponent(item.documentPath)
+        guard fileManager.fileExists(atPath: documentURL.path) else {
+            throw DocumentMigrationImportError.missingDocument(path: item.documentPath)
+        }
+
+        let document: MigratedDocument = try readJSON(from: documentURL)
+        let noteDirectory = documentURL.deletingLastPathComponent()
+        let assets = try resolveAssets(for: document, noteDirectory: noteDirectory, rootDirectory: rootDirectory)
+
+        return LoadedDocumentMigrationNote(
+            metadata: item,
+            document: document,
+            noteDirectory: noteDirectory,
+            assets: assets
+        )
+    }
+
+    private func resolveAssets(for document: MigratedDocument, noteDirectory: URL, rootDirectory: URL) throws -> [LoadedMigratedAsset] {
+        try document.blocks.compactMap { $0.asset }.map { reference in
+            let fileURL = try resolvedAssetURL(
+                for: reference.filename,
+                noteDirectory: noteDirectory,
+                rootDirectory: rootDirectory
+            )
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                throw DocumentMigrationImportError.missingAsset(path: reference.filename)
+            }
+
+            let sidecarFileURLs = try reference.sidecarFiles.map { sidecarPath in
+                let sidecarURL = try resolvedAssetURL(
+                    for: sidecarPath,
+                    noteDirectory: noteDirectory,
+                    rootDirectory: rootDirectory
+                )
+                guard fileManager.fileExists(atPath: sidecarURL.path) else {
+                    throw DocumentMigrationImportError.missingAsset(path: sidecarPath)
+                }
+                return sidecarURL
+            }
+
+            return LoadedMigratedAsset(
+                reference: reference,
+                fileURL: fileURL,
+                sidecarFileURLs: sidecarFileURLs
+            )
+        }
+    }
+
+    private func resolvedAssetURL(for relativePath: String, noteDirectory: URL, rootDirectory: URL) throws -> URL {
+        let noteScopedURL = try validatedURL(for: relativePath, baseDirectory: noteDirectory, rootDirectory: rootDirectory)
+        if fileManager.fileExists(atPath: noteScopedURL.path) {
+            return noteScopedURL
+        }
+
+        return try validatedURL(for: relativePath, baseDirectory: rootDirectory, rootDirectory: rootDirectory)
+    }
+
+    private func validatedURL(for relativePath: String, baseDirectory: URL, rootDirectory: URL) throws -> URL {
+        let url = baseDirectory.appendingPathComponent(relativePath)
+        let resolvedPath = url.standardizedFileURL.path
+        let rootPath = rootDirectory.standardizedFileURL.path
+        let rootPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard resolvedPath == rootPath || resolvedPath.hasPrefix(rootPrefix) else {
+            throw DocumentMigrationImportError.invalidAssetPath(path: relativePath)
+        }
+        return url
+    }
+
+    private func readJSON<T: Decodable>(from url: URL) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(T.self, from: Data(contentsOf: url))
+    }
+}
+
+@MainActor
+final class DocumentMigrationPackageImporter {
+    private let loader: DocumentMigrationPackageLoader
+
+    init() {
+        self.loader = DocumentMigrationPackageLoader()
+    }
+
+    init(loader: DocumentMigrationPackageLoader) {
+        self.loader = loader
+    }
+
+    @discardableResult
+    func importArchive(from zipURL: URL, using handler: DocumentMigrationImportHandler) throws -> LoadedDocumentMigrationPackage {
+        let package = try loader.loadArchive(from: zipURL)
+        do {
+            try runImport(package, using: handler)
+            return package
+        } catch {
+            package.cleanup()
+            throw error
+        }
+    }
+
+    @discardableResult
+    func importDirectory(from directoryURL: URL, using handler: DocumentMigrationImportHandler) throws -> LoadedDocumentMigrationPackage {
+        let package = try loader.loadDirectory(from: directoryURL)
+        try runImport(package, using: handler)
+        return package
+    }
+
+    private func runImport(_ package: LoadedDocumentMigrationPackage, using handler: DocumentMigrationImportHandler) throws {
+        try handler.prepareImport(manifest: package.manifest)
+        for note in package.notes {
+            try handler.importNote(note)
+        }
+        try handler.finishImport(package: package)
+    }
+}
+
+struct ImportedDocumentLibrary {
+    let schemaVersion: String
+    let sourceExportedAt: Date
+    let importedAt: Date
+    let folders: [ImportedDocumentFolder]
+    let tags: [ImportedDocumentTag]
+    let notes: [ImportedDocumentNote]
+}
+
+struct ImportedDocumentFolder {
+    let id: UUID
+    let name: String
+    let sortOrder: Int
+    let isSystem: Bool
+    let createdAt: Date?
+
+    init(
+        id: UUID,
+        name: String,
+        sortOrder: Int,
+        isSystem: Bool,
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.name = name
+        self.sortOrder = sortOrder
+        self.isSystem = isSystem
+        self.createdAt = createdAt
+    }
+
+    init(item: DocumentMigrationPackage.FolderItem) {
+        id = item.id
+        name = item.name
+        sortOrder = item.sortOrder
+        isSystem = item.isSystem
+        createdAt = item.createdAt
+    }
+}
+
+struct ImportedDocumentTag {
+    let id: UUID
+    let name: String
+    let color: String
+    let createdAt: Date
+
+    init(
+        id: UUID,
+        name: String,
+        color: String,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.createdAt = createdAt
+    }
+
+    init(item: DocumentMigrationPackage.TagItem) {
+        id = item.id
+        name = item.name
+        color = item.color
+        createdAt = item.createdAt
+    }
+}
+
+struct ImportedDocumentNote {
+    let id: UUID
+    let title: String
+    let createdAt: Date
+    let updatedAt: Date
+    let folderID: UUID?
+    let folderName: String
+    let reminderAt: Date?
+    let recurrenceRule: String
+    let version: Int64
+    let tagIDs: [UUID]
+    let viewMode: String
+    let deletedAt: Date?
+    let originalFolderID: UUID?
+    let originalFolderName: String?
+    let document: ImportedDocument
+    let assets: [ImportedDocumentAsset]
+
+    init(
+        id: UUID,
+        title: String,
+        createdAt: Date,
+        updatedAt: Date,
+        folderID: UUID?,
+        folderName: String,
+        reminderAt: Date?,
+        recurrenceRule: String,
+        version: Int64,
+        tagIDs: [UUID],
+        viewMode: String,
+        deletedAt: Date?,
+        originalFolderID: UUID?,
+        originalFolderName: String?,
+        document: ImportedDocument,
+        assets: [ImportedDocumentAsset]
+    ) {
+        self.id = id
+        self.title = title
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.folderID = folderID
+        self.folderName = folderName
+        self.reminderAt = reminderAt
+        self.recurrenceRule = recurrenceRule
+        self.version = version
+        self.tagIDs = tagIDs
+        self.viewMode = viewMode
+        self.deletedAt = deletedAt
+        self.originalFolderID = originalFolderID
+        self.originalFolderName = originalFolderName
+        self.document = document
+        self.assets = assets
+    }
+
+    init(note: LoadedDocumentMigrationNote) {
+        id = note.metadata.id
+        title = note.metadata.title
+        createdAt = note.metadata.createdAt
+        updatedAt = note.metadata.updatedAt
+        folderID = note.metadata.folderID
+        folderName = note.metadata.folderName
+        reminderAt = note.metadata.reminderAt
+        recurrenceRule = note.metadata.recurrenceRule
+        version = note.metadata.version
+        tagIDs = note.metadata.tagIDs
+        viewMode = note.metadata.viewMode
+        deletedAt = note.metadata.deletedAt
+        originalFolderID = note.metadata.originalFolderID
+        originalFolderName = note.metadata.originalFolderName
+        document = ImportedDocument(document: note.document)
+        assets = note.assets.map(ImportedDocumentAsset.init)
+    }
+}
+
+struct ImportedDocument {
+    let schemaVersion: String
+    let source: String
+    let blocks: [ImportedDocumentBlock]
+
+    init(
+        schemaVersion: String,
+        source: String,
+        blocks: [ImportedDocumentBlock]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.source = source
+        self.blocks = blocks
+    }
+
+    init(document: MigratedDocument) {
+        schemaVersion = document.schemaVersion
+        source = document.source
+        blocks = document.blocks.map(ImportedDocumentBlock.init)
+    }
+}
+
+enum ImportedDocumentBlockKind: String, Codable {
+    case paragraph
+    case heading
+    case listItem = "list_item"
+    case todoItem = "todo_item"
+    case image
+    case audio
+    case table
+    case unsupported
+}
+
+enum ImportedDocumentListStyle: String, Codable {
+    case bullet
+    case dash
+    case ordered
+    case unknown
+}
+
+struct ImportedDocumentBlock {
+    let id: String
+    let kind: ImportedDocumentBlockKind
+    let text: [ImportedInlineText]
+    let level: Int?
+    let listStyle: ImportedDocumentListStyle?
+    let order: Int?
+    let checked: Bool?
+    let indent: Int?
+    let asset: ImportedDocumentAssetReference?
+    let table: ImportedDocumentTable?
+    let sourceType: String
+
+    init(
+        id: String,
+        kind: ImportedDocumentBlockKind,
+        text: [ImportedInlineText],
+        level: Int?,
+        listStyle: ImportedDocumentListStyle?,
+        order: Int?,
+        checked: Bool?,
+        indent: Int?,
+        asset: ImportedDocumentAssetReference?,
+        table: ImportedDocumentTable?,
+        sourceType: String
+    ) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.level = level
+        self.listStyle = listStyle
+        self.order = order
+        self.checked = checked
+        self.indent = indent
+        self.asset = asset
+        self.table = table
+        self.sourceType = sourceType
+    }
+
+    init(block: MigratedDocumentBlock) {
+        id = block.id
+        kind = ImportedDocumentBlockKind(rawValue: block.type) ?? .unsupported
+        text = (block.text ?? []).map(ImportedInlineText.init)
+        level = block.level
+        listStyle = block.listStyle.map { ImportedDocumentListStyle(rawValue: $0) ?? .unknown }
+        order = block.order
+        checked = block.checked
+        indent = block.indent
+        asset = block.asset.map(ImportedDocumentAssetReference.init)
+        table = block.table.map(ImportedDocumentTable.init)
+        sourceType = block.type
+    }
+}
+
+struct ImportedInlineText {
+    let text: String
+    let bold: Bool
+    let italic: Bool
+    let underline: Bool
+    let strikethrough: Bool
+    let textColor: String?
+    let backgroundColor: String?
+    let link: String?
+    let fontFamily: String?
+    let fontSize: Double?
+
+    init(
+        text: String,
+        bold: Bool,
+        italic: Bool,
+        underline: Bool,
+        strikethrough: Bool,
+        textColor: String?,
+        backgroundColor: String?,
+        link: String?,
+        fontFamily: String?,
+        fontSize: Double?
+    ) {
+        self.text = text
+        self.bold = bold
+        self.italic = italic
+        self.underline = underline
+        self.strikethrough = strikethrough
+        self.textColor = textColor
+        self.backgroundColor = backgroundColor
+        self.link = link
+        self.fontFamily = fontFamily
+        self.fontSize = fontSize
+    }
+
+    init(span: MigratedInlineText) {
+        text = span.text
+        bold = span.bold
+        italic = span.italic
+        underline = span.underline
+        strikethrough = span.strikethrough
+        textColor = span.textColor
+        backgroundColor = span.backgroundColor
+        link = span.link
+        fontFamily = span.fontFamily
+        fontSize = span.fontSize
+    }
+}
+
+enum ImportedDocumentAssetKind: String, Codable {
+    case image
+    case audio
+    case unsupported
+}
+
+struct ImportedDocumentAssetReference {
+    let id: String
+    let kind: ImportedDocumentAssetKind
+    let filename: String
+    let mimeType: String
+    let width: Double?
+    let height: Double?
+    let duration: Double?
+    let createdAt: Date?
+    let sidecarFiles: [String]
+    let sourceKind: String
+
+    init(
+        id: String,
+        kind: ImportedDocumentAssetKind,
+        filename: String,
+        mimeType: String,
+        width: Double?,
+        height: Double?,
+        duration: Double?,
+        createdAt: Date?,
+        sidecarFiles: [String],
+        sourceKind: String
+    ) {
+        self.id = id
+        self.kind = kind
+        self.filename = filename
+        self.mimeType = mimeType
+        self.width = width
+        self.height = height
+        self.duration = duration
+        self.createdAt = createdAt
+        self.sidecarFiles = sidecarFiles
+        self.sourceKind = sourceKind
+    }
+
+    init(reference: MigratedAssetReference) {
+        id = reference.id
+        kind = ImportedDocumentAssetKind(rawValue: reference.kind) ?? .unsupported
+        filename = reference.filename
+        mimeType = reference.mimeType
+        width = reference.width
+        height = reference.height
+        duration = reference.duration
+        createdAt = reference.createdAt
+        sidecarFiles = reference.sidecarFiles
+        sourceKind = reference.kind
+    }
+}
+
+struct ImportedDocumentAsset {
+    let reference: ImportedDocumentAssetReference
+    let sourceURL: URL
+    let sidecarURLs: [URL]
+
+    init(
+        reference: ImportedDocumentAssetReference,
+        sourceURL: URL,
+        sidecarURLs: [URL]
+    ) {
+        self.reference = reference
+        self.sourceURL = sourceURL
+        self.sidecarURLs = sidecarURLs
+    }
+
+    init(asset: LoadedMigratedAsset) {
+        reference = ImportedDocumentAssetReference(reference: asset.reference)
+        sourceURL = asset.fileURL
+        sidecarURLs = asset.sidecarFileURLs
+    }
+}
+
+struct ImportedDocumentTable {
+    let rows: [[String]]
+    let columnWidths: [Double]
+    let rowHeights: [Double]
+
+    init(
+        rows: [[String]],
+        columnWidths: [Double],
+        rowHeights: [Double]
+    ) {
+        self.rows = rows
+        self.columnWidths = columnWidths
+        self.rowHeights = rowHeights
+    }
+
+    init(table: MigratedTable) {
+        rows = table.rows
+        columnWidths = table.columnWidths
+        rowHeights = table.rowHeights
+    }
+}
+
+@MainActor
+final class InMemoryDocumentMigrationImportHandler: DocumentMigrationImportHandler {
+    private var manifest: DocumentMigrationPackage?
+    private var notes: [ImportedDocumentNote] = []
+    private(set) var library: ImportedDocumentLibrary?
+
+    func prepareImport(manifest: DocumentMigrationPackage) throws {
+        self.manifest = manifest
+        notes = []
+        library = nil
+    }
+
+    func importNote(_ note: LoadedDocumentMigrationNote) throws {
+        notes.append(ImportedDocumentNote(note: note))
+    }
+
+    func finishImport(package: LoadedDocumentMigrationPackage) throws {
+        let manifest = self.manifest ?? package.manifest
+        library = ImportedDocumentLibrary(
+            schemaVersion: manifest.schemaVersion,
+            sourceExportedAt: manifest.exportedAt,
+            importedAt: Date(),
+            folders: manifest.folders.map(ImportedDocumentFolder.init),
+            tags: manifest.tags.map(ImportedDocumentTag.init),
+            notes: notes
+        )
+    }
+}
+
+enum DocumentMigrationPersistenceError: LocalizedError {
+    case storageNotConfigured
+    case importStateUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .storageNotConfigured:
+            return "未配置数据存储目录"
+        case .importStateUnavailable:
+            return "迁移导入状态不可用"
+        }
+    }
+}
+
+@MainActor
+final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHandler {
+    private let modelContext: ModelContext
+    private let fileManager = FileManager.default
+    private let jsonEncoder = JSONEncoder()
+    private var libraryEntity: BlockDocumentLibraryEntity?
+    private var attachmentsRootDirectory: URL?
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    convenience init(container: ModelContainer) {
+        self.init(modelContext: ModelContext(container))
+    }
+
+    func prepareImport(manifest: DocumentMigrationPackage) throws {
+        try deleteAll(BlockDocumentBlockEntity.self)
+        try deleteAll(BlockDocumentAssetEntity.self)
+        try deleteAll(BlockDocumentNoteEntity.self)
+        try deleteAll(BlockDocumentTagEntity.self)
+        try deleteAll(BlockDocumentFolderEntity.self)
+        try deleteAll(BlockDocumentLibraryEntity.self)
+
+        let attachmentsRoot = try persistentAttachmentsRootDirectory()
+        let importedAssetsRoot = attachmentsRoot.appendingPathComponent("MigratedDocuments", isDirectory: true)
+        if fileManager.fileExists(atPath: importedAssetsRoot.path) {
+            try fileManager.removeItem(at: importedAssetsRoot)
+        }
+        try fileManager.createDirectory(at: importedAssetsRoot, withIntermediateDirectories: true)
+
+        let libraryEntity = BlockDocumentLibraryEntity(
+            schemaVersion: manifest.schemaVersion,
+            sourceExportedAt: manifest.exportedAt,
+            importedAt: Date(),
+            noteCount: manifest.notes.count,
+            folderCount: manifest.folders.count,
+            tagCount: manifest.tags.count
+        )
+        modelContext.insert(libraryEntity)
+
+        for folder in manifest.folders {
+            modelContext.insert(
+                BlockDocumentFolderEntity(
+                    id: folder.id,
+                    libraryID: libraryEntity.id,
+                    name: folder.name,
+                    sortOrder: folder.sortOrder,
+                    isSystem: folder.isSystem,
+                    createdAt: folder.createdAt
+                )
+            )
+        }
+
+        for tag in manifest.tags {
+            modelContext.insert(
+                BlockDocumentTagEntity(
+                    id: tag.id,
+                    libraryID: libraryEntity.id,
+                    name: tag.name,
+                    color: tag.color,
+                    createdAt: tag.createdAt
+                )
+            )
+        }
+
+        try modelContext.save()
+        self.libraryEntity = libraryEntity
+        attachmentsRootDirectory = attachmentsRoot
+    }
+
+    func importNote(_ note: LoadedDocumentMigrationNote) throws {
+        guard let libraryEntity else {
+            throw DocumentMigrationPersistenceError.importStateUnavailable
+        }
+
+        let persistedAssets = try note.assets.map { try persistAsset($0, noteID: note.metadata.id) }
+
+        let noteEntity = BlockDocumentNoteEntity(
+            id: note.metadata.id,
+            libraryID: libraryEntity.id,
+            title: note.metadata.title,
+            createdAt: note.metadata.createdAt,
+            updatedAt: note.metadata.updatedAt,
+            folderID: note.metadata.folderID,
+            folderName: note.metadata.folderName,
+            reminderAt: note.metadata.reminderAt,
+            recurrenceRule: note.metadata.recurrenceRule,
+            version: note.metadata.version,
+            tagIDs: encodeUUIDList(note.metadata.tagIDs),
+            viewMode: note.metadata.viewMode,
+            deletedAt: note.metadata.deletedAt,
+            originalFolderID: note.metadata.originalFolderID,
+            originalFolderName: note.metadata.originalFolderName,
+            documentSchemaVersion: note.document.schemaVersion,
+            documentSource: note.document.source,
+            blockCount: note.document.blocks.count,
+            assetCount: persistedAssets.count
+        )
+        modelContext.insert(noteEntity)
+
+        for asset in persistedAssets {
+            modelContext.insert(
+                BlockDocumentAssetEntity(
+                    noteID: note.metadata.id,
+                    assetID: asset.reference.id,
+                    kind: asset.reference.kind,
+                    sourceKind: asset.reference.kind,
+                    filename: asset.reference.filename,
+                    mimeType: asset.reference.mimeType,
+                    width: asset.reference.width,
+                    height: asset.reference.height,
+                    duration: asset.reference.duration,
+                    createdAt: asset.reference.createdAt,
+                    relativeFilePath: asset.relativeFilePath,
+                    sidecarPathsPayload: try encodeJSON(asset.sidecarRelativePaths)
+                )
+            )
+        }
+
+        for (position, block) in note.document.blocks.enumerated() {
+            modelContext.insert(
+                BlockDocumentBlockEntity(
+                    noteID: note.metadata.id,
+                    position: position,
+                    blockID: block.id,
+                    kind: block.type,
+                    sourceType: block.type,
+                    textPayload: try encodeTextPayload(block.text ?? []),
+                    level: block.level,
+                    listStyle: block.listStyle,
+                    order: block.order,
+                    checked: block.checked,
+                    indent: block.indent,
+                    assetID: block.asset?.id,
+                    tablePayload: try encodeTablePayload(block.table)
+                )
+            )
+        }
+
+        try modelContext.save()
+    }
+
+    func finishImport(package: LoadedDocumentMigrationPackage) throws {
+        guard let libraryEntity else {
+            throw DocumentMigrationPersistenceError.importStateUnavailable
+        }
+        libraryEntity.noteCount = package.notes.count
+        libraryEntity.folderCount = package.manifest.folders.count
+        libraryEntity.tagCount = package.manifest.tags.count
+        libraryEntity.importedAt = Date()
+        try modelContext.save()
+    }
+
+    private func persistentAttachmentsRootDirectory() throws -> URL {
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
+        }
+
+        return try storage.withSecurityScopedAccess(base) {
+            try storage.ensureDirectoryStructureExists()
+            let attachmentsRoot = try storage.attachmentsDirectoryURL()
+            try fileManager.createDirectory(at: attachmentsRoot, withIntermediateDirectories: true)
+            return attachmentsRoot
+        }
+    }
+
+    private func persistAsset(_ asset: LoadedMigratedAsset, noteID: UUID) throws -> PersistedMigratedAsset {
+        guard let attachmentsRootDirectory else {
+            throw DocumentMigrationPersistenceError.importStateUnavailable
+        }
+
+        let baseRelativeDirectory = "MigratedDocuments/\(noteID.uuidString)/\(asset.reference.id)"
+        let relativeFilePath = "\(baseRelativeDirectory)/\(asset.fileURL.lastPathComponent)"
+        let destinationFileURL = attachmentsRootDirectory.appendingPathComponent(relativeFilePath)
+        try copyItemReplacingIfNeeded(from: asset.fileURL, to: destinationFileURL)
+
+        let sidecarRelativePaths = try asset.sidecarFileURLs.map { sidecarURL in
+            let relativePath = "\(baseRelativeDirectory)/\(sidecarURL.lastPathComponent)"
+            let destinationURL = attachmentsRootDirectory.appendingPathComponent(relativePath)
+            try copyItemReplacingIfNeeded(from: sidecarURL, to: destinationURL)
+            return relativePath
+        }
+
+        return PersistedMigratedAsset(
+            reference: asset.reference,
+            relativeFilePath: relativeFilePath,
+            sidecarRelativePaths: sidecarRelativePaths
+        )
+    }
+
+    private func copyItemReplacingIfNeeded(from sourceURL: URL, to destinationURL: URL) throws {
+        let parentDirectory = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentDirectory, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+    }
+
+    private func encodeUUIDList(_ uuids: [UUID]) -> String {
+        uuids.map(\.uuidString).joined(separator: ",")
+    }
+
+    private func encodeTextPayload(_ spans: [MigratedInlineText]) throws -> Data? {
+        guard !spans.isEmpty else {
+            return nil
+        }
+
+        let payload = spans.map {
+            BlockDocumentTextSpanPayload(
+                text: $0.text,
+                bold: $0.bold,
+                italic: $0.italic,
+                underline: $0.underline,
+                strikethrough: $0.strikethrough,
+                textColor: $0.textColor,
+                backgroundColor: $0.backgroundColor,
+                link: $0.link,
+                fontFamily: $0.fontFamily,
+                fontSize: $0.fontSize
+            )
+        }
+        return try encodeJSON(payload)
+    }
+
+    private func encodeTablePayload(_ table: MigratedTable?) throws -> Data? {
+        guard let table else {
+            return nil
+        }
+
+        return try encodeJSON(
+            BlockDocumentTablePayload(
+                rows: table.rows,
+                columnWidths: table.columnWidths,
+                rowHeights: table.rowHeights
+            )
+        )
+    }
+
+    private func encodeJSON<T: Encodable>(_ value: T) throws -> Data {
+        try jsonEncoder.encode(value)
+    }
+
+    private func deleteAll<T: PersistentModel>(_ type: T.Type) throws {
+        let models = try modelContext.fetch(FetchDescriptor<T>())
+        for model in models {
+            modelContext.delete(model)
+        }
+    }
+}
+
+private struct PersistedMigratedAsset {
+    let reference: MigratedAssetReference
+    let relativeFilePath: String
+    let sidecarRelativePaths: [String]
+}
+
+struct LegacyDocumentConversion {
+    let document: MigratedDocument
+    let assetCount: Int
+}
+
+final class LegacyNoteDocumentConverter {
+    private let noteID: UUID
+    private let noteDirectory: URL
+    private let assetsDirectory: URL
+    private let fileManager = FileManager.default
+    private var blockIndex = 0
+    private var assetIndex = 0
+
+    init(noteID: UUID, noteDirectory: URL) throws {
+        self.noteID = noteID
+        self.noteDirectory = noteDirectory
+        self.assetsDirectory = noteDirectory.appendingPathComponent("Assets", isDirectory: true)
+        try fileManager.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
+    }
+
+    func convert(content: NSAttributedString) throws -> LegacyDocumentConversion {
+        let document = try buildDocument(from: content)
+        return LegacyDocumentConversion(document: document, assetCount: assetIndex)
+    }
+
+    private func buildDocument(from content: NSAttributedString) throws -> MigratedDocument {
+        let nsString = content.string as NSString
+        var blocks: [MigratedDocumentBlock] = []
+        var location = 0
+
+        while location < nsString.length {
+            let paragraphRange = nsString.paragraphRange(for: NSRange(location: location, length: 0))
+            blocks.append(contentsOf: try convertParagraph(content, range: paragraphRange))
+            let nextLocation = NSMaxRange(paragraphRange)
+            if nextLocation <= location {
+                break
+            }
+            location = nextLocation
+        }
+
+        if nsString.length == 0 {
+            blocks.append(MigratedDocumentBlock(id: nextBlockID(), type: "paragraph", text: [], level: nil, listStyle: nil, order: nil, checked: nil, indent: 0, asset: nil, table: nil))
+        }
+
+        return MigratedDocument(schemaVersion: "1.0", source: "NotebookRTFD", blocks: blocks)
+    }
+
+    private func convertParagraph(_ content: NSAttributedString, range: NSRange) throws -> [MigratedDocumentBlock] {
+        let visibleRange = trimmedVisibleRange(range, in: content.string as NSString)
+        let attachmentItems = attachmentItems(in: visibleRange, content: content)
+
+        if let leadingCheckbox = leadingCheckboxItem(in: attachmentItems, visibleRange: visibleRange) {
+            return [buildTodoBlock(content, paragraphRange: visibleRange, checkbox: leadingCheckbox)]
+        }
+
+        if attachmentItems.count == 1,
+           visibleRange.length == attachmentItems[0].range.length,
+           let attachmentBlock = try buildAttachmentBlock(from: attachmentItems[0], content: content) {
+            return [attachmentBlock]
+        }
+
+        if attachmentItems.isEmpty {
+            if let textBlock = buildTextBlock(content, range: visibleRange, prefersParagraphSemantics: true) {
+                return [textBlock]
+            }
+            return [MigratedDocumentBlock(id: nextBlockID(), type: "paragraph", text: [], level: nil, listStyle: nil, order: nil, checked: nil, indent: 0, asset: nil, table: nil)]
+        }
+
+        var blocks: [MigratedDocumentBlock] = []
+        var cursor = visibleRange.location
+        var prefersParagraphSemantics = true
+
+        for item in attachmentItems {
+            if item.range.location > cursor {
+                let textRange = NSRange(location: cursor, length: item.range.location - cursor)
+                if let textBlock = buildTextBlock(content, range: textRange, prefersParagraphSemantics: prefersParagraphSemantics) {
+                    blocks.append(textBlock)
+                    prefersParagraphSemantics = false
+                }
+            }
+
+            if let attachmentBlock = try buildAttachmentBlock(from: item, content: content) {
+                blocks.append(attachmentBlock)
+                prefersParagraphSemantics = false
+            }
+
+            cursor = NSMaxRange(item.range)
+        }
+
+        let paragraphEnd = NSMaxRange(visibleRange)
+        if cursor < paragraphEnd {
+            let textRange = NSRange(location: cursor, length: paragraphEnd - cursor)
+            if let textBlock = buildTextBlock(content, range: textRange, prefersParagraphSemantics: prefersParagraphSemantics) {
+                blocks.append(textBlock)
+            }
+        }
+
+        if blocks.isEmpty {
+            blocks.append(MigratedDocumentBlock(id: nextBlockID(), type: "paragraph", text: [], level: nil, listStyle: nil, order: nil, checked: nil, indent: 0, asset: nil, table: nil))
+        }
+
+        return blocks
+    }
+
+    private func buildTodoBlock(_ content: NSAttributedString, paragraphRange: NSRange, checkbox: AttachmentItem) -> MigratedDocumentBlock {
+        var start = NSMaxRange(checkbox.range)
+        let end = NSMaxRange(paragraphRange)
+        let nsString = content.string as NSString
+        while start < end {
+            let scalar = nsString.character(at: start)
+            if scalar == 32 || scalar == 9 {
+                start += 1
+            } else {
+                break
+            }
+        }
+
+        let textRange = NSRange(location: start, length: max(0, end - start))
+        return MigratedDocumentBlock(
+            id: nextBlockID(),
+            type: "todo_item",
+            text: inlineText(in: textRange, content: content),
+            level: nil,
+            listStyle: nil,
+            order: nil,
+            checked: checkbox.checkboxState,
+            indent: 0,
+            asset: nil,
+            table: nil
+        )
+    }
+
+    private func buildTextBlock(_ content: NSAttributedString, range: NSRange, prefersParagraphSemantics: Bool) -> MigratedDocumentBlock? {
+        guard range.length > 0 else { return nil }
+        let nsString = content.string as NSString
+        let raw = nsString.substring(with: range)
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return MigratedDocumentBlock(id: nextBlockID(), type: "paragraph", text: [], level: nil, listStyle: nil, order: nil, checked: nil, indent: leadingIndentLevel(in: raw), asset: nil, table: nil)
+        }
+
+        var finalRange = range
+        var type = "paragraph"
+        var level: Int?
+        var listStyle: String?
+        var order: Int?
+        let indent = leadingIndentLevel(in: raw)
+
+        if prefersParagraphSemantics, let listDescriptor = detectListDescriptor(in: raw, baseLocation: range.location) {
+            type = "list_item"
+            listStyle = listDescriptor.style
+            order = listDescriptor.order
+            finalRange = listDescriptor.contentRange
+        } else if prefersParagraphSemantics, let headingLevel = detectHeadingLevel(in: content, range: range) {
+            type = "heading"
+            level = headingLevel
+        }
+
+        let spans = inlineText(in: finalRange, content: content)
+        return MigratedDocumentBlock(
+            id: nextBlockID(),
+            type: type,
+            text: spans,
+            level: level,
+            listStyle: listStyle,
+            order: order,
+            checked: nil,
+            indent: indent,
+            asset: nil,
+            table: nil
+        )
+    }
+
+    private func buildAttachmentBlock(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedDocumentBlock? {
+        if item.isCheckbox {
+            return nil
+        }
+
+        if let tableData = item.tableData {
+            return MigratedDocumentBlock(
+                id: nextBlockID(),
+                type: "table",
+                text: nil,
+                level: nil,
+                listStyle: nil,
+                order: nil,
+                checked: nil,
+                indent: nil,
+                asset: nil,
+                table: MigratedTable(
+                    rows: tableData.rows,
+                    columnWidths: tableData.columnWidths.map { Double($0) },
+                    rowHeights: tableData.rowHeights.map { Double($0) }
+                )
+            )
+        }
+
+        if let asset = try exportAsset(from: item, content: content) {
+            return MigratedDocumentBlock(
+                id: nextBlockID(),
+                type: asset.kind,
+                text: nil,
+                level: nil,
+                listStyle: nil,
+                order: nil,
+                checked: nil,
+                indent: nil,
+                asset: asset,
+                table: nil
+            )
+        }
+
+        return nil
+    }
+
+    private func exportAsset(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedAssetReference? {
+        if let attachment = item.attachment as? AttachmentTextAttachment {
+            switch attachment.kind {
+            case .image:
+                return try exportImageAsset(
+                    data: attachment.attachmentData(),
+                    preferredFilename: attachment.attachmentFileURL.lastPathComponent,
+                    width: resolvedWidth(for: item.attributes, attachment: attachment),
+                    height: resolvedHeight(for: item.attributes, attachment: attachment)
+                )
+            case .audio:
+                return try exportAudioAsset(
+                    sourceURL: attachment.attachmentFileURL,
+                    data: attachment.attachmentData(),
+                    duration: nil,
+                    createdAt: nil
+                )
+            }
+        }
+
+        if let audioAttachment = item.attachment as? AudioBlockAttachment {
+            return try exportAudioAsset(
+                sourceURL: audioAttachment.fileURL,
+                data: audioAttachment.audioData(),
+                duration: audioAttachment.duration,
+                createdAt: audioAttachment.createDate
+            )
+        }
+
+        if let fileWrapper = item.attachment.fileWrapper,
+           let data = fileWrapper.regularFileContents,
+           let preferredFilename = fileWrapper.preferredFilename {
+            let mimeType = mimeType(forPathExtension: URL(fileURLWithPath: preferredFilename).pathExtension.lowercased())
+            if mimeType.hasPrefix("image/") {
+                return try exportImageAsset(
+                    data: data,
+                    preferredFilename: preferredFilename,
+                    width: resolvedWidth(for: item.attributes, attachment: item.attachment),
+                    height: resolvedHeight(for: item.attributes, attachment: item.attachment)
+                )
+            }
+            if mimeType.hasPrefix("audio/") {
+                return try exportAudioAsset(
+                    sourceURL: URL(fileURLWithPath: preferredFilename),
+                    data: data,
+                    duration: nil,
+                    createdAt: nil
+                )
+            }
+        }
+
+        if let image = item.attachment.image,
+           let tiffData = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiffData),
+           let pngData = bitmap.representation(using: .png, properties: [:]) {
+            return try exportImageAsset(
+                data: pngData,
+                preferredFilename: "image.png",
+                width: resolvedWidth(for: item.attributes, attachment: item.attachment),
+                height: resolvedHeight(for: item.attributes, attachment: item.attachment)
+            )
+        }
+
+        if let linkValue = item.attributes[.link] {
+            let rawURL: String?
+            if let url = linkValue as? URL {
+                rawURL = url.absoluteString
+            } else if let string = linkValue as? String {
+                rawURL = string
+            } else {
+                rawURL = nil
+            }
+
+            if let rawURL, let fileURL = URL(string: rawURL) {
+                let mimeType = mimeType(forPathExtension: fileURL.pathExtension.lowercased())
+                if mimeType.hasPrefix("audio/") {
+                    return try exportAudioAsset(
+                        sourceURL: fileURL,
+                        data: try? Data(contentsOf: fileURL),
+                        duration: nil,
+                        createdAt: nil
+                    )
+                }
+            }
+        }
+
+        _ = content
+        return nil
+    }
+
+    private func exportImageAsset(data: Data?, preferredFilename: String, width: Double?, height: Double?) throws -> MigratedAssetReference? {
+        guard let data else { return nil }
+        let filename = uniqueAssetFilename(preferredFilename, fallbackExtension: "png")
+        let outputURL = assetsDirectory.appendingPathComponent(filename)
+        try data.write(to: outputURL, options: .atomic)
+        return MigratedAssetReference(
+            id: nextAssetID(),
+            kind: "image",
+            filename: "Assets/\(filename)",
+            mimeType: mimeType(forPathExtension: outputURL.pathExtension.lowercased()),
+            width: width,
+            height: height,
+            duration: nil,
+            createdAt: nil,
+            sidecarFiles: []
+        )
+    }
+
+    private func exportAudioAsset(sourceURL: URL, data: Data?, duration: TimeInterval?, createdAt: Date?) throws -> MigratedAssetReference? {
+        guard let data else { return nil }
+        let filename = uniqueAssetFilename(sourceURL.lastPathComponent, fallbackExtension: sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension)
+        let outputURL = assetsDirectory.appendingPathComponent(filename)
+        try data.write(to: outputURL, options: .atomic)
+
+        var sidecarFiles: [String] = []
+        let manifestURL = sourceURL.deletingPathExtension().appendingPathExtension("tracks.json")
+        if fileManager.fileExists(atPath: manifestURL.path),
+           let manifestData = try? Data(contentsOf: manifestURL) {
+            let manifestFilename = uniqueAssetFilename(manifestURL.lastPathComponent, fallbackExtension: manifestURL.pathExtension)
+            let manifestOutputURL = assetsDirectory.appendingPathComponent(manifestFilename)
+            try manifestData.write(to: manifestOutputURL, options: .atomic)
+            sidecarFiles.append("Assets/\(manifestFilename)")
+        }
+
+        return MigratedAssetReference(
+            id: nextAssetID(),
+            kind: "audio",
+            filename: "Assets/\(filename)",
+            mimeType: mimeType(forPathExtension: outputURL.pathExtension.lowercased()),
+            width: nil,
+            height: nil,
+            duration: duration,
+            createdAt: createdAt,
+            sidecarFiles: sidecarFiles
+        )
+    }
+
+    private func inlineText(in range: NSRange, content: NSAttributedString) -> [MigratedInlineText] {
+        guard range.length > 0 else { return [] }
+
+        let nsString = content.string as NSString
+        var spans: [MigratedInlineText] = []
+
+        content.enumerateAttributes(in: range, options: []) { attributes, subrange, _ in
+            if attributes[.attachment] != nil {
+                return
+            }
+
+            let raw = nsString.substring(with: subrange)
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+
+            guard !raw.isEmpty else { return }
+
+            let font = attributes[.font] as? NSFont
+            let fontTraits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
+            let textColor = (attributes[.foregroundColor] as? NSColor).flatMap(colorHex)
+            let backgroundColor = (attributes[.backgroundColor] as? NSColor).flatMap(colorHex)
+            let underline = ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0
+            let strikethrough = ((attributes[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0
+            let link: String?
+
+            if let url = attributes[.link] as? URL {
+                link = url.absoluteString
+            } else if let string = attributes[.link] as? String {
+                link = string
+            } else {
+                link = nil
+            }
+
+            let span = MigratedInlineText(
+                text: raw,
+                bold: fontTraits.contains(.boldFontMask),
+                italic: fontTraits.contains(.italicFontMask),
+                underline: underline,
+                strikethrough: strikethrough,
+                textColor: textColor,
+                backgroundColor: backgroundColor,
+                link: link,
+                fontFamily: font?.familyName,
+                fontSize: font.map { Double($0.pointSize) }
+            )
+
+            if let last = spans.last,
+               last.bold == span.bold,
+               last.italic == span.italic,
+               last.underline == span.underline,
+               last.strikethrough == span.strikethrough,
+               last.textColor == span.textColor,
+               last.backgroundColor == span.backgroundColor,
+               last.link == span.link,
+               last.fontFamily == span.fontFamily,
+               last.fontSize == span.fontSize {
+                spans[spans.count - 1] = MigratedInlineText(
+                    text: last.text + span.text,
+                    bold: span.bold,
+                    italic: span.italic,
+                    underline: span.underline,
+                    strikethrough: span.strikethrough,
+                    textColor: span.textColor,
+                    backgroundColor: span.backgroundColor,
+                    link: span.link,
+                    fontFamily: span.fontFamily,
+                    fontSize: span.fontSize
+                )
+            } else {
+                spans.append(span)
+            }
+        }
+
+        return spans
+    }
+
+    private func attachmentItems(in range: NSRange, content: NSAttributedString) -> [AttachmentItem] {
+        guard range.length > 0 else { return [] }
+
+        var items: [AttachmentItem] = []
+        content.enumerateAttribute(.attachment, in: range, options: []) { value, subrange, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            let attributes = content.attributes(at: subrange.location, effectiveRange: nil)
+
+            let tableData: TableData? = {
+                if let tableAttachment = attachment as? TableTextAttachment {
+                    return tableAttachment.tableData
+                }
+                if let raw = attributes[.notebookTableData] as? Data,
+                   let decoded = try? JSONDecoder().decode(TableData.self, from: raw) {
+                    return decoded
+                }
+                if TableTextAttachment.looksLikeTable(attachment) {
+                    return TableTextAttachment.recover(from: attachment)?.tableData
+                }
+                return nil
+            }()
+
+            let checkboxState: Bool? = {
+                if let checkbox = attachment as? CheckboxTextAttachment {
+                    return checkbox.isChecked
+                }
+                if CheckboxTextAttachment.looksLikeCheckbox(attachment) {
+                    return CheckboxTextAttachment.inferCheckedState(from: attachment)
+                }
+                return nil
+            }()
+
+            items.append(
+                AttachmentItem(
+                    range: subrange,
+                    attachment: attachment,
+                    attributes: attributes,
+                    checkboxState: checkboxState,
+                    tableData: tableData
+                )
+            )
+        }
+        return items
+    }
+
+    private func leadingCheckboxItem(in items: [AttachmentItem], visibleRange: NSRange) -> AttachmentItem? {
+        guard let first = items.first, first.isCheckbox else { return nil }
+        guard first.range.location == visibleRange.location else { return nil }
+        return first
+    }
+
+    private func detectHeadingLevel(in content: NSAttributedString, range: NSRange) -> Int? {
+        guard range.length > 0 else { return nil }
+
+        var maxPointSize: CGFloat = 0
+        var emphasized = false
+
+        content.enumerateAttribute(.font, in: range, options: []) { value, _, _ in
+            guard let font = value as? NSFont else { return }
+            maxPointSize = max(maxPointSize, font.pointSize)
+            let traits = NSFontManager.shared.traits(of: font)
+            if traits.contains(.boldFontMask) || font.fontName.lowercased().contains("semibold") {
+                emphasized = true
+            }
+        }
+
+        if maxPointSize >= 21 {
+            return 1
+        }
+        if maxPointSize >= 17 {
+            return 2
+        }
+        if maxPointSize >= 15.5 && emphasized {
+            return 3
+        }
+        return nil
+    }
+
+    private func detectListDescriptor(in raw: String, baseLocation: Int) -> ListDescriptor? {
+        let nsRaw = raw as NSString
+        let indentRange = nsRaw.range(of: #"^[ \t]*"#, options: .regularExpression)
+        let indentLength = indentRange.length
+        let tail = nsRaw.substring(from: indentLength)
+
+        if tail.hasPrefix("• ") {
+            return ListDescriptor(style: "bullet", order: nil, contentRange: NSRange(location: baseLocation + indentLength + 2, length: max(0, nsRaw.length - indentLength - 2)))
+        }
+
+        if tail.hasPrefix("- ") {
+            return ListDescriptor(style: "dash", order: nil, contentRange: NSRange(location: baseLocation + indentLength + 2, length: max(0, nsRaw.length - indentLength - 2)))
+        }
+
+        let pattern = #"^(\d+)\.\s"#
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: tail, options: [], range: NSRange(location: 0, length: (tail as NSString).length)) {
+            let orderRange = match.range(at: 1)
+            let order = Int((tail as NSString).substring(with: orderRange))
+            return ListDescriptor(style: "ordered", order: order, contentRange: NSRange(location: baseLocation + indentLength + match.range.length, length: max(0, nsRaw.length - indentLength - match.range.length)))
+        }
+
+        return nil
+    }
+
+    private func trimmedVisibleRange(_ range: NSRange, in nsString: NSString) -> NSRange {
+        var location = range.location
+        var length = range.length
+
+        while length > 0 {
+            let tail = nsString.character(at: location + length - 1)
+            if tail == 10 || tail == 13 {
+                length -= 1
+            } else {
+                break
+            }
+        }
+
+        while length > 0 {
+            let head = nsString.character(at: location)
+            if head == 10 || head == 13 {
+                location += 1
+                length -= 1
+            } else {
+                break
+            }
+        }
+
+        return NSRange(location: location, length: max(0, length))
+    }
+
+    private func leadingIndentLevel(in raw: String) -> Int {
+        var spaces = 0
+        var tabs = 0
+
+        for char in raw {
+            if char == " " {
+                spaces += 1
+                continue
+            }
+            if char == "\t" {
+                tabs += 1
+                continue
+            }
+            break
+        }
+
+        return tabs + (spaces / 4)
+    }
+
+    private func resolvedWidth(for attributes: [NSAttributedString.Key: Any], attachment: NSTextAttachment) -> Double? {
+        if let width = attributes[.notebookImageWidth] as? CGFloat, width > 1 {
+            return Double(width)
+        }
+        if attachment.bounds.width > 1 {
+            return Double(attachment.bounds.width)
+        }
+        return nil
+    }
+
+    private func resolvedHeight(for attributes: [NSAttributedString.Key: Any], attachment: NSTextAttachment) -> Double? {
+        if let height = attributes[.notebookImageHeight] as? CGFloat, height > 1 {
+            return Double(height)
+        }
+        if attachment.bounds.height > 1 {
+            return Double(attachment.bounds.height)
+        }
+        return nil
+    }
+
+    private func colorHex(_ color: NSColor) -> String? {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+        let red = Int(round(rgb.redComponent * 255))
+        let green = Int(round(rgb.greenComponent * 255))
+        let blue = Int(round(rgb.blueComponent * 255))
+        let alpha = Int(round(rgb.alphaComponent * 255))
+        return String(format: "#%02X%02X%02X%02X", red, green, blue, alpha)
+    }
+
+    private func mimeType(forPathExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "heic": return "image/heic"
+        case "webp": return "image/webp"
+        case "m4a": return "audio/mp4"
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "aiff": return "audio/aiff"
+        case "caf": return "audio/x-caf"
+        case "json": return "application/json"
+        default: return "application/octet-stream"
+        }
+    }
+
+    private func uniqueAssetFilename(_ preferredFilename: String, fallbackExtension: String) -> String {
+        let sanitizedBase = sanitizeFilename(URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent)
+        let fallbackBase = sanitizedBase.isEmpty ? "asset" : sanitizedBase
+        let ext = URL(fileURLWithPath: preferredFilename).pathExtension.isEmpty ? fallbackExtension : URL(fileURLWithPath: preferredFilename).pathExtension
+        let filename = "\(assetIndex + 1)-\(fallbackBase).\(ext)"
+        return filename
+    }
+
+    private func sanitizeFilename(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let unicodeScalars = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        return String(unicodeScalars).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private func nextBlockID() -> String {
+        blockIndex += 1
+        return "block-\(blockIndex)"
+    }
+
+    private func nextAssetID() -> String {
+        assetIndex += 1
+        return "asset-\(assetIndex)"
+    }
+
+    private struct AttachmentItem {
+        let range: NSRange
+        let attachment: NSTextAttachment
+        let attributes: [NSAttributedString.Key: Any]
+        let checkboxState: Bool?
+        let tableData: TableData?
+
+        var isCheckbox: Bool {
+            checkboxState != nil
+        }
+    }
+
+    private struct ListDescriptor {
+        let style: String
+        let order: Int?
+        let contentRange: NSRange
     }
 }

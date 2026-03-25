@@ -26,6 +26,7 @@ final class AppSettings: ObservableObject {
         static let lastSelectedFolder = "last_selected_folder"
         static let startupBehavior = "startup_behavior" // "restore", "none", "all_notes"
         static let accentColor = "accent_color" // 主题色
+        static let appearanceMode = "appearance_mode"
         static let iCloudSyncEnabled = "icloud_sync_enabled"
         static let editorFontName = "editor_font_name" // 编辑器字体名称
         static let editorFontSize = "editor_font_size" // 编辑器字号
@@ -109,6 +110,41 @@ final class AppSettings: ObservableObject {
             return behavior
         }
         set { defaults.set(newValue.rawValue, forKey: Keys.startupBehavior) }
+    }
+
+    enum AppearanceMode: String, CaseIterable {
+        case system
+        case light
+        case dark
+
+        var displayName: String {
+            switch self {
+            case .system: return "自动"
+            case .light: return "亮色"
+            case .dark: return "暗色"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .system: return "circle.lefthalf.filled"
+            case .light: return "sun.max"
+            case .dark: return "moon"
+            }
+        }
+    }
+
+    var appearanceMode: AppearanceMode {
+        get {
+            guard let rawValue = defaults.string(forKey: Keys.appearanceMode),
+                  let mode = AppearanceMode(rawValue: rawValue) else {
+                return .system
+            }
+            return mode
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.appearanceMode)
+        }
     }
 
     // MARK: - 主题色

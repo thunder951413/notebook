@@ -99,6 +99,10 @@ struct ContentView: View {
         return notes
     }
 
+    private var filteredNoteIDs: [UUID] {
+        filteredNotes.map(\.id)
+    }
+
     /// 保存指定笔记的内容
     private func saveNoteContent(noteID: UUID, content: NSAttributedString, reason: String) {
         guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else { return }
@@ -169,6 +173,34 @@ struct ContentView: View {
         saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
     }
 
+    private func updateSelection(_ newSelection: UUID?, reason: String) {
+        Logger.shared.log(.app, .debug, "updateSelection reason=\(reason), from=\(selection?.uuidString.prefix(8) ?? "nil"), to=\(newSelection?.uuidString.prefix(8) ?? "nil")")
+
+        if let oldNoteID = selection, oldNoteID != newSelection {
+            NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
+
+            let contentToSave: NSAttributedString
+            if richTextController.isBoundTo(noteID: oldNoteID),
+               let editorContent = richTextController.snapshotAttributedString() {
+                contentToSave = editorContent
+                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                    store.notes[oldIndex].content = contentToSave
+                }
+            } else if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                contentToSave = store.notes[oldIndex].content
+            } else {
+                selection = newSelection
+                AppSettings.shared.lastSelectedNoteID = newSelection
+                return
+            }
+
+            saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+        }
+
+        selection = newSelection
+        AppSettings.shared.lastSelectedNoteID = newSelection
+    }
+
     var body: some View {
         NavigationSplitView {
             SidebarView(
@@ -189,43 +221,7 @@ struct ContentView: View {
                 set: { newSelection in
                     // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
                     DispatchQueue.main.async {
-                        // 关键：在变更 selection 前，先保存当前笔记
-                        // 使用 selection（旧笔记ID）而不是 boundNoteID，因为 boundNoteID 可能已经被更新
-                        if let oldNoteID = selection, oldNoteID != newSelection {
-                            // 取消该笔记的待处理自动保存
-                            NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
-
-                            // 如果编辑器绑定着旧笔记，从编辑器获取内容
-                            // 否则使用内存中的内容
-                            let contentToSave: NSAttributedString
-                            if richTextController.isBoundTo(noteID: oldNoteID),
-                               let editorContent = richTextController.snapshotAttributedString() {
-                                // 成功从编辑器获取内容
-                                contentToSave = editorContent
-                                // 同步更新内存
-                                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
-                                    store.notes[oldIndex].content = contentToSave
-                                }
-                            } else {
-                                // 编辑器不可用或不绑定旧笔记，使用内存中的内容
-                                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
-                                    contentToSave = store.notes[oldIndex].content
-                                } else {
-                                    print("[SAVE WARNING] Cannot find old note in memory, skipping save")
-                                    selection = newSelection
-                                    AppSettings.shared.lastSelectedNoteID = newSelection
-                                    return
-                                }
-                            }
-
-                            // 执行保存
-                            saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: "switch")
-                        }
-
-                        // 更新 selection
-                        selection = newSelection
-                        // 保存最后选中的笔记
-                        AppSettings.shared.lastSelectedNoteID = newSelection
+                        updateSelection(newSelection, reason: "switch")
                     }
                 }
             ), onDeleteRequest: { id in
@@ -303,12 +299,37 @@ struct ContentView: View {
         }
         .onChange(of: store.selectedNoteId) { _, newValue in
             guard let id = newValue else { return }
-            selection = id
+            guard let note = store.activeNotes.first(where: { $0.id == id }) else {
+                store.selectedNoteId = nil
+                return
+            }
+
+            selectedTagID = nil
+            selectedEncryptedFolderID = nil
+            isEncryptedFolderUnlocked = false
+            isRecycleBinSelected = false
+            selectedFolder = note.folder
+            searchText = ""
+            updateSelection(id, reason: "externalNavigation")
+            store.selectedNoteId = nil
+            store.selectedFolderForNavigation = nil
         }
         .onChange(of: store.selectedFolderForNavigation) { _, newValue in
             guard let folder = newValue else { return }
+            selectedTagID = nil
+            isRecycleBinSelected = false
+            searchText = ""
             selectedFolder = folder
             store.selectedFolderForNavigation = nil
+        }
+        .onChange(of: filteredNoteIDs) { _, currentIDs in
+            guard !isRecycleBinSelected else { return }
+            let nextSelection = VisibleNoteSelectionCoordinator.selectionForVisibleNotes(
+                currentSelection: selection,
+                availableIDs: currentIDs
+            )
+            guard nextSelection != selection else { return }
+            updateSelection(nextSelection, reason: "filterSync")
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.fetchData()
@@ -428,6 +449,8 @@ struct ContentView: View {
     }
 
     private func createNote() {
+        searchText = ""
+
         // 检查是否在加密文件夹中
         if selectedFolder == EncryptedFolderManager.folderName,
            let encryptedFolderID = selectedEncryptedFolderID {
@@ -440,8 +463,12 @@ struct ContentView: View {
         
         let folderName = selectedFolder == l10n(L10nKeys.Folder.allNotes) ? l10n(L10nKeys.Folder.uncategorized) : selectedFolder
         let folderID = store.folders.first { $0.name == folderName }?.id
-        store.addNote(title: l10n(L10nKeys.Note.new), folderID: folderID, folderName: folderName)
-        selection = store.activeNotes.first?.id
+        if let newNote = store.addNote(title: l10n(L10nKeys.Note.new), folderID: folderID, folderName: folderName) {
+            if let selectedTagID {
+                store.addTagToNote(tagID: selectedTagID, noteID: newNote.id)
+            }
+            selection = newNote.id
+        }
     }
 
     private func confirmDeleteSelectedNote() {
@@ -1362,6 +1389,7 @@ private struct NoteEditorView: View {
                             RichTextEditor(
                                 attributedText: $note.content,
                                 controller: controller,
+                                isEditable: true,
                                 noteID: note.id
                             )
                             .id(note.id)
@@ -1380,6 +1408,7 @@ private struct NoteEditorView: View {
                                 RichTextEditor(
                                     attributedText: $note.content,
                                     controller: controller,
+                                    isEditable: true,
                                     noteID: note.id
                                 )
                                 .id(note.id)
@@ -2568,24 +2597,15 @@ private struct AIPanelView: View {
                 }
                 
                 print("[AI Image] Processing image attachment at: \(textAttachment.attachmentFileURL)")
-                
-                // 检查文件是否存在
-                let fileManager = FileManager.default
-                if !fileManager.fileExists(atPath: textAttachment.attachmentFileURL.path) {
-                    print("[AI Image] File does not exist at path: \(textAttachment.attachmentFileURL.path)")
-                    return
-                }
-                
-                // 读取图片文件并转换为 base64
-                do {
-                    let imageData = try Data(contentsOf: textAttachment.attachmentFileURL)
+
+                if let imageData = textAttachment.attachmentData() {
                     let base64String = imageData.base64EncodedString()
-                    let mimeType = mimeTypeForPath(path: textAttachment.attachmentFileURL.path)
+                    let mimeType = mimeTypeForPath(path: textAttachment.attachmentFilename)
                     let aiImage = AIImageAttachment(base64Data: base64String, mimeType: mimeType)
                     images.append(aiImage)
-                    print("[AI Image] Successfully extracted image: \(textAttachment.attachmentFileURL.lastPathComponent), size: \(imageData.count) bytes, base64 length: \(base64String.count)")
-                } catch {
-                    print("[AI Image] Failed to read image data: \(error)")
+                    print("[AI Image] Successfully extracted image: \(textAttachment.attachmentFilename), size: \(imageData.count) bytes, base64 length: \(base64String.count)")
+                } else {
+                    print("[AI Image] Failed to read image data from attachment or embedded payload")
                 }
             }
             // 处理普通的 NSTextAttachment（可能包含图片）
@@ -2670,12 +2690,27 @@ private struct RecycleBinView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Binding var selection: Note.ID?
 
+    @State private var selectedIDs: Set<Note.ID> = []
     @State private var showingDeleteConfirm = false
-    @State private var pendingDeleteNote: Note?
+    @State private var pendingDeleteIDs: Set<Note.ID> = []
     @State private var showingEmptyConfirm = false
+    @State private var feedbackMessage: String?
+    @State private var feedbackDismissTask: Task<Void, Never>?
 
     private var sortedNotes: [Note] {
         store.recycledNotes.sorted { $0.deletedAt ?? .distantPast > $1.deletedAt ?? .distantPast }
+    }
+
+    private var hasSelection: Bool {
+        !selectedIDs.isEmpty
+    }
+
+    private var deleteAlertTitle: String {
+        pendingDeleteIDs.count > 1 ? "彻底删除选中的 \(pendingDeleteIDs.count) 条笔记？" : "彻底删除该笔记？"
+    }
+
+    private var deleteAlertMessage: String {
+        pendingDeleteIDs.count > 1 ? "删除后将无法恢复这些笔记。" : "删除后将无法恢复。"
     }
 
     var body: some View {
@@ -2684,6 +2719,24 @@ private struct RecycleBinView: View {
                 Text("回收站")
                     .font(.headline)
                 Spacer()
+                if hasSelection {
+                    Text("已选 \(selectedIDs.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("恢复选中") {
+                    restoreNotes(ids: selectedIDs)
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasSelection)
+                .keyboardShortcut(.return, modifiers: [.command])
+                Button("删除选中") {
+                    pendingDeleteIDs = selectedIDs
+                    showingDeleteConfirm = true
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasSelection)
+                .keyboardShortcut(.delete, modifiers: [])
                 Button("清空") {
                     showingEmptyConfirm = true
                 }
@@ -2707,20 +2760,17 @@ private struct RecycleBinView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selection) {
+                List(selection: $selectedIDs) {
                     ForEach(sortedNotes) { note in
                         RecycleBinRow(note: note)
                             .tag(note.id)
                             .contentShape(Rectangle())
                             .contextMenu {
                                 Button("恢复到原文件夹") {
-                                    store.restoreNote(id: note.id)
-                                    if selection == note.id {
-                                        selection = nil
-                                    }
+                                    restoreNotes(ids: [note.id])
                                 }
                                 Button(role: .destructive) {
-                                    pendingDeleteNote = note
+                                    pendingDeleteIDs = [note.id]
                                     showingDeleteConfirm = true
                                 } label: {
                                     Label("彻底删除", systemImage: "trash")
@@ -2733,36 +2783,127 @@ private struct RecycleBinView: View {
         }
         .frame(minWidth: 220, maxWidth: 280)
         .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
-        .alert("彻底删除该笔记？", isPresented: $showingDeleteConfirm) {
+        .overlay(alignment: .bottom) {
+            if let feedbackMessage {
+                Text(feedbackMessage)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .onAppear {
+            selection = nil
+        }
+        .onChange(of: selectedIDs) { _, _ in
+            selection = nil
+        }
+        .onChange(of: sortedNotes.map(\.id)) { _, currentIDs in
+            selectedIDs.formIntersection(Set(currentIDs))
+            if currentIDs.isEmpty {
+                selection = nil
+            }
+        }
+        .alert(deleteAlertTitle, isPresented: $showingDeleteConfirm) {
             Button("删除", role: .destructive) {
-                if let note = pendingDeleteNote {
-                    store.deleteNotePermanently(id: note.id)
-                    if selection == note.id {
-                        selection = nil
-                    }
-                }
-                pendingDeleteNote = nil
+                let idsToDelete = pendingDeleteIDs
+                let deletedCount = store.deleteNotesPermanently(ids: Array(idsToDelete))
+                selectedIDs = RecycleBinSelectionCoordinator.selectionAfterRemoving(
+                    idsToDelete,
+                    from: selectedIDs,
+                    availableIDs: sortedNotes.map(\.id)
+                )
+                selection = nil
+                pendingDeleteIDs.removeAll()
+                showFeedback("已彻底删除 \(deletedCount) 条笔记")
             }
             Button("取消", role: .cancel) {
-                pendingDeleteNote = nil
+                pendingDeleteIDs.removeAll()
             }
         } message: {
-            Text("删除后将无法恢复。")
+            Text(deleteAlertMessage)
         }
         .alert("清空回收站？", isPresented: $showingEmptyConfirm) {
             Button("清空", role: .destructive) {
-                for note in sortedNotes {
-                    store.deleteNotePermanently(id: note.id)
-                }
-                if let current = selection,
-                   store.recycledNotes.contains(where: { $0.id == current }) {
-                    selection = nil
-                }
+                let deletedCount = store.deleteNotesPermanently(ids: sortedNotes.map(\.id))
+                selectedIDs.removeAll()
+                selection = nil
+                showFeedback("已清空回收站，共删除 \(deletedCount) 条笔记")
             }
             Button("取消", role: .cancel) {}
         } message: {
             Text("将永久删除回收站中的所有笔记。")
         }
+    }
+
+    private func restoreNotes(ids: Set<Note.ID>) {
+        let idsToRestore = ids
+        let restoredCount = store.restoreNotes(ids: Array(idsToRestore))
+        selectedIDs = RecycleBinSelectionCoordinator.selectionAfterRemoving(
+            idsToRestore,
+            from: selectedIDs,
+            availableIDs: sortedNotes.map(\.id)
+        )
+        selection = nil
+        showFeedback("已恢复 \(restoredCount) 条笔记")
+    }
+
+    private func showFeedback(_ message: String) {
+        feedbackDismissTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.18)) {
+            feedbackMessage = message
+        }
+        feedbackDismissTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled {
+                return
+            }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    feedbackMessage = nil
+                }
+            }
+        }
+    }
+}
+
+struct RecycleBinSelectionCoordinator {
+    static func selectionAfterRemoving(
+        _ removedIDs: Set<UUID>,
+        from currentSelection: Set<UUID>,
+        availableIDs: [UUID]
+    ) -> Set<UUID> {
+        let remainingIDs = availableIDs.filter { !removedIDs.contains($0) }
+        let remainingSelection = currentSelection
+            .subtracting(removedIDs)
+            .intersection(Set(remainingIDs))
+
+        if !remainingSelection.isEmpty {
+            return remainingSelection
+        }
+
+        guard let firstRemainingID = remainingIDs.first else {
+            return []
+        }
+
+        return [firstRemainingID]
+    }
+}
+
+struct VisibleNoteSelectionCoordinator {
+    static func selectionForVisibleNotes(
+        currentSelection: UUID?,
+        availableIDs: [UUID]
+    ) -> UUID? {
+        let visibleIDSet = Set(availableIDs)
+
+        if let currentSelection, visibleIDSet.contains(currentSelection) {
+            return currentSelection
+        }
+
+        return availableIDs.first
     }
 }
 
@@ -3884,6 +4025,10 @@ struct MarkdownWebView: NSViewRepresentable {
             return
         }
 
+        if context.coordinator.lastLoadedHTML != nil {
+            context.coordinator.captureRelativeScrollProgress(from: webView)
+        }
+
         // 调试：打印生成的 HTML 内容
         if markdown.contains("```mermaid") {
             print("[Mermaid Debug] Generated HTML preview:")
@@ -3914,6 +4059,7 @@ struct MarkdownWebView: NSViewRepresentable {
         var webView: WKWebView?
         var lastLoadedHTML: String?
         var reloadWorkItem: DispatchWorkItem?
+        var navigationState = MarkdownPreviewNavigationState()
 
         init(_ parent: MarkdownWebView) {
             self.parent = parent
@@ -3929,6 +4075,7 @@ struct MarkdownWebView: NSViewRepresentable {
                     }
                 }
             }
+            applyPendingNavigationIfNeeded()
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -3957,29 +4104,78 @@ struct MarkdownWebView: NSViewRepresentable {
                   let anchor = userInfo["anchor"] as? String else { return }
 
             print("[ScrollToHeading] Received for noteID: \(parent.noteID), anchor: \(anchor)")
+            navigationState.queueAnchor(anchor)
+            applyPendingNavigationIfNeeded()
+        }
 
-            // 使用更可靠的滚动方法
+        func captureRelativeScrollProgress(from webView: WKWebView) {
             let script = """
                 (function() {
-                    var element = document.getElementById('\(anchor)');
-                    if (element) {
-                        var elementTop = element.offsetTop;
-                        window.scrollTo({
-                            top: elementTop - 20,
-                            behavior: 'smooth'
-                        });
-                        return 'scrolled to \(anchor) at ' + elementTop;
-                    }
-                    return 'element not found: \(anchor)';
+                    return {
+                        offset: window.scrollY || window.pageYOffset || 0,
+                        contentHeight: document.body.scrollHeight || 0,
+                        viewportHeight: window.innerHeight || 0
+                    };
                 })();
             """
 
-            DispatchQueue.main.async { [weak self] in
-                self?.webView?.evaluateJavaScript(script) { result, error in
+            webView.evaluateJavaScript(script) { [weak self] result, _ in
+                guard let self,
+                      let payload = result as? [String: Any],
+                      let offset = payload["offset"] as? Double,
+                      let contentHeight = payload["contentHeight"] as? Double,
+                      let viewportHeight = payload["viewportHeight"] as? Double else {
+                    return
+                }
+                self.navigationState.captureRelativeProgress(
+                    offset: offset,
+                    contentHeight: contentHeight,
+                    viewportHeight: viewportHeight
+                )
+            }
+        }
+
+        private func applyPendingNavigationIfNeeded() {
+            guard let webView,
+                  let command = navigationState.consumePostLoadCommand() else { return }
+
+            let script: String
+            switch command {
+            case .anchor(let anchor):
+                script = """
+                    (function() {
+                        var element = document.getElementById('\(anchor)');
+                        if (element) {
+                            var elementTop = element.offsetTop;
+                            window.scrollTo({
+                                top: elementTop - 20,
+                                behavior: 'smooth'
+                            });
+                            return 'scrolled to \(anchor) at ' + elementTop;
+                        }
+                        return 'element not found: \(anchor)';
+                    })();
+                """
+            case .relativeProgress(let progress):
+                script = """
+                    (function() {
+                        var maxOffset = Math.max((document.body.scrollHeight || 0) - (window.innerHeight || 0), 0);
+                        var progress = Math.max(0, Math.min(1, \(progress)));
+                        window.scrollTo({
+                            top: maxOffset * progress,
+                            behavior: 'auto'
+                        });
+                        return 'restored progress ' + progress;
+                    })();
+                """
+            }
+
+            DispatchQueue.main.async {
+                webView.evaluateJavaScript(script) { result, error in
                     if let error = error {
-                        print("[ScrollToHeading] Error: \(error)")
+                        print("[MarkdownPreviewNavigation] Error: \(error)")
                     } else if let result = result {
-                        print("[ScrollToHeading] Result: \(result)")
+                        print("[MarkdownPreviewNavigation] Result: \(result)")
                     }
                 }
             }
@@ -4271,7 +4467,7 @@ struct MarkdownWebView: NSViewRepresentable {
                         if let data = textAttachment.attachmentData() {
                             let mimeType = mimeTypeForPath(path: textAttachment.attachmentFileURL.path)
                             let base64 = data.base64EncodedString()
-                            let filename = textAttachment.attachmentFileURL.lastPathComponent
+                            let filename = textAttachment.attachmentFilename
                             appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename)</div>")
                         } else {
                             print("[Markdown Preview] Failed to read audio attachment data (all sources empty)")
@@ -4281,15 +4477,14 @@ struct MarkdownWebView: NSViewRepresentable {
                 }
 
                 if let audioAttachment = attachment as? AudioBlockAttachment {
-                    do {
-                        let data = try Data(contentsOf: audioAttachment.fileURL)
-                        let mimeType = mimeTypeForPath(path: audioAttachment.fileURL.path)
+                    if let data = audioAttachment.audioData() {
+                        let mimeType = mimeTypeForPath(path: audioAttachment.attachmentFilename)
                         let base64 = data.base64EncodedString()
                         let duration = Int(audioAttachment.duration.rounded())
-                        let filename = htmlTextEscaped(audioAttachment.fileURL.lastPathComponent)
+                        let filename = htmlTextEscaped(audioAttachment.attachmentFilename)
                         appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename) · \(max(1, duration))秒</div>")
-                    } catch {
-                        print("[Markdown Preview] Failed to read audio attachment: \(error)")
+                    } else {
+                        print("[Markdown Preview] Failed to read audio attachment (all sources empty)")
                     }
                     return
                 }
@@ -4661,6 +4856,45 @@ struct MarkdownWebView: NSViewRepresentable {
         html += "</tbody></table>"
         
         return html
+    }
+}
+
+enum MarkdownPreviewNavigationCommand: Equatable {
+    case anchor(String)
+    case relativeProgress(Double)
+}
+
+struct MarkdownPreviewNavigationState {
+    private var pendingAnchor: String?
+    private var pendingRelativeProgress: Double?
+
+    mutating func queueAnchor(_ anchor: String) {
+        pendingAnchor = anchor
+    }
+
+    mutating func captureRelativeProgress(offset: Double, contentHeight: Double, viewportHeight: Double) {
+        let maxOffset = max(contentHeight - viewportHeight, 0)
+        guard maxOffset > 0 else {
+            pendingRelativeProgress = nil
+            return
+        }
+
+        let clampedOffset = min(max(offset, 0), maxOffset)
+        pendingRelativeProgress = clampedOffset / maxOffset
+    }
+
+    mutating func consumePostLoadCommand() -> MarkdownPreviewNavigationCommand? {
+        if let pendingAnchor {
+            self.pendingAnchor = nil
+            return .anchor(pendingAnchor)
+        }
+
+        if let pendingRelativeProgress {
+            self.pendingRelativeProgress = nil
+            return .relativeProgress(pendingRelativeProgress)
+        }
+
+        return nil
     }
 }
 

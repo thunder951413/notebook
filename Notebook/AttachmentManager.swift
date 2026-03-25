@@ -33,6 +33,37 @@ final class AttachmentManager {
         }
     }
 
+    func normalizedContentForSaving(_ content: NSAttributedString, noteID: UUID) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: content)
+        let fullRange = NSRange(location: 0, length: content.length)
+        var attachmentEntries: [(range: NSRange, attachment: NSTextAttachment, attributes: [NSAttributedString.Key: Any])] = []
+
+        content.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            if attachment is CheckboxTextAttachment || attachment is TableTextAttachment {
+                return
+            }
+            let attributes = content.attributes(at: range.location, effectiveRange: nil)
+            if attributes[.notebookTableData] is Data || TableTextAttachment.looksLikeTable(attachment) {
+                return
+            }
+            attachmentEntries.append((range, attachment, attributes))
+        }
+
+        for entry in attachmentEntries.reversed() {
+            guard let replacement = replacementAttachmentString(
+                from: entry.attachment,
+                attributes: entry.attributes,
+                noteID: noteID
+            ) else {
+                continue
+            }
+            mutable.replaceCharacters(in: entry.range, with: replacement)
+        }
+
+        return mutable
+    }
+
     func deleteAttachments(for noteID: UUID) {
         let location = StorageLocationManager.shared
         guard let base = location.baseDirectoryURL else { return }
@@ -47,6 +78,206 @@ final class AttachmentManager {
                 print("Failed to delete attachments: \(error)")
             }
         }
+    }
+
+    private func replacementAttachmentString(
+        from originalAttachment: NSTextAttachment,
+        attributes: [NSAttributedString.Key: Any],
+        noteID: UUID
+    ) -> NSAttributedString? {
+        if let imageAttachment = originalAttachment as? AttachmentTextAttachment, imageAttachment.kind == .image {
+            guard let targetURL = resolvedAttachmentURL(
+                existingURL: imageAttachment.attachmentFileURL,
+                data: imageAttachment.attachmentData(),
+                preferredFilename: imageAttachment.attachmentFilename,
+                noteID: noteID
+            ) else {
+                return nil
+            }
+
+            let replacementAttachment = AttachmentTextAttachment(
+                fileURL: targetURL,
+                kind: .image,
+                embeddedFileData: imageAttachment.attachmentData(),
+                attachmentFilename: imageAttachment.attachmentFilename
+            )
+            if originalAttachment.bounds.width > 1, originalAttachment.bounds.height > 1 {
+                replacementAttachment.bounds = originalAttachment.bounds
+            }
+
+            let replacement = NSMutableAttributedString(attachment: replacementAttachment)
+            applyAttributes(attributes, to: replacement)
+            let width = (attributes[.notebookImageWidth] as? CGFloat) ?? replacementAttachment.bounds.width
+            let height = (attributes[.notebookImageHeight] as? CGFloat) ?? replacementAttachment.bounds.height
+            if width > 1, height > 1 {
+                replacement.addAttribute(.notebookImageWidth, value: width, range: NSRange(location: 0, length: replacement.length))
+                replacement.addAttribute(.notebookImageHeight, value: height, range: NSRange(location: 0, length: replacement.length))
+                replacement.addAttribute(.link, value: imageLink(for: targetURL, width: width, height: height), range: NSRange(location: 0, length: replacement.length))
+            }
+            return replacement
+        }
+
+        if let audioAttachment = originalAttachment as? AudioBlockAttachment {
+            guard let audioStorage = resolvedAudioAttachmentStorage(
+                existingURL: audioAttachment.fileURL,
+                audioData: audioAttachment.audioData(),
+                preferredFilename: audioAttachment.attachmentFilename,
+                manifestData: audioAttachment.manifestData(),
+                noteID: noteID
+            ) else {
+                return nil
+            }
+
+            let replacementAttachment = AudioBlockAttachment(
+                fileURL: audioStorage.audioURL,
+                duration: audioAttachment.duration,
+                createDate: audioAttachment.createDate,
+                embeddedAudioData: audioAttachment.audioData(),
+                attachmentFilename: audioAttachment.attachmentFilename,
+                embeddedManifestData: audioAttachment.manifestData()
+            )
+            if !originalAttachment.bounds.isEmpty {
+                replacementAttachment.bounds = originalAttachment.bounds
+            }
+
+            let replacement = NSMutableAttributedString(attachment: replacementAttachment)
+            applyAttributes(attributes, to: replacement)
+            replacement.addAttribute(.link, value: audioStorage.audioURL, range: NSRange(location: 0, length: replacement.length))
+            return replacement
+        }
+
+        if let audioAttachment = originalAttachment as? AttachmentTextAttachment, audioAttachment.kind == .audio {
+            guard let audioURL = resolvedAttachmentURL(
+                existingURL: audioAttachment.attachmentFileURL,
+                data: audioAttachment.attachmentData(),
+                preferredFilename: audioAttachment.attachmentFilename,
+                noteID: noteID
+            ) else {
+                return nil
+            }
+
+            let replacementAttachment = AttachmentTextAttachment(
+                fileURL: audioURL,
+                kind: .audio,
+                embeddedFileData: audioAttachment.attachmentData(),
+                attachmentFilename: audioAttachment.attachmentFilename
+            )
+            if !originalAttachment.bounds.isEmpty {
+                replacementAttachment.bounds = originalAttachment.bounds
+            }
+
+            let replacement = NSMutableAttributedString(attachment: replacementAttachment)
+            applyAttributes(attributes, to: replacement)
+            replacement.addAttribute(.link, value: audioURL, range: NSRange(location: 0, length: replacement.length))
+            return replacement
+        }
+
+        return nil
+    }
+
+    private func applyAttributes(
+        _ attributes: [NSAttributedString.Key: Any],
+        to attributedString: NSMutableAttributedString
+    ) {
+        let range = NSRange(location: 0, length: attributedString.length)
+        for (key, value) in attributes {
+            if key == .attachment || key == .link || key == .notebookImageWidth || key == .notebookImageHeight {
+                continue
+            }
+            attributedString.addAttribute(key, value: value, range: range)
+        }
+    }
+
+    private func resolvedAttachmentURL(
+        existingURL: URL,
+        data: Data?,
+        preferredFilename: String,
+        noteID: UUID
+    ) -> URL? {
+        if isAttachmentStoredInNoteFolder(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
+            return existingURL
+        }
+        guard let data else { return nil }
+        return try? persistAttachmentData(data, preferredFilename: preferredFilename, noteID: noteID)
+    }
+
+    private func resolvedAudioAttachmentStorage(
+        existingURL: URL,
+        audioData: Data?,
+        preferredFilename: String,
+        manifestData: Data?,
+        noteID: UUID
+    ) -> (audioURL: URL, manifestURL: URL?)? {
+        if isAttachmentStoredInNoteFolder(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
+            let manifestURL = existingURL.deletingPathExtension().appendingPathExtension("tracks.json")
+            if let manifestData, !FileManager.default.fileExists(atPath: manifestURL.path) {
+                try? manifestData.write(to: manifestURL, options: .atomic)
+            }
+            return (existingURL, FileManager.default.fileExists(atPath: manifestURL.path) ? manifestURL : nil)
+        }
+
+        guard let audioData else { return nil }
+        guard let audioURL = try? persistAttachmentData(audioData, preferredFilename: preferredFilename, noteID: noteID) else {
+            return nil
+        }
+
+        let manifestURL: URL?
+        if let manifestData {
+            let destination = audioURL.deletingPathExtension().appendingPathExtension("tracks.json")
+            try? manifestData.write(to: destination, options: .atomic)
+            manifestURL = destination
+        } else {
+            manifestURL = nil
+        }
+
+        return (audioURL, manifestURL)
+    }
+
+    private func persistAttachmentData(_ data: Data, preferredFilename: String, noteID: UUID) throws -> URL {
+        let location = StorageLocationManager.shared
+        guard let base = location.baseDirectoryURL else {
+            throw NSError(domain: "AttachmentManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "未配置保存目录"])
+        }
+
+        return try location.withSecurityScopedAccess(base) {
+            let folder = try noteAttachmentDirectoryURL(noteID: noteID)
+            let ext = URL(fileURLWithPath: preferredFilename).pathExtension
+            let baseName = URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent
+            let safeBaseName = baseName.isEmpty ? "attachment" : baseName
+            let filename = "\(safeBaseName)-\(UUID().uuidString)" + (ext.isEmpty ? "" : ".\(ext)")
+            let destination = folder.appendingPathComponent(filename, isDirectory: false)
+            try data.write(to: destination, options: .atomic)
+            return destination
+        }
+    }
+
+    private func noteAttachmentDirectoryURL(noteID: UUID) throws -> URL {
+        let location = StorageLocationManager.shared
+        try location.ensureDirectoryStructureExists()
+        let folder = try location.attachmentsDirectoryURL().appendingPathComponent(noteID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    private func isAttachmentStoredInNoteFolder(_ url: URL, noteID: UUID) -> Bool {
+        let location = StorageLocationManager.shared
+        guard let base = location.baseDirectoryURL else { return false }
+
+        var result = false
+        location.withSecurityScopedAccess(base) {
+            guard let folder = try? noteAttachmentDirectoryURL(noteID: noteID) else {
+                return
+            }
+            let folderPath = folder.standardizedFileURL.path
+            let folderPrefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+            let filePath = url.standardizedFileURL.path
+            result = filePath == folderPath || filePath.hasPrefix(folderPrefix)
+        }
+        return result
+    }
+
+    private func imageLink(for fileURL: URL, width: CGFloat, height: CGFloat) -> String {
+        "notebook-image://\(fileURL.absoluteString)#w=\(Int(width.rounded()))&h=\(Int(height.rounded()))"
     }
 
     // MARK: - 附件清理
@@ -114,12 +345,14 @@ final class AttachmentManager {
 
         content.enumerateAttribute(.attachment, in: range, options: []) { value, _, _ in
             if let attachment = value as? AttachmentTextAttachment {
-                let filename = attachment.attachmentFileURL.lastPathComponent
+                let filename = attachment.attachmentFilename
                 referencedFiles.insert(filename)
             } else if let audioAttachment = value as? AudioBlockAttachment {
-                // 音频块附件使用独立类型，需要单独识别，避免被误删
-                let filename = audioAttachment.fileURL.lastPathComponent
+                let filename = audioAttachment.attachmentFilename
                 referencedFiles.insert(filename)
+                if let manifestFilename = audioAttachment.manifestFilename {
+                    referencedFiles.insert(manifestFilename)
+                }
             } else if let attachment = value as? NSTextAttachment,
                       let fileWrapper = attachment.fileWrapper {
                 if fileWrapper.isDirectory {

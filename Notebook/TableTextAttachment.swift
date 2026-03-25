@@ -331,6 +331,13 @@ final class TableTextAttachment: NSTextAttachment {
     
     /// 判断普通附件是否"像"一个表格（用于重启后反序列化恢复交互）
     static func looksLikeTable(_ attachment: NSTextAttachment) -> Bool {
+        if attachment is TableTextAttachment ||
+            attachment is AttachmentTextAttachment ||
+            attachment is AudioBlockAttachment ||
+            attachment is CheckboxTextAttachment {
+            return false
+        }
+
         let bounds = attachment.bounds
         
         // 表格通常宽度>100, 高度>50

@@ -199,6 +199,40 @@ final class AutoBackupManager: ObservableObject {
         }
     }
 
+    func createLocalBackup(context: ModelContext, fileNamePrefix: String) async throws -> BackupRecord {
+        let historyDir = try historyDirectoryURL()
+        try FileManager.default.createDirectory(at: historyDir, withIntermediateDirectories: true)
+        try await cleanupOldBackups()
+
+        let backupURL = try await DataExportManager.shared.exportAllData(context: context)
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let fileName = "\(fileNamePrefix)_\(formatter.string(from: Date())).zip"
+        let destinationURL = historyDir.appendingPathComponent(fileName)
+
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.moveItem(at: backupURL, to: destinationURL)
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: destinationURL.path)
+        let fileSize = attributes[.size] as? Int64 ?? 0
+        let record = BackupRecord(
+            id: UUID(),
+            date: Date(),
+            fileName: fileName,
+            fileSize: fileSize,
+            location: .local
+        )
+
+        localBackupRecords.append(record)
+        localBackupRecords.sort()
+        saveLocalBackupRecords()
+
+        return record
+    }
+
     // MARK: - 同步备份到SSH
     private func syncBackupToSSH(fileName: String, localURL: URL) async throws {
         let config = SSHConfigManager.shared.config

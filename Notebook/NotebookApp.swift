@@ -20,5 +20,8 @@ struct NotebookApp: App {
                 .environmentObject(PersistenceController.shared)
                 .environmentObject(appDelegate.store)
         }
+        .commands {
+            AppearanceCommands()
+        }
     }
 }

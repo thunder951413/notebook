@@ -12,6 +12,7 @@
 
 import Foundation
 import SwiftData
+import AppKit
 
 /// 备份项
 struct BackupItem: Codable, Identifiable, Hashable {
@@ -90,15 +91,14 @@ final class BackupManager {
     /// 从备份恢复
     func restoreBackup(_ backup: BackupItem, context: ModelContext) -> Bool {
         do {
-            let descriptor = FetchDescriptor<NoteEntity>(
-                predicate: #Predicate<NoteEntity> { $0.id == backup.noteID }
+            let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == backup.noteID }
             )
 
             let entities = try context.fetch(descriptor)
 
             if let entity = entities.first {
-                // 先创建当前状态的备份（以防万一）
-                if let currentData = entity.rtfdData {
+                if let currentData = currentBlockDocumentRTFDData(for: entity, context: context) {
                     createBackup(
                         noteID: backup.noteID,
                         title: entity.title,
@@ -107,10 +107,27 @@ final class BackupManager {
                     )
                 }
 
-                // 恢复备份数据
-                entity.rtfdData = backup.rtfdData
                 entity.updatedAt = Date()
-                try context.save()
+                guard let request = NoteSaveManager.shared.createRequest(
+                    noteID: backup.noteID,
+                    title: entity.title,
+                    folderID: entity.folderID,
+                    folder: entity.folderName,
+                    reminderAt: entity.reminderAt,
+                    recurrenceRule: entity.recurrenceRule,
+                    content: try NSAttributedString(
+                        data: backup.rtfdData,
+                        options: [.documentType: NSAttributedString.DocumentType.rtfd],
+                        documentAttributes: nil
+                    ),
+                    reason: "backup_restore"
+                ) else {
+                    return false
+                }
+                let result = NoteSaveManager.shared.saveImmediately(request: request)
+                guard case .success = result else {
+                    return false
+                }
 
                 print("[BackupManager] Restored backup: \(backup.id)")
                 return true
@@ -119,6 +136,40 @@ final class BackupManager {
             print("[BackupManager] Failed to restore backup: \(error)")
         }
         return false
+    }
+
+    private func currentBlockDocumentRTFDData(for entity: BlockDocumentNoteEntity, context: ModelContext) -> Data? {
+        let noteID = entity.id
+        let blockDescriptor = FetchDescriptor<BlockDocumentBlockEntity>(
+            predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == noteID }
+        )
+        let assetDescriptor = FetchDescriptor<BlockDocumentAssetEntity>(
+            predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
+        )
+
+        let blocks = ((try? context.fetch(blockDescriptor)) ?? []).sorted { $0.position < $1.position }
+        let assets = ((try? context.fetch(assetDescriptor)) ?? []).map { ($0.assetID, $0) }
+        let assetsByID = Dictionary(uniqueKeysWithValues: assets)
+
+        let attachmentsRoot: URL? = {
+            let storage = StorageLocationManager.shared
+            guard let baseDirectory = storage.baseDirectoryURL else {
+                return nil
+            }
+            return try? storage.withSecurityScopedAccess(baseDirectory) {
+                try storage.attachmentsDirectoryURL()
+            }
+        }()
+
+        let content = BlockDocumentAttributedStringBuilder(attachmentsRoot: attachmentsRoot)
+            .build(blocks: blocks, assetsByID: assetsByID)
+        guard content.length > 0 else {
+            return nil
+        }
+        return try? content.data(
+            from: NSRange(location: 0, length: content.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+        )
     }
 
     /// 标记保存开始（用于崩溃检测）

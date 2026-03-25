@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import SwiftData
+import AppKit
 
 /// 设置页面 Tab 类型
 enum SettingsTab: String, CaseIterable, Identifiable {
@@ -417,10 +418,15 @@ struct SettingsGeneralView: View {
 // MARK: - 数据管理视图
 struct DataManagementView: View {
     @EnvironmentObject private var persistence: PersistenceController
+    @EnvironmentObject private var store: NoteStore
     @State private var errorMessage: String?
     @State private var showSSHSettingsSheet = false
     @State private var isSyncing = false
     @State private var syncResult: SyncResult?
+    @State private var showMigrationPreviewSheet = false
+    @State private var showPersistedBlockBrowserSheet = false
+    @State private var migrationPreviewLibrary: ImportedDocumentLibrary?
+    @State private var migrationPreviewPackage: LoadedDocumentMigrationPackage?
 
     enum SyncResult {
         case success(String)
@@ -519,6 +525,16 @@ struct DataManagementView: View {
                         }
                         .help("导出所有笔记、文件夹和标签（不包含附件）")
 
+                        Button("预览笔记包") {
+                            previewDocumentMigrationPackage()
+                        }
+                        .help("读取笔记导出包，并用块级只读视图验证显示效果")
+
+                        Button("浏览当前文档库") {
+                            browsePersistedBlockDocumentLibrary()
+                        }
+                        .help("浏览当前已写入 SwiftData 的块级文档数据")
+
                         Button("导出所有数据") {
                             exportAllData()
                         }
@@ -551,7 +567,7 @@ struct DataManagementView: View {
                         Button("导入笔记") {
                             importNotes()
                         }
-                        .help("导入笔记、文件夹和标签")
+                        .help("导入块级文档笔记包，并重建当前文档库")
 
                         Button("导入所有数据") {
                             importAllData()
@@ -617,6 +633,23 @@ struct DataManagementView: View {
         }
         .sheet(isPresented: $showSSHSettingsSheet) {
             SSHSettingsView()
+        }
+        .sheet(isPresented: $showMigrationPreviewSheet, onDismiss: cleanupMigrationPreviewPackage) {
+            if let migrationPreviewLibrary {
+                DocumentMigrationPreviewView(library: migrationPreviewLibrary)
+            } else {
+                ProgressView("正在加载笔记包预览")
+                    .frame(width: 480, height: 320)
+            }
+        }
+        .sheet(isPresented: $showPersistedBlockBrowserSheet) {
+            if let container = persistence.modelContainer {
+                PersistentBlockDocumentLibraryBrowserView()
+                    .modelContainer(container)
+            } else {
+                ContentUnavailableView("数据容器未配置", systemImage: "externaldrive.badge.xmark")
+                    .frame(width: 520, height: 360)
+            }
         }
     }
 
@@ -695,6 +728,56 @@ struct DataManagementView: View {
         }
     }
 
+    private func previewDocumentMigrationPackage() {
+        Task {
+            do {
+                let openPanel = NSOpenPanel()
+                openPanel.allowedContentTypes = [.zip]
+                openPanel.allowsMultipleSelection = false
+                openPanel.canChooseDirectories = false
+                openPanel.canChooseFiles = true
+                openPanel.message = "选择要预览的笔记包"
+
+                guard openPanel.runModal() == .OK, let zipURL = openPanel.url else {
+                    return
+                }
+
+                cleanupMigrationPreviewPackage()
+
+                let handler = InMemoryDocumentMigrationImportHandler()
+                let importer = DocumentMigrationPackageImporter()
+                let package = try importer.importArchive(from: zipURL, using: handler)
+
+                guard let library = handler.library else {
+                    package.cleanup()
+                    errorMessage = "笔记包预览失败: 未生成预览数据"
+                    return
+                }
+
+                migrationPreviewPackage = package
+                migrationPreviewLibrary = library
+                showMigrationPreviewSheet = true
+            } catch {
+                cleanupMigrationPreviewPackage()
+                errorMessage = "预览笔记包失败: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func browsePersistedBlockDocumentLibrary() {
+        guard persistence.modelContainer != nil else {
+            errorMessage = "数据容器未配置"
+            return
+        }
+        showPersistedBlockBrowserSheet = true
+    }
+
+    private func cleanupMigrationPreviewPackage() {
+        migrationPreviewPackage?.cleanup()
+        migrationPreviewPackage = nil
+        migrationPreviewLibrary = nil
+    }
+
     // MARK: - 导入方法
 
     private func showImportConfirmation(message: String, confirmAction: @escaping () -> Void) {
@@ -744,7 +827,7 @@ struct DataManagementView: View {
     }
 
     private func importNotes() {
-        showImportConfirmation(message: "导入笔记将合并或覆盖现有的笔记、文件夹和标签。\n如果 ID 相同，现有数据将被更新。\n建议在导入前先导出当前数据作为备份。\n\n是否继续导入？") {
+        showImportConfirmation(message: "导入笔记会清空当前块级文档库，并用所选笔记包重新写入全部笔记、文件夹和标签。\n建议在导入前先导出当前数据作为备份。\n\n是否继续导入？") {
             Task {
                 await self.performImportNotes()
             }
@@ -765,7 +848,7 @@ struct DataManagementView: View {
             openPanel.allowsMultipleSelection = false
             openPanel.canChooseDirectories = false
             openPanel.canChooseFiles = true
-            openPanel.message = "选择要导入的笔记文件"
+            openPanel.message = "选择要导入的笔记包"
 
             guard openPanel.runModal() == .OK, let zipURL = openPanel.url else {
                 return
@@ -775,11 +858,12 @@ struct DataManagementView: View {
             try await DataExportManager.shared.importNotes(from: zipURL, context: context)
 
             await MainActor.run {
-                errorMessage = "笔记导入成功"
+                errorMessage = "笔记包导入成功，当前文档库已更新"
+                showPersistedBlockBrowserSheet = true
             }
         } catch {
             await MainActor.run {
-                errorMessage = "导入笔记失败: \(error.localizedDescription)"
+                errorMessage = "导入笔记包失败: \(error.localizedDescription)"
             }
         }
     }
@@ -906,6 +990,619 @@ struct DataManagementView: View {
                 }
             }
         }
+    }
+}
+
+private struct DocumentMigrationPreviewView: View {
+    let title: String
+    let library: ImportedDocumentLibrary
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedNoteID: UUID?
+
+    init(title: String = "笔记包只读预览", library: ImportedDocumentLibrary) {
+        self.title = title
+        self.library = library
+        _selectedNoteID = State(initialValue: library.notes.first?.id)
+    }
+
+    private var selectedNote: ImportedDocumentNote? {
+        if let selectedNoteID {
+            return library.notes.first { $0.id == selectedNoteID } ?? library.notes.first
+        }
+        return library.notes.first
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            headerView
+            Divider()
+            HSplitView {
+                sidebarView
+                    .frame(minWidth: 240, idealWidth: 280, maxWidth: 320)
+                detailView
+                    .frame(minWidth: 500)
+            }
+            Divider()
+            HStack {
+                Text("已加载 \(library.notes.count) 条笔记")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("关闭") {
+                    dismiss()
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding(16)
+        }
+        .frame(minWidth: 980, minHeight: 680)
+    }
+
+    private var headerView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.title2)
+                .bold()
+
+            HStack(spacing: 16) {
+                Label("\(library.notes.count) 条笔记", systemImage: "note.text")
+                Label("\(library.folders.count) 个文件夹", systemImage: "folder")
+                Label("\(library.tags.count) 个标签", systemImage: "tag")
+                Text("导出时间 \(library.sourceExportedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+    }
+
+    private var sidebarView: some View {
+        List(selection: $selectedNoteID) {
+            ForEach(library.notes, id: \.id) { note in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(note.title.isEmpty ? "无标题" : note.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(note.folderName)
+                        Text("\(note.document.blocks.count) 块")
+                        if !note.assets.isEmpty {
+                            Text("\(note.assets.count) 资源")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+                .tag(note.id)
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var detailView: some View {
+        Group {
+            if let selectedNote {
+                MigrationPreviewNoteDetailView(note: selectedNote)
+            } else {
+                ContentUnavailableView("没有可预览的笔记", systemImage: "doc.text.magnifyingglass")
+            }
+        }
+    }
+}
+
+private struct PersistentBlockDocumentLibraryBrowserView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @State private var library: ImportedDocumentLibrary?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        Group {
+            if let library {
+                DocumentMigrationPreviewView(title: "块级文档库浏览", library: library)
+            } else if let errorMessage {
+                VStack(spacing: 16) {
+                    ContentUnavailableView("无法加载块级文档库", systemImage: "doc.text.magnifyingglass", description: Text(errorMessage))
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+                .frame(width: 560, height: 420)
+            } else {
+                ProgressView("正在加载块级文档库")
+                    .frame(width: 560, height: 420)
+                    .task {
+                        await loadLibrary()
+                    }
+            }
+        }
+    }
+
+    @MainActor
+    private func loadLibrary() async {
+        do {
+            library = try PersistedBlockDocumentLibraryLoader.load(from: modelContext)
+            if library == nil {
+                errorMessage = "当前还没有导入到 SwiftData 的块级文档数据。"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct MigrationPreviewNoteDetailView: View {
+    let note: ImportedDocumentNote
+
+    private var assetByID: [String: ImportedDocumentAsset] {
+        Dictionary(uniqueKeysWithValues: note.assets.map { ($0.reference.id, $0) })
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(note.title.isEmpty ? "无标题" : note.title)
+                        .font(.largeTitle)
+                        .bold()
+
+                    HStack(spacing: 12) {
+                        Label(note.folderName, systemImage: "folder")
+                        if !note.tagIDs.isEmpty {
+                            Label("\(note.tagIDs.count) 个标签", systemImage: "tag")
+                        }
+                        if let reminderAt = note.reminderAt {
+                            Label(reminderAt.formatted(date: .abbreviated, time: .shortened), systemImage: "bell")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                ForEach(note.document.blocks, id: \.id) { block in
+                    MigrationPreviewBlockView(
+                        block: block,
+                        asset: block.asset.flatMap { assetByID[$0.id] }
+                    )
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(NSColor.textBackgroundColor))
+    }
+}
+
+private struct MigrationPreviewBlockView: View {
+    let block: ImportedDocumentBlock
+    let asset: ImportedDocumentAsset?
+
+    var body: some View {
+        switch block.kind {
+        case .heading:
+            MigrationPreviewInlineTextView(spans: block.text)
+                .font(headingFont)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .listItem:
+            HStack(alignment: .top, spacing: 10) {
+                Text(listMarker)
+                    .foregroundStyle(.secondary)
+                MigrationPreviewInlineTextView(spans: block.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .todoItem:
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: block.checked == true ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(block.checked == true ? .green : .secondary)
+                MigrationPreviewInlineTextView(spans: block.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .image:
+            MigrationPreviewImageBlockView(block: block, asset: asset)
+
+        case .audio:
+            MigrationPreviewAudioBlockView(block: block, asset: asset)
+
+        case .table:
+            if let table = block.table {
+                MigrationPreviewTableBlockView(table: table)
+            }
+
+        case .paragraph, .unsupported:
+            MigrationPreviewInlineTextView(spans: block.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var headingFont: Font {
+        switch block.level ?? 3 {
+        case 1:
+            return .system(size: 28, weight: .bold)
+        case 2:
+            return .system(size: 22, weight: .semibold)
+        default:
+            return .system(size: 18, weight: .semibold)
+        }
+    }
+
+    private var listMarker: String {
+        switch block.listStyle {
+        case .ordered:
+            return "\(block.order ?? 1)."
+        case .dash:
+            return "-"
+        default:
+            return "•"
+        }
+    }
+}
+
+private struct MigrationPreviewInlineTextView: View {
+    let spans: [ImportedInlineText]
+
+    var body: some View {
+        if spans.isEmpty {
+            Text(" ")
+        } else {
+            styledText
+                .textSelection(.enabled)
+        }
+    }
+
+    private var styledText: Text {
+        spans.reduce(Text("")) { partial, span in
+            partial + styledText(for: span)
+        }
+    }
+
+    private func styledText(for span: ImportedInlineText) -> Text {
+        var text = Text(verbatim: span.text)
+        if span.bold {
+            text = text.bold()
+        }
+        if span.italic {
+            text = text.italic()
+        }
+        if span.underline {
+            text = text.underline()
+        }
+        if span.strikethrough {
+            text = text.strikethrough()
+        }
+        if let color = nsColor(from: span.textColor) {
+            text = text.foregroundColor(Color(nsColor: color))
+        }
+        return text
+    }
+
+    private func nsColor(from hex: String?) -> NSColor? {
+        guard let hex else { return nil }
+        let raw = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard raw.count == 6 || raw.count == 8 else { return nil }
+
+        var value: UInt64 = 0
+        guard Scanner(string: raw).scanHexInt64(&value) else { return nil }
+
+        if raw.count == 6 {
+            return NSColor(
+                red: CGFloat((value & 0xFF0000) >> 16) / 255,
+                green: CGFloat((value & 0x00FF00) >> 8) / 255,
+                blue: CGFloat(value & 0x0000FF) / 255,
+                alpha: 1
+            )
+        }
+
+        return NSColor(
+            red: CGFloat((value & 0xFF000000) >> 24) / 255,
+            green: CGFloat((value & 0x00FF0000) >> 16) / 255,
+            blue: CGFloat((value & 0x0000FF00) >> 8) / 255,
+            alpha: CGFloat(value & 0x000000FF) / 255
+        )
+    }
+}
+
+private struct MigrationPreviewImageBlockView: View {
+    let block: ImportedDocumentBlock
+    let asset: ImportedDocumentAsset?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let sourceURL = asset?.sourceURL,
+               let image = NSImage(contentsOf: sourceURL) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 680, maxHeight: 360, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                placeholder("图片资源缺失")
+            }
+
+            if let asset {
+                HStack(spacing: 12) {
+                    Text(asset.reference.filename)
+                    if let width = asset.reference.width, let height = asset.reference.height {
+                        Text("\(Int(width)) × \(Int(height))")
+                    }
+                    Button("在访达中显示") {
+                        NSWorkspace.shared.activateFileViewerSelecting([asset.sourceURL])
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color.secondary.opacity(0.08))
+            .frame(maxWidth: 680, minHeight: 120, maxHeight: 180)
+            .overlay {
+                Label(text, systemImage: "photo")
+                    .foregroundStyle(.secondary)
+            }
+    }
+}
+
+private struct MigrationPreviewAudioBlockView: View {
+    let block: ImportedDocumentBlock
+    let asset: ImportedDocumentAsset?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform")
+                .font(.title2)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(asset?.reference.filename ?? block.asset?.filename ?? "音频")
+                    .font(.headline)
+
+                HStack(spacing: 12) {
+                    if let duration = asset?.reference.duration ?? block.asset?.duration {
+                        Text(durationLabel(duration))
+                    }
+                    Text(asset?.reference.mimeType ?? block.asset?.mimeType ?? "audio")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if let asset {
+                Button("在访达中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([asset.sourceURL])
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func durationLabel(_ duration: Double) -> String {
+        let totalSeconds = max(0, Int(duration.rounded()))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private struct MigrationPreviewTableBlockView: View {
+    let table: ImportedDocumentTable
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            VStack(spacing: 0) {
+                ForEach(table.rows.indices, id: \.self) { rowIndex in
+                    HStack(spacing: 0) {
+                        ForEach(table.rows[rowIndex].indices, id: \.self) { columnIndex in
+                            Text(table.rows[rowIndex][columnIndex])
+                                .frame(
+                                    minWidth: max(120, width(for: columnIndex)),
+                                    alignment: .leading
+                                )
+                                .padding(8)
+                                .background(rowIndex == 0 ? Color.secondary.opacity(0.10) : Color.clear)
+                                .overlay(
+                                    Rectangle()
+                                        .stroke(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                                )
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func width(for columnIndex: Int) -> CGFloat {
+        guard columnIndex < table.columnWidths.count else { return 120 }
+        return CGFloat(table.columnWidths[columnIndex])
+    }
+}
+
+private enum PersistedBlockDocumentLibraryLoader {
+    static func load(from modelContext: ModelContext) throws -> ImportedDocumentLibrary? {
+        let libraries = try modelContext.fetch(FetchDescriptor<BlockDocumentLibraryEntity>())
+        guard let libraryEntity = libraries.sorted(by: { $0.importedAt > $1.importedAt }).first else {
+            return nil
+        }
+
+        let folderEntities = try modelContext.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
+            .filter { $0.libraryID == libraryEntity.id }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        let tagEntities = try modelContext.fetch(FetchDescriptor<BlockDocumentTagEntity>())
+            .filter { $0.libraryID == libraryEntity.id }
+            .sorted { $0.createdAt < $1.createdAt }
+        let noteEntities = try modelContext.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+            .filter { $0.libraryID == libraryEntity.id }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        let blockEntities = try modelContext.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
+        let assetEntities = try modelContext.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
+        let attachmentsRoot = try StorageLocationManager.shared.attachmentsDirectoryURL()
+        let decoder = JSONDecoder()
+
+        let blocksByNoteID = Dictionary(grouping: blockEntities, by: \.noteID)
+        let assetsByNoteID = Dictionary(grouping: assetEntities, by: \.noteID)
+
+        let notes = try noteEntities.map { noteEntity in
+            let persistedAssets = try (assetsByNoteID[noteEntity.id] ?? []).map {
+                try importedAsset(from: $0, attachmentsRoot: attachmentsRoot, decoder: decoder)
+            }
+            let assetReferenceByID = Dictionary(uniqueKeysWithValues: persistedAssets.map { ($0.reference.id, $0.reference) })
+            let blocks = try (blocksByNoteID[noteEntity.id] ?? [])
+                .sorted { $0.position < $1.position }
+                .map { try importedBlock(from: $0, assetReferenceByID: assetReferenceByID, decoder: decoder) }
+
+            return ImportedDocumentNote(
+                id: noteEntity.id,
+                title: noteEntity.title,
+                createdAt: noteEntity.createdAt,
+                updatedAt: noteEntity.updatedAt,
+                folderID: noteEntity.folderID,
+                folderName: noteEntity.folderName,
+                reminderAt: noteEntity.reminderAt,
+                recurrenceRule: noteEntity.recurrenceRule,
+                version: noteEntity.version,
+                tagIDs: decodeUUIDList(noteEntity.tagIDs),
+                viewMode: noteEntity.viewMode,
+                deletedAt: noteEntity.deletedAt,
+                originalFolderID: noteEntity.originalFolderID,
+                originalFolderName: noteEntity.originalFolderName,
+                document: ImportedDocument(
+                    schemaVersion: noteEntity.documentSchemaVersion,
+                    source: noteEntity.documentSource,
+                    blocks: blocks
+                ),
+                assets: persistedAssets
+            )
+        }
+
+        return ImportedDocumentLibrary(
+            schemaVersion: libraryEntity.schemaVersion,
+            sourceExportedAt: libraryEntity.sourceExportedAt,
+            importedAt: libraryEntity.importedAt,
+            folders: folderEntities.map {
+                ImportedDocumentFolder(
+                    id: $0.id,
+                    name: $0.name,
+                    sortOrder: $0.sortOrder,
+                    isSystem: $0.isSystem,
+                    createdAt: $0.createdAt
+                )
+            },
+            tags: tagEntities.map {
+                ImportedDocumentTag(
+                    id: $0.id,
+                    name: $0.name,
+                    color: $0.color,
+                    createdAt: $0.createdAt
+                )
+            },
+            notes: notes
+        )
+    }
+
+    private static func importedBlock(
+        from entity: BlockDocumentBlockEntity,
+        assetReferenceByID: [String: ImportedDocumentAssetReference],
+        decoder: JSONDecoder
+    ) throws -> ImportedDocumentBlock {
+        ImportedDocumentBlock(
+            id: entity.blockID,
+            kind: ImportedDocumentBlockKind(rawValue: entity.kind) ?? .unsupported,
+            text: try decodeTextPayload(entity.textPayload, decoder: decoder),
+            level: entity.level,
+            listStyle: entity.listStyle.map { ImportedDocumentListStyle(rawValue: $0) ?? .unknown },
+            order: entity.order,
+            checked: entity.checked,
+            indent: entity.indent,
+            asset: entity.assetID.flatMap { assetReferenceByID[$0] },
+            table: try decodeTablePayload(entity.tablePayload, decoder: decoder),
+            sourceType: entity.sourceType
+        )
+    }
+
+    private static func importedAsset(
+        from entity: BlockDocumentAssetEntity,
+        attachmentsRoot: URL,
+        decoder: JSONDecoder
+    ) throws -> ImportedDocumentAsset {
+        let sidecarPaths = try decodeStringArray(entity.sidecarPathsPayload, decoder: decoder)
+        return ImportedDocumentAsset(
+            reference: ImportedDocumentAssetReference(
+                id: entity.assetID,
+                kind: ImportedDocumentAssetKind(rawValue: entity.kind) ?? .unsupported,
+                filename: entity.filename,
+                mimeType: entity.mimeType,
+                width: entity.width,
+                height: entity.height,
+                duration: entity.duration,
+                createdAt: entity.createdAt,
+                sidecarFiles: sidecarPaths,
+                sourceKind: entity.sourceKind
+            ),
+            sourceURL: attachmentsRoot.appendingPathComponent(entity.relativeFilePath),
+            sidecarURLs: sidecarPaths.map { attachmentsRoot.appendingPathComponent($0) }
+        )
+    }
+
+    private static func decodeTextPayload(_ data: Data?, decoder: JSONDecoder) throws -> [ImportedInlineText] {
+        guard let data else {
+            return []
+        }
+
+        let payload = try decoder.decode([BlockDocumentTextSpanPayload].self, from: data)
+        return payload.map {
+            ImportedInlineText(
+                text: $0.text,
+                bold: $0.bold,
+                italic: $0.italic,
+                underline: $0.underline,
+                strikethrough: $0.strikethrough,
+                textColor: $0.textColor,
+                backgroundColor: $0.backgroundColor,
+                link: $0.link,
+                fontFamily: $0.fontFamily,
+                fontSize: $0.fontSize
+            )
+        }
+    }
+
+    private static func decodeTablePayload(_ data: Data?, decoder: JSONDecoder) throws -> ImportedDocumentTable? {
+        guard let data else {
+            return nil
+        }
+
+        let payload = try decoder.decode(BlockDocumentTablePayload.self, from: data)
+        return ImportedDocumentTable(
+            rows: payload.rows,
+            columnWidths: payload.columnWidths,
+            rowHeights: payload.rowHeights
+        )
+    }
+
+    private static func decodeStringArray(_ data: Data?, decoder: JSONDecoder) throws -> [String] {
+        guard let data else {
+            return []
+        }
+        return try decoder.decode([String].self, from: data)
+    }
+
+    private static func decodeUUIDList(_ rawValue: String) -> [UUID] {
+        rawValue
+            .split(separator: ",")
+            .compactMap { UUID(uuidString: String($0)) }
     }
 }
 
