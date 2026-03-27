@@ -14,6 +14,20 @@ import CloudKit
 import SwiftData
 import Combine
 import SwiftUI
+import CryptoKit
+
+struct iCloudNoteIndex: Codable {
+    let generatedAt: Date
+    let deviceID: String
+    let entries: [iCloudNoteIndexEntry]
+}
+
+struct iCloudNoteIndexEntry: Codable {
+    let noteID: UUID
+    let version: Int64
+    let contentHash: String
+    let historyCount: Int
+}
 
 // MARK: - 同步错误类型
 
@@ -87,6 +101,12 @@ final class iCloudSyncManager: ObservableObject {
     
     /// 同步队列
     private let syncQueue = DispatchQueue(label: "com.notebook.icloudsync", qos: .utility)
+    private let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }()
+    private let jsonDecoder = JSONDecoder()
     
     // MARK: - 初始化
     
@@ -208,6 +228,78 @@ final class iCloudSyncManager: ObservableObject {
             await performFullSync()
         }
     }
+
+    func syncAllNotesToiCloud(context: ModelContext) async throws -> [UUID] {
+        guard let notesDirectory = notesDirectoryURL else {
+            throw iCloudSyncError.iCloudNotAvailable
+        }
+
+        try ensureNotesDirectory(notesDirectory)
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+            .sorted { $0.updatedAt > $1.updatedAt }
+        var syncedNoteIDs: [UUID] = []
+        var indexEntries: [iCloudNoteIndexEntry] = []
+
+        for note in notes {
+            let syncState = try fetchSyncState(noteID: note.id, context: context)
+            let shouldSync =
+                syncState == nil ||
+                syncState!.lastSyncedVersion < note.version ||
+                syncState!.pendingHistoryCount > 0
+            if shouldSync {
+                try syncNoteToiCloud(noteID: note.id, context: context, notesDirectory: notesDirectory)
+                syncedNoteIDs.append(note.id)
+            }
+            if let indexEntry = try makeIndexEntry(noteID: note.id, context: context) {
+                indexEntries.append(indexEntry)
+            }
+        }
+
+        try writeIndex(entries: indexEntries, notesDirectory: notesDirectory)
+        lastSyncDate = Date()
+        return syncedNoteIDs
+    }
+
+    func syncAllNotesFromiCloud(context: ModelContext) async throws -> [NoteSyncMergeResult] {
+        guard let notesDirectory = notesDirectoryURL else {
+            throw iCloudSyncError.iCloudNotAvailable
+        }
+        try ensureNotesDirectory(notesDirectory)
+
+        let remoteIndex = try readIndex(notesDirectory: notesDirectory)
+        let noteIDs: [UUID]
+        if let remoteIndex {
+            noteIDs = remoteIndex.entries
+                .filter { entry in
+                    guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
+                        return true
+                    }
+                    if entry.version > syncState.lastRemoteVersion {
+                        return true
+                    }
+                    return entry.contentHash != syncState.remoteFingerprint
+                }
+                .map(\.noteID)
+                .sorted { $0.uuidString < $1.uuidString }
+        } else {
+            noteIDs = try listRemoteNoteIDs(notesDirectory: notesDirectory)
+        }
+
+        var results: [NoteSyncMergeResult] = []
+        for noteID in noteIDs {
+            let result = try syncNoteFromiCloud(noteID: noteID, context: context, notesDirectory: notesDirectory)
+            results.append(result)
+        }
+        lastSyncDate = Date()
+        return results
+    }
+
+    func syncBidirectional(context: ModelContext) async throws -> (pulled: Int, pushed: Int, conflicts: Int) {
+        let pullResults = try await syncAllNotesFromiCloud(context: context)
+        let pushIDs = try await syncAllNotesToiCloud(context: context)
+        let conflicts = pullResults.filter(\.detectedConflict).count
+        return (pullResults.count, pushIDs.count, conflicts)
+    }
 }
 
 // MARK: - 配置同步 (NSUbiquitousKeyValueStore)
@@ -304,15 +396,125 @@ extension iCloudSyncManager {
         guard privateDatabase != nil else {
             throw iCloudSyncError.iCloudNotAvailable
         }
-        
-        // 这里实现 CloudKit 同步逻辑
-        // 1. 获取本地所有笔记
-        // 2. 获取云端所有笔记
-        // 3. 比较并合并
-        // 4. 上传本地修改
-        // 5. 下载云端修改
-        
+
+        guard let context = PersistenceController.shared.modelContainer?.mainContext else {
+            throw iCloudSyncError.syncFailed("数据容器未配置")
+        }
+        _ = try await syncBidirectional(context: context)
         print("[iCloudSyncManager] Notes data synced")
+    }
+
+    private var notesDirectoryURL: URL? {
+        guard let root = FileManager.default.url(forUbiquityContainerIdentifier: nil)?
+            .appendingPathComponent("Documents/NotebookSync", isDirectory: true) else {
+            return nil
+        }
+        return root.appendingPathComponent("notes", isDirectory: true)
+    }
+
+    private func ensureNotesDirectory(_ notesDirectory: URL) throws {
+        if !FileManager.default.fileExists(atPath: notesDirectory.path) {
+            try FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
+        }
+    }
+
+    private func syncNoteToiCloud(noteID: UUID, context: ModelContext, notesDirectory: URL) throws {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+            return
+        }
+        let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
+        let tempURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json.tmp")
+        let payload = try jsonEncoder.encode(envelope)
+        try payload.write(to: tempURL, options: [.atomic])
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: fileURL)
+        }
+        try BlockDocumentNoteVersionStore.markSynced(
+            noteID: noteID,
+            syncedVersion: envelope.currentVersion,
+            context: context
+        )
+    }
+
+    private func syncNoteFromiCloud(noteID: UUID, context: ModelContext, notesDirectory: URL) throws -> NoteSyncMergeResult {
+        let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
+        let payload = try Data(contentsOf: fileURL)
+        let envelope = try jsonDecoder.decode(VersionedNoteSyncEnvelope.self, from: payload)
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
+        if !result.detectedConflict {
+            try BlockDocumentNoteVersionStore.markSynced(
+                noteID: noteID,
+                syncedVersion: min(result.localVersion, result.remoteVersion),
+                context: context
+            )
+        }
+        return result
+    }
+
+    private func listRemoteNoteIDs(notesDirectory: URL) throws -> [UUID] {
+        let files = try FileManager.default.contentsOfDirectory(
+            at: notesDirectory,
+            includingPropertiesForKeys: nil
+        )
+        return files
+            .compactMap { url -> UUID? in
+                let filename = url.lastPathComponent
+                guard filename.hasSuffix(".json"), filename != "index.json" else { return nil }
+                return UUID(uuidString: String(filename.dropLast(5)))
+            }
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func makeIndexEntry(noteID: UUID, context: ModelContext) throws -> iCloudNoteIndexEntry? {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+            return nil
+        }
+        let snapshotData = try jsonEncoder.encode(envelope.currentSnapshot)
+        return iCloudNoteIndexEntry(
+            noteID: noteID,
+            version: envelope.currentVersion,
+            contentHash: fingerprint(for: snapshotData),
+            historyCount: envelope.history.count
+        )
+    }
+
+    private func writeIndex(entries: [iCloudNoteIndexEntry], notesDirectory: URL) throws {
+        let index = iCloudNoteIndex(
+            generatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+        )
+        let indexURL = notesDirectory.appendingPathComponent("index.json")
+        let tempURL = notesDirectory.appendingPathComponent("index.json.tmp")
+        let data = try jsonEncoder.encode(index)
+        try data.write(to: tempURL, options: [.atomic])
+        if FileManager.default.fileExists(atPath: indexURL.path) {
+            _ = try FileManager.default.replaceItemAt(indexURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: indexURL)
+        }
+    }
+
+    private func readIndex(notesDirectory: URL) throws -> iCloudNoteIndex? {
+        let indexURL = notesDirectory.appendingPathComponent("index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: indexURL)
+        return try jsonDecoder.decode(iCloudNoteIndex.self, from: data)
+    }
+
+    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity? {
+        let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+        )
+        return try context.fetch(descriptor).first
+    }
+
+    private func fingerprint(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
     
     /// 上传笔记到 CloudKit

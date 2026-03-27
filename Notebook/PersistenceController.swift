@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import Combine
+import CryptoKit
 
 @MainActor
 final class PersistenceController: ObservableObject {
@@ -14,7 +15,9 @@ final class PersistenceController: ObservableObject {
         BlockDocumentTagEntity.self,
         BlockDocumentNoteEntity.self,
         BlockDocumentBlockEntity.self,
-        BlockDocumentAssetEntity.self
+        BlockDocumentAssetEntity.self,
+        BlockDocumentNoteVersionEntity.self,
+        BlockDocumentNoteSyncStateEntity.self
     ])
 
     private init() {}
@@ -46,6 +49,16 @@ final class PersistenceController: ObservableObject {
     }
 }
 
+struct BlockDocumentParagraphStylePayload: Codable, Equatable {
+    let alignment: Int?
+    let lineSpacing: Double?
+    let paragraphSpacing: Double?
+    let paragraphSpacingBefore: Double?
+    let firstLineHeadIndent: Double?
+    let headIndent: Double?
+    let tailIndent: Double?
+}
+
 struct BlockDocumentTextSpanPayload: Codable {
     let text: String
     let bold: Bool
@@ -57,6 +70,9 @@ struct BlockDocumentTextSpanPayload: Codable {
     let link: String?
     let fontFamily: String?
     let fontSize: Double?
+    let kern: Double?
+    let baselineOffset: Double?
+    let paragraphStyle: BlockDocumentParagraphStylePayload?
 }
 
 struct BlockDocumentTablePayload: Codable {
@@ -302,5 +318,819 @@ final class BlockDocumentAssetEntity {
         self.createdAt = createdAt
         self.relativeFilePath = relativeFilePath
         self.sidecarPathsPayload = sidecarPathsPayload
+    }
+}
+
+@Model
+final class BlockDocumentNoteVersionEntity {
+    @Attribute(.unique) var id: UUID
+    var noteID: UUID
+    var version: Int64
+    var recordedAt: Date
+    var updatedAt: Date
+    var title: String
+    var authorDeviceID: String
+    var contentHash: String
+    var snapshotData: Data
+
+    init(
+        id: UUID = UUID(),
+        noteID: UUID,
+        version: Int64,
+        recordedAt: Date,
+        updatedAt: Date,
+        title: String,
+        authorDeviceID: String,
+        contentHash: String,
+        snapshotData: Data
+    ) {
+        self.id = id
+        self.noteID = noteID
+        self.version = version
+        self.recordedAt = recordedAt
+        self.updatedAt = updatedAt
+        self.title = title
+        self.authorDeviceID = authorDeviceID
+        self.contentHash = contentHash
+        self.snapshotData = snapshotData
+    }
+}
+
+@Model
+final class BlockDocumentNoteSyncStateEntity {
+    @Attribute(.unique) var noteID: UUID
+    var lastRecordedVersion: Int64
+    var lastSyncedVersion: Int64
+    var lastCommonVersion: Int64
+    var lastRemoteVersion: Int64
+    var lastSyncAt: Date?
+    var lastRemoteDeviceID: String?
+    var remoteFingerprint: String
+    var pendingHistoryCount: Int
+
+    init(
+        noteID: UUID,
+        lastRecordedVersion: Int64 = 0,
+        lastSyncedVersion: Int64 = 0,
+        lastCommonVersion: Int64 = 0,
+        lastRemoteVersion: Int64 = 0,
+        lastSyncAt: Date? = nil,
+        lastRemoteDeviceID: String? = nil,
+        remoteFingerprint: String = "",
+        pendingHistoryCount: Int = 0
+    ) {
+        self.noteID = noteID
+        self.lastRecordedVersion = lastRecordedVersion
+        self.lastSyncedVersion = lastSyncedVersion
+        self.lastCommonVersion = lastCommonVersion
+        self.lastRemoteVersion = lastRemoteVersion
+        self.lastSyncAt = lastSyncAt
+        self.lastRemoteDeviceID = lastRemoteDeviceID
+        self.remoteFingerprint = remoteFingerprint
+        self.pendingHistoryCount = pendingHistoryCount
+    }
+}
+
+struct VersionedNoteAssetSnapshot: Codable {
+    let reference: MigratedAssetReference
+    let relativeFilePath: String
+    let sidecarRelativePaths: [String]
+}
+
+struct VersionedNoteSnapshot: Codable {
+    let metadata: DocumentMigrationPackage.NoteItem
+    let document: MigratedDocument
+    let assets: [VersionedNoteAssetSnapshot]
+}
+
+struct VersionedNoteHistoryEnvelope: Codable {
+    let id: UUID
+    let noteID: UUID
+    let version: Int64
+    let recordedAt: Date
+    let updatedAt: Date
+    let title: String
+    let authorDeviceID: String
+    let contentHash: String
+    let snapshot: VersionedNoteSnapshot
+}
+
+struct VersionedNoteSyncStatePayload: Codable {
+    let lastRecordedVersion: Int64
+    let lastSyncedVersion: Int64
+    let lastCommonVersion: Int64
+    let lastRemoteVersion: Int64
+    let lastSyncAt: Date?
+    let lastRemoteDeviceID: String?
+    let remoteFingerprint: String
+    let pendingHistoryCount: Int
+}
+
+struct VersionedNoteSyncEnvelope: Codable {
+    let noteID: UUID
+    let deviceID: String
+    let exportedAt: Date
+    let currentVersion: Int64
+    let currentSnapshot: VersionedNoteSnapshot
+    let history: [VersionedNoteHistoryEnvelope]
+    let syncState: VersionedNoteSyncStatePayload
+}
+
+struct NoteVersionComparison {
+    let noteID: UUID
+    let fromVersion: Int64
+    let toVersion: Int64
+    let titleChanged: Bool
+    let metadataChanged: Bool
+    let blockCountDelta: Int
+    let assetCountDelta: Int
+    let changedBlockIDs: [String]
+    let addedAssetIDs: [String]
+    let removedAssetIDs: [String]
+}
+
+struct NoteSyncMergeResult {
+    let noteID: UUID
+    let appliedRemoteSnapshot: Bool
+    let detectedConflict: Bool
+    let importedHistoryVersions: [Int64]
+    let localVersion: Int64
+    let remoteVersion: Int64
+}
+
+enum BlockDocumentNoteVersionStore {
+    private static let deviceIdentityKey = "BlockDocumentNoteVersionStore.deviceID"
+    private static let jsonEncoder = JSONEncoder()
+    private static let jsonDecoder = JSONDecoder()
+
+    static func currentDeviceID(defaults: UserDefaults = .standard) -> String {
+        if let existing = defaults.string(forKey: deviceIdentityKey), !existing.isEmpty {
+            return existing
+        }
+
+        let generated = UUID().uuidString
+        defaults.set(generated, forKey: deviceIdentityKey)
+        return generated
+    }
+
+    @discardableResult
+    static func ensureHistoryRecorded(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteVersionEntity? {
+        let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(noteDescriptor).first else {
+            return nil
+        }
+
+        let blocks = try context.fetch(
+            FetchDescriptor<BlockDocumentBlockEntity>(
+                predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == noteID },
+                sortBy: [SortDescriptor(\.position)]
+            )
+        )
+        let assets = try context.fetch(
+            FetchDescriptor<BlockDocumentAssetEntity>(
+                predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
+            )
+        )
+        return try recordVersionIfNeeded(note: note, blocks: blocks, assets: assets, context: context)
+    }
+
+    @discardableResult
+    static func recordVersionIfNeeded(
+        note: BlockDocumentNoteEntity,
+        blocks: [BlockDocumentBlockEntity],
+        assets: [BlockDocumentAssetEntity],
+        context: ModelContext,
+        authorDeviceID: String? = nil
+    ) throws -> BlockDocumentNoteVersionEntity? {
+        let noteID = note.id
+        let noteVersion = note.version
+        let versionDescriptor = FetchDescriptor<BlockDocumentNoteVersionEntity>(
+            predicate: #Predicate<BlockDocumentNoteVersionEntity> {
+                $0.noteID == noteID && $0.version == noteVersion
+            }
+        )
+        if let existing = try context.fetch(versionDescriptor).first {
+            let syncState = try ensureSyncState(noteID: note.id, context: context)
+            syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, existing.version)
+            syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+            return existing
+        }
+
+        let snapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets)
+        let snapshotData = try jsonEncoder.encode(snapshot)
+        let contentHash = fingerprint(for: snapshotData)
+        let entry = BlockDocumentNoteVersionEntity(
+            noteID: note.id,
+            version: note.version,
+            recordedAt: note.updatedAt,
+            updatedAt: note.updatedAt,
+            title: note.title,
+            authorDeviceID: authorDeviceID ?? currentDeviceID(),
+            contentHash: contentHash,
+            snapshotData: snapshotData
+        )
+        context.insert(entry)
+
+        let syncState = try ensureSyncState(noteID: note.id, context: context)
+        syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, note.version)
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        return entry
+    }
+
+    static func history(for noteID: UUID, context: ModelContext) throws -> [BlockDocumentNoteVersionEntity] {
+        try context.fetch(
+            FetchDescriptor<BlockDocumentNoteVersionEntity>(
+                predicate: #Predicate<BlockDocumentNoteVersionEntity> { $0.noteID == noteID },
+                sortBy: [SortDescriptor(\.version)]
+            )
+        )
+    }
+
+    static func snapshot(noteID: UUID, version: Int64, context: ModelContext) throws -> VersionedNoteSnapshot? {
+        let versionDescriptor = FetchDescriptor<BlockDocumentNoteVersionEntity>(
+            predicate: #Predicate<BlockDocumentNoteVersionEntity> {
+                $0.noteID == noteID && $0.version == version
+            }
+        )
+        guard let entry = try context.fetch(versionDescriptor).first else {
+            return nil
+        }
+        return try jsonDecoder.decode(VersionedNoteSnapshot.self, from: entry.snapshotData)
+    }
+
+    static func compare(
+        noteID: UUID,
+        from fromVersion: Int64,
+        to toVersion: Int64,
+        context: ModelContext
+    ) throws -> NoteVersionComparison? {
+        guard let left = try snapshot(noteID: noteID, version: fromVersion, context: context),
+              let right = try snapshot(noteID: noteID, version: toVersion, context: context) else {
+            return nil
+        }
+
+        let leftBlockSignatures = Dictionary(uniqueKeysWithValues: left.document.blocks.map { ($0.id, blockSignature($0)) })
+        let rightBlockSignatures = Dictionary(uniqueKeysWithValues: right.document.blocks.map { ($0.id, blockSignature($0)) })
+        let sharedBlockIDs = Set(leftBlockSignatures.keys).intersection(rightBlockSignatures.keys)
+        let changedBlockIDs = sharedBlockIDs
+            .filter { leftBlockSignatures[$0] != rightBlockSignatures[$0] }
+            .sorted()
+
+        let leftAssetIDs = Set(left.assets.map(\.reference.id))
+        let rightAssetIDs = Set(right.assets.map(\.reference.id))
+        let addedAssetIDs = rightAssetIDs.subtracting(leftAssetIDs).sorted()
+        let removedAssetIDs = leftAssetIDs.subtracting(rightAssetIDs).sorted()
+
+        let metadataChanged =
+            left.metadata.folderID != right.metadata.folderID ||
+            left.metadata.folderName != right.metadata.folderName ||
+            left.metadata.reminderAt != right.metadata.reminderAt ||
+            left.metadata.recurrenceRule != right.metadata.recurrenceRule ||
+            left.metadata.tagIDs != right.metadata.tagIDs ||
+            left.metadata.viewMode != right.metadata.viewMode ||
+            left.metadata.deletedAt != right.metadata.deletedAt ||
+            left.metadata.originalFolderID != right.metadata.originalFolderID ||
+            left.metadata.originalFolderName != right.metadata.originalFolderName
+
+        return NoteVersionComparison(
+            noteID: noteID,
+            fromVersion: fromVersion,
+            toVersion: toVersion,
+            titleChanged: left.metadata.title != right.metadata.title,
+            metadataChanged: metadataChanged,
+            blockCountDelta: right.document.blocks.count - left.document.blocks.count,
+            assetCountDelta: right.assets.count - left.assets.count,
+            changedBlockIDs: changedBlockIDs,
+            addedAssetIDs: addedAssetIDs,
+            removedAssetIDs: removedAssetIDs
+        )
+    }
+
+    @discardableResult
+    static func restore(noteID: UUID, toVersion version: Int64, context: ModelContext) throws -> Int64 {
+        guard let targetSnapshot = try snapshot(noteID: noteID, version: version, context: context) else {
+            throw NSError(domain: "NoteVersionStore", code: 404, userInfo: [NSLocalizedDescriptionKey: "找不到目标版本"])
+        }
+
+        let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(noteDescriptor).first else {
+            throw NSError(domain: "NoteVersionStore", code: 404, userInfo: [NSLocalizedDescriptionKey: "找不到目标笔记"])
+        }
+
+        try apply(snapshot: targetSnapshot, to: note, context: context, restoredAt: Date())
+        try context.save()
+        _ = try ensureHistoryRecorded(noteID: noteID, context: context)
+        try context.save()
+        return note.version
+    }
+
+    static func exportEnvelope(noteID: UUID, context: ModelContext) throws -> VersionedNoteSyncEnvelope? {
+        let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(noteDescriptor).first else {
+            return nil
+        }
+
+        let blocks = try context.fetch(
+            FetchDescriptor<BlockDocumentBlockEntity>(
+                predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == noteID },
+                sortBy: [SortDescriptor(\.position)]
+            )
+        )
+        let assets = try context.fetch(
+            FetchDescriptor<BlockDocumentAssetEntity>(
+                predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
+            )
+        )
+        let currentSnapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets)
+        let historyEntries = try history(for: noteID, context: context)
+        let historyPayload = try historyEntries.map {
+            VersionedNoteHistoryEnvelope(
+                id: $0.id,
+                noteID: $0.noteID,
+                version: $0.version,
+                recordedAt: $0.recordedAt,
+                updatedAt: $0.updatedAt,
+                title: $0.title,
+                authorDeviceID: $0.authorDeviceID,
+                contentHash: $0.contentHash,
+                snapshot: try jsonDecoder.decode(VersionedNoteSnapshot.self, from: $0.snapshotData)
+            )
+        }
+        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        return VersionedNoteSyncEnvelope(
+            noteID: noteID,
+            deviceID: currentDeviceID(),
+            exportedAt: Date(),
+            currentVersion: note.version,
+            currentSnapshot: currentSnapshot,
+            history: historyPayload,
+            syncState: VersionedNoteSyncStatePayload(
+                lastRecordedVersion: syncState.lastRecordedVersion,
+                lastSyncedVersion: syncState.lastSyncedVersion,
+                lastCommonVersion: syncState.lastCommonVersion,
+                lastRemoteVersion: syncState.lastRemoteVersion,
+                lastSyncAt: syncState.lastSyncAt,
+                lastRemoteDeviceID: syncState.lastRemoteDeviceID,
+                remoteFingerprint: syncState.remoteFingerprint,
+                pendingHistoryCount: syncState.pendingHistoryCount
+            )
+        )
+    }
+
+    static func mergeRemoteEnvelope(_ envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws -> NoteSyncMergeResult {
+        let importedVersions = try importHistory(from: envelope, context: context)
+        let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
+        syncState.lastRemoteVersion = envelope.currentVersion
+        syncState.lastRemoteDeviceID = envelope.deviceID
+        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+
+        let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelope.noteID }
+        )
+        let localNote = try context.fetch(noteDescriptor).first
+
+        if let localNote {
+            let hasDiverged = localNote.version > syncState.lastCommonVersion && syncState.lastSyncedVersion < localNote.version
+            if hasDiverged && localNote.version != envelope.currentVersion {
+                try context.save()
+                return NoteSyncMergeResult(
+                    noteID: envelope.noteID,
+                    appliedRemoteSnapshot: false,
+                    detectedConflict: true,
+                    importedHistoryVersions: importedVersions,
+                    localVersion: localNote.version,
+                    remoteVersion: envelope.currentVersion
+                )
+            }
+
+            if envelope.currentVersion > localNote.version {
+                try apply(snapshot: envelope.currentSnapshot, to: localNote, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt)
+                syncState.lastCommonVersion = envelope.currentVersion
+                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+                syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
+                syncState.lastSyncAt = Date()
+                syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+                try context.save()
+                return NoteSyncMergeResult(
+                    noteID: envelope.noteID,
+                    appliedRemoteSnapshot: true,
+                    detectedConflict: false,
+                    importedHistoryVersions: importedVersions,
+                    localVersion: localNote.version,
+                    remoteVersion: envelope.currentVersion
+                )
+            }
+
+            syncState.lastCommonVersion = max(syncState.lastCommonVersion, min(localNote.version, envelope.currentVersion))
+            syncState.lastSyncAt = Date()
+            syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+            try context.save()
+            return NoteSyncMergeResult(
+                noteID: envelope.noteID,
+                appliedRemoteSnapshot: false,
+                detectedConflict: false,
+                importedHistoryVersions: importedVersions,
+                localVersion: localNote.version,
+                remoteVersion: envelope.currentVersion
+            )
+        }
+
+        let library = try ensureLibrary(context: context)
+        let note = BlockDocumentNoteEntity(
+            id: envelope.noteID,
+            libraryID: library.id,
+            title: envelope.currentSnapshot.metadata.title,
+            createdAt: envelope.currentSnapshot.metadata.createdAt,
+            updatedAt: envelope.currentSnapshot.metadata.updatedAt,
+            folderID: envelope.currentSnapshot.metadata.folderID,
+            folderName: envelope.currentSnapshot.metadata.folderName,
+            reminderAt: envelope.currentSnapshot.metadata.reminderAt,
+            recurrenceRule: envelope.currentSnapshot.metadata.recurrenceRule,
+            version: envelope.currentSnapshot.metadata.version,
+            tagIDs: encodeUUIDList(envelope.currentSnapshot.metadata.tagIDs),
+            viewMode: envelope.currentSnapshot.metadata.viewMode,
+            deletedAt: envelope.currentSnapshot.metadata.deletedAt,
+            originalFolderID: envelope.currentSnapshot.metadata.originalFolderID,
+            originalFolderName: envelope.currentSnapshot.metadata.originalFolderName,
+            documentSchemaVersion: envelope.currentSnapshot.document.schemaVersion,
+            documentSource: envelope.currentSnapshot.document.source,
+            blockCount: envelope.currentSnapshot.document.blocks.count,
+            assetCount: envelope.currentSnapshot.assets.count
+        )
+        context.insert(note)
+        library.noteCount += 1
+        try apply(snapshot: envelope.currentSnapshot, to: note, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt, replaceExistingArtifacts: false)
+        syncState.lastCommonVersion = envelope.currentVersion
+        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+        syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, envelope.currentVersion)
+        syncState.lastSyncAt = Date()
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try context.save()
+
+        return NoteSyncMergeResult(
+            noteID: envelope.noteID,
+            appliedRemoteSnapshot: true,
+            detectedConflict: false,
+            importedHistoryVersions: importedVersions,
+            localVersion: note.version,
+            remoteVersion: envelope.currentVersion
+        )
+    }
+
+    static func markSynced(noteID: UUID, syncedVersion: Int64, context: ModelContext) throws {
+        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, syncedVersion)
+        syncState.lastCommonVersion = max(syncState.lastCommonVersion, syncedVersion)
+        syncState.lastSyncAt = Date()
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try context.save()
+    }
+
+    static func deleteHistory(noteID: UUID, context: ModelContext) throws {
+        for entry in try history(for: noteID, context: context) {
+            context.delete(entry)
+        }
+
+        let syncStateDescriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+        )
+        if let syncState = try context.fetch(syncStateDescriptor).first {
+            context.delete(syncState)
+        }
+    }
+
+    private static func importHistory(from envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws -> [Int64] {
+        let noteID = envelope.noteID
+        var importedVersions: [Int64] = []
+
+        for historyEntry in envelope.history {
+            let versionDescriptor = FetchDescriptor<BlockDocumentNoteVersionEntity>(
+                predicate: #Predicate<BlockDocumentNoteVersionEntity> {
+                    $0.noteID == noteID && $0.version == historyEntry.version
+                }
+            )
+            if try context.fetch(versionDescriptor).first != nil {
+                continue
+            }
+
+            let snapshotData = try jsonEncoder.encode(historyEntry.snapshot)
+            context.insert(
+                BlockDocumentNoteVersionEntity(
+                    id: historyEntry.id,
+                    noteID: historyEntry.noteID,
+                    version: historyEntry.version,
+                    recordedAt: historyEntry.recordedAt,
+                    updatedAt: historyEntry.updatedAt,
+                    title: historyEntry.title,
+                    authorDeviceID: historyEntry.authorDeviceID,
+                    contentHash: historyEntry.contentHash,
+                    snapshotData: snapshotData
+                )
+            )
+            importedVersions.append(historyEntry.version)
+        }
+
+        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        if let maxHistoryVersion = (envelope.history.map(\.version).max()) {
+            syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, maxHistoryVersion)
+        }
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        return importedVersions.sorted()
+    }
+
+    private static func ensureLibrary(context: ModelContext) throws -> BlockDocumentLibraryEntity {
+        if let existing = try context.fetch(
+            FetchDescriptor<BlockDocumentLibraryEntity>(sortBy: [SortDescriptor(\.importedAt, order: .reverse)])
+        ).first {
+            return existing
+        }
+
+        let library = BlockDocumentLibraryEntity(schemaVersion: "1.0", sourceExportedAt: Date())
+        context.insert(library)
+        return library
+    }
+
+    private static func ensureSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity {
+        let syncStateDescriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+        )
+        if let existing = try context.fetch(syncStateDescriptor).first {
+            return existing
+        }
+
+        let syncState = BlockDocumentNoteSyncStateEntity(noteID: noteID)
+        context.insert(syncState)
+        return syncState
+    }
+
+    private static func apply(
+        snapshot: VersionedNoteSnapshot,
+        to note: BlockDocumentNoteEntity,
+        context: ModelContext,
+        restoredAt: Date,
+        replaceExistingArtifacts: Bool = true
+    ) throws {
+        let noteID = note.id
+        if replaceExistingArtifacts {
+            for block in try context.fetch(
+                FetchDescriptor<BlockDocumentBlockEntity>(
+                    predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == noteID }
+                )
+            ) {
+                context.delete(block)
+            }
+            for asset in try context.fetch(
+                FetchDescriptor<BlockDocumentAssetEntity>(
+                    predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
+                )
+            ) {
+                context.delete(asset)
+            }
+        }
+
+        note.title = snapshot.metadata.title
+        note.createdAt = snapshot.metadata.createdAt
+        note.updatedAt = restoredAt
+        note.folderID = snapshot.metadata.folderID
+        note.folderName = snapshot.metadata.folderName
+        note.reminderAt = snapshot.metadata.reminderAt
+        note.recurrenceRule = snapshot.metadata.recurrenceRule
+        note.version = max(note.version + 1, snapshot.metadata.version + (replaceExistingArtifacts ? 1 : 0))
+        note.tagIDs = encodeUUIDList(snapshot.metadata.tagIDs)
+        note.viewMode = snapshot.metadata.viewMode
+        note.deletedAt = snapshot.metadata.deletedAt
+        note.originalFolderID = snapshot.metadata.originalFolderID
+        note.originalFolderName = snapshot.metadata.originalFolderName
+        note.documentSchemaVersion = snapshot.document.schemaVersion
+        note.documentSource = snapshot.document.source
+        note.blockCount = snapshot.document.blocks.count
+        note.assetCount = snapshot.assets.count
+
+        for asset in snapshot.assets {
+            context.insert(
+                BlockDocumentAssetEntity(
+                    noteID: note.id,
+                    assetID: asset.reference.id,
+                    kind: asset.reference.kind,
+                    sourceKind: asset.reference.kind,
+                    filename: asset.reference.filename,
+                    mimeType: asset.reference.mimeType,
+                    width: asset.reference.width,
+                    height: asset.reference.height,
+                    duration: asset.reference.duration,
+                    createdAt: asset.reference.createdAt,
+                    relativeFilePath: asset.relativeFilePath,
+                    sidecarPathsPayload: try jsonEncoder.encode(asset.sidecarRelativePaths)
+                )
+            )
+        }
+
+        for (position, block) in snapshot.document.blocks.enumerated() {
+            context.insert(
+                BlockDocumentBlockEntity(
+                    noteID: note.id,
+                    position: position,
+                    blockID: block.id,
+                    kind: block.type,
+                    sourceType: block.type,
+                    textPayload: try block.text.map { try jsonEncoder.encode($0.map(mapTextPayload)) },
+                    level: block.level,
+                    listStyle: block.listStyle,
+                    order: block.order,
+                    checked: block.checked,
+                    indent: block.indent,
+                    assetID: block.asset?.id,
+                    tablePayload: try block.table.map { try jsonEncoder.encode(BlockDocumentTablePayload(rows: $0.rows, columnWidths: $0.columnWidths, rowHeights: $0.rowHeights)) }
+                )
+            )
+        }
+    }
+
+    private static func makeSnapshot(
+        note: BlockDocumentNoteEntity,
+        blocks: [BlockDocumentBlockEntity],
+        assets: [BlockDocumentAssetEntity]
+    ) throws -> VersionedNoteSnapshot {
+        let assetSnapshots = try assets.map(makeAssetSnapshot).sorted { $0.reference.id < $1.reference.id }
+        let assetByID = Dictionary(uniqueKeysWithValues: assetSnapshots.map { ($0.reference.id, $0.reference) })
+        let documentBlocks = try blocks.map { try makeDocumentBlock(from: $0, assetByID: assetByID) }
+        return VersionedNoteSnapshot(
+            metadata: DocumentMigrationPackage.NoteItem(
+                id: note.id,
+                title: note.title,
+                createdAt: note.createdAt,
+                updatedAt: note.updatedAt,
+                folderID: note.folderID,
+                folderName: note.folderName,
+                reminderAt: note.reminderAt,
+                recurrenceRule: note.recurrenceRule,
+                version: note.version,
+                tagIDs: decodeUUIDList(note.tagIDs),
+                viewMode: note.viewMode,
+                deletedAt: note.deletedAt,
+                originalFolderID: note.originalFolderID,
+                originalFolderName: note.originalFolderName,
+                blockCount: blocks.count,
+                assetCount: assets.count,
+                documentPath: "Notes/\(note.id.uuidString)/document.json"
+            ),
+            document: MigratedDocument(
+                schemaVersion: note.documentSchemaVersion,
+                source: note.documentSource,
+                blocks: documentBlocks
+            ),
+            assets: assetSnapshots
+        )
+    }
+
+    private static func makeAssetSnapshot(from asset: BlockDocumentAssetEntity) throws -> VersionedNoteAssetSnapshot {
+        let sidecarPaths = try decodeStringArray(asset.sidecarPathsPayload)
+        return VersionedNoteAssetSnapshot(
+            reference: MigratedAssetReference(
+                id: asset.assetID,
+                kind: asset.kind,
+                filename: asset.filename,
+                mimeType: asset.mimeType,
+                width: asset.width,
+                height: asset.height,
+                duration: asset.duration,
+                createdAt: asset.createdAt,
+                sidecarFiles: sidecarPaths
+            ),
+            relativeFilePath: asset.relativeFilePath,
+            sidecarRelativePaths: sidecarPaths
+        )
+    }
+
+    private static func makeDocumentBlock(
+        from block: BlockDocumentBlockEntity,
+        assetByID: [String: MigratedAssetReference]
+    ) throws -> MigratedDocumentBlock {
+        MigratedDocumentBlock(
+            id: block.blockID,
+            type: block.kind,
+            text: try decodeTextPayload(block.textPayload),
+            level: block.level,
+            listStyle: block.listStyle,
+            order: block.order,
+            checked: block.checked,
+            indent: block.indent,
+            asset: block.assetID.flatMap { assetByID[$0] },
+            table: try decodeTablePayload(block.tablePayload)
+        )
+    }
+
+    private static func decodeTextPayload(_ data: Data?) throws -> [MigratedInlineText]? {
+        guard let data else {
+            return nil
+        }
+        return try jsonDecoder.decode([BlockDocumentTextSpanPayload].self, from: data).map {
+            MigratedInlineText(
+                text: $0.text,
+                bold: $0.bold,
+                italic: $0.italic,
+                underline: $0.underline,
+                strikethrough: $0.strikethrough,
+                textColor: $0.textColor,
+                backgroundColor: $0.backgroundColor,
+                link: $0.link,
+                fontFamily: $0.fontFamily,
+                fontSize: $0.fontSize,
+                kern: $0.kern,
+                baselineOffset: $0.baselineOffset,
+                paragraphStyle: $0.paragraphStyle.map {
+                    MigratedParagraphStyle(
+                        alignment: $0.alignment,
+                        lineSpacing: $0.lineSpacing,
+                        paragraphSpacing: $0.paragraphSpacing,
+                        paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                        firstLineHeadIndent: $0.firstLineHeadIndent,
+                        headIndent: $0.headIndent,
+                        tailIndent: $0.tailIndent
+                    )
+                }
+            )
+        }
+    }
+
+    private static func decodeTablePayload(_ data: Data?) throws -> MigratedTable? {
+        guard let data else {
+            return nil
+        }
+        let table = try jsonDecoder.decode(BlockDocumentTablePayload.self, from: data)
+        return MigratedTable(rows: table.rows, columnWidths: table.columnWidths, rowHeights: table.rowHeights)
+    }
+
+    private static func decodeStringArray(_ data: Data?) throws -> [String] {
+        guard let data else {
+            return []
+        }
+        return try jsonDecoder.decode([String].self, from: data)
+    }
+
+    private static func mapTextPayload(_ inline: MigratedInlineText) -> BlockDocumentTextSpanPayload {
+        BlockDocumentTextSpanPayload(
+            text: inline.text,
+            bold: inline.bold,
+            italic: inline.italic,
+            underline: inline.underline,
+            strikethrough: inline.strikethrough,
+            textColor: inline.textColor,
+            backgroundColor: inline.backgroundColor,
+            link: inline.link,
+            fontFamily: inline.fontFamily,
+            fontSize: inline.fontSize,
+            kern: inline.kern,
+            baselineOffset: inline.baselineOffset,
+            paragraphStyle: inline.paragraphStyle.map {
+                BlockDocumentParagraphStylePayload(
+                    alignment: $0.alignment,
+                    lineSpacing: $0.lineSpacing,
+                    paragraphSpacing: $0.paragraphSpacing,
+                    paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                    firstLineHeadIndent: $0.firstLineHeadIndent,
+                    headIndent: $0.headIndent,
+                    tailIndent: $0.tailIndent
+                )
+            }
+        )
+    }
+
+    private static func decodeUUIDList(_ rawValue: String) -> [UUID] {
+        rawValue
+            .split(separator: ",")
+            .compactMap { UUID(uuidString: String($0)) }
+    }
+
+    private static func encodeUUIDList(_ values: [UUID]) -> String {
+        values.map(\.uuidString).joined(separator: ",")
+    }
+
+    private static func blockSignature(_ block: MigratedDocumentBlock) -> String {
+        let text = (block.text ?? []).map(\.text).joined(separator: "\u{241E}")
+        let table = block.table.map { "\($0.rows)\($0.columnWidths)\($0.rowHeights)" } ?? ""
+        let asset = block.asset?.id ?? ""
+        return [
+            block.id,
+            block.type,
+            text,
+            block.listStyle ?? "",
+            String(block.level ?? -1),
+            String(block.order ?? -1),
+            String(block.checked ?? false),
+            String(block.indent ?? -1),
+            asset,
+            table
+        ].joined(separator: "\u{241F}")
+    }
+
+    private static func fingerprint(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

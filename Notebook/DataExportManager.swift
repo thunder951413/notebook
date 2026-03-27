@@ -26,7 +26,7 @@ final class DataExportManager {
     /// 打包当前配置到 zip 文件
     func exportConfiguration() async throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
-        let exportDir = tempDir.appendingPathComponent("NotebookConfig_\(Date().timeIntervalSince1970)")
+        let exportDir = uniqueTemporaryDirectoryURL(prefix: "NotebookConfig", in: tempDir)
 
         // 创建临时目录
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
@@ -47,7 +47,7 @@ final class DataExportManager {
         try exportAIConfig(to: exportDir)
 
         // 创建 zip 文件
-        let zipURL = tempDir.appendingPathComponent("NotebookConfig_\(formattedDate()).zip")
+        let zipURL = uniqueExportArchiveURL(prefix: "NotebookConfig", in: tempDir)
         try createZip(from: exportDir, to: zipURL)
 
         // 清理临时目录
@@ -61,7 +61,7 @@ final class DataExportManager {
     /// 打包所有笔记和附件到 zip 文件
     func exportAllData(context: ModelContext) async throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
-        let exportDir = tempDir.appendingPathComponent("NotebookData_\(Date().timeIntervalSince1970)")
+        let exportDir = uniqueTemporaryDirectoryURL(prefix: "NotebookData", in: tempDir)
 
         // 创建临时目录
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
@@ -95,7 +95,7 @@ final class DataExportManager {
         try exportDatabaseFiles(to: exportDir.appendingPathComponent("Database"))
 
         // 创建 zip 文件
-        let zipURL = tempDir.appendingPathComponent("NotebookData_\(formattedDate()).zip")
+        let zipURL = uniqueExportArchiveURL(prefix: "NotebookData", in: tempDir)
         try createZip(from: exportDir, to: zipURL)
 
         // 清理临时目录
@@ -109,7 +109,7 @@ final class DataExportManager {
     /// 仅导出所有笔记（不包含配置和附件）
     func exportAllNotesOnly(context: ModelContext) async throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
-        let exportDir = tempDir.appendingPathComponent("NotebookNotes_\(Date().timeIntervalSince1970)")
+        let exportDir = uniqueTemporaryDirectoryURL(prefix: "NotebookNotes", in: tempDir)
 
         // 创建临时目录
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
@@ -118,7 +118,7 @@ final class DataExportManager {
         try await exportAllNotes(to: exportDir, context: context)
 
         // 创建 zip 文件
-        let zipURL = tempDir.appendingPathComponent("NotebookNotes_\(formattedDate()).zip")
+        let zipURL = uniqueExportArchiveURL(prefix: "NotebookNotes", in: tempDir)
         try createZip(from: exportDir, to: zipURL)
 
         // 清理临时目录
@@ -465,7 +465,20 @@ final class DataExportManager {
                 backgroundColor: $0.backgroundColor,
                 link: $0.link,
                 fontFamily: $0.fontFamily,
-                fontSize: $0.fontSize
+                fontSize: $0.fontSize,
+                kern: $0.kern,
+                baselineOffset: $0.baselineOffset,
+                paragraphStyle: $0.paragraphStyle.map {
+                    MigratedParagraphStyle(
+                        alignment: $0.alignment,
+                        lineSpacing: $0.lineSpacing,
+                        paragraphSpacing: $0.paragraphSpacing,
+                        paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                        firstLineHeadIndent: $0.firstLineHeadIndent,
+                        headIndent: $0.headIndent,
+                        tailIndent: $0.tailIndent
+                    )
+                }
             )
         }
     }
@@ -789,6 +802,14 @@ final class DataExportManager {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         return formatter.string(from: Date())
+    }
+
+    private func uniqueTemporaryDirectoryURL(prefix: String, in directory: URL) -> URL {
+        directory.appendingPathComponent("\(prefix)_\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func uniqueExportArchiveURL(prefix: String, in directory: URL) -> URL {
+        directory.appendingPathComponent("\(prefix)_\(formattedDate())_\(UUID().uuidString).zip")
     }
 
     // MARK: - 导入功能
@@ -1490,6 +1511,19 @@ struct MigratedInlineText: Codable {
     let link: String?
     let fontFamily: String?
     let fontSize: Double?
+    let kern: Double?
+    let baselineOffset: Double?
+    let paragraphStyle: MigratedParagraphStyle?
+}
+
+struct MigratedParagraphStyle: Codable, Equatable {
+    let alignment: Int?
+    let lineSpacing: Double?
+    let paragraphSpacing: Double?
+    let paragraphSpacingBefore: Double?
+    let firstLineHeadIndent: Double?
+    let headIndent: Double?
+    let tailIndent: Double?
 }
 
 struct MigratedAssetReference: Codable {
@@ -1958,6 +1992,9 @@ struct ImportedInlineText {
     let link: String?
     let fontFamily: String?
     let fontSize: Double?
+    let kern: Double?
+    let baselineOffset: Double?
+    let paragraphStyle: MigratedParagraphStyle?
 
     init(
         text: String,
@@ -1969,7 +2006,10 @@ struct ImportedInlineText {
         backgroundColor: String?,
         link: String?,
         fontFamily: String?,
-        fontSize: Double?
+        fontSize: Double?,
+        kern: Double?,
+        baselineOffset: Double?,
+        paragraphStyle: MigratedParagraphStyle?
     ) {
         self.text = text
         self.bold = bold
@@ -1981,6 +2021,9 @@ struct ImportedInlineText {
         self.link = link
         self.fontFamily = fontFamily
         self.fontSize = fontSize
+        self.kern = kern
+        self.baselineOffset = baselineOffset
+        self.paragraphStyle = paragraphStyle
     }
 
     init(span: MigratedInlineText) {
@@ -1994,6 +2037,9 @@ struct ImportedInlineText {
         link = span.link
         fontFamily = span.fontFamily
         fontSize = span.fontSize
+        kern = span.kern
+        baselineOffset = span.baselineOffset
+        paragraphStyle = span.paragraphStyle
     }
 }
 
@@ -2361,7 +2407,20 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
                 backgroundColor: $0.backgroundColor,
                 link: $0.link,
                 fontFamily: $0.fontFamily,
-                fontSize: $0.fontSize
+                fontSize: $0.fontSize,
+                kern: $0.kern,
+                baselineOffset: $0.baselineOffset,
+                paragraphStyle: $0.paragraphStyle.map {
+                    BlockDocumentParagraphStylePayload(
+                        alignment: $0.alignment,
+                        lineSpacing: $0.lineSpacing,
+                        paragraphSpacing: $0.paragraphSpacing,
+                        paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                        firstLineHeadIndent: $0.firstLineHeadIndent,
+                        headIndent: $0.headIndent,
+                        tailIndent: $0.tailIndent
+                    )
+                }
             )
         }
         return try encodeJSON(payload)
@@ -2404,7 +2463,7 @@ struct LegacyDocumentConversion {
     let assetCount: Int
 }
 
-final class LegacyNoteDocumentConverter {
+struct LegacyNoteDocumentConverter {
     private let noteID: UUID
     private let noteDirectory: URL
     private let assetsDirectory: URL
@@ -2419,18 +2478,18 @@ final class LegacyNoteDocumentConverter {
         try fileManager.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
     }
 
-    func convert(content: NSAttributedString) throws -> LegacyDocumentConversion {
+    mutating func convert(content: NSAttributedString) throws -> LegacyDocumentConversion {
         let document = try buildDocument(from: content)
         return LegacyDocumentConversion(document: document, assetCount: assetIndex)
     }
 
-    private func buildDocument(from content: NSAttributedString) throws -> MigratedDocument {
+    private mutating func buildDocument(from content: NSAttributedString) throws -> MigratedDocument {
         let nsString = content.string as NSString
         var blocks: [MigratedDocumentBlock] = []
         var location = 0
 
         while location < nsString.length {
-            let paragraphRange = nsString.paragraphRange(for: NSRange(location: location, length: 0))
+            let paragraphRange = paragraphRangeForLegacyConversion(startingAt: location, in: content)
             blocks.append(contentsOf: try convertParagraph(content, range: paragraphRange))
             let nextLocation = NSMaxRange(paragraphRange)
             if nextLocation <= location {
@@ -2446,12 +2505,143 @@ final class LegacyNoteDocumentConverter {
         return MigratedDocument(schemaVersion: "1.0", source: "NotebookRTFD", blocks: blocks)
     }
 
-    private func convertParagraph(_ content: NSAttributedString, range: NSRange) throws -> [MigratedDocumentBlock] {
+    private func paragraphRangeForLegacyConversion(startingAt location: Int, in content: NSAttributedString) -> NSRange {
+        let nsString = content.string as NSString
+        let length = nsString.length
+        guard location < length else {
+            return NSRange(location: location, length: 0)
+        }
+
+        var range = nextParagraphRange(startingAt: location, in: nsString)
+        while shouldMergeNextLegacyContinuation(for: range, in: content) {
+            let nextLocation = NSMaxRange(range)
+            guard nextLocation < length else { break }
+            let nextRange = nextParagraphRange(startingAt: nextLocation, in: nsString)
+            guard trimmedVisibleRange(nextRange, in: nsString).length > 0 else {
+                break
+            }
+            range = NSRange(location: location, length: NSMaxRange(nextRange) - location)
+        }
+
+        return range
+    }
+
+    private func nextParagraphRange(startingAt location: Int, in nsString: NSString) -> NSRange {
+        let length = nsString.length
+        guard location < length else {
+            return NSRange(location: location, length: 0)
+        }
+
+        var end = location
+        while end < length {
+            let scalar = nsString.character(at: end)
+            if scalar == 10 || scalar == 13 || scalar == 0x2028 || scalar == 0x2029 {
+                end += 1
+                if scalar == 13, end < length, nsString.character(at: end) == 10 {
+                    end += 1
+                }
+                break
+            }
+            end += 1
+        }
+
+        return NSRange(location: location, length: end - location)
+    }
+
+    private func shouldMergeNextLegacyContinuation(for range: NSRange, in content: NSAttributedString) -> Bool {
+        let nsString = content.string as NSString
+        let current = trimmedVisibleRange(range, in: nsString)
+        guard current.length > 0 else { return false }
+
+        return isLegacyCheckboxContinuationMarker(current, in: content)
+            || isLegacyListContinuationMarker(current, in: nsString)
+    }
+
+    private func isLegacyCheckboxContinuationMarker(_ range: NSRange, in content: NSAttributedString) -> Bool {
+        let nsString = content.string as NSString
+        var cursor = range.location
+        let end = NSMaxRange(range)
+
+        while cursor < end, isLegacyContinuationWhitespace(nsString.character(at: cursor)) {
+            cursor += 1
+        }
+
+        guard cursor < end else { return false }
+        guard let attachment = content.attribute(.attachment, at: cursor, effectiveRange: nil) as? NSTextAttachment else {
+            return false
+        }
+
+        let isCheckboxAttachment =
+            attachment is CheckboxTextAttachment
+            || CheckboxTextAttachment.looksLikeCheckbox(attachment)
+            || probableLegacyCheckboxAttachment(attachment)
+        guard isCheckboxAttachment else { return false }
+
+        cursor += 1
+        while cursor < end {
+            guard isLegacyContinuationWhitespace(nsString.character(at: cursor)) else {
+                return false
+            }
+            cursor += 1
+        }
+
+        return true
+    }
+
+    private func isLegacyListContinuationMarker(_ range: NSRange, in nsString: NSString) -> Bool {
+        var cursor = range.location
+        let end = NSMaxRange(range)
+
+        while cursor < end {
+            let scalar = nsString.character(at: cursor)
+            if scalar == 32 || scalar == 9 {
+                cursor += 1
+                continue
+            }
+            break
+        }
+
+        guard cursor < end else { return false }
+        let marker = nsString.character(at: cursor)
+        if marker == 0x2022 || marker == 45 {
+            cursor += 1
+            while cursor < end {
+                let scalar = nsString.character(at: cursor)
+                guard scalar == 32 || scalar == 9 else { return false }
+                cursor += 1
+            }
+            return true
+        }
+
+        let digitStart = cursor
+        while cursor < end {
+            let scalar = nsString.character(at: cursor)
+            guard CharacterSet.decimalDigits.contains(UnicodeScalar(scalar)!) else { break }
+            cursor += 1
+        }
+        guard cursor > digitStart, cursor < end, nsString.character(at: cursor) == 46 else {
+            return false
+        }
+
+        cursor += 1
+        while cursor < end {
+            let scalar = nsString.character(at: cursor)
+            guard scalar == 32 || scalar == 9 else { return false }
+            cursor += 1
+        }
+        return true
+    }
+
+    private func isLegacyContinuationWhitespace(_ scalar: unichar) -> Bool {
+        scalar == 32 || scalar == 9 || scalar == 10 || scalar == 13 || scalar == 0x2028 || scalar == 0x2029
+    }
+
+    private mutating func convertParagraph(_ content: NSAttributedString, range: NSRange) throws -> [MigratedDocumentBlock] {
         let visibleRange = trimmedVisibleRange(range, in: content.string as NSString)
         let attachmentItems = attachmentItems(in: visibleRange, content: content)
 
-        if let leadingCheckbox = leadingCheckboxItem(in: attachmentItems, visibleRange: visibleRange) {
-            return [buildTodoBlock(content, paragraphRange: visibleRange, checkbox: leadingCheckbox)]
+        if let leadingCheckbox = leadingCheckboxItem(in: attachmentItems, visibleRange: visibleRange, content: content) {
+            return [buildTodoBlock(content, paragraphRange: visibleRange, checkbox: leadingCheckbox.item, indent: leadingCheckbox.indent)]
         }
 
         if attachmentItems.count == 1,
@@ -2503,13 +2693,14 @@ final class LegacyNoteDocumentConverter {
         return blocks
     }
 
-    private func buildTodoBlock(_ content: NSAttributedString, paragraphRange: NSRange, checkbox: AttachmentItem) -> MigratedDocumentBlock {
-        var start = NSMaxRange(checkbox.range)
+    private mutating func buildTodoBlock(_ content: NSAttributedString, paragraphRange: NSRange, checkbox: AttachmentItem, indent: Int) -> MigratedDocumentBlock {
+        var start = checkboxTextStartLocation(for: checkbox, in: content)
         let end = NSMaxRange(paragraphRange)
         let nsString = content.string as NSString
         while start < end {
             let scalar = nsString.character(at: start)
-            if scalar == 32 || scalar == 9 {
+            let hasAttachmentAttribute = content.attribute(.attachment, at: start, effectiveRange: nil) != nil
+            if hasAttachmentAttribute || scalar == 32 || scalar == 9 || scalar == 10 || scalar == 13 || scalar == 0x2028 || scalar == 0x2029 {
                 start += 1
             } else {
                 break
@@ -2525,13 +2716,34 @@ final class LegacyNoteDocumentConverter {
             listStyle: nil,
             order: nil,
             checked: checkbox.checkboxState,
-            indent: 0,
+            indent: indent,
             asset: nil,
             table: nil
         )
     }
 
-    private func buildTextBlock(_ content: NSAttributedString, range: NSRange, prefersParagraphSemantics: Bool) -> MigratedDocumentBlock? {
+    private func checkboxTextStartLocation(for checkbox: AttachmentItem, in content: NSAttributedString) -> Int {
+        let nsString = content.string as NSString
+        let maxLength = nsString.length
+        guard checkbox.range.location < maxLength else {
+            return NSMaxRange(checkbox.range)
+        }
+
+        let rangeStart = max(0, checkbox.range.location)
+        let rangeEnd = min(NSMaxRange(checkbox.range), maxLength)
+        if rangeStart >= rangeEnd {
+            return NSMaxRange(checkbox.range)
+        }
+
+        let objectReplacement: unichar = 0xFFFC
+        for index in rangeStart..<rangeEnd where nsString.character(at: index) == objectReplacement {
+            return min(index + 1, maxLength)
+        }
+
+        return min(NSMaxRange(checkbox.range), maxLength)
+    }
+
+    private mutating func buildTextBlock(_ content: NSAttributedString, range: NSRange, prefersParagraphSemantics: Bool) -> MigratedDocumentBlock? {
         guard range.length > 0 else { return nil }
         let nsString = content.string as NSString
         let raw = nsString.substring(with: range)
@@ -2550,7 +2762,7 @@ final class LegacyNoteDocumentConverter {
             type = "list_item"
             listStyle = listDescriptor.style
             order = listDescriptor.order
-            finalRange = listDescriptor.contentRange
+            finalRange = sanitizedListContentRange(listDescriptor.contentRange, in: content.string as NSString)
         } else if prefersParagraphSemantics, let headingLevel = detectHeadingLevel(in: content, range: range) {
             type = "heading"
             level = headingLevel
@@ -2571,7 +2783,7 @@ final class LegacyNoteDocumentConverter {
         )
     }
 
-    private func buildAttachmentBlock(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedDocumentBlock? {
+    private mutating func buildAttachmentBlock(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedDocumentBlock? {
         if item.isCheckbox {
             return nil
         }
@@ -2613,7 +2825,24 @@ final class LegacyNoteDocumentConverter {
         return nil
     }
 
-    private func exportAsset(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedAssetReference? {
+    private func sanitizedListContentRange(_ range: NSRange, in nsString: NSString) -> NSRange {
+        let maxLength = nsString.length
+        var start = max(0, min(range.location, maxLength))
+        let end = max(start, min(NSMaxRange(range), maxLength))
+
+        while start < end {
+            let scalar = nsString.character(at: start)
+            if scalar == 10 || scalar == 13 || scalar == 0x2028 || scalar == 0x2029 {
+                start += 1
+                continue
+            }
+            break
+        }
+
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    private mutating func exportAsset(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedAssetReference? {
         if let attachment = item.attachment as? AttachmentTextAttachment {
             switch attachment.kind {
             case .image:
@@ -2642,9 +2871,9 @@ final class LegacyNoteDocumentConverter {
             )
         }
 
-        if let fileWrapper = item.attachment.fileWrapper,
-           let data = fileWrapper.regularFileContents,
-           let preferredFilename = fileWrapper.preferredFilename {
+        if let payload = regularFilePayload(from: item.attachment.fileWrapper) {
+            let data = payload.data
+            let preferredFilename = payload.preferredFilename
             let mimeType = mimeType(forPathExtension: URL(fileURLWithPath: preferredFilename).pathExtension.lowercased())
             if mimeType.hasPrefix("image/") {
                 return try exportImageAsset(
@@ -2703,7 +2932,7 @@ final class LegacyNoteDocumentConverter {
         return nil
     }
 
-    private func exportImageAsset(data: Data?, preferredFilename: String, width: Double?, height: Double?) throws -> MigratedAssetReference? {
+    private mutating func exportImageAsset(data: Data?, preferredFilename: String, width: Double?, height: Double?) throws -> MigratedAssetReference? {
         guard let data else { return nil }
         let filename = uniqueAssetFilename(preferredFilename, fallbackExtension: "png")
         let outputURL = assetsDirectory.appendingPathComponent(filename)
@@ -2721,7 +2950,7 @@ final class LegacyNoteDocumentConverter {
         )
     }
 
-    private func exportAudioAsset(sourceURL: URL, data: Data?, duration: TimeInterval?, createdAt: Date?) throws -> MigratedAssetReference? {
+    private mutating func exportAudioAsset(sourceURL: URL, data: Data?, duration: TimeInterval?, createdAt: Date?) throws -> MigratedAssetReference? {
         guard let data else { return nil }
         let filename = uniqueAssetFilename(sourceURL.lastPathComponent, fallbackExtension: sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension)
         let outputURL = assetsDirectory.appendingPathComponent(filename)
@@ -2757,13 +2986,12 @@ final class LegacyNoteDocumentConverter {
         var spans: [MigratedInlineText] = []
 
         content.enumerateAttributes(in: range, options: []) { attributes, subrange, _ in
-            if attributes[.attachment] != nil {
-                return
-            }
-
             let raw = nsString.substring(with: subrange)
+                .replacingOccurrences(of: "\u{FFFC}", with: "")
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: "\u{2028}", with: "")
+                .replacingOccurrences(of: "\u{2029}", with: "")
 
             guard !raw.isEmpty else { return }
 
@@ -2773,6 +3001,8 @@ final class LegacyNoteDocumentConverter {
             let backgroundColor = (attributes[.backgroundColor] as? NSColor).flatMap(colorHex)
             let underline = ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0
             let strikethrough = ((attributes[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0
+            let kern = (attributes[.kern] as? NSNumber)?.doubleValue
+            let baselineOffset = (attributes[.baselineOffset] as? NSNumber)?.doubleValue
             let link: String?
 
             if let url = attributes[.link] as? URL {
@@ -2793,7 +3023,10 @@ final class LegacyNoteDocumentConverter {
                 backgroundColor: backgroundColor,
                 link: link,
                 fontFamily: font?.familyName,
-                fontSize: font.map { Double($0.pointSize) }
+                fontSize: font.map { Double($0.pointSize) },
+                kern: kern,
+                baselineOffset: baselineOffset,
+                paragraphStyle: paragraphStylePayload(from: attributes[.paragraphStyle] as? NSParagraphStyle)
             )
 
             if let last = spans.last,
@@ -2805,7 +3038,10 @@ final class LegacyNoteDocumentConverter {
                last.backgroundColor == span.backgroundColor,
                last.link == span.link,
                last.fontFamily == span.fontFamily,
-               last.fontSize == span.fontSize {
+               last.fontSize == span.fontSize,
+               last.kern == span.kern,
+               last.baselineOffset == span.baselineOffset,
+               last.paragraphStyle == span.paragraphStyle {
                 spans[spans.count - 1] = MigratedInlineText(
                     text: last.text + span.text,
                     bold: span.bold,
@@ -2816,7 +3052,10 @@ final class LegacyNoteDocumentConverter {
                     backgroundColor: span.backgroundColor,
                     link: span.link,
                     fontFamily: span.fontFamily,
-                    fontSize: span.fontSize
+                    fontSize: span.fontSize,
+                    kern: span.kern,
+                    baselineOffset: span.baselineOffset,
+                    paragraphStyle: span.paragraphStyle
                 )
             } else {
                 spans.append(span)
@@ -2855,6 +3094,12 @@ final class LegacyNoteDocumentConverter {
                 if CheckboxTextAttachment.looksLikeCheckbox(attachment) {
                     return CheckboxTextAttachment.inferCheckedState(from: attachment)
                 }
+                if attachment is AttachmentTextAttachment {
+                    return nil
+                }
+                if probableLegacyCheckboxAttachment(attachment) {
+                    return CheckboxTextAttachment.inferCheckedState(from: attachment)
+                }
                 return nil
             }()
 
@@ -2871,14 +3116,33 @@ final class LegacyNoteDocumentConverter {
         return items
     }
 
-    private func leadingCheckboxItem(in items: [AttachmentItem], visibleRange: NSRange) -> AttachmentItem? {
+    private func leadingCheckboxItem(
+        in items: [AttachmentItem],
+        visibleRange: NSRange,
+        content: NSAttributedString
+    ) -> (item: AttachmentItem, indent: Int)? {
         guard let first = items.first, first.isCheckbox else { return nil }
-        guard first.range.location == visibleRange.location else { return nil }
-        return first
+        guard first.range.location >= visibleRange.location else { return nil }
+
+        let prefixRange = NSRange(location: visibleRange.location, length: first.range.location - visibleRange.location)
+        let prefix = (content.string as NSString).substring(with: prefixRange)
+        guard prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (first, leadingIndentLevel(in: prefix))
     }
 
     private func detectHeadingLevel(in content: NSAttributedString, range: NSRange) -> Int? {
         guard range.length > 0 else { return nil }
+
+        var explicitLevel: Int?
+        content.enumerateAttribute(.notebookHeadingLevel, in: range, options: []) { value, _, stop in
+            if let level = (value as? NSNumber)?.intValue ?? (value as? Int) {
+                explicitLevel = max(1, min(level, 6))
+                stop.pointee = true
+            }
+        }
+        if let explicitLevel {
+            return explicitLevel
+        }
 
         var maxPointSize: CGFloat = 0
         var emphasized = false
@@ -2902,6 +3166,19 @@ final class LegacyNoteDocumentConverter {
             return 3
         }
         return nil
+    }
+
+    private func paragraphStylePayload(from style: NSParagraphStyle?) -> MigratedParagraphStyle? {
+        guard let style else { return nil }
+        return MigratedParagraphStyle(
+            alignment: style.alignment.rawValue,
+            lineSpacing: style.lineSpacing == 0 ? nil : style.lineSpacing,
+            paragraphSpacing: style.paragraphSpacing == 0 ? nil : style.paragraphSpacing,
+            paragraphSpacingBefore: style.paragraphSpacingBefore == 0 ? nil : style.paragraphSpacingBefore,
+            firstLineHeadIndent: style.firstLineHeadIndent == 0 ? nil : style.firstLineHeadIndent,
+            headIndent: style.headIndent == 0 ? nil : style.headIndent,
+            tailIndent: style.tailIndent == 0 ? nil : style.tailIndent
+        )
     }
 
     private func detectListDescriptor(in raw: String, baseLocation: Int) -> ListDescriptor? {
@@ -2935,7 +3212,7 @@ final class LegacyNoteDocumentConverter {
 
         while length > 0 {
             let tail = nsString.character(at: location + length - 1)
-            if tail == 10 || tail == 13 {
+            if tail == 10 || tail == 13 || tail == 0x2028 || tail == 0x2029 {
                 length -= 1
             } else {
                 break
@@ -2944,7 +3221,7 @@ final class LegacyNoteDocumentConverter {
 
         while length > 0 {
             let head = nsString.character(at: location)
-            if head == 10 || head == 13 {
+            if head == 10 || head == 13 || head == 0x2028 || head == 0x2029 {
                 location += 1
                 length -= 1
             } else {
@@ -2994,6 +3271,46 @@ final class LegacyNoteDocumentConverter {
         return nil
     }
 
+    private func probableLegacyCheckboxAttachment(_ attachment: NSTextAttachment) -> Bool {
+        let resolvedSize: CGSize = {
+            if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+                return attachment.bounds.size
+            }
+            if let image = attachment.image {
+                return image.size
+            }
+            if let contents = attachment.contents, let image = NSImage(data: contents) {
+                return image.size
+            }
+            if let payload = regularFilePayload(from: attachment.fileWrapper),
+               let image = NSImage(data: payload.data) {
+                return image.size
+            }
+            return .zero
+        }()
+
+        guard resolvedSize.width > 0, resolvedSize.height > 0 else {
+            return false
+        }
+
+        let minEdge = min(resolvedSize.width, resolvedSize.height)
+        let maxEdge = max(resolvedSize.width, resolvedSize.height)
+        guard minEdge >= 10, maxEdge <= 36 else {
+            return false
+        }
+
+        let ratio = maxEdge / minEdge
+        return ratio <= 1.25
+    }
+
+    private func regularFilePayload(from fileWrapper: FileWrapper?) -> (data: Data, preferredFilename: String)? {
+        guard let fileWrapper, fileWrapper.isRegularFile, let data = fileWrapper.regularFileContents else {
+            return nil
+        }
+        let preferredFilename = fileWrapper.preferredFilename ?? fileWrapper.filename ?? "attachment"
+        return (data, preferredFilename)
+    }
+
     private func colorHex(_ color: NSColor) -> String? {
         guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
         let red = Int(round(rgb.redComponent * 255))
@@ -3020,7 +3337,7 @@ final class LegacyNoteDocumentConverter {
         }
     }
 
-    private func uniqueAssetFilename(_ preferredFilename: String, fallbackExtension: String) -> String {
+    private mutating func uniqueAssetFilename(_ preferredFilename: String, fallbackExtension: String) -> String {
         let sanitizedBase = sanitizeFilename(URL(fileURLWithPath: preferredFilename).deletingPathExtension().lastPathComponent)
         let fallbackBase = sanitizedBase.isEmpty ? "asset" : sanitizedBase
         let ext = URL(fileURLWithPath: preferredFilename).pathExtension.isEmpty ? fallbackExtension : URL(fileURLWithPath: preferredFilename).pathExtension
@@ -3034,12 +3351,12 @@ final class LegacyNoteDocumentConverter {
         return String(unicodeScalars).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private func nextBlockID() -> String {
+    private mutating func nextBlockID() -> String {
         blockIndex += 1
         return "block-\(blockIndex)"
     }
 
-    private func nextAssetID() -> String {
+    private mutating func nextAssetID() -> String {
         assetIndex += 1
         return "asset-\(assetIndex)"
     }

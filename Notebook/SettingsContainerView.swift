@@ -425,6 +425,7 @@ struct DataManagementView: View {
     @State private var syncResult: SyncResult?
     @State private var showMigrationPreviewSheet = false
     @State private var showPersistedBlockBrowserSheet = false
+    @State private var showVersionManagerSheet = false
     @State private var migrationPreviewLibrary: ImportedDocumentLibrary?
     @State private var migrationPreviewPackage: LoadedDocumentMigrationPackage?
 
@@ -471,15 +472,25 @@ struct DataManagementView: View {
 
                         if SSHConfigManager.shared.isConfigured {
                             Button {
-                                performSync()
+                                performPushSync()
                             } label: {
                                 if isSyncing {
                                     ProgressView()
                                         .scaleEffect(0.8)
                                         .frame(width: 60)
                                 } else {
-                                    Text("立即同步")
+                                    Text("推送同步")
                                 }
+                            }
+                            .disabled(isSyncing)
+
+                            Button("拉取同步") {
+                                performPullSync()
+                            }
+                            .disabled(isSyncing)
+
+                            Button("双向同步") {
+                                performBidirectionalSync()
                             }
                             .disabled(isSyncing)
                         }
@@ -495,6 +506,26 @@ struct DataManagementView: View {
                                 .font(.caption)
                         }
                         .padding(.top, 4)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "clock.badge")
+                            .font(.title3)
+                            .foregroundColor(.teal)
+                        Text("版本历史")
+                            .font(.headline)
+                    }
+
+                    Text("按笔记查看版本、比较差异并回退到指定版本。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button("打开版本管理") {
+                        showVersionManagerSheet = true
                     }
                 }
 
@@ -649,6 +680,15 @@ struct DataManagementView: View {
             } else {
                 ContentUnavailableView("数据容器未配置", systemImage: "externaldrive.badge.xmark")
                     .frame(width: 520, height: 360)
+            }
+        }
+        .sheet(isPresented: $showVersionManagerSheet) {
+            if let container = persistence.modelContainer {
+                NoteVersionManagerView()
+                    .modelContainer(container)
+            } else {
+                ContentUnavailableView("数据容器未配置", systemImage: "externaldrive.badge.xmark")
+                    .frame(width: 680, height: 460)
             }
         }
     }
@@ -958,7 +998,55 @@ struct DataManagementView: View {
 
     // MARK: - SSH 同步
 
-    private func performSync() {
+    private func performPushSync() {
+        runSync {
+            let config = SSHConfigManager.shared.config
+            guard let container = persistence.modelContainer else {
+                throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            let syncedNoteIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
+                context: container.mainContext,
+                config: config
+            )
+            return "推送完成，更新 \(syncedNoteIDs.count) 条笔记"
+        }
+    }
+
+    private func performPullSync() {
+        runSync {
+            let config = SSHConfigManager.shared.config
+            guard let container = persistence.modelContainer else {
+                throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            let results = try await SSHSyncManager.shared.syncAllNotesFromRemote(
+                context: container.mainContext,
+                config: config
+            )
+            let conflicts = results.filter(\.detectedConflict).count
+            return "拉取完成，共处理 \(results.count) 条笔记，冲突 \(conflicts) 条"
+        }
+    }
+
+    private func performBidirectionalSync() {
+        runSync {
+            let config = SSHConfigManager.shared.config
+            guard let container = persistence.modelContainer else {
+                throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            let pullResults = try await SSHSyncManager.shared.syncAllNotesFromRemote(
+                context: container.mainContext,
+                config: config
+            )
+            let pushIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
+                context: container.mainContext,
+                config: config
+            )
+            let conflicts = pullResults.filter(\.detectedConflict).count
+            return "双向完成，拉取 \(pullResults.count) 条，推送 \(pushIDs.count) 条，冲突 \(conflicts) 条"
+        }
+    }
+
+    private func runSync(operation: @escaping () async throws -> String) {
         guard !isSyncing else { return }
 
         isSyncing = true
@@ -966,19 +1054,12 @@ struct DataManagementView: View {
 
         Task {
             do {
-                let config = SSHConfigManager.shared.config
-
-                // 获取数据目录
-                let dataURL = try StorageLocationManager.shared.notebookDataDirectoryURL()
-
-                // 执行同步
-                try await SSHSyncManager.shared.syncToRemote(localURL: dataURL, config: config)
+                let message = try await operation()
 
                 await MainActor.run {
-                    syncResult = .success("同步成功完成")
+                    syncResult = .success(message)
                     isSyncing = false
 
-                    // 3秒后清除结果
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                         syncResult = nil
                     }
@@ -989,6 +1070,174 @@ struct DataManagementView: View {
                     isSyncing = false
                 }
             }
+        }
+    }
+}
+
+private struct NoteVersionManagerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @State private var notes: [BlockDocumentNoteEntity] = []
+    @State private var selectedNoteID: UUID?
+    @State private var history: [BlockDocumentNoteVersionEntity] = []
+    @State private var baseVersion: Int64?
+    @State private var targetVersion: Int64?
+    @State private var comparison: NoteVersionComparison?
+    @State private var resultMessage: String?
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("版本管理")
+                    .font(.title2)
+                    .bold()
+                Spacer()
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                List(selection: $selectedNoteID) {
+                    ForEach(notes, id: \.id) { note in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(note.title.isEmpty ? "无标题" : note.title)
+                                .lineLimit(1)
+                            Text("v\(note.version)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(note.id)
+                    }
+                }
+                .frame(minWidth: 220)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("历史版本")
+                        .font(.headline)
+
+                    if history.isEmpty {
+                        ContentUnavailableView("没有历史版本", systemImage: "clock.badge.xmark")
+                    } else {
+                        Picker("基线版本", selection: $baseVersion) {
+                            Text("未选择").tag(Optional<Int64>.none)
+                            ForEach(history, id: \.id) { entry in
+                                Text("v\(entry.version) · \(entry.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .tag(Optional(entry.version))
+                            }
+                        }
+
+                        Picker("目标版本", selection: $targetVersion) {
+                            Text("未选择").tag(Optional<Int64>.none)
+                            ForEach(history, id: \.id) { entry in
+                                Text("v\(entry.version) · \(entry.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .tag(Optional(entry.version))
+                            }
+                        }
+
+                        HStack {
+                            Button("比较版本") {
+                                compareSelectedVersions()
+                            }
+                            .disabled(selectedNoteID == nil || baseVersion == nil || targetVersion == nil)
+
+                            Button("回退到目标版本") {
+                                restoreTargetVersion()
+                            }
+                            .disabled(selectedNoteID == nil || targetVersion == nil)
+                        }
+                    }
+
+                    if let comparison {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("比较结果")
+                                .font(.headline)
+                            Text("标题变化: \(comparison.titleChanged ? "是" : "否")")
+                            Text("元数据变化: \(comparison.metadataChanged ? "是" : "否")")
+                            Text("块数量变化: \(comparison.blockCountDelta)")
+                            Text("资源数量变化: \(comparison.assetCountDelta)")
+                            Text("修改块: \(comparison.changedBlockIDs.count)")
+                            Text("资源变化: +\(comparison.addedAssetIDs.count) / -\(comparison.removedAssetIDs.count)")
+                        }
+                        .font(.caption)
+                    }
+
+                    if let resultMessage {
+                        Text(resultMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 860, minHeight: 520)
+        .onAppear(perform: reloadNotes)
+        .onChange(of: selectedNoteID) {
+            reloadHistory()
+        }
+    }
+
+    private func reloadNotes() {
+        do {
+            notes = try modelContext.fetch(
+                FetchDescriptor<BlockDocumentNoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+            )
+            if selectedNoteID == nil {
+                selectedNoteID = notes.first?.id
+            }
+            reloadHistory()
+        } catch {
+            resultMessage = "加载笔记失败: \(error.localizedDescription)"
+        }
+    }
+
+    private func reloadHistory() {
+        comparison = nil
+        guard let selectedNoteID else {
+            history = []
+            return
+        }
+        do {
+            history = try BlockDocumentNoteVersionStore.history(for: selectedNoteID, context: modelContext)
+            baseVersion = history.first?.version
+            targetVersion = history.last?.version
+        } catch {
+            history = []
+            resultMessage = "加载历史失败: \(error.localizedDescription)"
+        }
+    }
+
+    private func compareSelectedVersions() {
+        guard let selectedNoteID, let baseVersion, let targetVersion else { return }
+        do {
+            comparison = try BlockDocumentNoteVersionStore.compare(
+                noteID: selectedNoteID,
+                from: baseVersion,
+                to: targetVersion,
+                context: modelContext
+            )
+            resultMessage = comparison == nil ? "未找到可比较版本" : "版本对比完成"
+        } catch {
+            resultMessage = "版本对比失败: \(error.localizedDescription)"
+        }
+    }
+
+    private func restoreTargetVersion() {
+        guard let selectedNoteID, let targetVersion else { return }
+        do {
+            let restoredVersion = try BlockDocumentNoteVersionStore.restore(
+                noteID: selectedNoteID,
+                toVersion: targetVersion,
+                context: modelContext
+            )
+            resultMessage = "回退完成，当前版本 v\(restoredVersion)"
+            reloadNotes()
+        } catch {
+            resultMessage = "回退失败: \(error.localizedDescription)"
         }
     }
 }
@@ -1574,7 +1823,20 @@ private enum PersistedBlockDocumentLibraryLoader {
                 backgroundColor: $0.backgroundColor,
                 link: $0.link,
                 fontFamily: $0.fontFamily,
-                fontSize: $0.fontSize
+                fontSize: $0.fontSize,
+                kern: $0.kern,
+                baselineOffset: $0.baselineOffset,
+                paragraphStyle: $0.paragraphStyle.map {
+                    MigratedParagraphStyle(
+                        alignment: $0.alignment,
+                        lineSpacing: $0.lineSpacing,
+                        paragraphSpacing: $0.paragraphSpacing,
+                        paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                        firstLineHeadIndent: $0.firstLineHeadIndent,
+                        headIndent: $0.headIndent,
+                        tailIndent: $0.tailIndent
+                    )
+                }
             )
         }
     }

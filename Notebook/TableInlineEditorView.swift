@@ -49,11 +49,10 @@ class TableInlineEditorView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         
-        let isDark = window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let bgColor: NSColor = isDark ? NSColor(white: 0.22, alpha: 1) : .white
-        let borderColor: NSColor = isDark ? NSColor(white: 0.35, alpha: 1) : NSColor(white: 0.85, alpha: 1)
-        let textColor: NSColor = isDark ? .white : .black
-        let selectionColor: NSColor = .selectedControlColor
+        let bgColor = AttachmentAppearance.backgroundColor
+        let borderColor = AttachmentAppearance.borderColor
+        let textColor = AttachmentAppearance.primaryTextColor
+        let selectionColor = AttachmentAppearance.selectionColor
         
         bgColor.setFill()
         bounds.fill()
@@ -71,7 +70,7 @@ class TableInlineEditorView: NSView {
                 
                 // 绘制选中背景
                 if selectedCell?.row == row && selectedCell?.col == col {
-                    selectionColor.withAlphaComponent(0.3).setFill()
+                    selectionColor.setFill()
                     cellRect.fill()
                 }
                 

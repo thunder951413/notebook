@@ -6,6 +6,11 @@ import AVFoundation
 
 @MainActor
 final class RichTextController: ObservableObject {
+    private struct SavedNoteState {
+        let titleHash: Int
+        let contentHash: Int
+    }
+
     fileprivate weak var textView: NSTextView?
 
     /// 用于跟踪当前选中的笔记（可能在视图更新前就变更）
@@ -35,6 +40,7 @@ final class RichTextController: ObservableObject {
 
     /// 上次保存的内容哈希（用于检测变化）
     private var lastSavedContentHash: Int?
+    private var savedStates: [UUID: SavedNoteState] = [:]
 
     /// 启动定期自动保存（每30秒）
     func startAutoSave(interval: TimeInterval = 30.0, onSave: @escaping @MainActor () -> Void) {
@@ -75,6 +81,21 @@ final class RichTextController: ObservableObject {
         }
     }
 
+    func recordSavedState(noteID: UUID, title: String, content: NSAttributedString) {
+        savedStates[noteID] = SavedNoteState(
+            titleHash: title.hashValue,
+            contentHash: content.hashValue
+        )
+        if currentNoteID == noteID || boundNoteID == noteID {
+            lastSavedContentHash = content.string.hashValue
+        }
+    }
+
+    func hasUnsavedChanges(noteID: UUID, title: String, content: NSAttributedString) -> Bool {
+        guard let savedState = savedStates[noteID] else { return true }
+        return savedState.titleHash != title.hashValue || savedState.contentHash != content.hashValue
+    }
+
     func bind(textView: NSTextView, noteID: UUID) {
         self.textView = textView
         self.boundNoteID = noteID
@@ -94,6 +115,15 @@ final class RichTextController: ObservableObject {
         guard let tv = textView else { return false }
         guard let inputContext = tv.inputContext else { return false }
         return (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+    }
+
+    var requiresCommittedSnapshotOnSwitch: Bool {
+        guard let tv = textView else { return false }
+        if hasMarkedText {
+            return true
+        }
+        guard let richTextView = tv as? RichTextView else { return false }
+        return richTextView.hasActiveTableEditor
     }
 
     /// 强制同步内容并获取当前编辑器内容的快照
@@ -155,6 +185,24 @@ final class RichTextController: ObservableObject {
         }
         
         // 获取当前 attributedString 的副本
+        return tv.attributedString().copy() as? NSAttributedString
+    }
+
+    func snapshotAttributedStringForSwitch() -> NSAttributedString? {
+        guard let tv = textView else { return nil }
+
+        if let richTextView = tv as? RichTextView, richTextView.hasActiveTableEditor {
+            richTextView.finalizeActiveTableEditorIfNeeded()
+        }
+
+        if let inputContext = tv.inputContext {
+            let hasMarked = (inputContext.value(forKey: "hasMarkedText") as? Bool) ?? false
+            if hasMarked {
+                _ = inputContext.perform(NSSelectorFromString("commitComposition"))
+            }
+        }
+
+        tv.breakUndoCoalescing()
         return tv.attributedString().copy() as? NSAttributedString
     }
 
@@ -272,9 +320,11 @@ final class RichTextController: ObservableObject {
         default: size = 16
         }
         let range = tv.selectedRange()
+        let targetRange = range.length == 0 ? NSRange(location: 0, length: tv.string.utf16.count) : range
         tv.textStorage?.addAttributes([
-            .font: NSFont.systemFont(ofSize: size, weight: .semibold)
-        ], range: range.length == 0 ? NSRange(location: 0, length: tv.string.utf16.count) : range)
+            .font: NSFont.systemFont(ofSize: size, weight: .semibold),
+            .notebookHeadingLevel: level
+        ], range: targetRange)
     }
 
     // MARK: - 字体设置
@@ -326,6 +376,11 @@ final class RichTextController: ObservableObject {
     func setFontColor(_ color: NSColor) {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
+
+        var typingAttributes = tv.typingAttributes
+        typingAttributes[.foregroundColor] = color
+        tv.typingAttributes = typingAttributes
+
         if range.length == 0 { return }
 
         tv.textStorage?.beginEditing()
@@ -1499,6 +1554,42 @@ class RichTextView: NSTextView {
     private var activeTableAttachment: TableTextAttachment?
     private var activeTableRange: NSRange?
 
+    var hasActiveTableEditor: Bool {
+        activeTableEditor != nil
+    }
+
+    private func refreshActiveTableEditorLayout() {
+        guard let editor = activeTableEditor,
+              let range = activeTableRange,
+              let textStorage = textStorage,
+              range.location >= 0,
+              range.location + range.length <= textStorage.length,
+              let layoutManager = self.layoutManager,
+              let textContainer = self.textContainer else {
+            return
+        }
+
+        editor.updateTableData(editor.currentTableData())
+        layoutManager.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+        layoutManager.invalidateDisplay(forCharacterRange: range)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        attachmentRect.origin.x += textContainerInset.width
+        attachmentRect.origin.y += textContainerInset.height
+
+        let editorSize = editor.frame.size
+        editor.frame = NSRect(
+            x: attachmentRect.origin.x,
+            y: attachmentRect.origin.y - editorSize.height + attachmentRect.height,
+            width: editorSize.width,
+            height: editorSize.height
+        )
+        editor.needsDisplay = true
+        needsDisplay = true
+    }
+
     private func showTableEditor(for attachment: TableTextAttachment, at rect: CGRect, range: NSRange) {
         // 如果已经有活动的编辑器，先关闭它
         hideActiveTableEditor()
@@ -1513,9 +1604,14 @@ class RichTextView: NSTextView {
             onDataChanged: { [weak self, weak attachment] newData in
                 attachment?.tableData = newData
                 attachment?.updateImage()
-                // 更新文本存储以刷新显示
-                if let self = self, let range = self.activeTableRange {
+                guard let self = self else { return }
+                self.activeTableEditor?.updateTableData(newData)
+                if let range = self.activeTableRange {
                     self.textStorage?.edited(.editedAttributes, range: range, changeInLength: 0)
+                    self.refreshActiveTableEditorLayout()
+                    DispatchQueue.main.async { [weak self] in
+                        self?.refreshActiveTableEditorLayout()
+                    }
                 }
             },
             onCellEdited: { [weak attachment] row, col, value in
@@ -1523,15 +1619,9 @@ class RichTextView: NSTextView {
             }
         )
 
-        editorView.frame = NSRect(
-            x: rect.origin.x,
-            y: rect.origin.y - editorView.frame.height + rect.height,
-            width: editorView.frame.width,
-            height: editorView.frame.height
-        )
-
         addSubview(editorView)
         activeTableEditor = editorView
+        refreshActiveTableEditorLayout()
 
         // 不再替换为空白附件，保留真实表格附件以确保保存/恢复
         // 通过 editorView 覆盖展示即可
@@ -1694,6 +1784,23 @@ class RichTextView: NSTextView {
             }
 
             if let textAttachment = textStorage.attribute(.attachment, at: range.location, effectiveRange: nil) as? AttachmentTextAttachment {
+                if textAttachment.kind == .image,
+                   mimeTypeForFilename(textAttachment.attachmentFilename).hasPrefix("audio/") {
+                    let recoveredAudio = AudioBlockAttachment(
+                        fileURL: textAttachment.attachmentFileURL,
+                        embeddedAudioData: textAttachment.attachmentData(),
+                        attachmentFilename: textAttachment.attachmentFilename
+                    )
+                    if !textAttachment.bounds.isEmpty {
+                        recoveredAudio.bounds = textAttachment.bounds
+                    }
+                    textStorage.addAttribute(.attachment, value: recoveredAudio, range: range)
+                    if textStorage.attribute(.link, at: range.location, effectiveRange: nil) == nil {
+                        textStorage.addAttribute(.link, value: textAttachment.attachmentFileURL, range: range)
+                    }
+                    return
+                }
+
                 // 1) 图片附件：优先恢复持久化尺寸，再刷新展示
                 if textAttachment.kind == .image {
                     var restored = false
@@ -2540,20 +2647,20 @@ struct RichTextEditor: NSViewRepresentable {
 
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
-        // 不要设置 textColor，让富文本属性控制颜色
-        // textView.textColor = (scheme == .dark) ? .white : .black
+        textView.textColor = .textColor
         // 使用用户设置的字体
         textView.font = AppSettings.shared.editorFont
         textView.delegate = context.coordinator
         textView.pasteCoordinator = context.coordinator
 
-        // 设置默认 typingAttributes，根据外观模式设置默认文字颜色
-        let isDark = (colorScheme == .dark)
-        let defaultTextColor = isDark ? NSColor.white : NSColor.black
-        textView.typingAttributes[.foregroundColor] = defaultTextColor
+        textView.typingAttributes[.foregroundColor] = Self.adaptiveDefaultTextColor
 
         textView.textStorage?.setAttributedString(attributedText)
         textView.normalizeAttachmentsAfterLoad()
+        if updateDefaultTextColors(in: textView, for: scheme) {
+            context.coordinator.attributedText = NSAttributedString(attributedString: textView.attributedString())
+        }
+        Self.refreshAppearanceSensitiveAttachments(in: textView)
 
         textView.isSelectable = true
         textView.isEditable = isEditable
@@ -2569,6 +2676,8 @@ struct RichTextEditor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? RichTextView else { return }
+        let didSwitchNote = context.coordinator.lastAppliedNoteID != noteID
+        let didChangeColorScheme = context.coordinator.lastAppliedColorScheme != colorScheme
 
         // 确保 pasteCoordinator 始终是最新的
         textView.pasteCoordinator = context.coordinator
@@ -2576,23 +2685,19 @@ struct RichTextEditor: NSViewRepresentable {
         let scheme = colorScheme
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
-        // 不要设置 textColor，让富文本属性控制颜色
-        // textView.textColor = (scheme == .dark) ? .white : .black
+        textView.textColor = .textColor
         nsView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
 
-        // 更新 typingAttributes 中的默认文字颜色，以适应外观模式变化
-        let defaultTextColor = (scheme == .dark) ? NSColor.white : NSColor.black
-        textView.typingAttributes[.foregroundColor] = defaultTextColor
+        textView.typingAttributes[.foregroundColor] = Self.adaptiveDefaultTextColor
         textView.isEditable = isEditable
 
-        // 更新已有文字中使用的系统默认颜色（黑色/白色）以适应新的外观模式
-        updateDefaultTextColors(in: textView, for: scheme)
-
         // 关键：切换笔记时强制刷新内容；同一笔记编辑时避免 update 覆盖用户输入。
-        if context.coordinator.lastAppliedNoteID != noteID {
-            print("[RichTextEditor] Switching note: \(context.coordinator.lastAppliedNoteID?.uuidString.prefix(8) ?? "nil") -> \(noteID.uuidString.prefix(8))")
-            print("[RichTextEditor] attributedText length: \(attributedText.length), content: '\(String(attributedText.string.prefix(20)))'")
-            print("[RichTextEditor] textView current length: \(textView.string.count)")
+        if didSwitchNote {
+            let interval = Logger.shared.beginInterval(
+                .editor,
+                "richTextNoteSwitch",
+                metadata: "from=\(context.coordinator.lastAppliedNoteID?.uuidString.prefix(8) ?? "nil") to=\(noteID.uuidString.prefix(8)) incomingLength=\(attributedText.length) existingLength=\(textView.string.count)"
+            )
 
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
@@ -2607,45 +2712,105 @@ struct RichTextEditor: NSViewRepresentable {
 
             textView.textStorage?.setAttributedString(attributedText)
             textView.normalizeAttachmentsAfterLoad()
+            if updateDefaultTextColors(in: textView, for: scheme) {
+                context.coordinator.attributedText = NSAttributedString(attributedString: textView.attributedString())
+            }
+            Self.refreshAppearanceSensitiveAttachments(in: textView)
             textView.setSelectedRange(NSRange(location: 0, length: 0))
 
             context.coordinator.isProgrammaticUpdate = false
+            context.coordinator.lastAppliedColorScheme = scheme
 
             // 只有在内容实际更新后才绑定新的 noteID
             controller.bind(textView: textView, noteID: noteID)
-
-            print("[RichTextEditor] After update - textView length: \(textView.string.count)")
+            interval.end(.info, "renderedLength=\(textView.string.count)")
+        } else if didChangeColorScheme {
+            let interval = Logger.shared.beginInterval(
+                .editor,
+                "richTextAppearanceRefresh",
+                metadata: "noteID=\(noteID.uuidString.prefix(8)) scheme=\(scheme == .dark ? "dark" : "light")"
+            )
+            if updateDefaultTextColors(in: textView, for: scheme) {
+                context.coordinator.attributedText = NSAttributedString(attributedString: textView.attributedString())
+            }
+            Self.refreshAppearanceSensitiveAttachments(in: textView)
+            context.coordinator.lastAppliedColorScheme = scheme
+            interval.end(.info, "contentLength=\(textView.string.count)")
         }
     }
 
     /// 更新已有文字中的系统默认颜色（纯黑或纯白）以适应新的外观模式
     /// 这样不会破坏用户显式设置的其他颜色
-    private func updateDefaultTextColors(in textView: RichTextView, for scheme: ColorScheme) {
+    static var adaptiveDefaultTextColor: NSColor {
+        .textColor
+    }
+
+    static func normalizedDefaultForegroundColor(_ color: NSColor, for scheme: ColorScheme) -> NSColor? {
+        guard isLegacyDefaultTextColor(color, for: scheme) else {
+            return nil
+        }
+        return adaptiveDefaultTextColor
+    }
+
+    static func refreshAppearanceSensitiveAttachments(in textView: RichTextView) {
         guard let textStorage = textView.textStorage else { return }
-
-        let targetColor: NSColor = (scheme == .dark) ? .white : .black
-        let oldDefaultColors: [NSColor] = (scheme == .dark)
-            ? [.black, NSColor(calibratedWhite: 0, alpha: 1)]
-            : [.white, NSColor(calibratedWhite: 1, alpha: 1)]
-
-        textStorage.beginEditing()
-
-        // 遍历所有文字范围
         let fullRange = NSRange(location: 0, length: textStorage.length)
-        textStorage.enumerateAttribute(.foregroundColor, in: fullRange, options: []) { value, range, stop in
-            if let color = value as? NSColor {
-                // 检查是否是旧的默认颜色（纯黑或纯白）
-                let isOldDefault = oldDefaultColors.contains { oldColor in
-                    color.isEqual(to: oldColor)
-                }
 
-                if isOldDefault {
-                    textStorage.addAttribute(.foregroundColor, value: targetColor, range: range)
-                }
+        textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, _, _ in
+            switch value {
+            case let attachment as AudioBlockAttachment:
+                attachment.refreshPresentationIfNeeded()
+            case let attachment as TableTextAttachment:
+                attachment.updateImage()
+            case let attachment as CheckboxTextAttachment:
+                attachment.refreshPresentationIfNeeded()
+            default:
+                break
             }
         }
 
+        textView.layoutManager?.invalidateDisplay(forCharacterRange: fullRange)
+        textView.needsDisplay = true
+    }
+
+    static func isLegacyDefaultTextColor(_ color: NSColor, for scheme: ColorScheme) -> Bool {
+        let oldDefaultColors: [NSColor] = (scheme == .dark)
+            ? [.black, NSColor(calibratedWhite: 0, alpha: 1)]
+            : [.white, NSColor(calibratedWhite: 1, alpha: 1)]
+        return oldDefaultColors.contains { oldColor in
+            color.isEqual(to: oldColor)
+        }
+    }
+
+    @discardableResult
+    private func updateDefaultTextColors(in textView: RichTextView, for scheme: ColorScheme) -> Bool {
+        guard let textStorage = textView.textStorage else { return false }
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        guard fullRange.length > 0 else { return false }
+
+        var didUpdate = false
+
+        textStorage.beginEditing()
+
+        textStorage.enumerateAttributes(in: fullRange, options: []) { attributes, range, _ in
+            if attributes[.attachment] != nil {
+                return
+            }
+
+            if let color = attributes[.foregroundColor] as? NSColor {
+                if let normalizedColor = Self.normalizedDefaultForegroundColor(color, for: scheme) {
+                    didUpdate = true
+                    textStorage.addAttribute(.foregroundColor, value: normalizedColor, range: range)
+                }
+                return
+            }
+
+            didUpdate = true
+            textStorage.addAttribute(.foregroundColor, value: Self.adaptiveDefaultTextColor, range: range)
+        }
+
         textStorage.endEditing()
+        return didUpdate
     }
 
     func makeCoordinator() -> Coordinator {
@@ -2656,6 +2821,7 @@ struct RichTextEditor: NSViewRepresentable {
         @Binding var attributedText: NSAttributedString
         var isProgrammaticUpdate = false
         var lastAppliedNoteID: UUID?
+        var lastAppliedColorScheme: ColorScheme?
         weak var controller: RichTextController?
         
         /// 标记是否有正在进行的输入法编辑会话

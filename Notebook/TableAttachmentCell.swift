@@ -19,11 +19,9 @@ class TableAttachmentCell: NSTextAttachmentCell {
             return
         }
         
-        let isDark = controlView?.window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        
-        let bgColor: NSColor = isDark ? NSColor(white: 0.22, alpha: 1) : .white
-        let borderColor: NSColor = isDark ? NSColor(white: 0.35, alpha: 1) : NSColor(white: 0.85, alpha: 1)
-        let textColor: NSColor = isDark ? .white : .black
+        let bgColor = AttachmentAppearance.backgroundColor
+        let borderColor = AttachmentAppearance.borderColor
+        let textColor = AttachmentAppearance.primaryTextColor
         
         bgColor.setFill()
         cellFrame.fill()

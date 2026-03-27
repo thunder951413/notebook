@@ -3,7 +3,6 @@ import SwiftUI
 /// 表格编辑视图 - 用于编辑表格内容
 struct TableEditorView: View {
     @Binding var tableData: TableData
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     
     @State private var editingCell: (row: Int, col: Int)? = nil
@@ -189,7 +188,7 @@ struct TableEditorView: View {
                 })
                 .textFieldStyle(.plain)
                 .frame(width: tableData.columnWidths[column] - 8, height: tableData.rowHeights[row] - 4)
-                .background(Color.white)
+                .background(Color(nsColor: AttachmentAppearance.backgroundColor))
                 .onAppear {
                     editText = tableData.rows[row][column]
                 }
@@ -320,23 +319,23 @@ struct TableEditorView: View {
     // MARK: - 颜色
     
     private var backgroundColor: Color {
-        colorScheme == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.95, green: 0.95, blue: 0.95)
+        Color(nsColor: AttachmentAppearance.secondaryBackgroundColor)
     }
     
     private var headerColor: Color {
-        colorScheme == .dark ? Color(red: 0.28, green: 0.28, blue: 0.28) : Color(red: 0.9, green: 0.9, blue: 0.9)
+        Color(nsColor: AttachmentAppearance.secondaryBackgroundColor)
     }
     
     private var cellBackgroundColor: Color {
-        colorScheme == .dark ? Color(red: 0.22, green: 0.22, blue: 0.22) : .white
+        Color(nsColor: AttachmentAppearance.backgroundColor)
     }
     
     private var borderColor: Color {
-        colorScheme == .dark ? Color(red: 0.35, green: 0.35, blue: 0.35) : Color(red: 0.85, green: 0.85, blue: 0.85)
+        Color(nsColor: AttachmentAppearance.borderColor)
     }
     
     private var textColor: Color {
-        colorScheme == .dark ? .white : .black
+        Color(nsColor: AttachmentAppearance.primaryTextColor)
     }
 }
 

@@ -104,11 +104,17 @@ struct ContentView: View {
     }
 
     /// 保存指定笔记的内容
-    private func saveNoteContent(noteID: UUID, content: NSAttributedString, reason: String) {
-        guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else { return }
+    @discardableResult
+    private func saveNoteContent(noteID: UUID, content: NSAttributedString, reason: String) -> Bool {
+        guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else { return false }
         
         let note = store.notes[index]
         let preview = String(content.string.prefix(30)).replacingOccurrences(of: "\n", with: "\\n")
+        let interval = Logger.shared.beginInterval(
+            .save,
+            "contentViewSaveNote",
+            metadata: "noteID=\(noteID.uuidString.prefix(8)) reason=\(reason) title=\(note.title) contentLength=\(content.length)"
+        )
         Logger.shared.log(.save, .info, "'\(note.title)' [\(reason)]: '\(preview)' (\(content.length))")
         
         guard let request = NoteSaveManager.shared.createRequest(
@@ -120,9 +126,21 @@ struct ContentView: View {
             recurrenceRule: note.recurrenceRule,
             content: content,
             reason: reason
-        ) else { return }
-        
-        _ = NoteSaveManager.shared.saveImmediately(request: request)
+        ) else {
+            interval.end(.error, "createRequestFailed")
+            return false
+        }
+
+        switch NoteSaveManager.shared.saveImmediately(request: request) {
+        case .success:
+            richTextController.recordSavedState(noteID: noteID, title: note.title, content: content)
+            interval.end(.info, "result=success")
+            return true
+        case .failure(let error):
+            Logger.shared.log(.save, .error, "saveImmediately failed noteID=\(noteID.uuidString.prefix(8)) error=\(error.localizedDescription)")
+            interval.end(.error, "result=failure error=\(error.localizedDescription)")
+            return false
+        }
     }
     
     /// 保存当前编辑器中的笔记（用于 appBlur/terminate）
@@ -174,17 +192,32 @@ struct ContentView: View {
     }
 
     private func updateSelection(_ newSelection: UUID?, reason: String) {
-        Logger.shared.log(.app, .debug, "updateSelection reason=\(reason), from=\(selection?.uuidString.prefix(8) ?? "nil"), to=\(newSelection?.uuidString.prefix(8) ?? "nil")")
+        let interval = Logger.shared.beginInterval(
+            .app,
+            "noteSwitchSelection",
+            metadata: "reason=\(reason) from=\(selection?.uuidString.prefix(8) ?? "nil") to=\(newSelection?.uuidString.prefix(8) ?? "nil")"
+        )
+        defer {
+            interval.end(.info, "finalSelection=\(selection?.uuidString.prefix(8) ?? "nil")")
+        }
 
         if let oldNoteID = selection, oldNoteID != newSelection {
-            NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
+            let pendingSaveExists = NoteSaveManager.shared.hasPendingSave(for: oldNoteID)
+            if !pendingSaveExists {
+                NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
+            }
 
             let contentToSave: NSAttributedString
             if richTextController.isBoundTo(noteID: oldNoteID),
-               let editorContent = richTextController.snapshotAttributedString() {
-                contentToSave = editorContent
-                if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+               let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                if richTextController.requiresCommittedSnapshotOnSwitch,
+                   let editorContent = richTextController.snapshotAttributedStringForSwitch() {
+                    contentToSave = editorContent
                     store.notes[oldIndex].content = contentToSave
+                    Logger.shared.log(.app, .debug, "noteSwitch used committed snapshot for \(oldNoteID.uuidString.prefix(8))")
+                } else {
+                    contentToSave = store.notes[oldIndex].content
+                    Logger.shared.log(.app, .debug, "noteSwitch reused bound content for \(oldNoteID.uuidString.prefix(8))")
                 }
             } else if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
                 contentToSave = store.notes[oldIndex].content
@@ -194,7 +227,32 @@ struct ContentView: View {
                 return
             }
 
-            saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+            if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
+                let note = store.notes[oldIndex]
+                let isDirty = richTextController.hasUnsavedChanges(
+                    noteID: oldNoteID,
+                    title: note.title,
+                    content: contentToSave
+                )
+
+                if pendingSaveExists {
+                    Logger.shared.log(.app, .info, "noteSwitch flushing pending save for \(oldNoteID.uuidString.prefix(8))")
+                    switch NoteSaveManager.shared.savePendingImmediately(for: oldNoteID) {
+                    case .success?:
+                        richTextController.recordSavedState(noteID: oldNoteID, title: note.title, content: contentToSave)
+                    case .failure(let error)?:
+                        Logger.shared.log(.app, .warn, "pending save flush failed, fallback to immediate save: \(error.localizedDescription)")
+                        _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                    case nil:
+                        _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                    }
+                } else if isDirty {
+                    Logger.shared.log(.app, .info, "noteSwitch saving dirty note \(oldNoteID.uuidString.prefix(8))")
+                    _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                } else {
+                    Logger.shared.log(.app, .debug, "noteSwitch skipped clean note \(oldNoteID.uuidString.prefix(8))")
+                }
+            }
         }
 
         selection = newSelection
@@ -292,8 +350,9 @@ struct ContentView: View {
                    richTextController.isBoundTo(noteID: currentId) {
                     let content = richTextController.snapshotAttributedStringPreservingMarkedText()
                         ?? store.notes[index].content
-                    saveNoteContent(noteID: currentId, content: content, reason: "auto")
-                    richTextController.markAsSaved()
+                    if saveNoteContent(noteID: currentId, content: content, reason: "auto") {
+                        richTextController.markAsSaved()
+                    }
                 }
             }
         }
@@ -383,8 +442,9 @@ struct ContentView: View {
                let index = store.notes.firstIndex(where: { $0.id == currentId }),
                richTextController.isBoundTo(noteID: currentId) {
                 let content = richTextController.snapshotAttributedString() ?? store.notes[index].content
-                saveNoteContent(noteID: currentId, content: content, reason: "shortcut")
-                richTextController.markAsSaved()
+                if saveNoteContent(noteID: currentId, content: content, reason: "shortcut") {
+                    richTextController.markAsSaved()
+                }
             }
         }
         .onReceive(ShortcutActionHandler.shared.deleteNotePublisher) { _ in
@@ -1445,6 +1505,7 @@ private struct NoteEditorView: View {
         .onAppear {
             lastSavedTitle = note.title
             lastSavedContentHash = note.content.hashValue
+            controller.recordSavedState(noteID: note.id, title: note.title, content: note.content)
         }
         .onDisappear {
             pendingSaveWorkItem?.cancel()
@@ -2039,7 +2100,7 @@ private struct ColorPickerPopover: View {
             } label: {
                 HStack(spacing: 8) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.black)
+                        .fill(Color(nsColor: .textColor))
                         .frame(width: 16, height: 16)
                     Text("自动")
                         .foregroundColor(.primary)
@@ -4196,16 +4257,18 @@ struct MarkdownWebView: NSViewRepresentable {
         return regex.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: replacement)
     }
 
-    private func generateHTML(from markdown: String, attributed: NSAttributedString?, colorScheme: ColorScheme) -> String {
+    func generateHTML(from markdown: String, attributed: NSAttributedString?, colorScheme: ColorScheme) -> String {
         let textColor = colorScheme == .dark ? "#FFFFFF" : "#000000"
         let linkColor = colorScheme == .dark ? "#4A9EFF" : "#0066CC"
 
         let markdownSource: String
         var attachmentBlocks: [(placeholder: String, html: String)] = []
+        var inlineHTMLBlocks: [(placeholder: String, html: String)] = []
         if let attributed {
             let conversion = attributedToMarkdownWithAttachments(attributed)
             markdownSource = conversion.markdown
             attachmentBlocks = conversion.blocks
+            inlineHTMLBlocks = conversion.inlineBlocks
         } else {
             markdownSource = markdown
         }
@@ -4286,6 +4349,10 @@ struct MarkdownWebView: NSViewRepresentable {
 
         // 第五步：恢复附件 HTML 块（避免被转义和自动换行污染）
         for block in attachmentBlocks {
+            html = html.replacingOccurrences(of: block.placeholder, with: block.html)
+        }
+
+        for block in inlineHTMLBlocks {
             html = html.replacingOccurrences(of: block.placeholder, with: block.html)
         }
 
@@ -4401,11 +4468,17 @@ struct MarkdownWebView: NSViewRepresentable {
         """
     }
 
-    private func attributedToMarkdownWithAttachments(_ attributed: NSAttributedString) -> (markdown: String, blocks: [(placeholder: String, html: String)]) {
+    private func attributedToMarkdownWithAttachments(_ attributed: NSAttributedString) -> (
+        markdown: String,
+        blocks: [(placeholder: String, html: String)],
+        inlineBlocks: [(placeholder: String, html: String)]
+    ) {
         let nsText = attributed.string as NSString
         var output = ""
         var blocks: [(placeholder: String, html: String)] = []
+        var inlineBlocks: [(placeholder: String, html: String)] = []
         var blockIndex = 0
+        var inlineIndex = 0
         let fullRange = NSRange(location: 0, length: attributed.length)
 
         func appendBlock(_ html: String) {
@@ -4413,6 +4486,13 @@ struct MarkdownWebView: NSViewRepresentable {
             blockIndex += 1
             blocks.append((placeholder: placeholder, html: html))
             output += "\n\(placeholder)\n"
+        }
+
+        func appendInlineHTML(_ html: String) {
+            let placeholder = "INLINE_HTML_\(inlineIndex)_END"
+            inlineIndex += 1
+            inlineBlocks.append((placeholder: placeholder, html: html))
+            output += placeholder
         }
 
         attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
@@ -4616,10 +4696,97 @@ struct MarkdownWebView: NSViewRepresentable {
             }
 
             let chunk = nsText.substring(with: range)
-            output += chunk
+            if let inlineHTML = previewInlineHTML(for: chunk, attributes: attrs) {
+                appendInlineHTML(inlineHTML)
+            } else {
+                output += chunk
+            }
         }
 
-        return (output, blocks)
+        return (output, blocks, inlineBlocks)
+    }
+
+    private func previewInlineHTML(for text: String, attributes: [NSAttributedString.Key: Any]) -> String? {
+        guard !text.isEmpty else { return nil }
+
+        let linkURL: String? = {
+            if let url = attributes[.link] as? URL {
+                return url.absoluteString
+            }
+            if let raw = attributes[.link] as? String,
+               raw.hasPrefix("http://") || raw.hasPrefix("https://") || raw.hasPrefix("mailto:") {
+                return raw
+            }
+            return nil
+        }()
+
+        let style = previewInlineStyle(for: attributes)
+        if style.isEmpty && linkURL == nil {
+            return nil
+        }
+
+        let escapedText = htmlTextEscaped(text)
+        if let linkURL {
+            let safeURL = htmlAttributeEscaped(linkURL)
+            let styleAttribute = style.isEmpty ? "" : " style=\"\(style)\""
+            return "<a href=\"\(safeURL)\"\(styleAttribute)>\(escapedText)</a>"
+        }
+
+        return "<span style=\"\(style)\">\(escapedText)</span>"
+    }
+
+    private func previewInlineStyle(for attributes: [NSAttributedString.Key: Any]) -> String {
+        var styles: [String] = ["white-space: pre-wrap"]
+        let font = attributes[.font] as? NSFont
+        let fontTraits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
+        let textDecorations = previewTextDecorations(for: attributes)
+
+        if fontTraits.contains(.boldFontMask) || (font?.fontName.lowercased().contains("semibold") == true) {
+            styles.append("font-weight: 600")
+        }
+        if fontTraits.contains(.italicFontMask) {
+            styles.append("font-style: italic")
+        }
+        if !textDecorations.isEmpty {
+            styles.append("text-decoration: \(textDecorations.joined(separator: " "))")
+        }
+        if let color = previewForegroundColorHex(for: attributes) {
+            styles.append("color: \(color)")
+        }
+        if let color = (attributes[.backgroundColor] as? NSColor).flatMap(previewColorHex) {
+            styles.append("background-color: \(color)")
+        }
+        if let font,
+           abs(font.pointSize - 16) > 0.5 || attributes[.notebookHeadingLevel] != nil {
+            styles.append("font-size: \(Int(font.pointSize.rounded()))px")
+            styles.append("line-height: 1.45")
+        }
+        if let fontFamily = font?.familyName,
+           fontFamily != NSFont.systemFont(ofSize: font?.pointSize ?? 16).familyName {
+            styles.append("font-family: '\(htmlAttributeEscaped(fontFamily))'")
+        }
+        if let kern = (attributes[.kern] as? NSNumber)?.doubleValue,
+           abs(kern) > 0.001 {
+            styles.append("letter-spacing: \(kern)px")
+        }
+        if let baselineOffset = (attributes[.baselineOffset] as? NSNumber)?.doubleValue,
+           abs(baselineOffset) > 0.001 {
+            styles.append("position: relative")
+            styles.append("top: \(-baselineOffset)px")
+        }
+
+        return styles.joined(separator: "; ")
+    }
+
+    private func previewTextDecorations(for attributes: [NSAttributedString.Key: Any]) -> [String] {
+        var decorations: [String] = []
+        if ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0 {
+            decorations.append("underline")
+        }
+        if ((attributes[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0 {
+            decorations.append("line-through")
+        }
+        return decorations
     }
 
     /// 处理 Mermaid 代码块
@@ -4747,6 +4914,30 @@ struct MarkdownWebView: NSViewRepresentable {
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    private func previewForegroundColorHex(for attributes: [NSAttributedString.Key: Any]) -> String? {
+        guard let color = attributes[.foregroundColor] as? NSColor else { return nil }
+        if RichTextEditor.isLegacyDefaultTextColor(color, for: colorScheme) {
+            return nil
+        }
+        if color.isEqual(to: NSColor.textColor) {
+            return nil
+        }
+        return previewColorHex(color)
+    }
+
+    private func previewColorHex(_ color: NSColor) -> String? {
+        guard let rgbColor = color.usingColorSpace(.sRGB) else { return nil }
+        let red = Int(round(rgbColor.redComponent * 255))
+        let green = Int(round(rgbColor.greenComponent * 255))
+        let blue = Int(round(rgbColor.blueComponent * 255))
+        let alpha = rgbColor.alphaComponent
+        if abs(alpha - 1) < 0.001 {
+            return String(format: "#%02X%02X%02X", red, green, blue)
+        }
+        let alphaInt = Int(round(alpha * 255))
+        return String(format: "#%02X%02X%02X%02X", red, green, blue, alphaInt)
     }
 
     private func replaceHeadingsWithAnchors(_ html: String, tocItems: [TableOfContentsItem], anchorIndex: inout Int) -> String {

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import SwiftData
 
 struct iCloudSettingsView: View {
     @StateObject private var syncManager = iCloudSyncManager.shared
@@ -165,8 +166,8 @@ struct iCloudSettingsView: View {
             
             VStack(alignment: .leading, spacing: 8) {
                 DetailRow(title: "上次同步", value: lastSyncText)
-                DetailRow(title: "同步内容", value: "笔记、文件夹、标签、设置")
-                DetailRow(title: "存储位置", value: "iCloud Drive/Notebook")
+                DetailRow(title: "同步内容", value: "按笔记快照与历史、配置")
+                DetailRow(title: "存储位置", value: "iCloud Drive/NotebookSync")
             }
             
             // 高级选项
@@ -247,7 +248,35 @@ struct iCloudSettingsView: View {
     
     private func performSync() {
         Task {
-            await syncManager.performFullSync()
+            guard let context = PersistenceController.shared.modelContainer?.mainContext else {
+                syncManager.syncStatus = .failed("数据容器未配置")
+                return
+            }
+
+            syncManager.syncStatus = .syncing
+            syncManager.syncProgress = 0.0
+            do {
+                switch syncDirection {
+                case .toiCloud:
+                    let pushed = try await syncManager.syncAllNotesToiCloud(context: context)
+                    syncManager.syncProgress = 1.0
+                    syncManager.syncStatus = .completed
+                    print("[iCloudSettingsView] 推送完成 \(pushed.count) 条")
+                case .fromiCloud:
+                    let pulled = try await syncManager.syncAllNotesFromiCloud(context: context)
+                    let conflicts = pulled.filter(\.detectedConflict).count
+                    syncManager.syncProgress = 1.0
+                    syncManager.syncStatus = .completed
+                    print("[iCloudSettingsView] 拉取完成 \(pulled.count) 条，冲突 \(conflicts) 条")
+                case .bidirectional:
+                    let summary = try await syncManager.syncBidirectional(context: context)
+                    syncManager.syncProgress = 1.0
+                    syncManager.syncStatus = .completed
+                    print("[iCloudSettingsView] 双向完成，拉取 \(summary.pulled) 条，推送 \(summary.pushed) 条，冲突 \(summary.conflicts) 条")
+                }
+            } catch {
+                syncManager.syncStatus = .failed(error.localizedDescription)
+            }
         }
     }
     

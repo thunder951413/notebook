@@ -59,6 +59,16 @@ final class NoteSaveManager {
     func setContext(_ context: ModelContext) {
         self.modelContext = context
     }
+
+    func resetForTesting() {
+        modelContext = nil
+        currentlySaving.removeAll()
+        pendingSaves.removeAll()
+        for timer in pendingTimers.values {
+            timer.invalidate()
+        }
+        pendingTimers.removeAll()
+    }
     
     // MARK: - 公共 API
     
@@ -85,6 +95,16 @@ final class NoteSaveManager {
         }
         
         pendingTimers[noteID] = timer
+    }
+
+    func hasPendingSave(for noteID: UUID) -> Bool {
+        pendingSaves[noteID] != nil
+    }
+
+    func savePendingImmediately(for noteID: UUID) -> SaveResult? {
+        guard let request = pendingSaves.removeValue(forKey: noteID) else { return nil }
+        pendingTimers.removeValue(forKey: noteID)?.invalidate()
+        return performSave(request: request)
     }
     
     /// 取消待保存任务
@@ -115,7 +135,13 @@ final class NoteSaveManager {
 
     /// 执行实际保存 - 必须在主线程调用
     private func performSave(request: SaveRequest) -> SaveResult {
+        let interval = Logger.shared.beginInterval(
+            .save,
+            "performSave",
+            metadata: "noteID=\(request.noteID.uuidString.prefix(8)) reason=\(request.reason) dataBytes=\(request.rtfdData.count)"
+        )
         guard let context = modelContext else {
+            interval.end(.error, "contextMissing")
             return .failure(NSError(domain: "SaveManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "ModelContext not initialized"]))
         }
 
@@ -123,6 +149,7 @@ final class NoteSaveManager {
 
         // 检查是否正在保存该笔记
         guard !currentlySaving.contains(noteID) else {
+            interval.end(.warn, "alreadySaving_retry")
             return waitAndRetry(request: request, maxRetries: 3)
         }
 
@@ -146,6 +173,7 @@ final class NoteSaveManager {
         // 执行保存
         do {
             guard validateData(request.rtfdData) else {
+                interval.end(.error, "validationFailed")
                 return .failure(NSError(domain: "SaveManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Data validation failed"]))
             }
 
@@ -155,11 +183,14 @@ final class NoteSaveManager {
             let blockEntities = try context.fetch(blockDescriptor)
             if let blockEntity = blockEntities.first {
                 try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
+                interval.end(.info, "result=success")
                 return .success
             }
 
+            interval.end(.error, "entityMissing")
             return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
         } catch {
+            interval.end(.error, "result=failure error=\(error.localizedDescription)")
             return .failure(error)
         }
     }
@@ -169,6 +200,11 @@ final class NoteSaveManager {
         request: SaveRequest,
         context: ModelContext
     ) throws {
+        let interval = Logger.shared.beginInterval(
+            .save,
+            "saveBlockDocumentNote",
+            metadata: "noteID=\(request.noteID.uuidString.prefix(8)) reason=\(request.reason)"
+        )
         let decodedContent = decodeAttributedString(from: request.rtfdData)
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotebookBlockSave_\(request.noteID.uuidString)_\(UUID().uuidString)", isDirectory: true)
@@ -177,12 +213,13 @@ final class NoteSaveManager {
             try? FileManager.default.removeItem(at: temporaryDirectory)
         }
 
-        let conversion = try LegacyNoteDocumentConverter(noteID: request.noteID, noteDirectory: temporaryDirectory)
-            .convert(content: decodedContent)
+        var converter = try LegacyNoteDocumentConverter(noteID: request.noteID, noteDirectory: temporaryDirectory)
+        let conversion = try converter.convert(content: decodedContent)
         let attachmentsRoot = try persistentAttachmentsRootDirectory()
         let persistedAssetsByID = try persistBlockAssets(
             document: conversion.document,
             noteID: request.noteID,
+            originalContent: decodedContent,
             noteDirectory: temporaryDirectory,
             attachmentsRoot: attachmentsRoot
         )
@@ -266,6 +303,8 @@ final class NoteSaveManager {
         }
 
         try context.save()
+        _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
+        try context.save()
 
         let preservedRelativePaths = Set(
             persistedAssetsByID.values.flatMap { persistedAsset in
@@ -281,9 +320,16 @@ final class NoteSaveManager {
             noteID: request.noteID
         )
 
-        if request.reason != "appBlur" {
+        if shouldCleanupAttachments(for: request.reason) {
             AttachmentManager.shared.cleanupUnusedAttachments(for: request.noteID, content: normalizedContent)
+        } else {
+            Logger.shared.log(.save, .debug, "saveBlockDocumentNote skipped attachment cleanup for reason=\(request.reason)")
         }
+
+        interval.end(
+            .info,
+            "blocks=\(conversion.document.blocks.count) assets=\(persistedAssetsByID.count) normalizedLength=\(normalizedContent.length)"
+        )
     }
 
     private func decodeAttributedString(from data: Data) -> NSAttributedString {
@@ -303,13 +349,39 @@ final class NoteSaveManager {
     private func persistBlockAssets(
         document: MigratedDocument,
         noteID: UUID,
+        originalContent: NSAttributedString,
         noteDirectory: URL,
         attachmentsRoot: URL
     ) throws -> [String: PersistedBlockAsset] {
         var persistedAssetsByID: [String: PersistedBlockAsset] = [:]
+        let reusableAssets = reusablePersistedAssets(from: originalContent, attachmentsRoot: attachmentsRoot)
+        var reusableAssetIndex = 0
 
         for reference in document.blocks.compactMap(\.asset) {
             guard persistedAssetsByID[reference.id] == nil else { continue }
+
+            if reusableAssetIndex < reusableAssets.count,
+               let reusableAsset = reusableAssets[reusableAssetIndex],
+               reusableAsset.reference.kind == reference.kind {
+                let persistedReference = MigratedAssetReference(
+                    id: reference.id,
+                    kind: reusableAsset.reference.kind,
+                    filename: reusableAsset.reference.filename,
+                    mimeType: reference.mimeType,
+                    width: reference.width,
+                    height: reference.height,
+                    duration: reference.duration ?? reusableAsset.reference.duration,
+                    createdAt: reference.createdAt ?? reusableAsset.reference.createdAt,
+                    sidecarFiles: reusableAsset.reference.sidecarFiles
+                )
+                persistedAssetsByID[reference.id] = PersistedBlockAsset(
+                    reference: persistedReference,
+                    relativeFilePath: reusableAsset.relativeFilePath,
+                    sidecarRelativePaths: reusableAsset.sidecarRelativePaths
+                )
+                reusableAssetIndex += 1
+                continue
+            }
 
             let sourceURL = noteDirectory.appendingPathComponent(reference.filename)
             guard FileManager.default.fileExists(atPath: sourceURL.path) else {
@@ -354,6 +426,7 @@ final class NoteSaveManager {
                 relativeFilePath: relativeFilePath,
                 sidecarRelativePaths: sidecarRelativePaths
             )
+            reusableAssetIndex += 1
         }
 
         return persistedAssetsByID
@@ -489,6 +562,132 @@ final class NoteSaveManager {
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
     }
 
+    private func reusablePersistedAssets(
+        from content: NSAttributedString,
+        attachmentsRoot: URL
+    ) -> [PersistedBlockAsset?] {
+        let range = NSRange(location: 0, length: content.length)
+        var assets: [PersistedBlockAsset?] = []
+
+        content.enumerateAttribute(.attachment, in: range, options: []) { value, subrange, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            if attachment is CheckboxTextAttachment {
+                return
+            }
+
+            let attributes = content.attributes(at: subrange.location, effectiveRange: nil)
+            if attachment is TableTextAttachment {
+                return
+            }
+            if attributes[.notebookTableData] is Data {
+                return
+            }
+            if TableTextAttachment.looksLikeTable(attachment) {
+                return
+            }
+
+            assets.append(reusablePersistedAsset(for: attachment, attachmentsRoot: attachmentsRoot))
+        }
+
+        return assets
+    }
+
+    private func reusablePersistedAsset(
+        for attachment: NSTextAttachment,
+        attachmentsRoot: URL
+    ) -> PersistedBlockAsset? {
+        if let imageAttachment = attachment as? AttachmentTextAttachment,
+           imageAttachment.kind == .image,
+           let relativeFilePath = relativePathIfInsideAttachmentsRoot(imageAttachment.attachmentFileURL, attachmentsRoot: attachmentsRoot) {
+            return PersistedBlockAsset(
+                reference: MigratedAssetReference(
+                    id: relativeFilePath,
+                    kind: "image",
+                    filename: imageAttachment.attachmentFileURL.lastPathComponent,
+                    mimeType: mimeTypeForPathExtension(imageAttachment.attachmentFileURL.pathExtension),
+                    width: nil,
+                    height: nil,
+                    duration: nil,
+                    createdAt: nil,
+                    sidecarFiles: []
+                ),
+                relativeFilePath: relativeFilePath,
+                sidecarRelativePaths: []
+            )
+        }
+
+        if let audioAttachment = attachment as? AudioBlockAttachment,
+           let relativeFilePath = relativePathIfInsideAttachmentsRoot(audioAttachment.fileURL, attachmentsRoot: attachmentsRoot) {
+            let sidecarRelativePaths = reusableAudioSidecarPaths(for: audioAttachment, attachmentsRoot: attachmentsRoot)
+            return PersistedBlockAsset(
+                reference: MigratedAssetReference(
+                    id: relativeFilePath,
+                    kind: "audio",
+                    filename: audioAttachment.fileURL.lastPathComponent,
+                    mimeType: mimeTypeForPathExtension(audioAttachment.fileURL.pathExtension),
+                    width: nil,
+                    height: nil,
+                    duration: audioAttachment.duration,
+                    createdAt: audioAttachment.createDate,
+                    sidecarFiles: sidecarRelativePaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+                ),
+                relativeFilePath: relativeFilePath,
+                sidecarRelativePaths: sidecarRelativePaths
+            )
+        }
+
+        return nil
+    }
+
+    private func reusableAudioSidecarPaths(
+        for attachment: AudioBlockAttachment,
+        attachmentsRoot: URL
+    ) -> [String] {
+        guard attachment.manifestFilename != nil else { return [] }
+        let manifestURL = attachment.fileURL.deletingPathExtension().appendingPathExtension("tracks.json")
+        guard let relativePath = relativePathIfInsideAttachmentsRoot(manifestURL, attachmentsRoot: attachmentsRoot) else {
+            return []
+        }
+        return [relativePath]
+    }
+
+    private func relativePathIfInsideAttachmentsRoot(
+        _ fileURL: URL,
+        attachmentsRoot: URL
+    ) -> String? {
+        let standardizedFileURL = fileURL.standardizedFileURL
+        let standardizedRootURL = attachmentsRoot.standardizedFileURL
+        let rootPath = standardizedRootURL.path.hasSuffix("/") ? standardizedRootURL.path : standardizedRootURL.path + "/"
+        let filePath = standardizedFileURL.path
+        guard filePath.hasPrefix(rootPath) else { return nil }
+        return String(filePath.dropFirst(rootPath.count))
+    }
+
+    private func shouldCleanupAttachments(for reason: String) -> Bool {
+        switch reason {
+        case "appBlur", "switch", "externalNavigation", "filterSync":
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func mimeTypeForPathExtension(_ ext: String) -> String {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "heic": return "image/heic"
+        case "webp": return "image/webp"
+        case "mp3": return "audio/mpeg"
+        case "m4a": return "audio/mp4"
+        case "wav": return "audio/wav"
+        case "aif", "aiff": return "audio/aiff"
+        case "caf": return "audio/x-caf"
+        default: return "application/octet-stream"
+        }
+    }
+
     func cleanupBlockArtifactFiles(
         relativePaths: [String],
         preservedRelativePaths: Set<String>,
@@ -557,7 +756,20 @@ final class NoteSaveManager {
                 backgroundColor: $0.backgroundColor,
                 link: $0.link,
                 fontFamily: $0.fontFamily,
-                fontSize: $0.fontSize
+                fontSize: $0.fontSize,
+                kern: $0.kern,
+                baselineOffset: $0.baselineOffset,
+                paragraphStyle: $0.paragraphStyle.map {
+                    BlockDocumentParagraphStylePayload(
+                        alignment: $0.alignment,
+                        lineSpacing: $0.lineSpacing,
+                        paragraphSpacing: $0.paragraphSpacing,
+                        paragraphSpacingBefore: $0.paragraphSpacingBefore,
+                        firstLineHeadIndent: $0.firstLineHeadIndent,
+                        headIndent: $0.headIndent,
+                        tailIndent: $0.tailIndent
+                    )
+                }
             )
         }
         return try encodeJSON(payload)
@@ -646,6 +858,11 @@ extension NoteSaveManager {
         content: NSAttributedString,
         reason: String
     ) -> SaveRequest? {
+        let interval = Logger.shared.beginInterval(
+            .save,
+            "createSaveRequest",
+            metadata: "noteID=\(noteID.uuidString.prefix(8)) reason=\(reason) contentLength=\(content.length)"
+        )
         Logger.shared.log(.save, .debug, "createRequest: cleaning content for storage...")
         let normalized = AttachmentManager.shared.normalizedContentForSaving(content, noteID: noteID)
         let cleaned = normalized.cleanedForStorage()
@@ -657,9 +874,11 @@ extension NoteSaveManager {
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
         ) else {
             Logger.shared.log(.save, .error, "ERROR: Failed to serialize content - id=\(noteID)")
+            interval.end(.error, "serializationFailed")
             return nil
         }
         Logger.shared.log(.save, .debug, "createRequest: RTFD data created, size: \(rtfdData.count) bytes")
+        interval.end(.info, "rtfdBytes=\(rtfdData.count) normalizedLength=\(normalized.length) cleanedLength=\(cleaned.length)")
 
         return SaveRequest(
             noteID: noteID,

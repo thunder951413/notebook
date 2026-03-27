@@ -25,6 +25,32 @@ struct LogEntry: Codable {
     let message: String
 }
 
+struct LogInterval {
+    private let module: LogModule
+    private let level: LogLevel
+    private let name: String
+    private let metadata: String
+    private let startedAt: DispatchTime
+
+    fileprivate init(module: LogModule, level: LogLevel, name: String, metadata: String) {
+        self.module = module
+        self.level = level
+        self.name = name
+        self.metadata = metadata
+        self.startedAt = .now()
+    }
+
+    func end(_ level: LogLevel? = nil, _ metadata: String = "") {
+        let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds
+        let elapsedMilliseconds = Double(elapsedNanoseconds) / 1_000_000
+        let mergedMetadata = Logger.mergeMetadata(metadata, with: self.metadata)
+        let message = mergedMetadata.isEmpty
+            ? "\(name) finished in \(String(format: "%.2f", elapsedMilliseconds))ms"
+            : "\(name) finished in \(String(format: "%.2f", elapsedMilliseconds))ms | \(mergedMetadata)"
+        Logger.shared.log(module, level ?? self.level, message)
+    }
+}
+
 final class Logger {
     static let shared = Logger()
 
@@ -42,6 +68,12 @@ final class Logger {
                 self.entries.removeFirst(self.entries.count - self.maxEntries)
             }
         }
+    }
+
+    func beginInterval(_ module: LogModule, _ name: String, level: LogLevel = .debug, metadata: String = "") -> LogInterval {
+        let message = metadata.isEmpty ? "\(name) started" : "\(name) started | \(metadata)"
+        log(module, level, message)
+        return LogInterval(module: module, level: level, name: name, metadata: metadata)
     }
 
     func exportLogs(module: LogModule? = nil) -> String {
@@ -80,6 +112,19 @@ final class Logger {
     func clear() {
         queue.async {
             self.entries.removeAll()
+        }
+    }
+
+    fileprivate static func mergeMetadata(_ lhs: String, with rhs: String) -> String {
+        switch (lhs.isEmpty, rhs.isEmpty) {
+        case (true, true):
+            return ""
+        case (false, true):
+            return lhs
+        case (true, false):
+            return rhs
+        case (false, false):
+            return "\(rhs) | \(lhs)"
         }
     }
 }

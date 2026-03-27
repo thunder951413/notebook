@@ -6,10 +6,12 @@ class TableAttachmentNSView: NSView {
     private(set) var tableData: TableData?
     private var onCellEdited: ((Int, Int, String) -> Void)?
     private var onStructureChanged: (() -> Void)?
+    var contextMenuPresenter: ((NSMenu, NSEvent, NSView) -> Void)?
     
     private var selectedCell: (row: Int, col: Int)? = nil
     private var editingCell: (row: Int, col: Int)? = nil
     private var textField: NSTextField?
+    private var suppressTextDidEndEditing = false
     
     private let cellPadding: CGFloat = 4
     private let borderWidth: CGFloat = 1
@@ -20,11 +22,13 @@ class TableAttachmentNSView: NSView {
         self.tableData = tableData
         self.onCellEdited = onCellEdited
         self.onStructureChanged = onStructureChanged
+        invalidateIntrinsicContentSize()
         needsDisplay = true
     }
     
     func updateTableData(_ data: TableData) {
         self.tableData = data
+        invalidateIntrinsicContentSize()
         needsDisplay = true
     }
     
@@ -40,12 +44,10 @@ class TableAttachmentNSView: NSView {
         
         guard let data = tableData else { return }
         
-        let isDark = window?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        
-        let bgColor: NSColor = isDark ? NSColor(white: 0.22, alpha: 1) : .white
-        let borderColor: NSColor = isDark ? NSColor(white: 0.35, alpha: 1) : NSColor(white: 0.85, alpha: 1)
-        let selectionColor: NSColor = NSColor.systemBlue.withAlphaComponent(0.3)
-        let textColor: NSColor = isDark ? .white : .black
+        let bgColor = AttachmentAppearance.backgroundColor
+        let borderColor = AttachmentAppearance.borderColor
+        let selectionColor = AttachmentAppearance.selectionColor
+        let textColor = AttachmentAppearance.primaryTextColor
         
         bgColor.setFill()
         bounds.fill()
@@ -126,7 +128,7 @@ class TableAttachmentNSView: NSView {
         
         if let data = tableData, let cell = getCellAt(point: clickPoint, in: data) {
             selectCell(row: cell.row, col: cell.col)
-            showContextMenu(at: clickPoint, for: cell)
+            showContextMenu(with: event, for: cell)
         }
         
         super.rightMouseDown(with: event)
@@ -183,7 +185,8 @@ class TableAttachmentNSView: NSView {
             
         default:
             if let current = selectedCell, editingCell == nil, isPrintable(event: event) {
-                startEditingCell(row: current.row, col: current.col, withInitialText: "")
+                startEditingCell(row: current.row, col: current.col, withInitialText: event.characters ?? "")
+                return
             }
             super.keyDown(with: event)
         }
@@ -263,7 +266,8 @@ class TableAttachmentNSView: NSView {
             textField = nil
             return
         }
-        
+
+        suppressTextDidEndEditing = true
         if commit {
             onCellEdited?(editing.row, editing.col, tf.stringValue)
         }
@@ -342,7 +346,7 @@ class TableAttachmentNSView: NSView {
         selectCell(row: current.row, col: newCol)
     }
     
-    private func showContextMenu(at point: NSPoint, for cell: (row: Int, col: Int)) {
+    private func showContextMenu(with event: NSEvent, for cell: (row: Int, col: Int)) {
         let menu = NSMenu()
         
         let rowMenu = NSMenu()
@@ -367,57 +371,116 @@ class TableAttachmentNSView: NSView {
         
         contextMenuRow = cell.row
         contextMenuCol = cell.col
-        
-        NSMenu.popUpContextMenu(menu, with: NSApp.currentEvent!, for: self)
+
+        if let contextMenuPresenter {
+            contextMenuPresenter(menu, event, self)
+            return
+        }
+
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
     
     private var contextMenuRow: Int = 0
     private var contextMenuCol: Int = 0
+
+    private func structureActionCell(in data: TableData) -> (row: Int, col: Int)? {
+        if let selectedCell,
+           selectedCell.row >= 0, selectedCell.row < data.rowCount,
+           selectedCell.col >= 0, selectedCell.col < data.columnCount {
+            return selectedCell
+        }
+
+        guard contextMenuRow >= 0, contextMenuRow < data.rowCount,
+              contextMenuCol >= 0, contextMenuCol < data.columnCount else {
+            return nil
+        }
+        return (row: contextMenuRow, col: contextMenuCol)
+    }
     
     @objc private func insertRowAbove(_ sender: Any?) {
-        guard var data = tableData else { return }
-        data.addRow(at: contextMenuRow)
+        endEditing(commit: true)
+        guard var data = tableData,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.addRow(at: actionCell.row)
         tableData = data
+        if let selected = selectedCell, selected.row >= actionCell.row {
+            selectedCell = (row: selected.row + 1, col: selected.col)
+        }
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
     
     @objc private func insertRowBelow(_ sender: Any?) {
-        guard var data = tableData else { return }
-        data.addRow(at: contextMenuRow + 1)
+        endEditing(commit: true)
+        guard var data = tableData,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.addRow(at: actionCell.row + 1)
         tableData = data
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
     
     @objc private func deleteRow(_ sender: Any?) {
-        guard var data = tableData, data.rowCount > 1 else { return }
-        data.removeRow(at: contextMenuRow)
+        endEditing(commit: true)
+        guard var data = tableData,
+              data.rowCount > 1,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.removeRow(at: actionCell.row)
         tableData = data
+        if let selected = selectedCell {
+            if selected.row > actionCell.row {
+                selectedCell = (row: selected.row - 1, col: selected.col)
+            } else if selected.row == actionCell.row {
+                selectedCell = (row: min(actionCell.row, data.rowCount - 1), col: selected.col)
+            }
+        }
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
     
     @objc private func insertColumnLeft(_ sender: Any?) {
-        guard var data = tableData else { return }
-        data.addColumn(at: contextMenuCol)
+        endEditing(commit: true)
+        guard var data = tableData,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.addColumn(at: actionCell.col)
         tableData = data
+        if let selected = selectedCell, selected.col >= actionCell.col {
+            selectedCell = (row: selected.row, col: selected.col + 1)
+        }
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
     
     @objc private func insertColumnRight(_ sender: Any?) {
-        guard var data = tableData else { return }
-        data.addColumn(at: contextMenuCol + 1)
+        endEditing(commit: true)
+        guard var data = tableData,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.addColumn(at: actionCell.col + 1)
         tableData = data
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
     
     @objc private func deleteColumn(_ sender: Any?) {
-        guard var data = tableData, data.columnCount > 1 else { return }
-        data.removeColumn(at: contextMenuCol)
+        endEditing(commit: true)
+        guard var data = tableData,
+              data.columnCount > 1,
+              let actionCell = structureActionCell(in: data) else { return }
+        data.removeColumn(at: actionCell.col)
         tableData = data
+        if let selected = selectedCell {
+            if selected.col > actionCell.col {
+                selectedCell = (row: selected.row, col: selected.col - 1)
+            } else if selected.col == actionCell.col {
+                selectedCell = (row: selected.row, col: min(actionCell.col, data.columnCount - 1))
+            }
+        }
+        invalidateIntrinsicContentSize()
         onStructureChanged?()
         needsDisplay = true
     }
@@ -425,10 +488,19 @@ class TableAttachmentNSView: NSView {
 
 extension TableAttachmentNSView: NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
+        if suppressTextDidEndEditing {
+            suppressTextDidEndEditing = false
+            return
+        }
         endEditing(commit: true)
     }
     
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(cancelOperation(_:)) {
+            endEditing(commit: false)
+            return true
+        }
+
         if commandSelector == #selector(insertTab(_:)) {
             endEditing(commit: true)
             if let current = selectedCell, let data = tableData {

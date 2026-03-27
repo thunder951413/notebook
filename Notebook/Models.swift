@@ -34,6 +34,16 @@ struct AppColors {
     }
 }
 
+struct AttachmentAppearance {
+    static var primaryTextColor: NSColor { .textColor }
+    static var secondaryTextColor: NSColor { .secondaryLabelColor }
+    static var backgroundColor: NSColor { .textBackgroundColor }
+    static var secondaryBackgroundColor: NSColor { .controlBackgroundColor }
+    static var borderColor: NSColor { .separatorColor }
+    static var selectionColor: NSColor { .selectedContentBackgroundColor.withAlphaComponent(0.3) }
+    static var uncheckedStrokeColor: NSColor { .tertiaryLabelColor }
+}
+
 struct Folder: Identifiable, Hashable {
     let id: UUID
     var name: String
@@ -83,12 +93,26 @@ struct BlockDocumentAttributedStringBuilder {
         assetsByID: [String: BlockDocumentAssetEntity]
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
+        var index = 0
+        var emittedBlockCount = 0
 
-        for (index, block) in blocks.enumerated() {
-            if index > 0 {
+        while index < blocks.count {
+            if emittedBlockCount > 0 {
                 result.append(NSAttributedString(string: "\n"))
             }
-            result.append(attributedBlock(for: block, assetsByID: assetsByID))
+
+            if let recoveredTodo = recoveredLegacyTodoBlock(
+                at: index,
+                blocks: blocks,
+                assetsByID: assetsByID
+            ) {
+                result.append(recoveredTodo)
+                index += 2
+            } else {
+                result.append(attributedBlock(for: blocks[index], assetsByID: assetsByID))
+                index += 1
+            }
+            emittedBlockCount += 1
         }
 
         return result
@@ -131,6 +155,7 @@ struct BlockDocumentAttributedStringBuilder {
                 )
                 content.addAttribute(.font, value: font, range: subrange)
             }
+            content.addAttribute(.notebookHeadingLevel, value: block.level ?? 1, range: range)
         }
         return content
     }
@@ -138,7 +163,7 @@ struct BlockDocumentAttributedStringBuilder {
     private func listItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
         let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
         result.append(NSAttributedString(string: listMarker(for: block)))
-        result.append(inlineAttributedText(from: block.textPayload))
+        result.append(sanitizedListInlineText(from: block.textPayload))
         return result
     }
 
@@ -147,8 +172,76 @@ struct BlockDocumentAttributedStringBuilder {
         let attachment = CheckboxTextAttachment(checked: block.checked ?? false)
         result.append(NSAttributedString(attachment: attachment))
         result.append(NSAttributedString(string: " "))
-        result.append(inlineAttributedText(from: block.textPayload))
+        result.append(sanitizedTodoInlineText(from: block.textPayload))
         return result
+    }
+
+    private func recoveredLegacyTodoBlock(
+        at index: Int,
+        blocks: [BlockDocumentBlockEntity],
+        assetsByID: [String: BlockDocumentAssetEntity]
+    ) -> NSAttributedString? {
+        guard index + 1 < blocks.count else { return nil }
+        let imageBlock = blocks[index]
+        let textBlock = blocks[index + 1]
+        guard imageBlock.kind == "image", textBlock.kind == "paragraph" else { return nil }
+        guard isLikelyLegacyCheckboxImageBlock(imageBlock, assetsByID: assetsByID) else { return nil }
+
+        let checked = recoveredLegacyCheckboxState(from: imageBlock, assetsByID: assetsByID) ?? false
+        let result = NSMutableAttributedString(string: indentationPrefix(level: textBlock.indent))
+        result.append(NSAttributedString(attachment: CheckboxTextAttachment(checked: checked)))
+        result.append(NSAttributedString(string: " "))
+        result.append(sanitizedTodoInlineText(from: textBlock.textPayload))
+        return result
+    }
+
+    private func isLikelyLegacyCheckboxImageBlock(
+        _ block: BlockDocumentBlockEntity,
+        assetsByID: [String: BlockDocumentAssetEntity]
+    ) -> Bool {
+        guard let asset = block.assetID.flatMap({ assetsByID[$0] }) else { return false }
+        guard asset.kind == "image" else { return false }
+        let size = resolvedLegacyAssetImageSize(asset)
+        guard size.width > 0, size.height > 0 else { return false }
+        let width = size.width
+        let height = size.height
+        guard width >= 10, height >= 10, width <= 36, height <= 36 else { return false }
+
+        let minEdge = min(width, height)
+        let maxEdge = max(width, height)
+        return minEdge > 0 && (maxEdge / minEdge) <= 1.25
+    }
+
+    private func recoveredLegacyCheckboxState(
+        from block: BlockDocumentBlockEntity,
+        assetsByID: [String: BlockDocumentAssetEntity]
+    ) -> Bool? {
+        guard
+            let asset = block.assetID.flatMap({ assetsByID[$0] }),
+            let fileURL = assetFileURL(for: asset),
+            FileManager.default.fileExists(atPath: fileURL.path),
+            let image = NSImage(contentsOf: fileURL)
+        else {
+            return nil
+        }
+
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        return CheckboxTextAttachment.inferCheckedState(from: attachment)
+    }
+
+    private func resolvedLegacyAssetImageSize(_ asset: BlockDocumentAssetEntity) -> CGSize {
+        if let width = asset.width, let height = asset.height, width > 0, height > 0 {
+            return CGSize(width: width, height: height)
+        }
+        guard
+            let fileURL = assetFileURL(for: asset),
+            FileManager.default.fileExists(atPath: fileURL.path),
+            let image = NSImage(contentsOf: fileURL)
+        else {
+            return .zero
+        }
+        return image.size
     }
 
     private func imageBlock(
@@ -249,6 +342,38 @@ struct BlockDocumentAttributedStringBuilder {
         return result
     }
 
+    private func sanitizedTodoInlineText(from payload: Data?) -> NSAttributedString {
+        let text = NSMutableAttributedString(attributedString: inlineAttributedText(from: payload))
+        guard text.length > 0 else { return text }
+
+        while text.length > 0 {
+            let char = (text.string as NSString).character(at: 0)
+            if char == 32 || char == 9 || char == 10 || char == 13 || char == 0x2028 || char == 0x2029 {
+                text.deleteCharacters(in: NSRange(location: 0, length: 1))
+                continue
+            }
+            break
+        }
+
+        return text
+    }
+
+    private func sanitizedListInlineText(from payload: Data?) -> NSAttributedString {
+        let text = NSMutableAttributedString(attributedString: inlineAttributedText(from: payload))
+        guard text.length > 0 else { return text }
+
+        while text.length > 0 {
+            let char = (text.string as NSString).character(at: 0)
+            if char == 10 || char == 13 || char == 0x2028 || char == 0x2029 {
+                text.deleteCharacters(in: NSRange(location: 0, length: 1))
+                continue
+            }
+            break
+        }
+
+        return text
+    }
+
     private func attributes(for span: BlockDocumentTextSpanPayload) -> [NSAttributedString.Key: Any] {
         var attributes: [NSAttributedString.Key: Any] = [:]
         let fontSize = CGFloat(span.fontSize ?? 16)
@@ -272,6 +397,15 @@ struct BlockDocumentAttributedStringBuilder {
         }
         if let link = span.link, !link.isEmpty {
             attributes[.link] = URL(string: link) ?? link
+        }
+        if let kern = span.kern {
+            attributes[.kern] = kern
+        }
+        if let baselineOffset = span.baselineOffset {
+            attributes[.baselineOffset] = baselineOffset
+        }
+        if let paragraphStyle = nsParagraphStyle(from: span.paragraphStyle) {
+            attributes[.paragraphStyle] = paragraphStyle
         }
         return attributes
     }
@@ -308,13 +442,41 @@ struct BlockDocumentAttributedStringBuilder {
 
     private func headingFontSize(level: Int) -> CGFloat {
         switch max(1, min(level, 6)) {
-        case 1: return 30
-        case 2: return 26
-        case 3: return 22
-        case 4: return 20
-        case 5: return 18
-        default: return 16
+        case 1: return 22
+        case 2: return 18
+        case 3: return 16
+        case 4: return 15
+        case 5: return 14
+        default: return 13
         }
+    }
+
+    private func nsParagraphStyle(from payload: BlockDocumentParagraphStylePayload?) -> NSParagraphStyle? {
+        guard let payload else { return nil }
+        let style = NSMutableParagraphStyle()
+        if let alignment = payload.alignment,
+           let textAlignment = NSTextAlignment(rawValue: alignment) {
+            style.alignment = textAlignment
+        }
+        if let lineSpacing = payload.lineSpacing {
+            style.lineSpacing = lineSpacing
+        }
+        if let paragraphSpacing = payload.paragraphSpacing {
+            style.paragraphSpacing = paragraphSpacing
+        }
+        if let paragraphSpacingBefore = payload.paragraphSpacingBefore {
+            style.paragraphSpacingBefore = paragraphSpacingBefore
+        }
+        if let firstLineHeadIndent = payload.firstLineHeadIndent {
+            style.firstLineHeadIndent = firstLineHeadIndent
+        }
+        if let headIndent = payload.headIndent {
+            style.headIndent = headIndent
+        }
+        if let tailIndent = payload.tailIndent {
+            style.tailIndent = tailIndent
+        }
+        return style
     }
 
     private func indentationPrefix(level: Int?) -> String {
@@ -1234,6 +1396,7 @@ class NoteStore: ObservableObject {
                 library.noteCount = max(0, library.noteCount - 1)
             }
 
+            try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
             try? context.save()
             notes.removeAll { $0.id == id }
         }
@@ -1498,6 +1661,7 @@ extension NSAttributedString.Key {
     static let notebookImageWidth = NSAttributedString.Key("NotebookImageWidth")
     static let notebookImageHeight = NSAttributedString.Key("NotebookImageHeight")
     static let notebookTableData = NSAttributedString.Key("NotebookTableData")
+    static let notebookHeadingLevel = NSAttributedString.Key("NotebookHeadingLevel")
 }
 
 extension NSAttributedString {
@@ -1519,7 +1683,8 @@ extension NSAttributedString {
             .baselineOffset,
             .notebookImageWidth,
             .notebookImageHeight,
-            .notebookTableData
+            .notebookTableData,
+            .notebookHeadingLevel
         ]
 
         // 先确保所有复选框附件和表格附件的图像已生成

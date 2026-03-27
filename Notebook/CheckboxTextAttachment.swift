@@ -38,6 +38,10 @@ final class CheckboxTextAttachment: NSTextAttachment {
         coder.encode(isChecked, forKey: Self.checkedKey)
     }
 
+    func refreshPresentationIfNeeded() {
+        updateImage()
+    }
+
     private func updateImage() {
         self.image = createCheckboxImage()
         // 调整 bounds 使复选框垂直居中
@@ -53,12 +57,8 @@ final class CheckboxTextAttachment: NSTextAttachment {
 
         let rect = NSRect(origin: .zero, size: size)
 
-        // 获取当前外观（深色/浅色模式）
-        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-
         if isChecked {
-            // 已选中状态 - 填充圆，白色对勾
-            let fillColor: NSColor = isDarkMode ? .systemYellow : .systemYellow
+            let fillColor: NSColor = .systemYellow
             let checkColor: NSColor = .white
 
             // 绘制填充圆
@@ -84,8 +84,7 @@ final class CheckboxTextAttachment: NSTextAttachment {
             checkColor.setStroke()
             checkPath.stroke()
         } else {
-            // 未选中状态 - 空心圆
-            let strokeColor: NSColor = isDarkMode ? .systemGray : .systemGray
+            let strokeColor = AttachmentAppearance.uncheckedStrokeColor
 
             let circlePath = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
             circlePath.lineWidth = strokeWidth
@@ -270,6 +269,7 @@ extension NSTextView {
         let nsString = self.string as NSString
         let selectedRange = self.selectedRange()
         let currentLineRange = nsString.lineRange(for: selectedRange)
+        let insertionLocation = leadingWhitespaceBoundary(in: currentLineRange)
 
         // 检查行首是否已有复选框
         if let checkboxRange = findCheckboxAtLineStart(lineRange: currentLineRange) {
@@ -293,13 +293,12 @@ extension NSTextView {
             let newLocation = selectedRange.location - deleteRange.length
             self.setSelectedRange(NSRange(location: max(currentLineRange.location, newLocation), length: 0))
         } else {
-            // 在行首插入复选框
             let attachment = CheckboxTextAttachment(checked: false)
             let attrString = NSAttributedString(attachment: attachment)
             let mutableAttr = NSMutableAttributedString(attributedString: attrString)
             mutableAttr.append(NSAttributedString(string: " "))
 
-            self.textStorage?.insert(mutableAttr, at: currentLineRange.location)
+            self.textStorage?.insert(mutableAttr, at: insertionLocation)
             self.didChangeText()
 
             // 调整光标位置
@@ -311,13 +310,12 @@ extension NSTextView {
     /// 查找行首的复选框（支持重启后从普通 NSTextAttachment 自动恢复）
     private func findCheckboxAtLineStart(lineRange: NSRange) -> NSRange? {
         let attr = self.attributedString()
+        let checkboxLocation = leadingWhitespaceBoundary(in: lineRange)
 
-        // 检查行首字符
-        if lineRange.location >= attr.length { return nil }
+        if checkboxLocation >= attr.length { return nil }
 
         var effectiveRange = NSRange(location: NSNotFound, length: 0)
-        if let checkbox = normalizedCheckboxAttachment(at: lineRange.location, effectiveRange: &effectiveRange) {
-            // 确保附件已经被写回，避免后续判断再失败
+        if let checkbox = normalizedCheckboxAttachment(at: checkboxLocation, effectiveRange: &effectiveRange) {
             self.textStorage?.addAttribute(.attachment, value: checkbox, range: effectiveRange)
             return effectiveRange
         }
@@ -332,8 +330,24 @@ extension NSTextView {
 
         if lineRange.location >= self.attributedString().length { return false }
 
-        var effectiveRange = NSRange(location: NSNotFound, length: 0)
-        return normalizedCheckboxAttachment(at: lineRange.location, effectiveRange: &effectiveRange) != nil
+        return findCheckboxAtLineStart(lineRange: lineRange) != nil
+    }
+
+    private func leadingWhitespaceBoundary(in lineRange: NSRange) -> Int {
+        let nsString = self.string as NSString
+        let end = NSMaxRange(lineRange)
+        var location = lineRange.location
+
+        while location < end {
+            let scalar = nsString.character(at: location)
+            if scalar == 32 || scalar == 9 {
+                location += 1
+                continue
+            }
+            break
+        }
+
+        return location
     }
 
     /// 在当前位置插入复选框

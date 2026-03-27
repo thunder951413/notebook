@@ -10,6 +10,19 @@ enum AttachmentKind: String {
 final class AttachmentManager {
     static let shared = AttachmentManager()
 
+    private struct CleanupFolderSignature: Equatable {
+        let exists: Bool
+        let modificationDate: Date?
+    }
+
+    private struct CleanupCheckpoint {
+        let referencedFiles: Set<String>
+        let folderSignature: CleanupFolderSignature
+        let nextEligibleCleanupAt: Date?
+    }
+
+    private var cleanupCheckpoints: [UUID: CleanupCheckpoint] = [:]
+
     private init() {}
 
     func copyAttachmentToStore(sourceURL: URL, noteID: UUID, kind: AttachmentKind) throws -> URL {
@@ -68,6 +81,7 @@ final class AttachmentManager {
         let location = StorageLocationManager.shared
         guard let base = location.baseDirectoryURL else { return }
 
+        cleanupCheckpoints.removeValue(forKey: noteID)
         location.withSecurityScopedAccess(base) {
             do {
                 let folder = try location.attachmentsDirectoryURL().appendingPathComponent(noteID.uuidString, isDirectory: true)
@@ -194,7 +208,7 @@ final class AttachmentManager {
         preferredFilename: String,
         noteID: UUID
     ) -> URL? {
-        if isAttachmentStoredInNoteFolder(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
+        if isAttachmentReusableForCurrentNote(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
             return existingURL
         }
         guard let data else { return nil }
@@ -208,7 +222,7 @@ final class AttachmentManager {
         manifestData: Data?,
         noteID: UUID
     ) -> (audioURL: URL, manifestURL: URL?)? {
-        if isAttachmentStoredInNoteFolder(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
+        if isAttachmentReusableForCurrentNote(existingURL, noteID: noteID), FileManager.default.fileExists(atPath: existingURL.path) {
             let manifestURL = existingURL.deletingPathExtension().appendingPathExtension("tracks.json")
             if let manifestData, !FileManager.default.fileExists(atPath: manifestURL.path) {
                 try? manifestData.write(to: manifestURL, options: .atomic)
@@ -259,19 +273,25 @@ final class AttachmentManager {
         return folder
     }
 
-    private func isAttachmentStoredInNoteFolder(_ url: URL, noteID: UUID) -> Bool {
+    private func isAttachmentReusableForCurrentNote(_ url: URL, noteID: UUID) -> Bool {
         let location = StorageLocationManager.shared
         guard let base = location.baseDirectoryURL else { return false }
 
         var result = false
         location.withSecurityScopedAccess(base) {
-            guard let folder = try? noteAttachmentDirectoryURL(noteID: noteID) else {
+            guard let attachmentsRoot = try? location.attachmentsDirectoryURL() else {
                 return
             }
-            let folderPath = folder.standardizedFileURL.path
-            let folderPrefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
             let filePath = url.standardizedFileURL.path
-            result = filePath == folderPath || filePath.hasPrefix(folderPrefix)
+            let noteFolderPath = attachmentsRoot
+                .appendingPathComponent(noteID.uuidString, isDirectory: true)
+                .standardizedFileURL.path
+            let noteFolderPrefix = noteFolderPath.hasSuffix("/") ? noteFolderPath : noteFolderPath + "/"
+            let blockDocumentsPath = attachmentsRoot
+                .appendingPathComponent("BlockDocuments", isDirectory: true)
+                .standardizedFileURL.path
+            let blockDocumentsPrefix = blockDocumentsPath.hasSuffix("/") ? blockDocumentsPath : blockDocumentsPath + "/"
+            result = filePath.hasPrefix(noteFolderPrefix) || filePath.hasPrefix(blockDocumentsPrefix)
         }
         return result
     }
@@ -293,13 +313,27 @@ final class AttachmentManager {
         location.withSecurityScopedAccess(base) {
             do {
                 let folder = try location.attachmentsDirectoryURL().appendingPathComponent(noteID.uuidString, isDirectory: true)
-                guard FileManager.default.fileExists(atPath: folder.path) else {
+                let referencedFiles = self.extractReferencedAttachmentFiles(from: content)
+                let preCleanupSignature = self.cleanupFolderSignature(for: folder)
+                let now = Date()
+
+                if let checkpoint = self.cleanupCheckpoints[noteID],
+                   checkpoint.referencedFiles == referencedFiles,
+                   checkpoint.folderSignature == preCleanupSignature,
+                   (checkpoint.nextEligibleCleanupAt == nil || now < checkpoint.nextEligibleCleanupAt!) {
+                    return
+                }
+
+                guard preCleanupSignature.exists else {
+                    self.cleanupCheckpoints[noteID] = CleanupCheckpoint(
+                        referencedFiles: referencedFiles,
+                        folderSignature: preCleanupSignature,
+                        nextEligibleCleanupAt: nil
+                    )
                     print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) attachment folder does not exist")
                     return
                 }
 
-                // 获取当前内容中引用的所有附件文件名
-                let referencedFiles = self.extractReferencedAttachmentFiles(from: content)
                 print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) has \(referencedFiles.count) referenced attachments")
 
                 // 获取文件夹中的所有文件
@@ -307,14 +341,20 @@ final class AttachmentManager {
                 print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) folder has \(allFiles.count) files")
 
                 var deletedCount = 0
+                var nextEligibleCleanupAt: Date?
 
                 for fileURL in allFiles {
                     let filename = fileURL.lastPathComponent
 
                     // 如果文件未被引用，先做“新文件保护”：避免录音刚生成但尚未完成插入时被误删
                     if !referencedFiles.contains(filename) {
-                        if self.shouldKeepAsRecentlyCreated(fileURL) {
+                        if let protectionExpiry = self.recentAttachmentProtectionExpiry(for: fileURL), protectionExpiry > now {
                             print("[AttachmentManager] Skip deleting recent attachment: \(filename)")
+                            if let existing = nextEligibleCleanupAt {
+                                nextEligibleCleanupAt = max(existing, protectionExpiry)
+                            } else {
+                                nextEligibleCleanupAt = protectionExpiry
+                            }
                             continue
                         }
 
@@ -331,6 +371,12 @@ final class AttachmentManager {
                 } else {
                     print("[AttachmentManager] No unused attachments to clean for note \(noteID.uuidString.prefix(8))")
                 }
+
+                self.cleanupCheckpoints[noteID] = CleanupCheckpoint(
+                    referencedFiles: referencedFiles,
+                    folderSignature: self.cleanupFolderSignature(for: folder),
+                    nextEligibleCleanupAt: nextEligibleCleanupAt
+                )
             } catch {
                 print("[AttachmentManager] Failed to cleanup unused attachments: \(error)")
             }
@@ -409,12 +455,22 @@ final class AttachmentManager {
     /// 新创建附件保护窗口（秒）
     private var recentAttachmentProtectionWindow: TimeInterval { 30 }
 
-    /// 判断文件是否属于“刚创建”，用于避免保存时序造成的误删
-    private func shouldKeepAsRecentlyCreated(_ fileURL: URL) -> Bool {
+    private func cleanupFolderSignature(for folderURL: URL) -> CleanupFolderSignature {
+        guard FileManager.default.fileExists(atPath: folderURL.path) else {
+            return CleanupFolderSignature(exists: false, modificationDate: nil)
+        }
+        let values = try? folderURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+        return CleanupFolderSignature(
+            exists: true,
+            modificationDate: values?.contentModificationDate ?? values?.creationDate
+        )
+    }
+
+    private func recentAttachmentProtectionExpiry(for fileURL: URL) -> Date? {
         let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
         let ts = values?.contentModificationDate ?? values?.creationDate
-        guard let ts else { return false }
-        return Date().timeIntervalSince(ts) < recentAttachmentProtectionWindow
+        guard let ts else { return nil }
+        return ts.addingTimeInterval(recentAttachmentProtectionWindow)
     }
 
     /// 清理所有孤儿附件（启动时调用）

@@ -142,33 +142,20 @@ final class AudioBlockAttachment: NSTextAttachment {
         return embeddedManifestData
     }
     
-    /// 检测当前是否为暗色模式
-    private var isDarkMode: Bool {
-        if let appearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) {
-            return appearance == .darkAqua
-        }
-        return false
+    func refreshPresentationIfNeeded() {
+        image = createCardImage()
     }
 
-    /// 创建音频卡片图像（仿苹果备忘录）
     private func createCardImage() -> NSImage {
         let cardWidth: CGFloat = 229  // 185(按钮X) + 32(按钮宽) + 12(右边距)
         let cardHeight: CGFloat = 60
         let size = NSSize(width: cardWidth, height: cardHeight)
         let image = NSImage(size: size)
 
-        // 在 lockFocus 前获取颜色设置
-        let darkMode = isDarkMode
-        let primaryTextColor = darkMode ? NSColor.white : NSColor.black
-        let secondaryTextColor = darkMode
-            ? NSColor(calibratedWhite: 0.75, alpha: 0.95)
-            : NSColor(calibratedWhite: 0.35, alpha: 0.95)
-        let cardBgColor = darkMode
-            ? NSColor(calibratedWhite: 0.25, alpha: 0.95)
-            : NSColor(calibratedWhite: 0.92, alpha: 0.95)
-        let buttonBgColor = darkMode
-            ? NSColor(calibratedWhite: 0.15, alpha: 0.95)
-            : NSColor(calibratedWhite: 0.85, alpha: 0.95)
+        let primaryTextColor = AttachmentAppearance.primaryTextColor
+        let secondaryTextColor = AttachmentAppearance.secondaryTextColor
+        let cardBgColor = AttachmentAppearance.backgroundColor
+        let buttonBgColor = AttachmentAppearance.secondaryBackgroundColor
 
         image.lockFocus()
 

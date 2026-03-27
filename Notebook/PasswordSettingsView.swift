@@ -2,6 +2,7 @@ import SwiftUI
 
 /// 密码设置视图
 struct PasswordSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var passwordManager = PasswordManager.shared
     @State private var currentPassword = ""
     @State private var newPassword = ""
@@ -17,14 +18,29 @@ struct PasswordSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             // 标题
             HStack {
-                Image(systemName: "lock.shield")
-                    .font(.title2)
-                    .foregroundColor(.accentColor)
+                HStack(spacing: 10) {
+                    Image(systemName: "lock.shield")
+                        .font(.title2)
+                        .foregroundColor(.accentColor)
+                    
+                    Text("应用密码")
+                        .font(.title2)
+                        .bold()
+                }
                 
-                Text("应用密码")
-                    .font(.title2)
-                    .bold()
+                Spacer()
+                
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
+
+            Divider()
             
             // 说明文字
             Text(passwordManager.hasPassword 
@@ -62,6 +78,10 @@ struct PasswordSettingsView: View {
                     
                     // 按钮组
                     HStack(spacing: 12) {
+                        Button("取消") {
+                            dismiss()
+                        }
+
                         Button(role: .destructive) {
                             showClearConfirmation = true
                         } label: {
@@ -101,6 +121,10 @@ struct PasswordSettingsView: View {
                     
                     // 设置按钮
                     HStack {
+                        Button("取消") {
+                            dismiss()
+                        }
+
                         Spacer()
                         
                         Button {
@@ -141,8 +165,8 @@ struct PasswordSettingsView: View {
             
             Spacer()
         }
-        .padding(20)
-        .frame(width: 400, height: 350)
+        .padding(24)
+        .frame(width: 420, height: 360)
         .alert("确认清除密码", isPresented: $showClearConfirmation) {
             Button("取消", role: .cancel) {}
             Button("确认清除", role: .destructive) {
@@ -267,6 +291,12 @@ struct PasswordSettingsView: View {
     private func showSuccess(_ message: String) {
         successMessage = message
         errorMessage = nil
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if self.successMessage == message {
+                dismiss()
+            }
+        }
         
         // 3秒后清除成功消息
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {

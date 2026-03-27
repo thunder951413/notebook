@@ -1,8 +1,29 @@
 import Foundation
+import SwiftData
+import CryptoKit
+
+struct RemoteNoteIndex: Codable {
+    let generatedAt: Date
+    let deviceID: String
+    let entries: [RemoteNoteIndexEntry]
+}
+
+struct RemoteNoteIndexEntry: Codable {
+    let noteID: UUID
+    let version: Int64
+    let contentHash: String
+    let historyCount: Int
+}
 
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 class SSHSyncManager {
     static let shared = SSHSyncManager()
+
+    private struct ProcessExecutionResult {
+        let terminationStatus: Int32
+        let standardOutput: String
+        let standardError: String
+    }
 
     private init() {}
 
@@ -51,7 +72,7 @@ class SSHSyncManager {
         return "/usr/local/bin/sshpass"
     }
 
-    private func sanitizeLog(_ text: String, password: String) -> String {
+    private static func sanitizeLog(_ text: String, password: String) -> String {
         guard !password.isEmpty else { return text }
         return text.replacingOccurrences(of: password, with: "******")
     }
@@ -59,46 +80,19 @@ class SSHSyncManager {
     /// 使用密码认证测试连接
     func testConnectionWithPassword(config: SSHConfig) async throws {
         let sshpassPath = try checkSshpassAvailable()
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: sshArguments(config: config, command: "echo NB_CONNECTION_SUCCESS"),
+            password: config.password
+        )
+        let output = result.standardOutput
+        let errorOutput = result.standardError
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: sshpassPath)
-        task.arguments = [
-            "-p", config.password,
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-p", String(config.port),
-            "\(config.username)@\(config.host)",
-            "echo NB_CONNECTION_SUCCESS"
-        ]
+        print("SSH Test Output: \(Self.sanitizeLog(output, password: config.password))")
+        print("SSH Test Error: \(Self.sanitizeLog(errorOutput, password: config.password))")
+        print("SSH Test Exit Code: \(result.terminationStatus)")
 
-        // 设置环境变量
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        task.environment = env
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
-
-        try task.run()
-        task.waitUntilExit()
-
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-
-        print("SSH Test Output: \(sanitizeLog(output, password: config.password))")
-        print("SSH Test Error: \(sanitizeLog(errorOutput, password: config.password))")
-        print("SSH Test Exit Code: \(task.terminationStatus)")
-
-        if task.terminationStatus != 0 {
+        if result.terminationStatus != 0 {
             var errorMessage = "连接失败"
             if errorOutput.contains("Permission denied") || output.contains("Permission denied") {
                 errorMessage = "认证失败：用户名或密码错误，或服务器未允许该用户使用密码登录"
@@ -117,7 +111,7 @@ class SSHSyncManager {
             } else if errorOutput.contains("sshpass") && (errorOutput.contains("not found") || errorOutput.contains("No such file")) {
                 errorMessage = "未找到 sshpass，请先运行: brew install sshpass"
             }
-            throw NSError(domain: "SSHConnection", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
+            throw NSError(domain: "SSHConnection", code: Int(result.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
         }
 
         if !output.contains("NB_CONNECTION_SUCCESS") {
@@ -131,39 +125,11 @@ class SSHSyncManager {
 
         let quotedRemotePath = config.repositoryPath
             .replacingOccurrences(of: "'", with: "'\"'\"'")
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: sshpassPath)
-        task.arguments = [
-            "-p", config.password,
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-p", String(config.port),
-            "\(config.username)@\(config.host)",
-            "mkdir -p '\(quotedRemotePath)'"
-        ]
-
-        // 设置环境变量
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        task.environment = env
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        try task.run()
-        task.waitUntilExit()
-
-        if task.terminationStatus != 0 {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: data, encoding: .utf8) ?? "创建远程目录失败"
-            throw NSError(domain: "SSHSync", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: sanitizeLog(errorMessage, password: config.password)])
-        }
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p '\(quotedRemotePath)'"
+        )
     }
 
     /// 同步文件到远程（上传）- 使用 scp 代替 sftp
@@ -232,7 +198,7 @@ class SSHSyncManager {
         if scpTask.terminationStatus != 0 {
             let data = scpPipe.fileHandleForReading.readDataToEndOfFile()
             let rawErrorMessage = String(data: data, encoding: .utf8) ?? "上传失败"
-            let errorMessage = sanitizeLog(rawErrorMessage, password: config.password)
+            let errorMessage = Self.sanitizeLog(rawErrorMessage, password: config.password)
             throw NSError(domain: "SSHSync", code: Int(scpTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
         }
 
@@ -263,7 +229,7 @@ class SSHSyncManager {
         if extractTask.terminationStatus != 0 {
             let data = extractPipe.fileHandleForReading.readDataToEndOfFile()
             let errorMessage = String(data: data, encoding: .utf8) ?? "解压失败"
-            throw NSError(domain: "SSHSync", code: Int(extractTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: sanitizeLog(errorMessage, password: config.password)])
+            throw NSError(domain: "SSHSync", code: Int(extractTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(errorMessage, password: config.password)])
         }
     }
 
@@ -303,7 +269,7 @@ class SSHSyncManager {
         if packTask.terminationStatus != 0 {
             let data = packPipe.fileHandleForReading.readDataToEndOfFile()
             let errorMessage = String(data: data, encoding: .utf8) ?? "远程打包失败"
-            throw NSError(domain: "SSHSync", code: Int(packTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: sanitizeLog(errorMessage, password: config.password)])
+            throw NSError(domain: "SSHSync", code: Int(packTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(errorMessage, password: config.password)])
         }
 
         // 下载 tar 文件
@@ -359,7 +325,7 @@ class SSHSyncManager {
         if scpTask.terminationStatus != 0 {
             let data = scpPipe.fileHandleForReading.readDataToEndOfFile()
             let rawErrorMessage = String(data: data, encoding: .utf8) ?? "下载失败"
-            throw NSError(domain: "SSHSync", code: Int(scpTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: sanitizeLog(rawErrorMessage, password: config.password)])
+            throw NSError(domain: "SSHSync", code: Int(scpTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(rawErrorMessage, password: config.password)])
         }
 
         // 解压到本地
@@ -379,5 +345,422 @@ class SSHSyncManager {
             let errorMessage = String(data: data, encoding: .utf8) ?? "解压失败"
             throw NSError(domain: "SSHSync", code: Int(extractTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
         }
+    }
+
+    func syncNoteToRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+            return
+        }
+
+        let sshpassPath = try checkSshpassAvailable()
+        try await ensureRemoteDirectory(config: config)
+
+        let remoteNoteDirectory = "\(config.repositoryPath)/notes"
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'"
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let payload = try encoder.encode(envelope)
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note_sync_\(noteID.uuidString)_\(UUID().uuidString).json")
+        try payload.write(to: tempFileURL, options: [.atomic])
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        let remoteTempPath = "\(remoteNoteDirectory)/\(noteID.uuidString).json.tmp"
+        let remoteTargetPath = "\(remoteNoteDirectory)/\(noteID.uuidString).json"
+
+        try await runSCPUpload(
+            sshpassPath: sshpassPath,
+            config: config,
+            localPath: tempFileURL.path,
+            remotePath: remoteTempPath
+        )
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+        )
+
+        try BlockDocumentNoteVersionStore.markSynced(
+            noteID: noteID,
+            syncedVersion: envelope.currentVersion,
+            context: context
+        )
+    }
+
+    func syncAllNotesToRemote(context: ModelContext, config: SSHConfig) async throws -> [UUID] {
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+            .sorted { $0.updatedAt > $1.updatedAt }
+        var syncedNoteIDs: [UUID] = []
+        var indexEntries: [RemoteNoteIndexEntry] = []
+
+        for note in notes {
+            let syncState = try fetchSyncState(noteID: note.id, context: context)
+            let shouldSync =
+                syncState == nil ||
+                syncState!.lastSyncedVersion < note.version ||
+                syncState!.pendingHistoryCount > 0
+            if shouldSync {
+                try await syncNoteToRemote(noteID: note.id, context: context, config: config)
+                syncedNoteIDs.append(note.id)
+            }
+            if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                indexEntries.append(entry)
+            }
+        }
+        try await uploadRemoteIndex(entries: indexEntries, config: config)
+        return syncedNoteIDs
+    }
+
+    func syncNoteFromRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws -> NoteSyncMergeResult {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/\(noteID.uuidString).json"
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note_sync_pull_\(noteID.uuidString)_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        try await runSCPDownload(
+            sshpassPath: sshpassPath,
+            config: config,
+            remotePath: remotePath,
+            localPath: tempFileURL.path
+        )
+
+        let payload = try Data(contentsOf: tempFileURL)
+        let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
+        if !result.detectedConflict {
+            try BlockDocumentNoteVersionStore.markSynced(
+                noteID: noteID,
+                syncedVersion: min(result.localVersion, result.remoteVersion),
+                context: context
+            )
+        }
+        return result
+    }
+
+    func syncAllNotesFromRemote(context: ModelContext, config: SSHConfig) async throws -> [NoteSyncMergeResult] {
+        let remoteIndex = try await downloadRemoteIndex(config: config)
+        let noteIDs: [UUID]
+        if let remoteIndex {
+            noteIDs = remoteIndex.entries
+                .filter { entry in
+                    guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
+                        return true
+                    }
+                    if entry.version > syncState.lastRemoteVersion {
+                        return true
+                    }
+                    return entry.contentHash != syncState.remoteFingerprint
+                }
+                .map(\.noteID)
+                .sorted { $0.uuidString < $1.uuidString }
+        } else {
+            noteIDs = try await listRemoteNoteIDs(config: config)
+        }
+
+        var results: [NoteSyncMergeResult] = []
+        for noteID in noteIDs {
+            let result = try await syncNoteFromRemote(noteID: noteID, context: context, config: config)
+            results.append(result)
+        }
+        return results
+    }
+
+    private func makeRemoteIndexEntry(noteID: UUID, context: ModelContext) throws -> RemoteNoteIndexEntry? {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+            return nil
+        }
+        let snapshotData = try JSONEncoder().encode(envelope.currentSnapshot)
+        let contentHash = SHA256.hash(data: snapshotData).map { String(format: "%02x", $0) }.joined()
+        return RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: envelope.currentVersion,
+            contentHash: contentHash,
+            historyCount: envelope.history.count
+        )
+    }
+
+    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        try await ensureRemoteDirectory(config: config)
+        let remoteNoteDirectory = "\(config.repositoryPath)/notes"
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'"
+        )
+
+        let index = RemoteNoteIndex(
+            generatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let payload = try encoder.encode(index)
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
+        try payload.write(to: tempFileURL, options: [.atomic])
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        let remoteTempPath = "\(remoteNoteDirectory)/index.json.tmp"
+        let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
+        try await runSCPUpload(
+            sshpassPath: sshpassPath,
+            config: config,
+            localPath: tempFileURL.path,
+            remotePath: remoteTempPath
+        )
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+        )
+    }
+
+    private func downloadRemoteIndex(config: SSHConfig) async throws -> RemoteNoteIndex? {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/index.json"
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note_sync_index_pull_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        do {
+            try await runSCPDownload(
+                sshpassPath: sshpassPath,
+                config: config,
+                remotePath: remotePath,
+                localPath: tempFileURL.path
+            )
+        } catch {
+            return nil
+        }
+
+        let payload = try Data(contentsOf: tempFileURL)
+        return try JSONDecoder().decode(RemoteNoteIndex.self, from: payload)
+    }
+
+    private func listRemoteNoteIDs(config: SSHConfig) async throws -> [UUID] {
+        let sshpassPath = try checkSshpassAvailable()
+        let remoteNoteDirectory = "\(config.repositoryPath)/notes"
+        let rawListing = try await runSSHCommandForOutput(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "if [ -d '\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\(escapeSingleQuoted(remoteNoteDirectory))'; fi"
+        )
+        return rawListing
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> UUID? in
+                let filename = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard filename.hasSuffix(".json"), filename != "index.json" else { return nil }
+                let id = filename.replacingOccurrences(of: ".json", with: "")
+                return UUID(uuidString: id)
+            }
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity? {
+        let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+        )
+        return try context.fetch(descriptor).first
+    }
+
+    private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String) async throws {
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: sshArguments(config: config, command: command),
+            password: config.password
+        )
+        if result.terminationStatus != 0 {
+            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
+            throw NSError(
+                domain: "SSHSync",
+                code: Int(result.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(message.isEmpty ? "执行远程命令失败" : message, password: config.password)]
+            )
+        }
+    }
+
+    private func runSSHCommandForOutput(sshpassPath: String, config: SSHConfig, command: String) async throws -> String {
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: sshArguments(config: config, command: command),
+            password: config.password
+        )
+        if result.terminationStatus != 0 {
+            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
+            throw NSError(
+                domain: "SSHSync",
+                code: Int(result.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(message.isEmpty ? "执行远程命令失败" : message, password: config.password)]
+            )
+        }
+        return result.standardOutput
+    }
+
+    private func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String) async throws {
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath),
+            password: config.password,
+            timeout: 120
+        )
+        if result.terminationStatus != 0 {
+            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
+            throw NSError(
+                domain: "SSHSync",
+                code: Int(result.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(message.isEmpty ? "上传失败" : message, password: config.password)]
+            )
+        }
+    }
+
+    private func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String) async throws {
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath),
+            password: config.password,
+            timeout: 120
+        )
+        if result.terminationStatus != 0 {
+            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
+            throw NSError(
+                domain: "SSHSync",
+                code: Int(result.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(message.isEmpty ? "下载失败" : message, password: config.password)]
+            )
+        }
+    }
+
+    private func sshArguments(config: SSHConfig, command: String) -> [String] {
+        [
+            "-p", config.password,
+            "ssh"
+        ] + commonSSHOptions(port: config.port) + [
+            "\(config.username)@\(config.host)",
+            command
+        ]
+    }
+
+    private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String) -> [String] {
+        [
+            "-p", config.password,
+            "scp"
+        ] + commonSCPOptions(port: config.port) + [
+            localPath,
+            "\(config.username)@\(config.host):\(remotePath)"
+        ]
+    }
+
+    private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String) -> [String] {
+        [
+            "-p", config.password,
+            "scp"
+        ] + commonSCPOptions(port: config.port) + [
+            "\(config.username)@\(config.host):\(remotePath)",
+            localPath
+        ]
+    }
+
+    private func commonSSHOptions(port: Int) -> [String] {
+        [
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "PreferredAuthentications=keyboard-interactive,password",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2",
+            "-p", String(port)
+        ]
+    }
+
+    private func commonSCPOptions(port: Int) -> [String] {
+        [
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "PreferredAuthentications=keyboard-interactive,password",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2",
+            "-P", String(port)
+        ]
+    }
+
+    private func executeProcess(
+        executablePath: String,
+        arguments: [String],
+        password: String,
+        timeout: TimeInterval = 45
+    ) async throws -> ProcessExecutionResult {
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executablePath)
+        task.arguments = arguments
+        task.environment = env
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = outputPipe
+        task.standardError = errorPipe
+
+        let timeoutErrorMessage = Self.sanitizeLog("SSH 操作超时，请检查服务器连通性、端口配置或网络状态", password: password)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let lock = NSLock()
+            var finished = false
+
+            func resume(_ result: Result<ProcessExecutionResult, Error>) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !finished else { return }
+                finished = true
+                continuation.resume(with: result)
+            }
+
+            task.terminationHandler = { process in
+                let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                resume(.success(ProcessExecutionResult(
+                    terminationStatus: process.terminationStatus,
+                    standardOutput: output,
+                    standardError: error
+                )))
+            }
+
+            do {
+                try task.run()
+            } catch {
+                resume(.failure(error))
+                return
+            }
+
+            Task.detached {
+                let delay = UInt64(max(1, timeout) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: delay)
+                guard task.isRunning else { return }
+                task.terminate()
+                resume(.failure(NSError(
+                    domain: "SSHSync",
+                    code: -1001,
+                    userInfo: [NSLocalizedDescriptionKey: timeoutErrorMessage]
+                )))
+            }
+        }
+    }
+
+    private func escapeSingleQuoted(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "'\"'\"'")
     }
 }

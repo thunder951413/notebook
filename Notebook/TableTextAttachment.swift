@@ -136,10 +136,9 @@ final class TableTextAttachment: NSTextAttachment {
         
         image.lockFocus()
         
-        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let backgroundColor: NSColor = isDarkMode ? NSColor(red: 0.22, green: 0.22, blue: 0.22, alpha: 1) : .white
-        let borderColor: NSColor = isDarkMode ? NSColor(red: 0.35, green: 0.35, blue: 0.35, alpha: 1) : NSColor(red: 0.85, green: 0.85, blue: 0.85, alpha: 1)
-        let textColor: NSColor = isDarkMode ? .white : .black
+        let backgroundColor = AttachmentAppearance.backgroundColor
+        let borderColor = AttachmentAppearance.borderColor
+        let textColor = AttachmentAppearance.primaryTextColor
         
         // 绘制背景
         backgroundColor.setFill()
