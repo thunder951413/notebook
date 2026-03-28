@@ -1,0 +1,30 @@
+name: macOS Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Build app
+        run: xcodebuild -scheme Notebook -project Notebook.xcodeproj -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+      - name: Package app
+        run: |
+          app_dir=$(xcodebuild -scheme Notebook -project Notebook.xcodeproj -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -showBuildSettings | awk -F ' = ' '/TARGET_BUILD_DIR/ {print $2; exit}')
+          app_name=$(xcodebuild -scheme Notebook -project Notebook.xcodeproj -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -showBuildSettings | awk -F ' = ' '/FULL_PRODUCT_NAME/ {print $2; exit}')
+          ditto -c -k --sequesterRsrc --keepParent "$app_dir/$app_name" "Notebook-${{ github.ref_name }}.zip"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Notebook-${{ github.ref_name }}.zip
+          generate_release_notes: true
