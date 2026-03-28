@@ -15,6 +15,12 @@ struct RemoteNoteIndexEntry: Codable {
     let historyCount: Int
 }
 
+struct SSHPushSyncSummary {
+    let uploadedNoteIDs: [UUID]
+    let pulledResults: [NoteSyncMergeResult]
+    let skippedNoteIDs: [UUID]
+}
+
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 class SSHSyncManager {
     static let shared = SSHSyncManager()
@@ -23,6 +29,12 @@ class SSHSyncManager {
         let terminationStatus: Int32
         let standardOutput: String
         let standardError: String
+    }
+
+    enum PushDecision: Equatable {
+        case upload
+        case pull
+        case skip
     }
 
     private init() {}
@@ -392,28 +404,145 @@ class SSHSyncManager {
         )
     }
 
-    func syncAllNotesToRemote(context: ModelContext, config: SSHConfig) async throws -> [UUID] {
+    static func pushDecision(
+        localEntry: RemoteNoteIndexEntry,
+        remoteEntry: RemoteNoteIndexEntry?,
+        syncState: BlockDocumentNoteSyncStateEntity?
+    ) -> PushDecision {
+        guard let remoteEntry else {
+            return .upload
+        }
+
+        guard let syncState else {
+            if remoteEntry.version > localEntry.version {
+                return .pull
+            }
+            if remoteEntry.version < localEntry.version {
+                return .upload
+            }
+            if remoteEntry.contentHash != localEntry.contentHash {
+                return .pull
+            }
+            if remoteEntry.historyCount > localEntry.historyCount {
+                return .pull
+            }
+            if remoteEntry.historyCount < localEntry.historyCount {
+                return .upload
+            }
+            return .skip
+        }
+
+        let remoteChanged =
+            remoteEntry.version > syncState.lastRemoteVersion ||
+            remoteEntry.contentHash != syncState.remoteFingerprint ||
+            remoteEntry.historyCount > localEntry.historyCount
+        let localChanged =
+            localEntry.version > syncState.lastSyncedVersion ||
+            syncState.pendingHistoryCount > 0
+
+        if remoteChanged {
+            return .pull
+        }
+        if localChanged {
+            return .upload
+        }
+        if localEntry.version > remoteEntry.version {
+            return .upload
+        }
+        if localEntry.version < remoteEntry.version {
+            return .pull
+        }
+        if localEntry.contentHash != remoteEntry.contentHash {
+            if remoteEntry.contentHash == syncState.remoteFingerprint &&
+                remoteEntry.version == syncState.lastRemoteVersion {
+                return .upload
+            }
+            return .pull
+        }
+        if localEntry.historyCount > remoteEntry.historyCount {
+            return .upload
+        }
+        if localEntry.historyCount < remoteEntry.historyCount {
+            return .pull
+        }
+        return .skip
+    }
+
+    func syncAllNotesToRemote(context: ModelContext, config: SSHConfig) async throws -> SSHPushSyncSummary {
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
             .sorted { $0.updatedAt > $1.updatedAt }
+        let remoteIndex = try await downloadRemoteIndex(config: config)
+        var remoteEntriesByID = Dictionary(
+            uniqueKeysWithValues: (remoteIndex?.entries ?? []).map { ($0.noteID, $0) }
+        )
         var syncedNoteIDs: [UUID] = []
-        var indexEntries: [RemoteNoteIndexEntry] = []
+        var pulledResults: [NoteSyncMergeResult] = []
+        var skippedNoteIDs: [UUID] = []
 
         for note in notes {
-            let syncState = try fetchSyncState(noteID: note.id, context: context)
-            let shouldSync =
-                syncState == nil ||
-                syncState!.lastSyncedVersion < note.version ||
-                syncState!.pendingHistoryCount > 0
-            if shouldSync {
+            guard var localEntry = try makeRemoteIndexEntry(noteID: note.id, context: context) else {
+                continue
+            }
+
+            var syncState = try fetchSyncState(noteID: note.id, context: context)
+            var remoteEntry = remoteEntriesByID[note.id]
+            let initialDecision = Self.pushDecision(
+                localEntry: localEntry,
+                remoteEntry: remoteEntry,
+                syncState: syncState
+            )
+
+            if initialDecision == .pull {
+                let pullResult = try await syncNoteFromRemote(noteID: note.id, context: context, config: config)
+                pulledResults.append(pullResult)
+                if pullResult.detectedConflict {
+                    skippedNoteIDs.append(note.id)
+                    if let remoteEntry {
+                        remoteEntriesByID[note.id] = remoteEntry
+                    }
+                    continue
+                }
+
+                guard let refreshedLocalEntry = try makeRemoteIndexEntry(noteID: note.id, context: context) else {
+                    continue
+                }
+                localEntry = refreshedLocalEntry
+                syncState = try fetchSyncState(noteID: note.id, context: context)
+                remoteEntry = remoteEntriesByID[note.id]
+            }
+
+            let finalDecision = Self.pushDecision(
+                localEntry: localEntry,
+                remoteEntry: remoteEntry,
+                syncState: syncState
+            )
+
+            if finalDecision == .upload {
                 try await syncNoteToRemote(noteID: note.id, context: context, config: config)
                 syncedNoteIDs.append(note.id)
-            }
-            if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
-                indexEntries.append(entry)
+                if let refreshedLocalEntry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                    localEntry = refreshedLocalEntry
+                }
+                remoteEntriesByID[note.id] = localEntry
+            } else {
+                if finalDecision == .skip {
+                    skippedNoteIDs.append(note.id)
+                }
+                if remoteEntry == nil {
+                    remoteEntriesByID[note.id] = localEntry
+                }
             }
         }
-        try await uploadRemoteIndex(entries: indexEntries, config: config)
-        return syncedNoteIDs
+
+        try await uploadRemoteIndex(
+            entries: remoteEntriesByID.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
+            config: config
+        )
+        return SSHPushSyncSummary(
+            uploadedNoteIDs: syncedNoteIDs,
+            pulledResults: pulledResults,
+            skippedNoteIDs: skippedNoteIDs
+        )
     }
 
     func syncNoteFromRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws -> NoteSyncMergeResult {

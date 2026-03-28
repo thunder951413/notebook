@@ -688,7 +688,8 @@ enum BlockDocumentNoteVersionStore {
         let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
         syncState.lastRemoteVersion = envelope.currentVersion
         syncState.lastRemoteDeviceID = envelope.deviceID
-        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        let remoteSnapshotFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        syncState.remoteFingerprint = remoteSnapshotFingerprint
 
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
             predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelope.noteID }
@@ -696,8 +697,23 @@ enum BlockDocumentNoteVersionStore {
         let localNote = try context.fetch(noteDescriptor).first
 
         if let localNote {
+            let blocks = try context.fetch(
+                FetchDescriptor<BlockDocumentBlockEntity>(
+                    predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == envelope.noteID },
+                    sortBy: [SortDescriptor(\.position)]
+                )
+            )
+            let assets = try context.fetch(
+                FetchDescriptor<BlockDocumentAssetEntity>(
+                    predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == envelope.noteID }
+                )
+            )
+            let localSnapshot = try makeSnapshot(note: localNote, blocks: blocks, assets: assets)
+            let localSnapshotFingerprint = fingerprint(for: try jsonEncoder.encode(localSnapshot))
+            let snapshotsMatch = localSnapshotFingerprint == remoteSnapshotFingerprint
             let hasDiverged = localNote.version > syncState.lastCommonVersion && syncState.lastSyncedVersion < localNote.version
-            if hasDiverged && localNote.version != envelope.currentVersion {
+            if (hasDiverged && (localNote.version != envelope.currentVersion || !snapshotsMatch)) ||
+                (localNote.version == envelope.currentVersion && !snapshotsMatch) {
                 try context.save()
                 return NoteSyncMergeResult(
                     noteID: envelope.noteID,

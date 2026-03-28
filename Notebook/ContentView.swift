@@ -1912,10 +1912,9 @@ private struct EditorTopBarView: View {
 
             // 目录按钮（仅在预览或分屏模式下显示）
             TableOfContentsMenu(
-                content: note.content.string,
+                content: NotePreviewContentBuilder.tableOfContentsSource(from: note.content),
                 viewMode: note.viewMode,
                 onSelect: { anchor in
-                    // 发送通知让 MarkdownWebView 滚动到指定位置
                     NotificationCenter.default.post(
                         name: .scrollToHeading,
                         object: note.id,
@@ -3016,14 +3015,10 @@ private struct NoteMarkdownPreviewView: View {
     let content: NSAttributedString
     let colorScheme: ColorScheme
     let noteID: UUID
-    @State private var webViewHeight: CGFloat = 500
-    @State private var scrollOffset: CGFloat = 0
-    @State private var renderedContent: NSAttributedString = NSAttributedString(string: "")
+    @State private var previewBlocks: [NotePreviewBlockData] = []
     @State private var renderWorkItem: DispatchWorkItem?
 
     private var contentRevision: Int {
-        // 不能只看 content.string：附件尺寸变化不会触发
-        // 也不能只看 RTFD：自定义尺寸属性不会稳定进入 RTFD
         var hasher = Hasher()
         hasher.combine(content.string)
         hasher.combine(content.length)
@@ -3052,32 +3047,455 @@ private struct NoteMarkdownPreviewView: View {
     }
 
     var body: some View {
-        MarkdownWebView(
-            markdown: renderedContent.string,
-            attributedContent: renderedContent,
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(previewBlocks) { block in
+                        NotePreviewBlockView(
+                            block: block,
+                            colorScheme: colorScheme,
+                            noteID: noteID
+                        )
+                        .id(block.anchor ?? block.id.uuidString)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: .infinity)
+            .background(AppColors.editorBackground(colorScheme))
+            .onAppear {
+                let snapshot = content.copy() as? NSAttributedString ?? content
+                previewBlocks = NotePreviewContentBuilder.blocks(from: snapshot)
+            }
+            .onDisappear {
+                renderWorkItem?.cancel()
+            }
+            .onChange(of: contentRevision) { _, _ in
+                renderWorkItem?.cancel()
+                let snapshot = content.copy() as? NSAttributedString ?? content
+                let workItem = DispatchWorkItem {
+                    previewBlocks = NotePreviewContentBuilder.blocks(from: snapshot)
+                }
+                renderWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .scrollToHeading)) { notification in
+                guard let notificationNoteID = notification.object as? UUID,
+                      notificationNoteID == noteID,
+                      let anchor = notification.userInfo?["anchor"] as? String else {
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(anchor, anchor: .top)
+                }
+            }
+        }
+    }
+}
+
+enum NotePreviewBlockKind: Equatable {
+    case richText
+    case mermaid
+}
+
+struct NotePreviewBlockData: Identifiable {
+    let id = UUID()
+    let kind: NotePreviewBlockKind
+    let attributedContent: NSAttributedString?
+    let mermaidCode: String?
+    let anchor: String?
+
+    init(attributedContent: NSAttributedString, anchor: String? = nil) {
+        self.kind = .richText
+        self.attributedContent = attributedContent
+        self.mermaidCode = nil
+        self.anchor = anchor
+    }
+
+    init(mermaidCode: String) {
+        self.kind = .mermaid
+        self.attributedContent = nil
+        self.mermaidCode = mermaidCode
+        self.anchor = nil
+    }
+}
+
+enum NotePreviewContentBuilder {
+    static let mermaidPattern = #"(?ms)^```mermaid[^\n\r]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)"#
+    static let markdownHeadingPattern = #"^(#{1,6})\s+(.+)$"#
+    static let markdownSyntaxPattern = #"(?m)^(#{1,6})\s+.+$|^(\s*[-*+])\s+.+$|^(\s*\d+\.)\s+.+$|^>\s+.+$|```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^)]+\)|\*\*.+?\*\*|__.+?__|\*[^*\n]+\*|_[^_\n]+_"#
+
+    static func blocks(from content: NSAttributedString) -> [NotePreviewBlockData] {
+        let fullText = content.string as NSString
+        guard let mermaidRegex = try? NSRegularExpression(pattern: mermaidPattern, options: []) else {
+            var anchorIndex = 0
+            return splitRichTextBlocks(content, anchorIndex: &anchorIndex)
+        }
+
+        let matches = mermaidRegex.matches(
+            in: content.string,
+            options: [],
+            range: NSRange(location: 0, length: fullText.length)
+        )
+
+        if matches.isEmpty {
+            var anchorIndex = 0
+            return splitRichTextBlocks(content, anchorIndex: &anchorIndex)
+        }
+
+        var blocks: [NotePreviewBlockData] = []
+        var anchorIndex = 0
+        var cursor = 0
+
+        for match in matches {
+            let matchRange = match.range
+            if matchRange.location > cursor {
+                let textRange = NSRange(location: cursor, length: matchRange.location - cursor)
+                let attributedSegment = content.attributedSubstring(from: textRange)
+                blocks.append(contentsOf: splitRichTextBlocks(attributedSegment, anchorIndex: &anchorIndex))
+            }
+
+            let codeRange = match.range(at: 1)
+            if codeRange.location != NSNotFound {
+                let code = fullText.substring(with: codeRange).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !code.isEmpty {
+                    blocks.append(NotePreviewBlockData(mermaidCode: code))
+                }
+            }
+
+            cursor = NSMaxRange(matchRange)
+        }
+
+        if cursor < fullText.length {
+            let tailRange = NSRange(location: cursor, length: fullText.length - cursor)
+            let attributedSegment = content.attributedSubstring(from: tailRange)
+            blocks.append(contentsOf: splitRichTextBlocks(attributedSegment, anchorIndex: &anchorIndex))
+        }
+
+        return blocks.isEmpty ? [NotePreviewBlockData(attributedContent: content)] : blocks
+    }
+
+    static func tableOfContentsSource(from content: NSAttributedString) -> String {
+        let blocks = blocks(from: content)
+        return blocks.compactMap { block in
+            guard block.kind == .richText else { return nil }
+            return block.attributedContent?.string
+        }
+        .joined()
+    }
+
+    static func shouldRenderAsMarkdown(_ content: NSAttributedString) -> Bool {
+        guard !content.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        let fullRange = NSRange(location: 0, length: content.length)
+        var containsRichTextOnlyFeatures = false
+        content.enumerateAttributes(in: fullRange, options: []) { attrs, _, stop in
+            if attrs[.attachment] != nil ||
+                attrs[.link] != nil ||
+                attrs[.underlineStyle] != nil ||
+                attrs[.strikethroughStyle] != nil ||
+                attrs[.backgroundColor] != nil ||
+                attrs[.notebookHeadingLevel] != nil ||
+                attrs[.notebookTableData] != nil {
+                containsRichTextOnlyFeatures = true
+                stop.pointee = true
+            }
+
+            if let font = attrs[.font] as? NSFont {
+                let traits = font.fontDescriptor.symbolicTraits
+                if abs(font.pointSize - NSFont.systemFontSize) > 0.5 ||
+                    traits.contains(.bold) ||
+                    traits.contains(.italic) {
+                    containsRichTextOnlyFeatures = true
+                    stop.pointee = true
+                }
+            }
+        }
+
+        guard !containsRichTextOnlyFeatures else {
+            return false
+        }
+
+        return content.string.range(of: markdownSyntaxPattern, options: .regularExpression) != nil
+    }
+
+    private static func splitRichTextBlocks(_ content: NSAttributedString, anchorIndex: inout Int) -> [NotePreviewBlockData] {
+        guard !content.string.isEmpty else { return [] }
+        let fullText = content.string as NSString
+        guard let headingRegex = try? NSRegularExpression(pattern: markdownHeadingPattern, options: [.anchorsMatchLines]) else {
+            return [NotePreviewBlockData(attributedContent: content)]
+        }
+
+        let matches = headingRegex.matches(
+            in: content.string,
+            options: [],
+            range: NSRange(location: 0, length: fullText.length)
+        )
+
+        if matches.isEmpty {
+            return [NotePreviewBlockData(attributedContent: content)]
+        }
+
+        var blocks: [NotePreviewBlockData] = []
+        var cursor = 0
+
+        for match in matches {
+            let matchRange = match.range
+            if matchRange.location > cursor {
+                let prefixRange = NSRange(location: cursor, length: matchRange.location - cursor)
+                let prefix = content.attributedSubstring(from: prefixRange)
+                if !prefix.string.isEmpty {
+                    blocks.append(NotePreviewBlockData(attributedContent: prefix))
+                }
+            }
+
+            let heading = content.attributedSubstring(from: matchRange)
+            blocks.append(
+                NotePreviewBlockData(
+                    attributedContent: heading,
+                    anchor: "heading-\(anchorIndex)"
+                )
+            )
+            anchorIndex += 1
+            cursor = NSMaxRange(matchRange)
+        }
+
+        if cursor < fullText.length {
+            let tailRange = NSRange(location: cursor, length: fullText.length - cursor)
+            let tail = content.attributedSubstring(from: tailRange)
+            if !tail.string.isEmpty {
+                blocks.append(NotePreviewBlockData(attributedContent: tail))
+            }
+        }
+
+        return blocks
+    }
+}
+
+private struct NotePreviewBlockView: View {
+    let block: NotePreviewBlockData
+    let colorScheme: ColorScheme
+    let noteID: UUID
+
+    var body: some View {
+        Group {
+            switch block.kind {
+            case .richText:
+                if let attributedContent = block.attributedContent {
+                    if NotePreviewContentBuilder.shouldRenderAsMarkdown(attributedContent) {
+                        MarkdownAttributedPreviewView(
+                            markdown: attributedContent.string,
+                            colorScheme: colorScheme
+                        )
+                    } else {
+                        NativeAttributedPreviewView(
+                            attributedText: attributedContent,
+                            colorScheme: colorScheme
+                        )
+                    }
+                }
+            case .mermaid:
+                if let mermaidCode = block.mermaidCode {
+                    MermaidPreviewBlockView(
+                        mermaidCode: mermaidCode,
+                        colorScheme: colorScheme,
+                        noteID: noteID
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+enum MarkdownAttributedPreviewRenderer {
+    static func render(markdown: String, colorScheme: ColorScheme) -> NSAttributedString {
+        guard !markdown.isEmpty else { return NSAttributedString(string: "") }
+
+        let webView = MarkdownWebView(
+            markdown: markdown,
+            attributedContent: nil,
             colorScheme: colorScheme,
-            height: $webViewHeight,
+            height: .constant(0),
+            noteID: UUID()
+        )
+        let html = webView.generateHTML(from: markdown, attributed: nil, colorScheme: colorScheme)
+
+        guard let data = html.data(using: .utf8),
+              let rendered = try? NSMutableAttributedString(
+                data: data,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue
+                ],
+                documentAttributes: nil
+              ) else {
+            return NSAttributedString(string: markdown)
+        }
+
+        let fullRange = NSRange(location: 0, length: rendered.length)
+        guard fullRange.length > 0 else { return rendered }
+
+        rendered.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
+        rendered.enumerateAttribute(.link, in: fullRange, options: []) { value, range, _ in
+            guard value != nil else { return }
+            rendered.addAttribute(.foregroundColor, value: NSColor.linkColor, range: range)
+        }
+
+        while rendered.length > 0,
+              rendered.string.hasSuffix("\n\n") {
+            rendered.deleteCharacters(in: NSRange(location: rendered.length - 1, length: 1))
+        }
+
+        return rendered
+    }
+}
+
+private struct MarkdownAttributedPreviewView: View {
+    let markdown: String
+    let colorScheme: ColorScheme
+    @State private var renderedText: NSAttributedString = NSAttributedString(string: "")
+
+    var body: some View {
+        NativeAttributedPreviewView(
+            attributedText: renderedText,
+            colorScheme: colorScheme
+        )
+        .onAppear {
+            renderedText = MarkdownAttributedPreviewRenderer.render(markdown: markdown, colorScheme: colorScheme)
+        }
+        .onChange(of: markdown) { _, newValue in
+            renderedText = MarkdownAttributedPreviewRenderer.render(markdown: newValue, colorScheme: colorScheme)
+        }
+        .onChange(of: colorScheme) { _, newValue in
+            renderedText = MarkdownAttributedPreviewRenderer.render(markdown: markdown, colorScheme: newValue)
+        }
+    }
+}
+
+private struct NativeAttributedPreviewView: View {
+    let attributedText: NSAttributedString
+    let colorScheme: ColorScheme
+    @State private var height: CGFloat = 1
+
+    var body: some View {
+        ReadOnlyAttributedTextView(
+            attributedText: attributedText,
+            colorScheme: colorScheme,
+            height: $height
+        )
+        .frame(height: max(height, 1))
+    }
+}
+
+private struct ReadOnlyAttributedTextView: NSViewRepresentable {
+    let attributedText: NSAttributedString
+    let colorScheme: ColorScheme
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(height: $height)
+    }
+
+    func makeNSView(context: Context) -> PreviewTextView {
+        let textView = PreviewTextView()
+        textView.drawsBackground = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.allowsUndo = false
+        textView.textContainerInset = NSSize(width: 0, height: 0)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = false
+        textView.backgroundColor = .clear
+        textView.linkTextAttributes = [.foregroundColor: NSColor.linkColor]
+        textView.heightCoordinator = context.coordinator
+        return textView
+    }
+
+    func updateNSView(_ textView: PreviewTextView, context: Context) {
+        textView.textStorage?.setAttributedString(attributedText)
+        textView.backgroundColor = .clear
+        textView.textColor = .textColor
+        textView.insertionPointColor = colorScheme == .dark ? .white : .black
+        textView.refreshLayout()
+    }
+
+    final class Coordinator {
+        @Binding var height: CGFloat
+
+        init(height: Binding<CGFloat>) {
+            self._height = height
+        }
+
+        func update(height newHeight: CGFloat) {
+            guard abs(height - newHeight) > 0.5 else { return }
+            DispatchQueue.main.async {
+                self.height = newHeight
+            }
+        }
+    }
+}
+
+private final class PreviewTextView: NSTextView {
+    weak var heightCoordinator: ReadOnlyAttributedTextView.Coordinator?
+    private var lastMeasuredHeight: CGFloat = 0
+
+    override func layout() {
+        super.layout()
+        refreshLayout()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshLayout()
+    }
+
+    func refreshLayout() {
+        guard let textContainer, let layoutManager else { return }
+        let targetWidth = max(bounds.width, 1)
+        textContainer.containerSize = NSSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+        let usedHeight = layoutManager.usedRect(for: textContainer).height
+        let measuredHeight = max(ceil(usedHeight + textContainerInset.height * 2), 1)
+        guard abs(lastMeasuredHeight - measuredHeight) > 0.5 else { return }
+        lastMeasuredHeight = measuredHeight
+        heightCoordinator?.update(height: measuredHeight)
+    }
+}
+
+private struct MermaidPreviewBlockView: View {
+    let mermaidCode: String
+    let colorScheme: ColorScheme
+    let noteID: UUID
+    @State private var height: CGFloat = 220
+
+    private var markdown: String {
+        "```mermaid\n\(mermaidCode)\n```"
+    }
+
+    var body: some View {
+        MarkdownWebView(
+            markdown: markdown,
+            attributedContent: nil,
+            colorScheme: colorScheme,
+            height: $height,
             noteID: noteID
         )
-        .frame(maxHeight: .infinity)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(AppColors.editorBackground(colorScheme))
-        .onAppear {
-            renderedContent = content.copy() as? NSAttributedString ?? content
-        }
-        .onDisappear {
-            renderWorkItem?.cancel()
-        }
-        .onChange(of: contentRevision) { _, _ in
-            renderWorkItem?.cancel()
-            let snapshot = content.copy() as? NSAttributedString ?? content
-            let workItem = DispatchWorkItem {
-                renderedContent = snapshot
-            }
-            renderWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
-        }
+        .frame(height: max(height, 160))
+        .allowsHitTesting(false)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(AppColors.divider(colorScheme), lineWidth: 1)
+        )
     }
 }
 
@@ -4063,7 +4481,7 @@ struct MarkdownWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = NonScrollingWKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
 

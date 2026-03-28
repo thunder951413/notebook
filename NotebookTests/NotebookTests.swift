@@ -25,6 +25,221 @@ final class NotebookTests: XCTestCase {
         XCTAssertTrue(true)
     }
 
+    func testSSHPushDecisionPullsWhenRemoteChangedAfterLastSync() {
+        let noteID = UUID()
+        let localEntry = RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: 10,
+            contentHash: "local-v10",
+            historyCount: 10
+        )
+        let remoteEntry = RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: 8,
+            contentHash: "remote-v8",
+            historyCount: 8
+        )
+        let syncState = BlockDocumentNoteSyncStateEntity(
+            noteID: noteID,
+            lastRecordedVersion: 10,
+            lastSyncedVersion: 7,
+            lastCommonVersion: 7,
+            lastRemoteVersion: 7,
+            lastSyncAt: nil,
+            lastRemoteDeviceID: nil,
+            remoteFingerprint: "remote-v7",
+            pendingHistoryCount: 3
+        )
+
+        XCTAssertEqual(
+            SSHSyncManager.pushDecision(
+                localEntry: localEntry,
+                remoteEntry: remoteEntry,
+                syncState: syncState
+            ),
+            .pull
+        )
+    }
+
+    func testSSHPushDecisionUploadsWhenLocalAheadAndRemoteUnchanged() {
+        let noteID = UUID()
+        let localEntry = RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: 10,
+            contentHash: "local-v10",
+            historyCount: 10
+        )
+        let remoteEntry = RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: 7,
+            contentHash: "remote-v7",
+            historyCount: 7
+        )
+        let syncState = BlockDocumentNoteSyncStateEntity(
+            noteID: noteID,
+            lastRecordedVersion: 10,
+            lastSyncedVersion: 7,
+            lastCommonVersion: 7,
+            lastRemoteVersion: 7,
+            lastSyncAt: nil,
+            lastRemoteDeviceID: nil,
+            remoteFingerprint: "remote-v7",
+            pendingHistoryCount: 3
+        )
+
+        XCTAssertEqual(
+            SSHSyncManager.pushDecision(
+                localEntry: localEntry,
+                remoteEntry: remoteEntry,
+                syncState: syncState
+            ),
+            .upload
+        )
+    }
+
+    @MainActor
+    func testMergeRemoteEnvelopeDetectsConflictWhenVersionsMatchButSnapshotsDiffer() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let libraryID = UUID()
+        let noteID = UUID()
+        let updatedAt = Date()
+
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: updatedAt,
+                importedAt: updatedAt,
+                noteCount: 1,
+                folderCount: 0,
+                tagCount: 0
+            )
+        )
+        context.insert(
+            BlockDocumentNoteEntity(
+                id: noteID,
+                libraryID: libraryID,
+                title: "本地版本",
+                createdAt: updatedAt,
+                updatedAt: updatedAt,
+                folderID: nil,
+                folderName: "未分类",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 2,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 1,
+                assetCount: 0
+            )
+        )
+        context.insert(
+            BlockDocumentBlockEntity(
+                noteID: noteID,
+                position: 0,
+                blockID: "block-1",
+                kind: "paragraph",
+                sourceType: "paragraph",
+                textPayload: try JSONEncoder().encode([
+                    BlockDocumentTextSpanPayload(
+                        text: "local body",
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        strikethrough: false,
+                        textColor: nil,
+                        backgroundColor: nil,
+                        link: nil,
+                        fontFamily: nil,
+                        fontSize: nil,
+                        kern: nil,
+                        baselineOffset: nil,
+                        paragraphStyle: nil
+                    )
+                ]),
+                level: nil,
+                listStyle: nil,
+                order: nil,
+                checked: nil,
+                indent: 0,
+                assetID: nil,
+                tablePayload: nil
+            )
+        )
+        try context.save()
+        _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: noteID, context: context)
+        try context.save()
+
+        let localEnvelope = try XCTUnwrap(
+            BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context)
+        )
+        let remoteSnapshot = VersionedNoteSnapshot(
+            metadata: localEnvelope.currentSnapshot.metadata,
+            document: MigratedDocument(
+                schemaVersion: localEnvelope.currentSnapshot.document.schemaVersion,
+                source: localEnvelope.currentSnapshot.document.source,
+                blocks: [
+                    MigratedDocumentBlock(
+                        id: "block-1",
+                        type: "paragraph",
+                        text: [
+                            MigratedInlineText(
+                                text: "remote body",
+                                bold: false,
+                                italic: false,
+                                underline: false,
+                                strikethrough: false,
+                                textColor: nil,
+                                backgroundColor: nil,
+                                link: nil,
+                                fontFamily: nil,
+                                fontSize: nil,
+                                kern: nil,
+                                baselineOffset: nil,
+                                paragraphStyle: nil
+                            )
+                        ],
+                        level: nil,
+                        listStyle: nil,
+                        order: nil,
+                        checked: nil,
+                        indent: 0,
+                        asset: nil,
+                        table: nil
+                    )
+                ]
+            ),
+            assets: localEnvelope.currentSnapshot.assets
+        )
+        let remoteEnvelope = VersionedNoteSyncEnvelope(
+            noteID: localEnvelope.noteID,
+            deviceID: "remote-device",
+            exportedAt: Date(),
+            currentVersion: localEnvelope.currentVersion,
+            currentSnapshot: remoteSnapshot,
+            history: localEnvelope.history,
+            syncState: localEnvelope.syncState
+        )
+
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(remoteEnvelope, context: context)
+        XCTAssertTrue(result.detectedConflict)
+        XCTAssertFalse(result.appliedRemoteSnapshot)
+
+        let mergedEnvelope = try XCTUnwrap(
+            BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context)
+        )
+        XCTAssertEqual(
+            mergedEnvelope.currentSnapshot.document.blocks.first?.text?.first?.text,
+            "local body"
+        )
+    }
+
     @MainActor
     func testBlockDocumentNoteMovesToRecycleBinAndRestores() throws {
         let container = try makeInMemoryContainer()
@@ -2198,6 +2413,71 @@ final class NotebookTests: XCTestCase {
 
         XCTAssertFalse(html.contains("color: #000000"))
         XCTAssertTrue(html.contains("color: #FFFFFF"))
+    }
+
+    func testNotePreviewContentBuilderSplitsMermaidIntoDedicatedBlock() {
+        let content = NSAttributedString(string: "前文\n```mermaid\ngraph TD\nA --> B\n```\n后文")
+
+        let blocks = NotePreviewContentBuilder.blocks(from: content)
+
+        XCTAssertEqual(blocks.count, 3)
+        XCTAssertEqual(blocks[0].kind, .richText)
+        XCTAssertEqual(blocks[0].attributedContent?.string, "前文\n")
+        XCTAssertEqual(blocks[1].kind, .mermaid)
+        XCTAssertEqual(blocks[1].mermaidCode, "graph TD\nA --> B")
+        XCTAssertEqual(blocks[2].kind, .richText)
+        XCTAssertEqual(blocks[2].attributedContent?.string, "后文")
+    }
+
+    func testNotePreviewTableOfContentsSourceOmitsMermaidBlocks() {
+        let content = NSAttributedString(string: """
+        ```mermaid
+        # 不应进入目录
+        graph TD
+        A --> B
+        ```
+        # 保留标题
+        正文
+        """)
+
+        let tocSource = NotePreviewContentBuilder.tableOfContentsSource(from: content)
+        let tocItems = extractTableOfContents(from: tocSource)
+
+        XCTAssertFalse(tocSource.contains("不应进入目录"))
+        XCTAssertEqual(tocItems.map(\.title), ["保留标题"])
+    }
+
+    func testNotePreviewContentBuilderDetectsPlainMarkdownSyntax() {
+        let plainMarkdown = NSAttributedString(string: "# 标题\n\n- 列表项\n\n**加粗**")
+        let richText = NSMutableAttributedString(string: "# 标题")
+        richText.addAttribute(
+            .font,
+            value: NSFont.systemFont(ofSize: 18, weight: .bold),
+            range: NSRange(location: 0, length: richText.length)
+        )
+
+        XCTAssertTrue(NotePreviewContentBuilder.shouldRenderAsMarkdown(plainMarkdown))
+        XCTAssertFalse(NotePreviewContentBuilder.shouldRenderAsMarkdown(richText))
+    }
+
+    func testMarkdownAttributedPreviewRendererConvertsHeadingSyntaxToStyledText() {
+        let rendered = MarkdownAttributedPreviewRenderer.render(
+            markdown: "# 一级标题\n\n普通正文",
+            colorScheme: .dark
+        )
+
+        XCTAssertFalse(rendered.string.contains("# 一级标题"))
+        XCTAssertTrue(rendered.string.contains("一级标题"))
+        XCTAssertTrue(rendered.string.contains("普通正文"))
+
+        let headingRange = (rendered.string as NSString).range(of: "一级标题")
+        let bodyRange = (rendered.string as NSString).range(of: "普通正文")
+        let headingFont = rendered.attribute(.font, at: headingRange.location, effectiveRange: nil) as? NSFont
+        let bodyFont = rendered.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont
+
+        XCTAssertNotNil(headingFont)
+        XCTAssertNotNil(bodyFont)
+        XCTAssertGreaterThan(headingFont?.pointSize ?? 0, bodyFont?.pointSize ?? 0)
     }
 
     @MainActor

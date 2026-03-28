@@ -1004,11 +1004,12 @@ struct DataManagementView: View {
             guard let container = persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
             }
-            let syncedNoteIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
+            let summary = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
                 config: config
             )
-            return "推送完成，更新 \(syncedNoteIDs.count) 条笔记"
+            let conflicts = summary.pulledResults.filter(\.detectedConflict).count
+            return "推送完成，上传 \(summary.uploadedNoteIDs.count) 条，预拉取 \(summary.pulledResults.count) 条，冲突 \(conflicts) 条"
         }
     }
 
@@ -1037,12 +1038,15 @@ struct DataManagementView: View {
                 context: container.mainContext,
                 config: config
             )
-            let pushIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
+            let pushSummary = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
                 config: config
             )
-            let conflicts = pullResults.filter(\.detectedConflict).count
-            return "双向完成，拉取 \(pullResults.count) 条，推送 \(pushIDs.count) 条，冲突 \(conflicts) 条"
+            let conflicts =
+                pullResults.filter(\.detectedConflict).count +
+                pushSummary.pulledResults.filter(\.detectedConflict).count
+            let totalPulled = pullResults.count + pushSummary.pulledResults.count
+            return "双向完成，拉取 \(totalPulled) 条，推送 \(pushSummary.uploadedNoteIDs.count) 条，冲突 \(conflicts) 条"
         }
     }
 
