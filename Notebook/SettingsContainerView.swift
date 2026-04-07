@@ -423,6 +423,8 @@ struct DataManagementView: View {
     @State private var showSSHSettingsSheet = false
     @State private var isSyncing = false
     @State private var syncResult: SyncResult?
+    @State private var syncProgress: SSHSyncProgress?
+    @State private var conflictResults: [NoteSyncMergeResult]?
     @State private var showMigrationPreviewSheet = false
     @State private var showPersistedBlockBrowserSheet = false
     @State private var showVersionManagerSheet = false
@@ -458,7 +460,7 @@ struct DataManagementView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        Text("配置 SSH 服务器，将笔记数据同步到 NAS 或其他远程服务器。")
+                        Text("配置 SSH 服务器，将笔记数据同步到 NAS 或其他远程服务器。支持笔记、附件、文件夹和标签的完整多端同步。")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -474,7 +476,7 @@ struct DataManagementView: View {
                             Button {
                                 performPushSync()
                             } label: {
-                                if isSyncing {
+                                if isSyncing && syncProgress?.phase == .pushNotes {
                                     ProgressView()
                                         .scaleEffect(0.8)
                                         .frame(width: 60)
@@ -496,6 +498,20 @@ struct DataManagementView: View {
                         }
                     }
 
+                    // 同步进度
+                    if isSyncing, let progress = syncProgress {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(progress.phase.rawValue)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ProgressView(value: progress.fraction)
+                            Text(progress.message)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 4)
+                    }
+
                     // 同步结果显示
                     if let result = syncResult {
                         HStack {
@@ -504,6 +520,32 @@ struct DataManagementView: View {
                             Text(result.message)
                                 .foregroundStyle(result.isSuccess ? .green : .red)
                                 .font(.caption)
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    // 冲突展示
+                    if let conflicts = conflictResults, !conflicts.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                Text("检测到 \(conflicts.count) 条冲突笔记")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                            ForEach(conflicts, id: \.noteID) { conflict in
+                                HStack {
+                                    Text(conflict.noteID.uuidString.prefix(8) + "...")
+                                        .font(.system(.caption, design: .monospaced))
+                                    Text("本地 v\(conflict.localVersion) vs 远程 v\(conflict.remoteVersion)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text("冲突笔记已保留本地版本。可通过版本管理手动回退。")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 4)
                     }
@@ -999,50 +1041,72 @@ struct DataManagementView: View {
     // MARK: - SSH 同步
 
     private func performPushSync() {
-        runSync {
+        runSync { [self] in
             let config = SSHConfigManager.shared.config
-            guard let container = persistence.modelContainer else {
+            guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            await MainActor.run {
+                self.syncProgress = SSHSyncProgress(phase: .pushNotes, current: 0, total: 1, message: "正在推送笔记...")
             }
             let syncedNoteIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
                 config: config
             )
-            return "推送完成，更新 \(syncedNoteIDs.count) 条笔记"
+            return "推送完成，更新 \(syncedNoteIDs.count) 条笔记（含附件和文件夹/标签）"
         }
     }
 
     private func performPullSync() {
-        runSync {
+        runSync { [self] in
             let config = SSHConfigManager.shared.config
-            guard let container = persistence.modelContainer else {
+            guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            await MainActor.run {
+                self.syncProgress = SSHSyncProgress(phase: .pullNotes, current: 0, total: 1, message: "正在拉取笔记...")
             }
             let results = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: container.mainContext,
                 config: config
             )
-            let conflicts = results.filter(\.detectedConflict).count
-            return "拉取完成，共处理 \(results.count) 条笔记，冲突 \(conflicts) 条"
+            let conflicts = results.filter(\.detectedConflict)
+            await MainActor.run {
+                if !conflicts.isEmpty {
+                    self.conflictResults = conflicts
+                }
+            }
+            return "拉取完成，共处理 \(results.count) 条笔记（含附件和文件夹/标签），冲突 \(conflicts.count) 条"
         }
     }
 
     private func performBidirectionalSync() {
-        runSync {
+        runSync { [self] in
             let config = SSHConfigManager.shared.config
-            guard let container = persistence.modelContainer else {
+            guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            await MainActor.run {
+                self.syncProgress = SSHSyncProgress(phase: .pullNotes, current: 0, total: 1, message: "正在拉取...")
             }
             let pullResults = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: container.mainContext,
                 config: config
             )
+            await MainActor.run {
+                self.syncProgress = SSHSyncProgress(phase: .pushNotes, current: 0, total: 1, message: "正在推送...")
+            }
             let pushIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
                 config: config
             )
-            let conflicts = pullResults.filter(\.detectedConflict).count
-            return "双向完成，拉取 \(pullResults.count) 条，推送 \(pushIDs.count) 条，冲突 \(conflicts) 条"
+            let conflicts = pullResults.filter(\.detectedConflict)
+            await MainActor.run {
+                if !conflicts.isEmpty {
+                    self.conflictResults = conflicts
+                }
+            }
+            return "双向完成，拉取 \(pullResults.count) 条，推送 \(pushIDs.count) 条（含附件和文件夹/标签），冲突 \(conflicts.count) 条"
         }
     }
 
@@ -1051,23 +1115,31 @@ struct DataManagementView: View {
 
         isSyncing = true
         syncResult = nil
+        conflictResults = nil
+        syncProgress = nil
 
-        Task {
+        Task { [self] in
             do {
                 let message = try await operation()
 
-                await MainActor.run {
-                    syncResult = .success(message)
-                    isSyncing = false
+                await MainActor.run { [self] in
+                    // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据
+                    self.store.fetchData()
 
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        syncResult = nil
+                    self.syncResult = .success(message)
+                    self.isSyncing = false
+                    self.syncProgress = nil
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                        self.syncResult = nil
+                        self.conflictResults = nil
                     }
                 }
             } catch {
-                await MainActor.run {
-                    syncResult = .failure("同步失败: \(error.localizedDescription)")
-                    isSyncing = false
+                await MainActor.run { [self] in
+                    self.syncResult = .failure("同步失败: \(error.localizedDescription)")
+                    self.isSyncing = false
+                    self.syncProgress = nil
                 }
             }
         }

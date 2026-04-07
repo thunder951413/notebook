@@ -15,6 +15,64 @@ struct RemoteNoteIndexEntry: Codable {
     let historyCount: Int
 }
 
+/// 附件清单 - 记录远程已同步附件的哈希，用于增量同步
+struct AssetsManifest: Codable {
+    let generatedAt: Date
+    let deviceID: String
+    let entries: [AssetsManifestEntry]
+}
+
+struct AssetsManifestEntry: Codable {
+    let relativePath: String
+    let contentHash: String
+    let size: Int
+}
+
+/// 文件夹和标签同步信封
+struct LibrarySyncEnvelope: Codable {
+    let exportedAt: Date
+    let deviceID: String
+    let folders: [FolderSyncEntry]
+    let tags: [TagSyncEntry]
+}
+
+struct FolderSyncEntry: Codable {
+    let id: UUID
+    let name: String
+    let sortOrder: Int
+    let isSystem: Bool
+    let createdAt: Date?
+}
+
+struct TagSyncEntry: Codable {
+    let id: UUID
+    let name: String
+    let color: String
+    let createdAt: Date
+}
+
+/// 同步进度
+struct SSHSyncProgress {
+    let phase: SyncPhase
+    let current: Int
+    let total: Int
+    let message: String
+
+    var fraction: Double {
+        guard total > 0 else { return 0 }
+        return Double(current) / Double(total)
+    }
+}
+
+enum SyncPhase: String {
+    case pushLibrary = "推送文件夹/标签"
+    case pushNotes = "推送笔记"
+    case pushAssets = "推送附件"
+    case pullLibrary = "拉取文件夹/标签"
+    case pullNotes = "拉取笔记"
+    case pullAssets = "拉取附件"
+}
+
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 class SSHSyncManager {
     static let shared = SSHSyncManager()
@@ -132,221 +190,6 @@ class SSHSyncManager {
         )
     }
 
-    /// 同步文件到远程（上传）- 使用 scp 代替 sftp
-    func syncToRemote(localURL: URL, config: SSHConfig) async throws {
-        let sshpassPath = try checkSshpassAvailable()
-
-        // 先确保远程目录存在
-        try await ensureRemoteDirectory(config: config)
-
-        // 使用 scp 递归上传目录
-        // 先创建一个临时 tar 归档，然后上传并解压
-        let tempDir = FileManager.default.temporaryDirectory
-        let tarFileName = "notebook_backup_\(UUID().uuidString).tar.gz"
-        let tarURL = tempDir.appendingPathComponent(tarFileName)
-
-        // 创建 tar 归档
-        let tarTask = Process()
-        tarTask.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        tarTask.arguments = ["-czf", tarURL.path, "-C", localURL.deletingLastPathComponent().path, localURL.lastPathComponent]
-
-        let tarPipe = Pipe()
-        tarTask.standardOutput = tarPipe
-        tarTask.standardError = tarPipe
-
-        try tarTask.run()
-        tarTask.waitUntilExit()
-
-        guard tarTask.terminationStatus == 0 else {
-            let data = tarPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMsg = String(data: data, encoding: .utf8) ?? "创建归档失败"
-            throw NSError(domain: "SSHSync", code: Int(tarTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMsg])
-        }
-
-        defer {
-            try? FileManager.default.removeItem(at: tarURL)
-        }
-
-        // 使用 scp 上传 tar 文件
-        let scpTask = Process()
-        scpTask.executableURL = URL(fileURLWithPath: sshpassPath)
-        scpTask.arguments = [
-            "-p", config.password,
-            "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-P", String(config.port),
-            tarURL.path,
-            "\(config.username)@\(config.host):\(config.repositoryPath)/\(tarFileName)"
-        ]
-
-        // 设置环境变量
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        scpTask.environment = env
-
-        let scpPipe = Pipe()
-        scpTask.standardOutput = scpPipe
-        scpTask.standardError = scpPipe
-
-        try scpTask.run()
-        scpTask.waitUntilExit()
-
-        if scpTask.terminationStatus != 0 {
-            let data = scpPipe.fileHandleForReading.readDataToEndOfFile()
-            let rawErrorMessage = String(data: data, encoding: .utf8) ?? "上传失败"
-            let errorMessage = Self.sanitizeLog(rawErrorMessage, password: config.password)
-            throw NSError(domain: "SSHSync", code: Int(scpTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
-        }
-
-        // 在远程解压 tar 文件
-        let extractTask = Process()
-        extractTask.executableURL = URL(fileURLWithPath: sshpassPath)
-        extractTask.arguments = [
-            "-p", config.password,
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-p", String(config.port),
-            "\(config.username)@\(config.host)",
-            "cd '\(config.repositoryPath)' && tar -xzf '\(tarFileName)' && rm '\(tarFileName)'"
-        ]
-
-        extractTask.environment = env
-        let extractPipe = Pipe()
-        extractTask.standardOutput = extractPipe
-        extractTask.standardError = extractPipe
-
-        try extractTask.run()
-        extractTask.waitUntilExit()
-
-        if extractTask.terminationStatus != 0 {
-            let data = extractPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: data, encoding: .utf8) ?? "解压失败"
-            throw NSError(domain: "SSHSync", code: Int(extractTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(errorMessage, password: config.password)])
-        }
-    }
-
-    /// 从远程同步文件（下载）- 使用 scp 代替 sftp
-    func syncFromRemote(localURL: URL, config: SSHConfig) async throws {
-        let sshpassPath = try checkSshpassAvailable()
-
-        // 先在远程打包数据
-        let tarFileName = "notebook_restore_\(UUID().uuidString).tar.gz"
-
-        let packTask = Process()
-        packTask.executableURL = URL(fileURLWithPath: sshpassPath)
-        packTask.arguments = [
-            "-p", config.password,
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-p", String(config.port),
-            "\(config.username)@\(config.host)",
-            "cd '\(config.repositoryPath)' && tar -czf '\(tarFileName)' ."
-        ]
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        packTask.environment = env
-
-        let packPipe = Pipe()
-        packTask.standardOutput = packPipe
-        packTask.standardError = packPipe
-
-        try packTask.run()
-        packTask.waitUntilExit()
-
-        if packTask.terminationStatus != 0 {
-            let data = packPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: data, encoding: .utf8) ?? "远程打包失败"
-            throw NSError(domain: "SSHSync", code: Int(packTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(errorMessage, password: config.password)])
-        }
-
-        // 下载 tar 文件
-        let tempDir = FileManager.default.temporaryDirectory
-        let tarURL = tempDir.appendingPathComponent(tarFileName)
-
-        defer {
-            // 清理远程和本地临时文件
-            let cleanupTask = Process()
-            cleanupTask.executableURL = URL(fileURLWithPath: sshpassPath)
-            cleanupTask.arguments = [
-                "-p", config.password,
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "GlobalKnownHostsFile=/dev/null",
-                "-o", "PreferredAuthentications=keyboard-interactive,password",
-                "-o", "PubkeyAuthentication=no",
-                "-p", String(config.port),
-                "\(config.username)@\(config.host)",
-                "rm -f '\(config.repositoryPath)/\(tarFileName)'"
-            ]
-            cleanupTask.environment = env
-            try? cleanupTask.run()
-            cleanupTask.waitUntilExit()
-
-            try? FileManager.default.removeItem(at: tarURL)
-        }
-
-        let scpTask = Process()
-        scpTask.executableURL = URL(fileURLWithPath: sshpassPath)
-        scpTask.arguments = [
-            "-p", config.password,
-            "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-P", String(config.port),
-            "\(config.username)@\(config.host):\(config.repositoryPath)/\(tarFileName)",
-            tarURL.path
-        ]
-
-        scpTask.environment = env
-        let scpPipe = Pipe()
-        scpTask.standardOutput = scpPipe
-        scpTask.standardError = scpPipe
-
-        try scpTask.run()
-        scpTask.waitUntilExit()
-
-        if scpTask.terminationStatus != 0 {
-            let data = scpPipe.fileHandleForReading.readDataToEndOfFile()
-            let rawErrorMessage = String(data: data, encoding: .utf8) ?? "下载失败"
-            throw NSError(domain: "SSHSync", code: Int(scpTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog(rawErrorMessage, password: config.password)])
-        }
-
-        // 解压到本地
-        let extractTask = Process()
-        extractTask.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        extractTask.arguments = ["-xzf", tarURL.path, "-C", localURL.path]
-
-        let extractPipe = Pipe()
-        extractTask.standardOutput = extractPipe
-        extractTask.standardError = extractPipe
-
-        try extractTask.run()
-        extractTask.waitUntilExit()
-
-        if extractTask.terminationStatus != 0 {
-            let data = extractPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMessage = String(data: data, encoding: .utf8) ?? "解压失败"
-            throw NSError(domain: "SSHSync", code: Int(extractTask.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorMessage])
-        }
-    }
-
     func syncNoteToRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return
@@ -385,6 +228,9 @@ class SSHSyncManager {
             command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
         )
 
+        // 上传附件文件
+        try await uploadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config)
+
         try BlockDocumentNoteVersionStore.markSynced(
             noteID: noteID,
             syncedVersion: envelope.currentVersion,
@@ -397,6 +243,7 @@ class SSHSyncManager {
             .sorted { $0.updatedAt > $1.updatedAt }
         var syncedNoteIDs: [UUID] = []
         var indexEntries: [RemoteNoteIndexEntry] = []
+        var allAssetEntries: [AssetsManifestEntry] = []
 
         for note in notes {
             let syncState = try fetchSyncState(noteID: note.id, context: context)
@@ -411,8 +258,15 @@ class SSHSyncManager {
             if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
                 indexEntries.append(entry)
             }
+
+            // 收集附件清单
+            if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
+                allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
+            }
         }
         try await uploadRemoteIndex(entries: indexEntries, config: config)
+        try await uploadAssetsManifest(entries: allAssetEntries, config: config)
+        try await syncLibraryToRemote(context: context, config: config)
         return syncedNoteIDs
     }
 
@@ -433,6 +287,10 @@ class SSHSyncManager {
         let payload = try Data(contentsOf: tempFileURL)
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
+
+        // 下载附件文件
+        try await downloadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config)
+
         if !result.detectedConflict {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
@@ -444,6 +302,9 @@ class SSHSyncManager {
     }
 
     func syncAllNotesFromRemote(context: ModelContext, config: SSHConfig) async throws -> [NoteSyncMergeResult] {
+        // 先拉取文件夹和标签
+        try await syncLibraryFromRemote(context: context, config: config)
+
         let remoteIndex = try await downloadRemoteIndex(config: config)
         let noteIDs: [UUID]
         if let remoteIndex {
@@ -762,5 +623,282 @@ class SSHSyncManager {
 
     private func escapeSingleQuoted(_ value: String) -> String {
         value.replacingOccurrences(of: "'", with: "'\"'\"'")
+    }
+
+    // MARK: - Attachment Sync Helpers
+
+    private func uploadAssetsForNote(envelope: VersionedNoteSyncEnvelope, sshpassPath: String, config: SSHConfig) async throws {
+        let storage = StorageLocationManager.shared
+        let attachmentsRoot = try storage.attachmentsDirectoryURL()
+
+        // 对存储目录开启 security-scoped 访问（如果需要），覆盖整个上传过程
+        let base = storage.baseDirectoryURL
+        let didStartAccess = base?.startAccessingSecurityScopedResource() ?? false
+        defer {
+            if didStartAccess, let base { base.stopAccessingSecurityScopedResource() }
+        }
+
+        let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
+
+        // 确保远程附件目录存在
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p '\(escapeSingleQuoted(remoteAttachmentsDir))'"
+        )
+
+        for asset in envelope.currentSnapshot.assets {
+            let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
+            for relativePath in paths {
+                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
+
+                let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
+                let remoteDir = String(remotePath[..<remotePath.range(of: "/", options: .backwards)!.lowerBound])
+
+                try await runSSHCommand(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    command: "mkdir -p '\(escapeSingleQuoted(remoteDir))'"
+                )
+                try await runSCPUpload(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    localPath: localURL.path,
+                    remotePath: remotePath
+                )
+            }
+        }
+    }
+
+    private func downloadAssetsForNote(envelope: VersionedNoteSyncEnvelope, sshpassPath: String, config: SSHConfig) async throws {
+        let storage = StorageLocationManager.shared
+        let attachmentsRoot = try storage.attachmentsDirectoryURL()
+
+        // 对存储目录开启 security-scoped 访问（如果需要），覆盖整个下载过程
+        let base = storage.baseDirectoryURL
+        let didStartAccess = base?.startAccessingSecurityScopedResource() ?? false
+        defer {
+            if didStartAccess, let base { base.stopAccessingSecurityScopedResource() }
+        }
+
+        try FileManager.default.createDirectory(at: attachmentsRoot, withIntermediateDirectories: true)
+        let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
+
+        for asset in envelope.currentSnapshot.assets {
+            let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
+            for relativePath in paths {
+                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                // 如果本地已存在，跳过
+                if FileManager.default.fileExists(atPath: localURL.path) { continue }
+
+                let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
+
+                // 确保本地目录存在
+                let localDir = localURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
+
+                // 检查远程文件是否存在后再下载
+                let checkResult = try await runSSHCommandForOutput(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING"
+                )
+                guard checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" else { continue }
+
+                try await runSCPDownload(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    remotePath: remotePath,
+                    localPath: localURL.path
+                )
+            }
+        }
+    }
+
+    private func collectAssetsManifestEntries(from envelope: VersionedNoteSyncEnvelope) throws -> [AssetsManifestEntry] {
+        let attachmentsRoot = try StorageLocationManager.shared.attachmentsDirectoryURL()
+        var entries: [AssetsManifestEntry] = []
+
+        for asset in envelope.currentSnapshot.assets {
+            let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
+            for relativePath in paths {
+                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                guard FileManager.default.fileExists(atPath: localURL.path),
+                      let data = try? Data(contentsOf: localURL) else { continue }
+                let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                entries.append(AssetsManifestEntry(
+                    relativePath: relativePath,
+                    contentHash: hash,
+                    size: data.count
+                ))
+            }
+        }
+        return entries
+    }
+
+    private func uploadAssetsManifest(entries: [AssetsManifestEntry], config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        let manifest = AssetsManifest(
+            generatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            entries: entries.sorted { $0.relativePath < $1.relativePath }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let payload = try encoder.encode(manifest)
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assets_manifest_\(UUID().uuidString).json")
+        try payload.write(to: tempFileURL, options: [.atomic])
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        let remoteTempPath = "\(config.repositoryPath)/notes/assets_manifest.json.tmp"
+        let remoteTargetPath = "\(config.repositoryPath)/notes/assets_manifest.json"
+
+        try await runSCPUpload(
+            sshpassPath: sshpassPath,
+            config: config,
+            localPath: tempFileURL.path,
+            remotePath: remoteTempPath
+        )
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+        )
+    }
+
+    // MARK: - Library Sync (Folders & Tags)
+
+    private func syncLibraryToRemote(context: ModelContext, config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        try await ensureRemoteDirectory(config: config)
+
+        let folders = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
+            .sorted { $0.sortOrder < $1.sortOrder }
+        let tags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
+            .sorted { $0.createdAt < $1.createdAt }
+
+        let envelope = LibrarySyncEnvelope(
+            exportedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            folders: folders.map {
+                FolderSyncEntry(id: $0.id, name: $0.name, sortOrder: $0.sortOrder, isSystem: $0.isSystem, createdAt: $0.createdAt)
+            },
+            tags: tags.map {
+                TagSyncEntry(id: $0.id, name: $0.name, color: $0.color, createdAt: $0.createdAt)
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let payload = try encoder.encode(envelope)
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("library_sync_\(UUID().uuidString).json")
+        try payload.write(to: tempFileURL, options: [.atomic])
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        let remoteTempPath = "\(config.repositoryPath)/library.json.tmp"
+        let remoteTargetPath = "\(config.repositoryPath)/library.json"
+
+        try await runSCPUpload(
+            sshpassPath: sshpassPath,
+            config: config,
+            localPath: tempFileURL.path,
+            remotePath: remoteTempPath
+        )
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+        )
+    }
+
+    private func syncLibraryFromRemote(context: ModelContext, config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/library.json"
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("library_sync_pull_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        do {
+            try await runSCPDownload(
+                sshpassPath: sshpassPath,
+                config: config,
+                remotePath: remotePath,
+                localPath: tempFileURL.path
+            )
+        } catch {
+            // library.json 不存在时静默跳过
+            return
+        }
+
+        let payload = try Data(contentsOf: tempFileURL)
+        let envelope = try JSONDecoder().decode(LibrarySyncEnvelope.self, from: payload)
+
+        // 获取本地 library，确保同步的文件夹/标签与本地 library 关联
+        let localLibraryID = ensureLocalLibraryID(in: context)
+
+        // 合并文件夹
+        for remoteFolder in envelope.folders {
+            let idToMatch = remoteFolder.id
+            let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(
+                predicate: #Predicate<BlockDocumentFolderEntity> { $0.id == idToMatch }
+            )
+            if let existing = try context.fetch(descriptor).first {
+                existing.name = remoteFolder.name
+                existing.sortOrder = remoteFolder.sortOrder
+            } else {
+                let entity = BlockDocumentFolderEntity(
+                    id: remoteFolder.id,
+                    libraryID: localLibraryID,
+                    name: remoteFolder.name,
+                    sortOrder: remoteFolder.sortOrder,
+                    isSystem: remoteFolder.isSystem,
+                    createdAt: remoteFolder.createdAt
+                )
+                context.insert(entity)
+            }
+        }
+
+        // 合并标签
+        for remoteTag in envelope.tags {
+            let idToMatch = remoteTag.id
+            let descriptor = FetchDescriptor<BlockDocumentTagEntity>(
+                predicate: #Predicate<BlockDocumentTagEntity> { $0.id == idToMatch }
+            )
+            if let existing = try context.fetch(descriptor).first {
+                existing.name = remoteTag.name
+                existing.color = remoteTag.color
+            } else {
+                let entity = BlockDocumentTagEntity(
+                    id: remoteTag.id,
+                    libraryID: localLibraryID,
+                    name: remoteTag.name,
+                    color: remoteTag.color,
+                    createdAt: remoteTag.createdAt
+                )
+                context.insert(entity)
+            }
+        }
+
+        try context.save()
+    }
+
+    /// 获取本地 library 的 ID，确保同步过来的文件夹/标签与本地 library 关联
+    private func ensureLocalLibraryID(in context: ModelContext) -> UUID {
+        if let existing = try? context.fetch(
+            FetchDescriptor<BlockDocumentLibraryEntity>(sortBy: [SortDescriptor(\.importedAt, order: .reverse)])
+        ).first {
+            return existing.id
+        }
+
+        let library = BlockDocumentLibraryEntity(
+            schemaVersion: "1.0",
+            sourceExportedAt: Date()
+        )
+        context.insert(library)
+        try? context.save()
+        return library.id
     }
 }
