@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import CryptoKit
+import Dispatch
 
 struct RemoteNoteIndex: Codable {
     let generatedAt: Date
@@ -34,6 +35,7 @@ struct LibrarySyncEnvelope: Codable {
     let deviceID: String
     let folders: [FolderSyncEntry]
     let tags: [TagSyncEntry]
+    let encryptedData: EncryptedFolderSyncData?
 }
 
 struct FolderSyncEntry: Codable {
@@ -49,6 +51,13 @@ struct TagSyncEntry: Codable {
     let name: String
     let color: String
     let createdAt: Date
+}
+
+/// 加密文件夹同步数据
+struct EncryptedFolderSyncData: Codable {
+    let encryptedFolders: [EncryptedFolder]
+    let encryptedNoteIDs: [String]
+    let noteToFolderMapping: [String: String]
 }
 
 /// 同步进度
@@ -68,9 +77,12 @@ enum SyncPhase: String {
     case pushLibrary = "推送文件夹/标签"
     case pushNotes = "推送笔记"
     case pushAssets = "推送附件"
+    case pushConfig = "推送配置"
     case pullLibrary = "拉取文件夹/标签"
     case pullNotes = "拉取笔记"
     case pullAssets = "拉取附件"
+    case pullConfig = "拉取配置"
+    case checkMissingAssets = "检查缺失附件"
 }
 
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
@@ -286,10 +298,12 @@ class SSHSyncManager {
 
         let payload = try Data(contentsOf: tempFileURL)
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
-        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
 
-        // 下载附件文件
+        // 先下载附件文件，确保文件到位后再导入笔记数据
+        // 这样如果附件下载失败，同步状态不会被更新，下次同步会重试
         try await downloadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config)
+
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
 
         if !result.detectedConflict {
             try BlockDocumentNoteVersionStore.markSynced(
@@ -329,6 +343,10 @@ class SSHSyncManager {
             let result = try await syncNoteFromRemote(noteID: noteID, context: context, config: config)
             results.append(result)
         }
+
+        // 补充下载：检查所有已有笔记中缺失的附件文件
+        try await downloadMissingAssetsForExistingNotes(context: context, config: config)
+
         return results
     }
 
@@ -581,12 +599,20 @@ class SSHSyncManager {
         return try await withCheckedThrowingContinuation { continuation in
             let lock = NSLock()
             var finished = false
+            let finishedQueue = DispatchQueue(label: "com.notebook.ssh.finished")
 
-            func resume(_ result: Result<ProcessExecutionResult, Error>) {
+            @Sendable func resume(_ result: Result<ProcessExecutionResult, Error>) {
                 lock.lock()
                 defer { lock.unlock() }
-                guard !finished else { return }
-                finished = true
+
+                var shouldResume = false
+                finishedQueue.sync {
+                    guard !finished else { return }
+                    finished = true
+                    shouldResume = true
+                }
+
+                guard shouldResume else { return }
                 continuation.resume(with: result)
             }
 
@@ -689,8 +715,11 @@ class SSHSyncManager {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
                 let localURL = attachmentsRoot.appendingPathComponent(relativePath)
-                // 如果本地已存在，跳过
-                if FileManager.default.fileExists(atPath: localURL.path) { continue }
+                // 如果本地已存在且文件大小大于 0，跳过
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: localURL.path),
+                   let fileSize = attrs[.size] as? Int, fileSize > 0 {
+                    continue
+                }
 
                 let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
 
@@ -768,6 +797,163 @@ class SSHSyncManager {
         )
     }
 
+    /// 下载远程附件清单
+    private func downloadAssetsManifest(config: SSHConfig) async throws -> AssetsManifest? {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/assets_manifest.json"
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assets_manifest_download_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        do {
+            try await runSCPDownload(
+                sshpassPath: sshpassPath,
+                config: config,
+                remotePath: remotePath,
+                localPath: tempFileURL.path
+            )
+        } catch {
+            // 如果文件不存在，返回nil（兼容旧版本）
+            return nil
+        }
+
+        let payload = try Data(contentsOf: tempFileURL)
+        return try JSONDecoder().decode(AssetsManifest.self, from: payload)
+    }
+
+    /// 检查并下载本地已有笔记中缺失的附件
+    private func downloadMissingAssetsForExistingNotes(context: ModelContext, config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+
+        // 1. 获取所有本地笔记的附件
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+        let allAssets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
+
+        // 如果没有任何附件，直接返回
+        guard !allAssets.isEmpty else {
+            return
+        }
+
+        // 2. 下载远程附件清单（如果存在）
+        let remoteManifest = try? await downloadAssetsManifest(config: config)
+
+        // 3. 准备远程附件路径映射
+        let remoteAssetMap = remoteManifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
+            $0[$1.relativePath] = $1
+        } ?? [:]
+
+        // 4. 检查并下载缺失附件
+        let storage = StorageLocationManager.shared
+        let attachmentsRoot = try storage.attachmentsDirectoryURL()
+        let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
+
+        for asset in allAssets {
+            let sidecarPaths: [String]
+            if let sidecarPayload = asset.sidecarPathsPayload,
+               let paths = try? JSONDecoder().decode([String].self, from: sidecarPayload) {
+                sidecarPaths = paths
+            } else {
+                sidecarPaths = []
+            }
+
+            let paths = [asset.relativeFilePath] + sidecarPaths
+
+            for relativePath in paths {
+                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+
+                // 检查本地文件是否存在且有效
+                let shouldDownload = try await shouldDownloadAsset(
+                    localURL: localURL,
+                    relativePath: relativePath,
+                    remoteEntry: remoteAssetMap[relativePath],
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    remoteAttachmentsDir: remoteAttachmentsDir
+                )
+
+                if shouldDownload {
+                    try await downloadSingleAsset(
+                        relativePath: relativePath,
+                        localURL: localURL,
+                        sshpassPath: sshpassPath,
+                        config: config,
+                        remoteAttachmentsDir: remoteAttachmentsDir
+                    )
+                }
+            }
+        }
+    }
+
+    /// 判断是否需要下载某个附件
+    private func shouldDownloadAsset(
+        localURL: URL,
+        relativePath: String,
+        remoteEntry: AssetsManifestEntry?,
+        sshpassPath: String,
+        config: SSHConfig,
+        remoteAttachmentsDir: String
+    ) async throws -> Bool {
+        let fileManager = FileManager.default
+
+        // 如果本地文件存在且大小大于0，检查是否需要验证哈希
+        if fileManager.fileExists(atPath: localURL.path) {
+            if let attributes = try? fileManager.attributesOfItem(atPath: localURL.path),
+               let fileSize = attributes[.size] as? Int, fileSize > 0 {
+
+                // 如果有远程清单条目，验证哈希
+                if let remoteEntry = remoteEntry,
+                   let localData = try? Data(contentsOf: localURL) {
+                    let localHash = SHA256.hash(data: localData).map { String(format: "%02x", $0) }.joined()
+                    return localHash != remoteEntry.contentHash
+                }
+
+                // 没有远程清单，认为文件完整
+                return false
+            }
+        }
+
+        // 本地文件不存在或大小为0，需要检查远程是否存在
+        let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
+        let checkResult = try await runSSHCommandForOutput(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING"
+        )
+
+        let exists = checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
+
+        // 如果远程文件不存在，记录警告但继续处理其他文件
+        if !exists {
+            print("警告：远程附件不存在：\(remotePath)")
+        }
+
+        return exists
+    }
+
+    /// 下载单个附件文件
+    private func downloadSingleAsset(
+        relativePath: String,
+        localURL: URL,
+        sshpassPath: String,
+        config: SSHConfig,
+        remoteAttachmentsDir: String
+    ) async throws {
+        // 确保本地目录存在
+        let localDir = localURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
+
+        let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
+
+        try await runSCPDownload(
+            sshpassPath: sshpassPath,
+            config: config,
+            remotePath: remotePath,
+            localPath: localURL.path
+        )
+
+        print("已下载附件：\(relativePath)")
+    }
+
     // MARK: - Library Sync (Folders & Tags)
 
     private func syncLibraryToRemote(context: ModelContext, config: SSHConfig) async throws {
@@ -779,6 +965,9 @@ class SSHSyncManager {
         let tags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
             .sorted { $0.createdAt < $1.createdAt }
 
+        // 收集加密文件夹数据
+        let encryptedData = collectEncryptedFolderSyncData()
+
         let envelope = LibrarySyncEnvelope(
             exportedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
@@ -787,7 +976,8 @@ class SSHSyncManager {
             },
             tags: tags.map {
                 TagSyncEntry(id: $0.id, name: $0.name, color: $0.color, createdAt: $0.createdAt)
-            }
+            },
+            encryptedData: encryptedData
         )
 
         let encoder = JSONEncoder()
@@ -882,6 +1072,11 @@ class SSHSyncManager {
             }
         }
 
+        // 合并加密文件夹数据
+        if let encryptedData = envelope.encryptedData {
+            importEncryptedFolderSyncData(encryptedData)
+        }
+
         try context.save()
     }
 
@@ -900,5 +1095,69 @@ class SSHSyncManager {
         context.insert(library)
         try? context.save()
         return library.id
+    }
+
+    // MARK: - Encrypted Folder Sync
+
+    private func collectEncryptedFolderSyncData() -> EncryptedFolderSyncData {
+        let defaults = UserDefaults.standard
+
+        // 加密文件夹列表
+        let encryptedFoldersKey = "encrypted_folders"
+        var encryptedFolders: [EncryptedFolder] = []
+        if let data = defaults.data(forKey: encryptedFoldersKey),
+           let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: data) {
+            encryptedFolders = folders
+        }
+
+        // 加密笔记ID列表
+        let encryptedNoteIDs = defaults.stringArray(forKey: "encrypted_note_ids") ?? []
+
+        // 笔记到加密文件夹的映射
+        let noteToFolderMapping = defaults.dictionary(forKey: "note_to_encrypted_folder") as? [String: String] ?? [:]
+
+        return EncryptedFolderSyncData(
+            encryptedFolders: encryptedFolders,
+            encryptedNoteIDs: encryptedNoteIDs,
+            noteToFolderMapping: noteToFolderMapping
+        )
+    }
+
+    private func importEncryptedFolderSyncData(_ data: EncryptedFolderSyncData) {
+        let defaults = UserDefaults.standard
+
+        // 合并加密文件夹列表（以远程为准，添加本地不存在的）
+        let encryptedFoldersKey = "encrypted_folders"
+        var localFolders: [EncryptedFolder] = []
+        if let folderData = defaults.data(forKey: encryptedFoldersKey),
+           let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: folderData) {
+            localFolders = folders
+        }
+        let localFolderIDs = Set(localFolders.map(\.id))
+        for remoteFolder in data.encryptedFolders {
+            if !localFolderIDs.contains(remoteFolder.id) {
+                localFolders.append(remoteFolder)
+            }
+            // 保存文件夹名称
+            let nameKey = "encrypted_folder_name_\(remoteFolder.id.uuidString)"
+            defaults.set(remoteFolder.name, forKey: nameKey)
+        }
+        if let encoded = try? JSONEncoder().encode(localFolders) {
+            defaults.set(encoded, forKey: encryptedFoldersKey)
+        }
+
+        // 合并加密笔记ID（取并集）
+        var localEncryptedIDs = Set(defaults.stringArray(forKey: "encrypted_note_ids") ?? [])
+        for id in data.encryptedNoteIDs {
+            localEncryptedIDs.insert(id)
+        }
+        defaults.set(Array(localEncryptedIDs), forKey: "encrypted_note_ids")
+
+        // 合并笔记到文件夹的映射（以远程为准覆盖）
+        var localMapping = defaults.dictionary(forKey: "note_to_encrypted_folder") as? [String: String] ?? [:]
+        for (noteID, folderID) in data.noteToFolderMapping {
+            localMapping[noteID] = folderID
+        }
+        defaults.set(localMapping, forKey: "note_to_encrypted_folder")
     }
 }

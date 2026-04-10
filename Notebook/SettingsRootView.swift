@@ -21,6 +21,11 @@ struct SettingsRootView: View {
     @State private var startupBehavior = AppSettings.shared.startupBehavior
     @State private var showLogExportAlert = false
     @State private var logExportMessage = ""
+    @State private var isSyncing = false
+    @State private var syncResultMessage: String?
+    @State private var showSyncResultAlert = false
+    @State private var showMergeStrategyAlert = false
+    @State private var pendingSyncAction: ((ConfigMergeStrategy) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -136,29 +141,60 @@ struct SettingsRootView: View {
                     Divider()
                         .padding(.vertical, 8)
 
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("SSH 同步")
-                                .font(.headline)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("SSH 同步")
+                                    .font(.headline)
 
-                            if SSHConfigManager.shared.isConfigured {
-                                let config = SSHConfigManager.shared.config
-                                Text("已配置: \(config.username)@\(config.host)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("未配置 SSH 服务器")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                if SSHConfigManager.shared.isConfigured {
+                                    let config = SSHConfigManager.shared.config
+                                    Text("已配置: \(config.username)@\(config.host)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("未配置 SSH 服务器")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Spacer()
+
+                            Button {
+                                showSSHSettingsSheet = true
+                            } label: {
+                                Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
                             }
                         }
 
-                        Spacer()
+                        if SSHConfigManager.shared.isConfigured {
+                            HStack(spacing: 12) {
+                                Button("上传配置") {
+                                    syncConfigToRemote()
+                                }
+                                .disabled(isSyncing)
 
-                        Button {
-                            showSSHSettingsSheet = true
-                        } label: {
-                            Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
+                                Button("下载配置") {
+                                    syncConfigFromRemote()
+                                }
+                                .disabled(isSyncing)
+
+                                Button("导出配置") {
+                                    exportConfig()
+                                }
+                                .disabled(isSyncing)
+
+                                Button("导入配置") {
+                                    importConfig()
+                                }
+                                .disabled(isSyncing)
+
+                                if isSyncing {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                }
+                            }
                         }
                     }
 
@@ -365,6 +401,38 @@ struct SettingsRootView: View {
         } message: {
             Text(logExportMessage)
         }
+        .alert("配置同步", isPresented: $showSyncResultAlert) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            if let message = syncResultMessage {
+                Text(message)
+            }
+        }
+        .alert("选择合并策略", isPresented: $showMergeStrategyAlert) {
+            Button("优先本地配置") {
+                if let action = pendingSyncAction {
+                    pendingSyncAction = nil
+                    action(.preferLocal)
+                }
+            }
+            Button("优先远程配置") {
+                if let action = pendingSyncAction {
+                    pendingSyncAction = nil
+                    action(.preferRemote)
+                }
+            }
+            Button("优先更新配置") {
+                if let action = pendingSyncAction {
+                    pendingSyncAction = nil
+                    action(.preferNewer)
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingSyncAction = nil
+            }
+        } message: {
+            Text("检测到配置冲突，请选择如何处理：\n\n• 优先本地配置：保留当前设备的设置\n• 优先远程配置：使用远程服务器的设置\n• 优先更新配置：保留更新时间最新的设置")
+        }
     }
 
     /// 检查颜色是否被选中
@@ -425,6 +493,151 @@ struct SettingsRootView: View {
                 errorMessage = error.localizedDescription
             }
             isChoosingDirectory = false
+        }
+    }
+
+    /// 上传配置到远程服务器
+    private func syncConfigToRemote() {
+        guard SSHConfigManager.shared.isConfigured else {
+            syncResultMessage = "请先配置 SSH 服务器"
+            showSyncResultAlert = true
+            return
+        }
+
+        isSyncing = true
+        syncResultMessage = nil
+
+        Task {
+            do {
+                let config = SSHConfigManager.shared.config
+                try await ConfigSyncManager.shared.syncConfigToRemote(config: config)
+
+                await MainActor.run {
+                    syncResultMessage = "配置上传成功"
+                    showSyncResultAlert = true
+                    isSyncing = false
+                }
+            } catch {
+                await MainActor.run {
+                    syncResultMessage = "上传失败: \(error.localizedDescription)"
+                    showSyncResultAlert = true
+                    isSyncing = false
+                }
+            }
+        }
+    }
+
+    /// 从远程服务器下载配置
+    private func syncConfigFromRemote() {
+        guard SSHConfigManager.shared.isConfigured else {
+            syncResultMessage = "请先配置 SSH 服务器"
+            showSyncResultAlert = true
+            return
+        }
+
+        pendingSyncAction = { [self] strategy in
+            syncConfigFromRemote(with: strategy)
+        }
+
+        showMergeStrategyAlert = true
+    }
+
+    private func syncConfigFromRemote(with strategy: ConfigMergeStrategy) {
+        isSyncing = true
+        syncResultMessage = nil
+
+        Task {
+            do {
+                let config = SSHConfigManager.shared.config
+                let result = try await ConfigSyncManager.shared.syncConfigFromRemote(config: config, mergeStrategy: strategy)
+
+                await MainActor.run {
+                    if result.totalApplied > 0 {
+                        syncResultMessage = "成功同步 \(result.totalApplied) 项配置\n设备: \(result.deviceID ?? "未知")\n时间: \(result.exportedAt.map { formattedDate($0) } ?? "未知")"
+                    } else {
+                        syncResultMessage = "没有新的配置需要同步"
+                    }
+                    showSyncResultAlert = true
+                    isSyncing = false
+                }
+            } catch {
+                await MainActor.run {
+                    syncResultMessage = "下载失败: \(error.localizedDescription)"
+                    showSyncResultAlert = true
+                    isSyncing = false
+                }
+            }
+        }
+    }
+
+    /// 导出配置到本地文件
+    private func exportConfig() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "notebook-config-\(Date().formatted(date: .numeric, time: .shortened)).json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+
+            do {
+                let configEnvelope = ConfigSyncManager.shared.collectLocalConfig()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(configEnvelope)
+                try data.write(to: url)
+
+                self.syncResultMessage = "配置已导出到: \(url.path)"
+                self.showSyncResultAlert = true
+            } catch {
+                self.syncResultMessage = "导出失败: \(error.localizedDescription)"
+                self.showSyncResultAlert = true
+            }
+        }
+    }
+
+    /// 从本地文件导入配置
+    private func importConfig() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+
+            Task {
+                do {
+                    let data = try Data(contentsOf: url)
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let configEnvelope = try decoder.decode(ConfigSyncManager.ConfigSyncEnvelope.self, from: data)
+
+                    await MainActor.run {
+                        self.pendingSyncAction = { [self] strategy in
+                            Task {
+                                self.isSyncing = true
+                                self.syncResultMessage = nil
+
+                                let result = ConfigSyncManager.shared.applyRemoteConfig(configEnvelope, mergeStrategy: strategy)
+
+                                await MainActor.run {
+                                    if result.totalApplied > 0 {
+                                        self.syncResultMessage = "成功导入 \(result.totalApplied) 项配置\n设备: \(result.deviceID ?? "未知")\n时间: \(result.exportedAt.map { self.formattedDate($0) } ?? "未知")"
+                                    } else {
+                                        self.syncResultMessage = "没有新的配置需要导入"
+                                    }
+                                    self.showSyncResultAlert = true
+                                    self.isSyncing = false
+                                }
+                            }
+                        }
+                        self.showMergeStrategyAlert = true
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.syncResultMessage = "导入失败: \(error.localizedDescription)"
+                        self.showSyncResultAlert = true
+                    }
+                }
+            }
         }
     }
 
