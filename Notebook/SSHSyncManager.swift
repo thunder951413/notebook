@@ -7,6 +7,23 @@ struct RemoteNoteIndex: Codable {
     let generatedAt: Date
     let deviceID: String
     let entries: [RemoteNoteIndexEntry]
+    /// 已永久删除的笔记记录，用于多端同步删除状态
+    let deletedEntries: [RemoteDeletedEntry]
+
+    init(generatedAt: Date, deviceID: String, entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = []) {
+        self.generatedAt = generatedAt
+        self.deviceID = deviceID
+        self.entries = entries
+        self.deletedEntries = deletedEntries
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        deviceID = try container.decode(String.self, forKey: .deviceID)
+        entries = try container.decode([RemoteNoteIndexEntry].self, forKey: .entries)
+        deletedEntries = try container.decodeIfPresent([RemoteDeletedEntry].self, forKey: .deletedEntries) ?? []
+    }
 }
 
 struct RemoteNoteIndexEntry: Codable {
@@ -14,6 +31,13 @@ struct RemoteNoteIndexEntry: Codable {
     let version: Int64
     let contentHash: String
     let historyCount: Int
+}
+
+/// 远程已删除笔记记录
+struct RemoteDeletedEntry: Codable {
+    let noteID: UUID
+    let deletedAt: Date
+    let deletedByDeviceID: String
 }
 
 /// 附件清单 - 记录远程已同步附件的哈希，用于增量同步
@@ -253,6 +277,7 @@ class SSHSyncManager {
     func syncAllNotesToRemote(context: ModelContext, config: SSHConfig) async throws -> [UUID] {
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
             .sorted { $0.updatedAt > $1.updatedAt }
+        let existingNoteIDs = Set(notes.map { $0.id })
         var syncedNoteIDs: [UUID] = []
         var indexEntries: [RemoteNoteIndexEntry] = []
         var allAssetEntries: [AssetsManifestEntry] = []
@@ -276,9 +301,25 @@ class SSHSyncManager {
                 allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
             }
         }
-        try await uploadRemoteIndex(entries: indexEntries, config: config)
+
+        // 收集本地已永久删除的笔记记录（SyncState存在但NoteEntity已不存在）
+        let deletedEntries = try collectLocallyDeletedEntries(
+            existingNoteIDs: existingNoteIDs,
+            context: context
+        )
+
+        try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config)
         try await uploadAssetsManifest(entries: allAssetEntries, config: config)
         try await syncLibraryToRemote(context: context, config: config)
+
+        // 清理远程孤儿文件（已删除笔记的 .json 和附件）
+        let activeNoteIDs = Set(indexEntries.map { $0.noteID })
+        try await cleanupRemoteOrphanFiles(
+            activeNoteIDs: activeNoteIDs,
+            deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
+            config: config
+        )
+
         return syncedNoteIDs
     }
 
@@ -320,32 +361,56 @@ class SSHSyncManager {
         try await syncLibraryFromRemote(context: context, config: config)
 
         let remoteIndex = try await downloadRemoteIndex(config: config)
-        let noteIDs: [UUID]
-        if let remoteIndex {
-            noteIDs = remoteIndex.entries
-                .filter { entry in
-                    guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
-                        return true
-                    }
-                    if entry.version > syncState.lastRemoteVersion {
-                        return true
-                    }
-                    return entry.contentHash != syncState.remoteFingerprint
-                }
-                .map(\.noteID)
-                .sorted { $0.uuidString < $1.uuidString }
-        } else {
-            noteIDs = try await listRemoteNoteIDs(config: config)
+        guard let remoteIndex else {
+            // index.json 不存在视为空仓库，不做任何拉取
+            // 但仍需处理本地已有笔记的补充附件下载
+            print("[SSHSync] 远程 index.json 不存在，视为空仓库")
+            return []
         }
+
+        // 处理远程已删除的笔记：对本地存在的笔记执行软删除
+        try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
+
+        // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
+        let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
+        let noteIDs = remoteIndex.entries
+            .filter { entry in
+                // 跳过已删除的笔记
+                guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
+                guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
+                    return true
+                }
+                if entry.version > syncState.lastRemoteVersion {
+                    return true
+                }
+                return entry.contentHash != syncState.remoteFingerprint
+            }
+            .map(\.noteID)
+            .sorted { $0.uuidString < $1.uuidString }
 
         var results: [NoteSyncMergeResult] = []
         for noteID in noteIDs {
-            let result = try await syncNoteFromRemote(noteID: noteID, context: context, config: config)
-            results.append(result)
+            do {
+                let result = try await syncNoteFromRemote(noteID: noteID, context: context, config: config)
+                results.append(result)
+            } catch {
+                if isRemoteFileMissing(error) {
+                    print("[SSHSync] 远程笔记文件不存在，跳过：\(noteID.uuidString)")
+                    continue
+                }
+                throw error
+            }
         }
 
         // 补充下载：检查所有已有笔记中缺失的附件文件
-        try await downloadMissingAssetsForExistingNotes(context: context, config: config)
+        do {
+            try await downloadMissingAssetsForExistingNotes(context: context, config: config)
+        } catch {
+            if !isRemoteFileMissing(error) {
+                throw error
+            }
+            print("[SSHSync] 补充下载附件时远程文件缺失，跳过：\(error.localizedDescription)")
+        }
 
         return results
     }
@@ -364,7 +429,7 @@ class SSHSyncManager {
         )
     }
 
-    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], config: SSHConfig) async throws {
+    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = [], config: SSHConfig) async throws {
         let sshpassPath = try checkSshpassAvailable()
         try await ensureRemoteDirectory(config: config)
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
@@ -377,7 +442,8 @@ class SSHSyncManager {
         let index = RemoteNoteIndex(
             generatedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
-            entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+            entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
+            deletedEntries: deletedEntries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -649,6 +715,130 @@ class SSHSyncManager {
 
     private func escapeSingleQuoted(_ value: String) -> String {
         value.replacingOccurrences(of: "'", with: "'\"'\"'")
+    }
+
+    /// 判断错误是否为远程文件不存在
+    private func isRemoteFileMissing(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        if message.contains("no such file") { return true }
+        if message.contains("not found") { return true }
+        if message.contains("没有那个文件或目录") { return true }
+        if message.contains("找不到") { return true }
+        if message.contains("cannot stat") { return true }
+        if message.contains("no such file or directory") { return true }
+        return false
+    }
+
+    // MARK: - Delete Sync Helpers
+
+    /// 处理远程已删除的笔记：对本地存在的笔记执行软删除（标记 deletedAt）
+    private func applyRemoteDeletedEntries(_ deletedEntries: [RemoteDeletedEntry], context: ModelContext) throws {
+        guard !deletedEntries.isEmpty else { return }
+
+        for entry in deletedEntries {
+            let noteID = entry.noteID
+            let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+            )
+            guard let localNote = try context.fetch(descriptor).first else {
+                // 本地不存在该笔记，无需操作
+                continue
+            }
+
+            // 本地笔记尚未标记删除 → 执行软删除
+            if localNote.deletedAt == nil {
+                print("[SSHSync] 远程已删除笔记，本地执行软删除：\(noteID.uuidString)")
+                localNote.deletedAt = entry.deletedAt
+                localNote.originalFolderID = localNote.folderID
+                localNote.originalFolderName = localNote.folderName
+                localNote.updatedAt = entry.deletedAt
+            }
+        }
+        try context.save()
+    }
+
+    /// 收集本地已永久删除的笔记记录（SyncState存在但NoteEntity已不存在）
+    private func collectLocallyDeletedEntries(existingNoteIDs: Set<UUID>, context: ModelContext) throws -> [RemoteDeletedEntry] {
+        let allSyncStates = try context.fetch(FetchDescriptor<BlockDocumentNoteSyncStateEntity>())
+        let deviceID = BlockDocumentNoteVersionStore.currentDeviceID()
+        var deletedEntries: [RemoteDeletedEntry] = []
+
+        for syncState in allSyncStates {
+            // SyncState 存在但对应的 NoteEntity 已不存在 → 笔记已被永久删除
+            if !existingNoteIDs.contains(syncState.noteID) {
+                deletedEntries.append(RemoteDeletedEntry(
+                    noteID: syncState.noteID,
+                    deletedAt: syncState.lastSyncAt ?? Date(),
+                    deletedByDeviceID: syncState.lastRemoteDeviceID ?? deviceID
+                ))
+            }
+        }
+        return deletedEntries
+    }
+
+    /// 清理远程孤儿文件（已删除笔记的 .json 和附件目录）
+    private func cleanupRemoteOrphanFiles(activeNoteIDs: Set<UUID>, deletedNoteIDs: Set<UUID>, config: SSHConfig) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        let remoteNoteDirectory = "\(config.repositoryPath)/notes"
+
+        // 列出远程 notes/ 目录下所有 .json 文件
+        let listing = try await runSSHCommandForOutput(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "if [ -d '\\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\\(escapeSingleQuoted(remoteNoteDirectory))'; else echo ''; fi"
+        )
+
+        let remoteFiles = listing.split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasSuffix(".json") && $0 != "index.json" && $0 != "assets_manifest.json" }
+
+        for filename in remoteFiles {
+            let idString = filename.replacingOccurrences(of: ".json", with: "")
+            guard let noteID = UUID(uuidString: idString) else { continue }
+
+            // 仅删除明确在已删除列表中的远程文件，避免误删未同步过的笔记
+            if deletedNoteIDs.contains(noteID) {
+                let remotePath = "\(remoteNoteDirectory)/\(filename)"
+                print("[SSHSync] 清理远程孤儿笔记文件：\(remotePath)")
+                try? await runSSHCommand(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    command: "rm -f '\\(escapeSingleQuoted(remotePath))'"
+                )
+            }
+        }
+
+        // 清理已删除笔记的远程附件目录
+        // 通过 assets_manifest.json 确定哪些附件属于已删除笔记
+        if !deletedNoteIDs.isEmpty {
+            // 获取附件清单中属于已删除笔记的附件路径
+            let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
+            // 简单策略：删除以笔记ID为路径前缀的附件目录
+            // 附件路径格式通常为 {noteID}/... 或直接文件名
+            for deletedID in deletedNoteIDs {
+                let noteAttachmentDir = "\(remoteAttachmentsDir)/\(deletedID.uuidString)"
+                // 检查目录是否存在，存在则删除
+                _ = try? await runSSHCommandForOutput(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    command: "if [ -d '\\(escapeSingleQuoted(noteAttachmentDir))' ]; then rm -rf '\\(escapeSingleQuoted(noteAttachmentDir))'; echo DELETED; else echo SKIP; fi"
+                )
+            }
+        }
+    }
+
+    /// 清理本地已同步删除记录的 SyncState（避免每次推送都重复收集）
+    private func cleanupDeletedSyncStates(deletedNoteIDs: Set<UUID>, context: ModelContext) {
+        guard !deletedNoteIDs.isEmpty else { return }
+        for noteID in deletedNoteIDs {
+            let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+                predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+            )
+            if let syncState = try? context.fetch(descriptor).first {
+                context.delete(syncState)
+            }
+        }
+        try? context.save()
     }
 
     // MARK: - Attachment Sync Helpers
