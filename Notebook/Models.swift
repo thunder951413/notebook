@@ -1662,6 +1662,11 @@ extension NSAttributedString.Key {
     static let notebookImageHeight = NSAttributedString.Key("NotebookImageHeight")
     static let notebookTableData = NSAttributedString.Key("NotebookTableData")
     static let notebookHeadingLevel = NSAttributedString.Key("NotebookHeadingLevel")
+    static let notebookExplicitBold = NSAttributedString.Key("NotebookExplicitBold")
+    static let notebookExplicitItalic = NSAttributedString.Key("NotebookExplicitItalic")
+    static let notebookExplicitFontFamily = NSAttributedString.Key("NotebookExplicitFontFamily")
+    static let notebookExplicitFontSize = NSAttributedString.Key("NotebookExplicitFontSize")
+    static let notebookExplicitForegroundColor = NSAttributedString.Key("NotebookExplicitForegroundColor")
 }
 
 extension NSAttributedString {
@@ -1684,7 +1689,12 @@ extension NSAttributedString {
             .notebookImageWidth,
             .notebookImageHeight,
             .notebookTableData,
-            .notebookHeadingLevel
+            .notebookHeadingLevel,
+            .notebookExplicitBold,
+            .notebookExplicitItalic,
+            .notebookExplicitFontFamily,
+            .notebookExplicitFontSize,
+            .notebookExplicitForegroundColor
         ]
 
         // 先确保所有复选框附件和表格附件的图像已生成

@@ -1,9 +1,16 @@
 import Foundation
 import SwiftData
+import Combine
 
 @MainActor
-final class AutoSyncCoordinator {
+final class AutoSyncCoordinator: ObservableObject {
     static let shared = AutoSyncCoordinator()
+
+    enum SidebarIndicatorState: Equatable {
+        case idle
+        case syncing
+        case success
+    }
 
     private weak var store: NoteStore?
     private var pendingPushTimer: Timer?
@@ -11,11 +18,15 @@ final class AutoSyncCoordinator {
     private var isAutomaticSyncRunning = false
     private var isManualSyncRunning = false
     private var didScheduleInitialPull = false
+    private var indicatorDismissTask: Task<Void, Never>?
     private(set) var lastSuccessfulPullAt: Date?
     private(set) var lastSuccessfulPushAt: Date?
 
+    @Published private(set) var sidebarIndicatorState: SidebarIndicatorState = .idle
+
     private let foregroundPullInterval: TimeInterval = 5 * 60
     private let savePushDebounceInterval: TimeInterval = 10 * 60
+    private let successIndicatorDurationNanoseconds: UInt64 = 3_000_000_000
 
     private init() {}
 
@@ -102,6 +113,7 @@ final class AutoSyncCoordinator {
 
         isAutomaticSyncRunning = true
         defer { isAutomaticSyncRunning = false }
+        setSidebarIndicatorSyncing()
 
         // 确保自动拉取前，编辑器中的待保存内容已经落盘。
         NoteSaveManager.shared.flushAllPending()
@@ -113,8 +125,10 @@ final class AutoSyncCoordinator {
             )
             lastSuccessfulPullAt = Date()
             store?.fetchData()
+            setSidebarIndicatorSuccess()
             Logger.shared.log(.app, .info, "[AutoSync] 自动拉取完成: \(reason)")
         } catch {
+            clearSidebarIndicator()
             Logger.shared.log(.app, .error, "[AutoSync] 自动拉取失败 (\(reason)): \(error.localizedDescription)")
         }
     }
@@ -129,6 +143,7 @@ final class AutoSyncCoordinator {
         defer { isAutomaticSyncRunning = false }
 
         invalidatePendingPushTimer()
+        setSidebarIndicatorSyncing()
 
         // 推送前再冲刷一次待保存内容，确保远端拿到的是最新数据。
         NoteSaveManager.shared.flushAllPending()
@@ -140,12 +155,37 @@ final class AutoSyncCoordinator {
             )
             hasPendingLocalChanges = false
             lastSuccessfulPushAt = Date()
+            setSidebarIndicatorSuccess()
             Logger.shared.log(.app, .info, "[AutoSync] 自动推送完成: \(reason)")
         } catch {
+            clearSidebarIndicator()
             Logger.shared.log(.app, .error, "[AutoSync] 自动推送失败 (\(reason)): \(error.localizedDescription)")
             if hasPendingLocalChanges && !isManualSyncRunning {
                 scheduleDebouncedPush(reason: "retryAfterFailure")
             }
         }
+    }
+
+    private func setSidebarIndicatorSyncing() {
+        indicatorDismissTask?.cancel()
+        indicatorDismissTask = nil
+        sidebarIndicatorState = .syncing
+    }
+
+    private func setSidebarIndicatorSuccess() {
+        indicatorDismissTask?.cancel()
+        sidebarIndicatorState = .success
+        indicatorDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: successIndicatorDurationNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.sidebarIndicatorState = .idle
+            self?.indicatorDismissTask = nil
+        }
+    }
+
+    private func clearSidebarIndicator() {
+        indicatorDismissTask?.cancel()
+        indicatorDismissTask = nil
+        sidebarIndicatorState = .idle
     }
 }

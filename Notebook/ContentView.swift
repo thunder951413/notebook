@@ -715,6 +715,7 @@ private struct SidebarView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var themeManager = ThemeManager.shared
+    @ObservedObject private var autoSyncCoordinator = AutoSyncCoordinator.shared
 
     @Binding var selectedFolder: String
     @Binding var selectedTagID: UUID?
@@ -733,6 +734,7 @@ private struct SidebarView: View {
     @State private var shouldOpenManagementAfterUnlock: Bool = false
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
     @State private var tagsFilterMode: AppSettings.TagsFilterMode = AppSettings.shared.tagsFilterMode
+    @State private var autoSyncRotationDegrees: Double = 0
 
     private let maxSidebarTitleLength = 8
     private let maxTagDisplayCount = 10
@@ -795,18 +797,20 @@ private struct SidebarView: View {
     private var allNotesRow: some View {
         // 全部笔记（排除加密文件夹的笔记）
         let allNotesCount = store.activeNotes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
+        let isSelected = selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected
         return HStack {
             Image(systemName: "tray.fill")
-                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? .white : .orange)
+                .foregroundStyle(isSelected ? .white : .orange)
             Text(l10n(L10nKeys.Folder.allNotes))
             Spacer()
+            autoSyncIndicator(isSelected: isSelected)
             Text("\(allNotesCount)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected ? themeManager.accentColor : Color.clear)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -821,6 +825,38 @@ private struct SidebarView: View {
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
+        .animation(.easeInOut(duration: 0.2), value: autoSyncCoordinator.sidebarIndicatorState)
+    }
+
+    @ViewBuilder
+    private func autoSyncIndicator(isSelected: Bool) -> some View {
+        switch autoSyncCoordinator.sidebarIndicatorState {
+        case .idle:
+            EmptyView()
+        case .syncing:
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.caption)
+                .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
+                .rotationEffect(.degrees(autoSyncRotationDegrees))
+                .onAppear {
+                    autoSyncRotationDegrees = 0
+                    withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                        autoSyncRotationDegrees = 360
+                    }
+                }
+                .onDisappear {
+                    autoSyncRotationDegrees = 0
+                }
+                .transition(.opacity)
+        case .success:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                Text("同步成功")
+            }
+            .font(.caption2)
+            .foregroundStyle(isSelected ? .white.opacity(0.92) : .green)
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+        }
     }
 
     private var uncategorizedNotesRow: some View {
@@ -1418,6 +1454,18 @@ private struct NoteEditorView: View {
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
 
+    private func applyViewMode(_ mode: NoteViewMode) {
+        guard note.viewMode != mode else { return }
+
+        if controller.isBoundTo(noteID: note.id),
+           let editorContent = controller.snapshotAttributedStringForSwitch() {
+            note.content = editorContent
+        }
+
+        note.viewMode = mode
+        store.saveNoteViewMode(id: note.id, viewMode: mode)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
@@ -1430,7 +1478,8 @@ private struct NoteEditorView: View {
                         note: $note,
                         showingReminderPopover: $showingReminderPopover,
                         showingRecordingMenu: $showingRecordingMenu,
-                        isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
+                        isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
+                        onSelectViewMode: applyViewMode
                     )
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -1527,9 +1576,7 @@ private struct NoteEditorView: View {
             }
             // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
             DispatchQueue.main.async {
-                note.viewMode = newMode
-                // 保存视图模式到数据库
-                store.saveNoteViewMode(id: note.id, viewMode: newMode)
+                applyViewMode(newMode)
             }
         }
         .toolbar {
@@ -1614,6 +1661,7 @@ private struct EditorTopBarView: View {
     @StateObject private var windowState = WindowStateManager.shared
     @EnvironmentObject private var themeManager: ThemeManager
     @Binding var isEncryptedFolderUnlocked: Bool
+    let onSelectViewMode: (NoteViewMode) -> Void
 
     @State private var tempReminderAt: Date = Date()
     @State private var tempRecurrence: String = "none"
@@ -1941,9 +1989,7 @@ private struct EditorTopBarView: View {
                             // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
                             DispatchQueue.main.async {
                                 withAnimation(.easeInOut(duration: 0.2)) {
-                                    note.viewMode = mode
-                                    // 保存视图模式到数据库
-                                    store.saveNoteViewMode(id: note.id, viewMode: mode)
+                                    onSelectViewMode(mode)
                                 }
                             }
                         } label: {
@@ -2119,8 +2165,7 @@ private struct EditorTopBarView: View {
         }
 
         if note.viewMode == .preview {
-            note.viewMode = .split
-            store.saveNoteViewMode(id: note.id, viewMode: .split)
+            onSelectViewMode(.split)
         }
 
         showingNoteSearch = true
@@ -4415,13 +4460,16 @@ struct MarkdownWebView: NSViewRepresentable {
         let markdownSource: String
         var attachmentBlocks: [(placeholder: String, html: String)] = []
         var inlineHTMLBlocks: [(placeholder: String, html: String)] = []
-        if let attributed {
+        let usesAttributedPipeline: Bool
+        if let attributed, shouldRenderFromAttributedContent(attributed) {
             let conversion = attributedToMarkdownWithAttachments(attributed)
             markdownSource = conversion.markdown
             attachmentBlocks = conversion.blocks
             inlineHTMLBlocks = conversion.inlineBlocks
+            usesAttributedPipeline = true
         } else {
             markdownSource = markdown
+            usesAttributedPipeline = false
         }
 
         // 提取目录项用于生成锚点
@@ -4617,6 +4665,53 @@ struct MarkdownWebView: NSViewRepresentable {
         </body>
         </html>
         """
+    }
+
+    private func shouldRenderFromAttributedContent(_ attributed: NSAttributedString) -> Bool {
+        guard attributed.length > 0 else { return false }
+
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        var shouldUseAttributedPipeline = false
+
+        attributed.enumerateAttributes(in: fullRange, options: []) { attrs, _, stop in
+            if attrs[.attachment] != nil ||
+                attrs[.notebookHeadingLevel] != nil ||
+                attrs[.notebookExplicitBold] != nil ||
+                attrs[.notebookExplicitItalic] != nil ||
+                attrs[.notebookExplicitFontFamily] != nil ||
+                attrs[.notebookExplicitFontSize] != nil ||
+                attrs[.notebookExplicitForegroundColor] != nil {
+                shouldUseAttributedPipeline = true
+                stop.pointee = true
+                return
+            }
+
+            if let link = attrs[.link] {
+                if let raw = link as? String {
+                    if !raw.hasPrefix("http://") && !raw.hasPrefix("https://") && !raw.hasPrefix("mailto:") {
+                        shouldUseAttributedPipeline = true
+                        stop.pointee = true
+                        return
+                    }
+                } else {
+                    shouldUseAttributedPipeline = true
+                    stop.pointee = true
+                    return
+                }
+            }
+
+            if attrs[.backgroundColor] != nil ||
+                attrs[.kern] != nil ||
+                attrs[.baselineOffset] != nil ||
+                ((attrs[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0 ||
+                ((attrs[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0 {
+                shouldUseAttributedPipeline = true
+                stop.pointee = true
+                return
+            }
+        }
+
+        return shouldUseAttributedPipeline
     }
 
     private func attributedToMarkdownWithAttachments(_ attributed: NSAttributedString) -> (
@@ -4887,33 +4982,34 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     private func previewInlineStyle(for attributes: [NSAttributedString.Key: Any]) -> String {
-        var styles: [String] = ["white-space: pre-wrap"]
+        var styles: [String] = []
         let font = attributes[.font] as? NSFont
-        let fontTraits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
+        let editorFont = AppSettings.shared.editorFont
         let textDecorations = previewTextDecorations(for: attributes)
 
-        if fontTraits.contains(.boldFontMask) || (font?.fontName.lowercased().contains("semibold") == true) {
+        if attributes[.notebookExplicitBold] != nil {
             styles.append("font-weight: 600")
         }
-        if fontTraits.contains(.italicFontMask) {
+        if attributes[.notebookExplicitItalic] != nil {
             styles.append("font-style: italic")
         }
         if !textDecorations.isEmpty {
             styles.append("text-decoration: \(textDecorations.joined(separator: " "))")
         }
-        if let color = previewForegroundColorHex(for: attributes) {
+        if attributes[.notebookExplicitForegroundColor] != nil,
+           let color = previewForegroundColorHex(for: attributes) {
             styles.append("color: \(color)")
         }
         if let color = (attributes[.backgroundColor] as? NSColor).flatMap(previewColorHex) {
             styles.append("background-color: \(color)")
         }
         if let font,
-           abs(font.pointSize - 16) > 0.5 || attributes[.notebookHeadingLevel] != nil {
+           attributes[.notebookExplicitFontSize] != nil || attributes[.notebookHeadingLevel] != nil {
             styles.append("font-size: \(Int(font.pointSize.rounded()))px")
             styles.append("line-height: 1.45")
         }
         if let fontFamily = font?.familyName,
-           fontFamily != NSFont.systemFont(ofSize: font?.pointSize ?? 16).familyName {
+           attributes[.notebookExplicitFontFamily] != nil && fontFamily != editorFont.familyName {
             styles.append("font-family: '\(htmlAttributeEscaped(fontFamily))'")
         }
         if let kern = (attributes[.kern] as? NSNumber)?.doubleValue,
@@ -4924,6 +5020,10 @@ struct MarkdownWebView: NSViewRepresentable {
            abs(baselineOffset) > 0.001 {
             styles.append("position: relative")
             styles.append("top: \(-baselineOffset)px")
+        }
+
+        if !styles.isEmpty {
+            styles.insert("white-space: pre-wrap", at: 0)
         }
 
         return styles.joined(separator: "; ")

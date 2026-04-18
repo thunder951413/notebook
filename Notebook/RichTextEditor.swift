@@ -369,6 +369,38 @@ final class RichTextController: ObservableObject {
         tv.setSelectedRange(NSRange(location: newLocation, length: 0))
     }
 
+    private func setExplicitPreviewMarker(
+        _ key: NSAttributedString.Key,
+        enabled: Bool,
+        range: NSRange,
+        in textStorage: NSTextStorage?
+    ) {
+        guard let textStorage else { return }
+        if enabled {
+            textStorage.addAttribute(key, value: true, range: range)
+        } else {
+            textStorage.removeAttribute(key, range: range)
+        }
+    }
+
+    private func shouldMarkExplicitFontFamily(_ font: NSFont) -> Bool {
+        font.familyName != AppSettings.shared.editorFont.familyName
+    }
+
+    private func shouldMarkExplicitFontSize(_ font: NSFont) -> Bool {
+        abs(font.pointSize - AppSettings.shared.editorFont.pointSize) > 0.5
+    }
+
+    private func shouldMarkExplicitForegroundColor(_ color: NSColor) -> Bool {
+        if color.isEqual(to: NSColor.textColor) {
+            return false
+        }
+        if color.isEqual(to: NSColor.black) || color.isEqual(to: NSColor.white) {
+            return false
+        }
+        return true
+    }
+
     func toggleBold() {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
@@ -387,6 +419,12 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        setExplicitPreviewMarker(
+            .notebookExplicitBold,
+            enabled: !currentFont.fontDescriptor.symbolicTraits.contains(.bold),
+            range: range,
+            in: tv.textStorage
+        )
         tv.textStorage?.endEditing()
         tv.didChangeText()
     }
@@ -418,6 +456,12 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        setExplicitPreviewMarker(
+            .notebookExplicitItalic,
+            enabled: !traits.contains(.italicFontMask),
+            range: range,
+            in: tv.textStorage
+        )
         tv.textStorage?.endEditing()
         tv.didChangeText()
     }
@@ -479,6 +523,12 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        setExplicitPreviewMarker(
+            .notebookExplicitFontFamily,
+            enabled: shouldMarkExplicitFontFamily(newFont),
+            range: range,
+            in: tv.textStorage
+        )
         tv.textStorage?.endEditing()
         tv.didChangeText()
     }
@@ -498,6 +548,12 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.font, value: newFont, range: range)
+        setExplicitPreviewMarker(
+            .notebookExplicitFontSize,
+            enabled: shouldMarkExplicitFontSize(newFont),
+            range: range,
+            in: tv.textStorage
+        )
         tv.textStorage?.endEditing()
         tv.didChangeText()
     }
@@ -515,6 +571,12 @@ final class RichTextController: ObservableObject {
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.foregroundColor, value: color, range: range)
+        setExplicitPreviewMarker(
+            .notebookExplicitForegroundColor,
+            enabled: shouldMarkExplicitForegroundColor(color),
+            range: range,
+            in: tv.textStorage
+        )
         tv.textStorage?.endEditing()
         tv.didChangeText()
     }
