@@ -114,6 +114,7 @@ final class AutoSyncCoordinator: ObservableObject {
         isAutomaticSyncRunning = true
         defer { isAutomaticSyncRunning = false }
         setSidebarIndicatorSyncing()
+        Logger.shared.log(.app, .debug, "[AutoSync] 开始自动拉取: \(reason)")
 
         // 确保自动拉取前，编辑器中的待保存内容已经落盘。
         NoteSaveManager.shared.flushAllPending()
@@ -144,6 +145,7 @@ final class AutoSyncCoordinator: ObservableObject {
 
         invalidatePendingPushTimer()
         setSidebarIndicatorSyncing()
+        Logger.shared.log(.app, .debug, "[AutoSync] 开始自动推送: \(reason)")
 
         // 推送前再冲刷一次待保存内容，确保远端拿到的是最新数据。
         NoteSaveManager.shared.flushAllPending()

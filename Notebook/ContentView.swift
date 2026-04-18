@@ -849,13 +849,12 @@ private struct SidebarView: View {
                 }
                 .transition(.opacity)
         case .success:
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill")
-                Text("同步成功")
-            }
-            .font(.caption2)
-            .foregroundStyle(isSelected ? .white.opacity(0.92) : .green)
-            .transition(.opacity.combined(with: .move(edge: .trailing)))
+            Image(systemName: "checkmark.square.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.green)
+                .frame(width: 16, alignment: .center)
+                .help("自动同步成功")
+                .transition(.opacity)
         }
     }
 
