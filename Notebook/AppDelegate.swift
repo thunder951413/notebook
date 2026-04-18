@@ -64,6 +64,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 启动鼠标中键监控
         RadialMenuEventMonitor.shared.startMonitoring()
+
+        Task { @MainActor in
+            if let release = await UpdateChecker.shared.checkForUpdates(silently: true) {
+                presentUpdateAlert(for: release)
+            }
+        }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -156,6 +162,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             setupAboutPanel()
             aboutWindow?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    @MainActor
+    private func presentUpdateAlert(for release: GitHubReleaseInfo) {
+        let alert = NSAlert()
+        alert.messageText = "发现新版本 \(release.version)"
+        let publishedText: String
+        if let publishedAt = release.publishedAt {
+            publishedText = publishedAt.formatted(date: .abbreviated, time: .shortened)
+        } else {
+            publishedText = "未知"
+        }
+
+        alert.informativeText = """
+        当前版本: \(AppVersion.current.shortVersion)
+        最新版本: \(release.version)
+        发布时间: \(publishedText)
+
+        是否前往 GitHub Release 页面下载更新？
+        """
+        alert.addButton(withTitle: "前往下载")
+        alert.addButton(withTitle: "稍后")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            UpdateChecker.shared.openReleasePage(for: release)
         }
     }
 

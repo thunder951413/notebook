@@ -34,6 +34,7 @@ final class AppSettings: ObservableObject {
         static let editorFontColor = "editor_font_color" // 编辑器字体颜色
         static let isFileLoggingEnabled = "logger.file_logging_enabled"
         static let keepHistoricalLogFiles = "logger.keep_historical_files"
+        static let githubRepositoryURL = "update.github_repository_url"
     }
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
@@ -134,6 +135,30 @@ final class AppSettings: ObservableObject {
             defaults.set(newValue, forKey: Keys.keepHistoricalLogFiles)
             Logger.shared.reloadPersistenceSettings()
         }
+    }
+
+    var githubRepositoryURLString: String {
+        get {
+            let value = defaults.string(forKey: Keys.githubRepositoryURL)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value! : "https://github.com/thunder951413/notebook"
+        }
+        set {
+            defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.githubRepositoryURL)
+        }
+    }
+
+    var githubRepositoryURL: URL? {
+        let rawValue = githubRepositoryURLString
+        if let url = URL(string: rawValue), url.scheme != nil {
+            return url
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: "/").map(String.init)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            return nil
+        }
+        return URL(string: "https://github.com/\(parts[0])/\(parts[1].replacingOccurrences(of: ".git", with: ""))")
     }
 
     enum AppearanceMode: String, CaseIterable {

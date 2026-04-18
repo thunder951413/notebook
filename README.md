@@ -36,10 +36,42 @@ Notebook 是一款专为 macOS 设计的轻量级富文本笔记应用。它结�
 ### 安装与运行
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/your-username/Notebook.git
+git clone https://github.com/thunder951413/notebook.git
    ```
 2. 使用 Xcode 打开 `Notebook.xcodeproj`。
 3. 编译并运行项目。
+
+## 📦 发版
+
+仓库已配置 GitHub Actions 自动发布流程：当推送 `v*` 格式的 tag 时，会自动构建并创建 GitHub Release。
+
+可使用本地脚本一键发版：
+
+```bash
+./scripts/release.sh 1.0.1
+```
+
+脚本会自动执行以下步骤：
+
+- 检查当前 Git 工作区是否干净
+- 更新 `Notebook.xcodeproj/project.pbxproj` 中的 `MARKETING_VERSION`
+- 更新 `Notebook.xcodeproj/project.pbxproj` 中的 `CURRENT_PROJECT_VERSION`
+- 创建发版提交
+- 创建如 `v1.0.1` 的注释 tag
+- 推送提交和 tag 到 `origin`，从而触发 GitHub Release 工作流
+
+常用参数：
+
+```bash
+# 指定 build number
+./scripts/release.sh 1.0.1 42
+
+# 仅预览，不实际修改
+./scripts/release.sh 1.0.1 --dry-run
+
+# 只在本地创建提交和 tag，不推送
+./scripts/release.sh 1.0.1 --no-push
+```
 
 ## 📸 预览
 
@@ -51,4 +83,4 @@ Notebook 是一款专为 macOS 设计的轻量级富文本笔记应用。它结�
 
 ---
 
-*由 [Yan Yan](https://github.com/your-username) 开发*
+*由 [Yan Yan](https://github.com/thunder951413) 开发*

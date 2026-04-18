@@ -168,7 +168,8 @@ final class DataExportManager {
             "accent_color",
             "icloud_sync_enabled",
             "logger.file_logging_enabled",
-            "logger.keep_historical_files"
+            "logger.keep_historical_files",
+            "update.github_repository_url"
         ]
 
         for key in keys {
@@ -1541,6 +1542,7 @@ final class DataExportManager {
         defaults.removeObject(forKey: "accentColor")
         defaults.removeObject(forKey: "logger.file_logging_enabled")
         defaults.removeObject(forKey: "logger.keep_historical_files")
+        defaults.removeObject(forKey: "update.github_repository_url")
 
         // 清除存储位置设置
         defaults.removeObject(forKey: "storageLocationBookmark")

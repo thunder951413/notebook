@@ -73,6 +73,7 @@ struct SettingsGeneralView: View {
     @EnvironmentObject private var store: NoteStore
     @StateObject private var languageManager = LanguageManager.shared
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var updateChecker = UpdateChecker.shared
 
     @State private var isChoosingDirectory = false
     @State private var errorMessage: String?
@@ -83,6 +84,7 @@ struct SettingsGeneralView: View {
     @State private var logExportMessage = ""
     @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
+    @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
 
     var body: some View {
         ScrollView {
@@ -247,6 +249,54 @@ struct SettingsGeneralView: View {
 
                 Divider()
 
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("更新")
+                        .font(.title2)
+                        .bold()
+
+                    Text("启动时会自动检查 GitHub Release，也可以在这里手动检查。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    TextField("GitHub 仓库地址或 owner/repo", text: $githubRepositoryURLString)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            AppSettings.shared.githubRepositoryURLString = githubRepositoryURLString
+                        }
+
+                    HStack(spacing: 12) {
+                        Button("保存更新源") {
+                            AppSettings.shared.githubRepositoryURLString = githubRepositoryURLString
+                        }
+
+                        Button(updateChecker.isChecking ? "检查中..." : "检查更新") {
+                            AppSettings.shared.githubRepositoryURLString = githubRepositoryURLString
+                            Task {
+                                _ = await updateChecker.checkForUpdates(silently: false)
+                            }
+                        }
+                        .disabled(updateChecker.isChecking)
+
+                        if let latestRelease = updateChecker.latestRelease {
+                            Button("前往下载 \(latestRelease.version)") {
+                                updateChecker.openReleasePage(for: latestRelease)
+                            }
+                        }
+                    }
+
+                    Text(updateChecker.lastCheckMessage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let lastCheckedAt = updateChecker.lastCheckedAt {
+                        Text("上次检查: \(lastCheckedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
                 // 日志导出
                 VStack(alignment: .leading, spacing: 12) {
                     Text("日志")
@@ -332,7 +382,7 @@ struct SettingsGeneralView: View {
                             Text(l10n(L10nKeys.About.projectHelp))
                                 .foregroundColor(.secondary)
                             Button(l10n(L10nKeys.About.viewOnGitHub)) {
-                                if let url = URL(string: "https://github.com/your-username/Notebook") {
+                                if let url = AppSettings.shared.githubRepositoryURL {
                                     NSWorkspace.shared.open(url)
                                 }
                             }

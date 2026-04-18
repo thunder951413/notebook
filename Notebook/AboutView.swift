@@ -15,7 +15,7 @@ struct AboutView: View {
                 .font(.system(size: 24, weight: .bold))
 
             // 版本号
-            Text("版本 1.0 (1)")
+            Text(AppVersion.current.displayString)
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
 
@@ -48,7 +48,7 @@ struct AboutView: View {
 
             // 项目帮助链接
             Button("在 GitHub 上查看") {
-                if let url = URL(string: "https://github.com/your-username/Notebook") {
+                if let url = AppSettings.shared.githubRepositoryURL {
                     NSWorkspace.shared.open(url)
                 }
             }
