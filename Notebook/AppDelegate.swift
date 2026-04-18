@@ -181,14 +181,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         最新版本: \(release.version)
         发布时间: \(publishedText)
 
-        是否前往 GitHub Release 页面下载更新？
+        是否立即下载更新？若当前 Release 没有可下载资源，将自动打开 Release 页面。
         """
-        alert.addButton(withTitle: "前往下载")
+        alert.addButton(withTitle: "立即下载")
         alert.addButton(withTitle: "稍后")
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            UpdateChecker.shared.openReleasePage(for: release)
+            UpdateChecker.shared.openPreferredDownload(for: release)
         }
     }
 

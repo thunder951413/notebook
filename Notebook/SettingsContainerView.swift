@@ -339,8 +339,8 @@ struct SettingsGeneralView: View {
                         .disabled(updateChecker.isTestingToken)
 
                         if let latestRelease = updateChecker.latestRelease {
-                            Button("前往下载 \(latestRelease.version)") {
-                                updateChecker.openReleasePage(for: latestRelease)
+                            Button("直接下载 \(latestRelease.version)") {
+                                updateChecker.openPreferredDownload(for: latestRelease)
                             }
                         }
                     }

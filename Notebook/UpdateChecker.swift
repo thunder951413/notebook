@@ -7,6 +7,7 @@ struct GitHubReleaseInfo: Equatable {
     let tagName: String
     let releaseName: String
     let htmlURL: URL
+    let preferredDownloadURL: URL?
     let body: String
     let publishedAt: Date?
     let source: Source
@@ -81,6 +82,12 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
+    func openPreferredDownload(for release: GitHubReleaseInfo? = nil) {
+        let url = release?.preferredDownloadURL ?? release?.htmlURL ?? AppSettings.shared.githubRepositoryURL
+        guard let url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     func testTokenAccess() async {
         guard !isTestingToken else { return }
         guard let token = GitHubTokenManager.shared.loadToken(), !token.isEmpty else {
@@ -142,6 +149,7 @@ final class UpdateChecker: ObservableObject {
             tagName: payload.tagName,
             releaseName: payload.name ?? payload.tagName,
             htmlURL: payload.htmlURL,
+            preferredDownloadURL: Self.preferredAssetURL(from: payload.assets),
             body: payload.body ?? "",
             publishedAt: payload.publishedAt,
             source: .release
@@ -212,6 +220,7 @@ final class UpdateChecker: ObservableObject {
             tagName: latestTag.name,
             releaseName: latestTag.name,
             htmlURL: htmlURL,
+            preferredDownloadURL: nil,
             body: "",
             publishedAt: nil,
             source: .tag
@@ -282,6 +291,30 @@ final class UpdateChecker: ObservableObject {
         return trimmed
     }
 
+    private static func preferredAssetURL(from assets: [GitHubReleaseAssetResponse]) -> URL? {
+        let rankedAssets = assets.sorted { lhs, rhs in
+            let leftRank = assetPriority(for: lhs.name)
+            let rightRank = assetPriority(for: rhs.name)
+            if leftRank != rightRank {
+                return leftRank < rightRank
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+
+        return rankedAssets.first?.browserDownloadURL
+    }
+
+    private static func assetPriority(for fileName: String) -> Int {
+        let name = fileName.lowercased()
+        if name.hasSuffix(".dmg") {
+            return 0
+        }
+        if name.hasSuffix(".zip") {
+            return 1
+        }
+        return 2
+    }
+
     static func isVersion(_ remoteVersion: String, newerThan localVersion: String) -> Bool {
         let remote = versionComponents(from: remoteVersion)
         let local = versionComponents(from: localVersion)
@@ -341,6 +374,7 @@ private struct GitHubLatestReleaseResponse: Decodable {
     let name: String?
     let body: String?
     let htmlURL: URL
+    let assets: [GitHubReleaseAssetResponse]
     let draft: Bool
     let prerelease: Bool
     let publishedAt: Date?
@@ -350,9 +384,20 @@ private struct GitHubLatestReleaseResponse: Decodable {
         case name
         case body
         case htmlURL = "html_url"
+        case assets
         case draft
         case prerelease
         case publishedAt = "published_at"
+    }
+}
+
+private struct GitHubReleaseAssetResponse: Decodable {
+    let name: String
+    let browserDownloadURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case browserDownloadURL = "browser_download_url"
     }
 }
 
