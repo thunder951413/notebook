@@ -74,6 +74,7 @@ struct SettingsGeneralView: View {
     @StateObject private var languageManager = LanguageManager.shared
     @StateObject private var themeManager = ThemeManager.shared
     @StateObject private var updateChecker = UpdateChecker.shared
+    @StateObject private var gitHubTokenManager = GitHubTokenManager.shared
 
     @State private var isChoosingDirectory = false
     @State private var errorMessage: String?
@@ -85,6 +86,8 @@ struct SettingsGeneralView: View {
     @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
+    @State private var githubTokenInput = ""
+    @State private var githubTokenStatusMessage = ""
 
     var body: some View {
         ScrollView {
@@ -254,15 +257,65 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Text("启动时会自动检查 GitHub Release，也可以在这里手动检查。")
+                    Text("启动时会自动检查 GitHub Release，也可以在这里手动检查。支持 private 仓库；若仓库私有，请配置 GitHub Token。")
                         .font(.caption)
                         .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("当前版本: \(AppVersion.current.shortVersion) (\(AppVersion.current.buildVersion))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Text("服务器版本: \(updateChecker.serverVersionText)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if let latestServerInfo = updateChecker.latestServerInfo {
+                            Text("检测来源: \(latestServerInfo.source == .release ? "Release" : "Tag")")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if let publishedAt = updateChecker.serverPublishedAt {
+                            Text("发布时间: \(publishedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
 
                     TextField("GitHub 仓库地址或 owner/repo", text: $githubRepositoryURLString)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit {
                             AppSettings.shared.githubRepositoryURLString = githubRepositoryURLString
                         }
+
+                    SecureField("GitHub Token（private 仓库需要）", text: $githubTokenInput)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 12) {
+                        Button(gitHubTokenManager.hasToken ? "更新 Token" : "保存 Token") {
+                            saveGitHubToken()
+                        }
+
+                        Button("清除 Token") {
+                            clearGitHubToken()
+                        }
+                        .disabled(!gitHubTokenManager.hasToken && githubTokenInput.isEmpty)
+                    }
+
+                    Text(gitHubTokenManager.hasToken ? "Token 状态: 已保存到系统钥匙串" : "Token 状态: 未配置")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text("推荐使用 Fine-grained PAT，只授权当前仓库，并开启 Repository permission: Contents = Read。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    if !githubTokenStatusMessage.isEmpty {
+                        Text(githubTokenStatusMessage)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
 
                     HStack(spacing: 12) {
                         Button("保存更新源") {
@@ -277,6 +330,14 @@ struct SettingsGeneralView: View {
                         }
                         .disabled(updateChecker.isChecking)
 
+                        Button(updateChecker.isTestingToken ? "测试中..." : "测试 Token") {
+                            AppSettings.shared.githubRepositoryURLString = githubRepositoryURLString
+                            Task {
+                                await updateChecker.testTokenAccess()
+                            }
+                        }
+                        .disabled(updateChecker.isTestingToken)
+
                         if let latestRelease = updateChecker.latestRelease {
                             Button("前往下载 \(latestRelease.version)") {
                                 updateChecker.openReleasePage(for: latestRelease)
@@ -286,6 +347,10 @@ struct SettingsGeneralView: View {
 
                     Text(updateChecker.lastCheckMessage)
                         .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text(updateChecker.tokenTestMessage)
+                        .font(.caption2)
                         .foregroundColor(.secondary)
 
                     if let lastCheckedAt = updateChecker.lastCheckedAt {
@@ -437,6 +502,30 @@ struct SettingsGeneralView: View {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private func saveGitHubToken() {
+        let trimmed = githubTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            githubTokenStatusMessage = "请输入 GitHub Token 后再保存。"
+            return
+        }
+
+        if gitHubTokenManager.saveToken(trimmed) {
+            githubTokenInput = ""
+            githubTokenStatusMessage = "GitHub Token 已保存到系统钥匙串。"
+        } else {
+            githubTokenStatusMessage = "GitHub Token 保存失败，请检查系统钥匙串权限。"
+        }
+    }
+
+    private func clearGitHubToken() {
+        if gitHubTokenManager.deleteToken() {
+            githubTokenInput = ""
+            githubTokenStatusMessage = "已清除 GitHub Token。"
+        } else {
+            githubTokenStatusMessage = "清除 GitHub Token 失败，请稍后再试。"
+        }
     }
 
     /// 选择目录

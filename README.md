@@ -45,6 +45,15 @@ git clone https://github.com/thunder951413/notebook.git
 
 仓库已配置 GitHub Actions 自动发布流程：当推送 `v*` 格式的 tag 时，会自动构建并创建 GitHub Release。
 
+如果仓库是私有的，可在应用设置中填写 GitHub Token；Token 会保存在 macOS 钥匙串中，用于访问私有仓库的 Release/tag。
+
+推荐使用 Fine-grained Personal Access Token，并按下面配置：
+
+- Repository access: 只选择用于检查更新的目标仓库
+- Repository permissions: `Contents = Read`
+
+应用设置中还提供“测试 Token”按钮，可直接验证当前仓库地址与 Token 是否能访问 Release/tag。
+
 可使用本地脚本一键发版：
 
 ```bash

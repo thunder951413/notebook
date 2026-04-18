@@ -9,6 +9,12 @@ struct GitHubReleaseInfo: Equatable {
     let htmlURL: URL
     let body: String
     let publishedAt: Date?
+    let source: Source
+
+    enum Source: Equatable {
+        case release
+        case tag
+    }
 }
 
 @MainActor
@@ -19,6 +25,11 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var lastCheckMessage = "尚未检查更新"
     @Published private(set) var latestRelease: GitHubReleaseInfo?
+    @Published private(set) var latestServerInfo: GitHubReleaseInfo?
+    @Published private(set) var serverVersionText = "未检查"
+    @Published private(set) var serverPublishedAt: Date?
+    @Published private(set) var isTestingToken = false
+    @Published private(set) var tokenTestMessage = "尚未测试 Token"
 
     private init() {}
 
@@ -30,11 +41,18 @@ final class UpdateChecker: ObservableObject {
         do {
             let release = try await fetchLatestRelease()
             lastCheckedAt = Date()
+            latestServerInfo = release
+            serverVersionText = release.version
+            serverPublishedAt = release.publishedAt
 
             let currentVersion = AppVersion.current.shortVersion
             if Self.isVersion(release.version, newerThan: currentVersion) {
-                latestRelease = release
-                lastCheckMessage = "发现新版本 \(release.version)"
+                latestRelease = release.source == .release ? release : nil
+                if release.source == .release {
+                    lastCheckMessage = "发现新版本 \(release.version)"
+                } else {
+                    lastCheckMessage = "检测到最新标签 \(release.version)，但仓库暂无可下载 Release"
+                }
                 Logger.shared.log(.app, .info, "[UpdateChecker] 发现新版本 \(release.version)，当前版本 \(currentVersion)")
                 return release
             }
@@ -47,7 +65,10 @@ final class UpdateChecker: ObservableObject {
             return nil
         } catch {
             latestRelease = nil
+            latestServerInfo = nil
             lastCheckedAt = Date()
+            serverVersionText = "获取失败"
+            serverPublishedAt = nil
             lastCheckMessage = "检查更新失败: \(error.localizedDescription)"
             Logger.shared.log(.app, .warn, "[UpdateChecker] 检查更新失败: \(error.localizedDescription)")
             return nil
@@ -60,15 +81,39 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
+    func testTokenAccess() async {
+        guard !isTestingToken else { return }
+        guard let token = GitHubTokenManager.shared.loadToken(), !token.isEmpty else {
+            tokenTestMessage = "请先保存 GitHub Token，再执行测试。"
+            return
+        }
+        isTestingToken = true
+        defer { isTestingToken = false }
+
+        do {
+            let repository = try await fetchRepositoryAccess()
+
+            do {
+                let latest = try await fetchLatestRelease()
+                let sourceText = latest.source == .release ? "Release" : "tag"
+                tokenTestMessage = "Token 有效，已成功访问仓库 \(repository.fullName) 并读取最新\(sourceText) \(latest.version)"
+            } catch UpdateError.releaseNotFound {
+                tokenTestMessage = "Token 有效，已成功访问仓库 \(repository.fullName)，但当前未找到可用的 Release 或 tag"
+            } catch {
+                tokenTestMessage = "Token 可访问仓库 \(repository.fullName)，但读取更新信息失败: \(error.localizedDescription)"
+            }
+        } catch {
+            tokenTestMessage = "Token 测试失败: \(error.localizedDescription)"
+        }
+    }
+
     private func fetchLatestRelease() async throws -> GitHubReleaseInfo {
         let repositoryPath = try normalizedRepositoryPath(from: AppSettings.shared.githubRepositoryURLString)
         guard let apiURL = URL(string: "https://api.github.com/repos/\(repositoryPath)/releases/latest") else {
             throw UpdateError.invalidRepositoryURL
         }
 
-        var request = URLRequest(url: apiURL)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("Notebook/\(AppVersion.current.shortVersion)", forHTTPHeaderField: "User-Agent")
+        let request = makeRequest(url: apiURL)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -79,14 +124,16 @@ final class UpdateChecker: ObservableObject {
         case 200:
             break
         case 404:
-            throw UpdateError.releaseNotFound
+            return try await fetchLatestTag(repositoryPath: repositoryPath)
+        case 401, 403:
+            throw UpdateError.authenticationFailed
         default:
             throw UpdateError.httpStatus(httpResponse.statusCode)
         }
 
         let payload = try JSONDecoder.githubReleaseDecoder.decode(GitHubLatestReleaseResponse.self, from: data)
         guard !payload.draft, !payload.prerelease else {
-            throw UpdateError.noStableRelease
+            return try await fetchLatestTag(repositoryPath: repositoryPath)
         }
 
         let version = Self.normalizedVersion(fromTag: payload.tagName)
@@ -96,8 +143,89 @@ final class UpdateChecker: ObservableObject {
             releaseName: payload.name ?? payload.tagName,
             htmlURL: payload.htmlURL,
             body: payload.body ?? "",
-            publishedAt: payload.publishedAt
+            publishedAt: payload.publishedAt,
+            source: .release
         )
+    }
+
+    private func fetchRepositoryAccess() async throws -> GitHubRepositoryResponse {
+        let repositoryPath = try normalizedRepositoryPath(from: AppSettings.shared.githubRepositoryURLString)
+        guard let apiURL = URL(string: "https://api.github.com/repos/\(repositoryPath)") else {
+            throw UpdateError.invalidRepositoryURL
+        }
+
+        let request = makeRequest(url: apiURL)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw UpdateError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            break
+        case 401, 403:
+            throw UpdateError.authenticationFailed
+        case 404:
+            throw UpdateError.repositoryNotAccessible
+        default:
+            throw UpdateError.httpStatus(httpResponse.statusCode)
+        }
+
+        return try JSONDecoder().decode(GitHubRepositoryResponse.self, from: data)
+    }
+
+    private func fetchLatestTag(repositoryPath: String) async throws -> GitHubReleaseInfo {
+        guard let apiURL = URL(string: "https://api.github.com/repos/\(repositoryPath)/tags?per_page=1") else {
+            throw UpdateError.invalidRepositoryURL
+        }
+
+        let request = makeRequest(url: apiURL)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw UpdateError.invalidResponse
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            break
+        case 404:
+            throw UpdateError.repositoryNotAccessible
+        case 401, 403:
+            throw UpdateError.authenticationFailed
+        default:
+            throw UpdateError.httpStatus(httpResponse.statusCode)
+        }
+
+        let payload = try JSONDecoder().decode([GitHubTagResponse].self, from: data)
+        guard let latestTag = payload.first else {
+            throw UpdateError.releaseNotFound
+        }
+
+        let version = Self.normalizedVersion(fromTag: latestTag.name)
+        guard let htmlURL = AppSettings.shared.githubRepositoryURL?.appending(path: "releases") else {
+            throw UpdateError.invalidRepositoryURL
+        }
+
+        return GitHubReleaseInfo(
+            version: version,
+            tagName: latestTag.name,
+            releaseName: latestTag.name,
+            htmlURL: htmlURL,
+            body: "",
+            publishedAt: nil,
+            source: .tag
+        )
+    }
+
+    private func makeRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Notebook/\(AppVersion.current.shortVersion)", forHTTPHeaderField: "User-Agent")
+        if let token = GitHubTokenManager.shared.loadToken(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     private func normalizedRepositoryPath(from rawValue: String) throws -> String {
@@ -183,6 +311,8 @@ extension UpdateChecker {
         case invalidResponse
         case releaseNotFound
         case noStableRelease
+        case repositoryNotAccessible
+        case authenticationFailed
         case httpStatus(Int)
 
         var errorDescription: String? {
@@ -192,9 +322,13 @@ extension UpdateChecker {
             case .invalidResponse:
                 return "更新服务返回了无效响应"
             case .releaseNotFound:
-                return "未找到可用的 Release"
+                return "未找到可用的 Release 或 tag"
             case .noStableRelease:
                 return "当前没有可用的稳定版 Release"
+            case .repositoryNotAccessible:
+                return "无法访问该仓库，可能是地址错误；如果仓库是 private，请先配置 GitHub Token"
+            case .authenticationFailed:
+                return "GitHub Token 无效，或没有访问该私有仓库的权限"
             case .httpStatus(let code):
                 return "GitHub 接口请求失败（HTTP \(code)）"
             }
@@ -219,6 +353,18 @@ private struct GitHubLatestReleaseResponse: Decodable {
         case draft
         case prerelease
         case publishedAt = "published_at"
+    }
+}
+
+private struct GitHubTagResponse: Decodable {
+    let name: String
+}
+
+private struct GitHubRepositoryResponse: Decodable {
+    let fullName: String
+
+    enum CodingKeys: String, CodingKey {
+        case fullName = "full_name"
     }
 }
 

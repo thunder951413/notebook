@@ -1543,6 +1543,7 @@ final class DataExportManager {
         defaults.removeObject(forKey: "logger.file_logging_enabled")
         defaults.removeObject(forKey: "logger.keep_historical_files")
         defaults.removeObject(forKey: "update.github_repository_url")
+        _ = GitHubTokenManager.shared.deleteToken()
 
         // 清除存储位置设置
         defaults.removeObject(forKey: "storageLocationBookmark")
