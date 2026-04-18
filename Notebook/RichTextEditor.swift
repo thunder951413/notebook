@@ -12,6 +12,8 @@ final class RichTextController: ObservableObject {
     }
 
     fileprivate weak var textView: NSTextView?
+    @Published private(set) var noteSearchResultCount: Int = 0
+    @Published private(set) var noteSearchCurrentMatchIndex: Int = 0
 
     /// 用于跟踪当前选中的笔记（可能在视图更新前就变更）
     var currentNoteID: UUID?
@@ -41,6 +43,10 @@ final class RichTextController: ObservableObject {
     /// 上次保存的内容哈希（用于检测变化）
     private var lastSavedContentHash: Int?
     private var savedStates: [UUID: SavedNoteState] = [:]
+    private var noteSearchQuery: String = ""
+    private var noteSearchRanges: [NSRange] = []
+    private var highlightedSearchRange: NSRange?
+    private let noteSearchHighlightColor = NSColor.systemYellow.withAlphaComponent(0.35)
 
     /// 启动定期自动保存（每30秒）
     func startAutoSave(interval: TimeInterval = 30.0, onSave: @escaping @MainActor () -> Void) {
@@ -97,6 +103,9 @@ final class RichTextController: ObservableObject {
     }
 
     func bind(textView: NSTextView, noteID: UUID) {
+        if boundNoteID != nil && boundNoteID != noteID {
+            clearNoteSearch()
+        }
         self.textView = textView
         self.boundNoteID = noteID
         self.currentNoteID = noteID
@@ -210,6 +219,127 @@ final class RichTextController: ObservableObject {
     func forceSync() {
         guard let tv = textView else { return }
         tv.didChangeText()
+    }
+
+    func updateNoteSearch(query: String) {
+        noteSearchQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let textView else {
+            noteSearchRanges = []
+            noteSearchResultCount = 0
+            noteSearchCurrentMatchIndex = 0
+            highlightedSearchRange = nil
+            return
+        }
+
+        guard !noteSearchQuery.isEmpty else {
+            noteSearchRanges = []
+            noteSearchResultCount = 0
+            noteSearchCurrentMatchIndex = 0
+            clearNoteSearchHighlight(in: textView)
+            return
+        }
+
+        noteSearchRanges = noteSearchMatches(in: textView.string, query: noteSearchQuery)
+        noteSearchResultCount = noteSearchRanges.count
+
+        guard !noteSearchRanges.isEmpty else {
+            noteSearchCurrentMatchIndex = 0
+            clearNoteSearchHighlight(in: textView)
+            return
+        }
+
+        let anchorLocation = highlightedSearchRange?.location ?? textView.selectedRange().location
+        let targetIndex = preferredSearchMatchIndex(near: anchorLocation, in: noteSearchRanges)
+        activateNoteSearchMatch(at: targetIndex, in: textView)
+    }
+
+    func selectNextNoteSearchMatch() {
+        guard let textView, !noteSearchRanges.isEmpty else { return }
+        let nextIndex = noteSearchCurrentMatchIndex <= 0
+            ? 0
+            : (noteSearchCurrentMatchIndex % noteSearchRanges.count)
+        activateNoteSearchMatch(at: nextIndex, in: textView)
+    }
+
+    func selectPreviousNoteSearchMatch() {
+        guard let textView, !noteSearchRanges.isEmpty else { return }
+        let previousIndex = noteSearchCurrentMatchIndex <= 1
+            ? max(noteSearchRanges.count - 1, 0)
+            : noteSearchCurrentMatchIndex - 2
+        activateNoteSearchMatch(at: previousIndex, in: textView)
+    }
+
+    func refreshNoteSearchResultsIfNeeded() {
+        guard !noteSearchQuery.isEmpty else { return }
+        updateNoteSearch(query: noteSearchQuery)
+    }
+
+    func clearNoteSearch() {
+        noteSearchQuery = ""
+        noteSearchRanges = []
+        noteSearchResultCount = 0
+        noteSearchCurrentMatchIndex = 0
+        if let textView {
+            clearNoteSearchHighlight(in: textView)
+        } else {
+            highlightedSearchRange = nil
+        }
+    }
+
+    private func noteSearchMatches(in text: String, query: String) -> [NSRange] {
+        let nsText = text as NSString
+        var results: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: nsText.length)
+
+        while searchRange.length > 0 {
+            let foundRange = nsText.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchRange
+            )
+            guard foundRange.location != NSNotFound else { break }
+            results.append(foundRange)
+
+            let nextLocation = NSMaxRange(foundRange)
+            guard nextLocation < nsText.length else { break }
+            searchRange = NSRange(location: nextLocation, length: nsText.length - nextLocation)
+        }
+
+        return results
+    }
+
+    private func preferredSearchMatchIndex(near location: Int, in ranges: [NSRange]) -> Int {
+        guard !ranges.isEmpty else { return 0 }
+        if let index = ranges.firstIndex(where: { $0.location >= location }) {
+            return index
+        }
+        return 0
+    }
+
+    private func activateNoteSearchMatch(at index: Int, in textView: NSTextView) {
+        guard noteSearchRanges.indices.contains(index) else { return }
+        let range = noteSearchRanges[index]
+
+        clearNoteSearchHighlight(in: textView)
+        if let layoutManager = textView.layoutManager {
+            layoutManager.addTemporaryAttribute(
+                .backgroundColor,
+                value: noteSearchHighlightColor,
+                forCharacterRange: range
+            )
+        }
+
+        highlightedSearchRange = range
+        noteSearchCurrentMatchIndex = index + 1
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+        textView.showFindIndicator(for: range)
+    }
+
+    private func clearNoteSearchHighlight(in textView: NSTextView) {
+        guard let previousRange = highlightedSearchRange else { return }
+        textView.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: previousRange)
+        highlightedSearchRange = nil
     }
 
     /// 获取当前选中区域的字体信息
@@ -2906,6 +3036,7 @@ struct RichTextEditor: NSViewRepresentable {
             hasMarkedText = false
             pendingContent = nil
             self.attributedText = content
+            controller?.refreshNoteSearchResultsIfNeeded()
         }
         
         // NSTextViewDelegate 方法：处理输入法文本选择变化

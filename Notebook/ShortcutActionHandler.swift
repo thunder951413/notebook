@@ -30,6 +30,7 @@ final class ShortcutActionHandler: ObservableObject {
     let toggleMarkdownPreviewPublisher = PassthroughSubject<Void, Never>()
     let toggleTableOfContentsPublisher = PassthroughSubject<Void, Never>()
     let focusSearchPublisher = PassthroughSubject<Void, Never>()
+    let focusCurrentNoteSearchPublisher = PassthroughSubject<Void, Never>()
     let focusEditorPublisher = PassthroughSubject<Void, Never>()
     
     private init() {
@@ -196,6 +197,8 @@ final class ShortcutActionHandler: ObservableObject {
             toggleTableOfContentsPublisher.send()
         case .focusSearch:
             focusSearchPublisher.send()
+        case .focusCurrentNoteSearch:
+            focusCurrentNoteSearchPublisher.send()
         case .focusEditor:
             focusEditorPublisher.send()
         }

@@ -15,7 +15,6 @@ struct SettingsRootView: View {
     @State private var showRestartAlert = false
     @State private var showBackupRestoreSheet = false
     @State private var showClearBackupConfirmation = false
-    @State private var showAutoBackupSheet = false
     @State private var showPasswordSheet = false
     @State private var showSSHSettingsSheet = false
     @State private var startupBehavior = AppSettings.shared.startupBehavior
@@ -242,25 +241,6 @@ struct SettingsRootView: View {
 
             Divider()
 
-            // 自动备份设置
-            VStack(alignment: .leading, spacing: 12) {
-                Text("自动备份")
-                    .font(.title2)
-                    .bold()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("每天首次启动时自动备份所有数据到历史记录中")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Button("管理历史备份...") {
-                        showAutoBackupSheet = true
-                    }
-                }
-            }
-
-            Divider()
-
             // 日志导出
             VStack(alignment: .leading, spacing: 12) {
                 Text("日志")
@@ -377,10 +357,6 @@ struct SettingsRootView: View {
         .sheet(isPresented: $showBackupRestoreSheet) {
             BackupRestoreView()
                 .frame(minWidth: 600, minHeight: 400)
-        }
-        .sheet(isPresented: $showAutoBackupSheet) {
-            AutoBackupSettingsView()
-                .frame(minWidth: 600, minHeight: 500)
         }
         .sheet(isPresented: $showPasswordSheet) {
             PasswordSettingsView()

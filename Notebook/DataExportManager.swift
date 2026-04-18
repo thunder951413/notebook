@@ -19,6 +19,17 @@ final class DataExportManager {
         }
     }
 
+    enum DataImportValidationError: LocalizedError {
+        case invalidConfigurationFile(name: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidConfigurationFile(let name):
+                return "配置文件格式无效: \(name)"
+            }
+        }
+    }
+
     private init() {}
 
     // MARK: - 导出配置
@@ -91,9 +102,6 @@ final class DataExportManager {
         // 导出附件
         try exportAttachments(to: exportDir.appendingPathComponent("Attachments"))
 
-        // 导出数据库文件
-        try exportDatabaseFiles(to: exportDir.appendingPathComponent("Database"))
-
         // 创建 zip 文件
         let zipURL = uniqueExportArchiveURL(prefix: "NotebookData", in: tempDir)
         try createZip(from: exportDir, to: zipURL)
@@ -131,6 +139,12 @@ final class DataExportManager {
         try unzipFile(at: zipURL, to: destinationURL)
     }
 
+    func createArchiveForTesting(from directoryURL: URL, prefix: String = "NotebookTest") throws -> URL {
+        let zipURL = uniqueExportArchiveURL(prefix: prefix, in: FileManager.default.temporaryDirectory)
+        try createZip(from: directoryURL, to: zipURL)
+        return zipURL
+    }
+
     // MARK: - 私有方法
 
     private func exportUserDefaults(to directory: URL) throws {
@@ -153,7 +167,8 @@ final class DataExportManager {
             "startup_behavior",
             "accent_color",
             "icloud_sync_enabled",
-            "storageDirectoryBookmark"
+            "logger.file_logging_enabled",
+            "logger.keep_historical_files"
         ]
 
         for key in keys {
@@ -225,9 +240,10 @@ final class DataExportManager {
         try configsData.write(to: configsURL)
 
         // 导出选中的配置 ID
-        let selectedConfig: [String: String?] = [
-            "selectedConfigID": aiManager.selectedConfigID?.uuidString
-        ]
+        var selectedConfig: [String: String] = [:]
+        if let selectedConfigID = aiManager.selectedConfigID?.uuidString {
+            selectedConfig["selectedConfigID"] = selectedConfigID
+        }
         let selectedConfigURL = directory.appendingPathComponent("AISelectedConfig.plist")
         try PropertyListSerialization.data(fromPropertyList: selectedConfig, format: .xml, options: 0)
             .write(to: selectedConfigURL)
@@ -527,23 +543,6 @@ final class DataExportManager {
         }
     }
 
-    private func exportDatabaseFiles(to directory: URL) throws {
-        guard let storage = StorageLocationManager.shared.baseDirectoryURL else { return }
-
-        let databaseDir = storage.appendingPathComponent("NotebookData/Database")
-
-        guard FileManager.default.fileExists(atPath: databaseDir.path) else { return }
-
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        // 复制数据库文件
-        let contents = try FileManager.default.contentsOfDirectory(at: databaseDir, includingPropertiesForKeys: nil)
-        for item in contents {
-            let destination = directory.appendingPathComponent(item.lastPathComponent)
-            try? FileManager.default.copyItem(at: item, to: destination)
-        }
-    }
-
     private func createZip(from sourceURL: URL, to destinationURL: URL) throws {
         let fileManager = FileManager.default
 
@@ -817,10 +816,14 @@ final class DataExportManager {
     /// 导入配置
     func importConfiguration(from zipURL: URL) async throws {
         let tempDir = FileManager.default.temporaryDirectory
-        let extractDir = tempDir.appendingPathComponent("ImportConfig_\(Date().timeIntervalSince1970)")
+        let extractDir = uniqueTemporaryDirectoryURL(prefix: "ImportConfig", in: tempDir)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: extractDir) }
 
         // 解压 ZIP
         try unzipFile(at: zipURL, to: extractDir)
+
+        try validateConfigurationImport(at: extractDir)
 
         // 导入配置
         try importUserDefaults(from: extractDir)
@@ -828,9 +831,6 @@ final class DataExportManager {
         try importRadialMenuSettings(from: extractDir)
         try importAppSettings(from: extractDir)
         try importAIConfig(from: extractDir)
-
-        // 清理
-        try? FileManager.default.removeItem(at: extractDir)
     }
 
     /// 导入笔记
@@ -844,10 +844,32 @@ final class DataExportManager {
     /// 导入所有数据
     func importAllData(from zipURL: URL, context: ModelContext) async throws {
         let tempDir = FileManager.default.temporaryDirectory
-        let extractDir = tempDir.appendingPathComponent("ImportAll_\(Date().timeIntervalSince1970)")
+        let extractDir = uniqueTemporaryDirectoryURL(prefix: "ImportAll", in: tempDir)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: extractDir) }
 
         // 解压 ZIP
         try unzipFile(at: zipURL, to: extractDir)
+
+        try preflightValidateAllDataImport(at: extractDir)
+
+        let attachmentsDir = extractDir.appendingPathComponent("Attachments")
+        let stagedAttachmentsDir = try stageAttachmentsImportIfNeeded(from: attachmentsDir)
+        defer {
+            if let stagedAttachmentsDir {
+                try? FileManager.default.removeItem(at: stagedAttachmentsDir)
+            }
+        }
+
+        // 先导入笔记和附件，确认核心数据可落盘，再覆盖配置
+        let notesDir = extractDir.appendingPathComponent("Notes")
+        if FileManager.default.fileExists(atPath: notesDir.path) {
+            try await importAllNotes(from: notesDir, context: context)
+        }
+
+        if let stagedAttachmentsDir {
+            try commitStagedAttachmentsImport(from: stagedAttachmentsDir)
+        }
 
         // 导入配置
         let configDir = extractDir.appendingPathComponent("Config")
@@ -861,21 +883,6 @@ final class DataExportManager {
             try importEncryptedFolders(from: configDir)
             try importEncryptedData(from: configDir)
         }
-
-        // 导入笔记
-        let notesDir = extractDir.appendingPathComponent("Notes")
-        if FileManager.default.fileExists(atPath: notesDir.path) {
-            try await importAllNotes(from: notesDir, context: context)
-        }
-
-        // 导入附件
-        let attachmentsDir = extractDir.appendingPathComponent("Attachments")
-        if FileManager.default.fileExists(atPath: attachmentsDir.path) {
-            try importAttachments(from: attachmentsDir)
-        }
-
-        // 清理
-        try? FileManager.default.removeItem(at: extractDir)
     }
 
     // MARK: - 导入私有方法
@@ -1088,8 +1095,12 @@ final class DataExportManager {
             return
         }
 
+        let skippedKeys: Set<String> = ["storageDirectoryBookmark"]
         let defaults = UserDefaults.standard
         for (key, value) in config {
+            if skippedKeys.contains(key) {
+                continue
+            }
             defaults.set(value, forKey: key)
         }
     }
@@ -1118,11 +1129,7 @@ final class DataExportManager {
     }
 
     private func importRadialMenuSettings(from directory: URL) throws {
-        let settingsURL = directory.appendingPathComponent("RadialMenuSettings.json")
-        guard FileManager.default.fileExists(atPath: settingsURL.path) else { return }
-
-        let data = try Data(contentsOf: settingsURL)
-        guard let settings = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let settings = try loadRadialMenuSettings(from: directory) else { return }
 
         let defaults = UserDefaults.standard
         if let isEnabled = settings["isEnabled"] as? Bool {
@@ -1178,11 +1185,13 @@ final class DataExportManager {
         // 导入选中的配置 ID
         let selectedConfigURL = directory.appendingPathComponent("AISelectedConfig.plist")
         if FileManager.default.fileExists(atPath: selectedConfigURL.path) {
-            guard let selectedConfig = try PropertyListSerialization.propertyList(from: Data(contentsOf: selectedConfigURL), format: nil) as? [String: String?] else {
+            guard let selectedConfig = try PropertyListSerialization.propertyList(from: Data(contentsOf: selectedConfigURL), format: nil) as? [String: Any] else {
                 return
             }
-            if let selectedID = selectedConfig["selectedConfigID"] {
+            if let selectedID = selectedConfig["selectedConfigID"] as? String {
                 UserDefaults.standard.set(selectedID, forKey: "ai.selectedConfigID")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "ai.selectedConfigID")
             }
         }
     }
@@ -1256,22 +1265,169 @@ final class DataExportManager {
         print("[Import] 笔记导入完成，共 \(package.notes.count) 条")
     }
 
-    private func importAttachments(from directory: URL) throws {
-        guard let storage = StorageLocationManager.shared.baseDirectoryURL else { return }
+    private func preflightValidateAllDataImport(at directory: URL) throws {
+        let configDir = directory.appendingPathComponent("Config")
+        if FileManager.default.fileExists(atPath: configDir.path) {
+            try validateConfigurationImport(at: configDir)
+        }
 
-        let attachmentsDir = storage.appendingPathComponent("NotebookData/Attachments")
-        try FileManager.default.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
+        let notesDir = directory.appendingPathComponent("Notes")
+        if FileManager.default.fileExists(atPath: notesDir.path) {
+            let importer = DocumentMigrationPackageImporter()
+            let handler = InMemoryDocumentMigrationImportHandler()
+            let package = try importer.importDirectory(from: notesDir, using: handler)
+            package.cleanup()
+        }
+
+        let attachmentsDir = directory.appendingPathComponent("Attachments")
+        if FileManager.default.fileExists(atPath: attachmentsDir.path) {
+            _ = try FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil)
+        }
+    }
+
+    private func validateConfigurationImport(at directory: URL) throws {
+        let fileManager = FileManager.default
+
+        let userDefaultsURL = directory.appendingPathComponent("UserDefaults.plist")
+        if fileManager.fileExists(atPath: userDefaultsURL.path) {
+            _ = try propertyListDictionary(at: userDefaultsURL, named: "UserDefaults.plist")
+        }
+
+        let shortcutsURL = directory.appendingPathComponent("KeyboardShortcuts.plist")
+        if fileManager.fileExists(atPath: shortcutsURL.path) {
+            guard (try PropertyListSerialization.propertyList(from: Data(contentsOf: shortcutsURL), format: nil) as? [String: [String: Any]]) != nil else {
+                throw DataImportValidationError.invalidConfigurationFile(name: "KeyboardShortcuts.plist")
+            }
+        }
+
+        if fileManager.fileExists(atPath: directory.appendingPathComponent("RadialMenuSettings.plist").path) ||
+            fileManager.fileExists(atPath: directory.appendingPathComponent("RadialMenuSettings.json").path) {
+            _ = try validatedRadialMenuSettings(from: directory)
+        }
+
+        let appSettingsURL = directory.appendingPathComponent("AppSettings.plist")
+        if fileManager.fileExists(atPath: appSettingsURL.path) {
+            _ = try propertyListDictionary(at: appSettingsURL, named: "AppSettings.plist")
+        }
+
+        let aiConfigsURL = directory.appendingPathComponent("AIConfigs.json")
+        if fileManager.fileExists(atPath: aiConfigsURL.path) {
+            _ = try JSONDecoder().decode([AIServiceConfig].self, from: Data(contentsOf: aiConfigsURL))
+        }
+
+        let selectedConfigURL = directory.appendingPathComponent("AISelectedConfig.plist")
+        if fileManager.fileExists(atPath: selectedConfigURL.path) {
+            guard (try PropertyListSerialization.propertyList(from: Data(contentsOf: selectedConfigURL), format: nil) as? [String: Any]) != nil else {
+                throw DataImportValidationError.invalidConfigurationFile(name: "AISelectedConfig.plist")
+            }
+        }
+
+        let passwordURL = directory.appendingPathComponent("PasswordConfig.plist")
+        if fileManager.fileExists(atPath: passwordURL.path) {
+            guard (try PropertyListSerialization.propertyList(from: Data(contentsOf: passwordURL), format: nil) as? [String: String]) != nil else {
+                throw DataImportValidationError.invalidConfigurationFile(name: "PasswordConfig.plist")
+            }
+        }
+
+        let encryptedFoldersURL = directory.appendingPathComponent("EncryptedFolders.plist")
+        if fileManager.fileExists(atPath: encryptedFoldersURL.path) {
+            _ = try propertyListDictionary(at: encryptedFoldersURL, named: "EncryptedFolders.plist")
+        }
+
+        let encryptedDataURL = directory.appendingPathComponent("EncryptedData.plist")
+        if fileManager.fileExists(atPath: encryptedDataURL.path) {
+            _ = try propertyListDictionary(at: encryptedDataURL, named: "EncryptedData.plist")
+        }
+    }
+
+    private func propertyListDictionary(at url: URL, named fileName: String) throws -> [String: Any] {
+        guard let dictionary = try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: Any] else {
+            throw DataImportValidationError.invalidConfigurationFile(name: fileName)
+        }
+        return dictionary
+    }
+
+    private func loadRadialMenuSettings(from directory: URL) throws -> [String: Any]? {
+        let fileManager = FileManager.default
+        let plistURL = directory.appendingPathComponent("RadialMenuSettings.plist")
+        if fileManager.fileExists(atPath: plistURL.path) {
+            return try propertyListDictionary(at: plistURL, named: "RadialMenuSettings.plist")
+        }
+
+        let jsonURL = directory.appendingPathComponent("RadialMenuSettings.json")
+        if fileManager.fileExists(atPath: jsonURL.path) {
+            let data = try Data(contentsOf: jsonURL)
+            guard let settings = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw DataImportValidationError.invalidConfigurationFile(name: "RadialMenuSettings.json")
+            }
+            return settings
+        }
+
+        return nil
+    }
+
+    private func validatedRadialMenuSettings(from directory: URL) throws -> [String: Any] {
+        guard let settings = try loadRadialMenuSettings(from: directory) else {
+            throw DataImportValidationError.invalidConfigurationFile(name: "RadialMenuSettings")
+        }
+        return settings
+    }
+
+    private func stageAttachmentsImportIfNeeded(from directory: URL) throws -> URL? {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
+        guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
+        }
+
+        let notebookDataDir = storage.appendingPathComponent("NotebookData", isDirectory: true)
+        try FileManager.default.createDirectory(at: notebookDataDir, withIntermediateDirectories: true)
+
+        let stagingDir = notebookDataDir.appendingPathComponent("AttachmentsImportStaging_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
         let contents = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         for item in contents {
-            let destination = attachmentsDir.appendingPathComponent(item.lastPathComponent)
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try? FileManager.default.removeItem(at: destination)
-            }
+            let destination = stagingDir.appendingPathComponent(item.lastPathComponent)
             try FileManager.default.copyItem(at: item, to: destination)
         }
 
-        print("[Import] 已导入 \(contents.count) 个附件")
+        return stagingDir
+    }
+
+    private func commitStagedAttachmentsImport(from stagingDir: URL) throws {
+        guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
+        }
+
+        let fileManager = FileManager.default
+        let notebookDataDir = storage.appendingPathComponent("NotebookData", isDirectory: true)
+        try fileManager.createDirectory(at: notebookDataDir, withIntermediateDirectories: true)
+
+        let liveDir = notebookDataDir.appendingPathComponent("Attachments", isDirectory: true)
+        let backupDir = notebookDataDir.appendingPathComponent("AttachmentsBackup_\(UUID().uuidString)", isDirectory: true)
+        let hadExistingLiveDir = fileManager.fileExists(atPath: liveDir.path)
+
+        if hadExistingLiveDir {
+            try fileManager.moveItem(at: liveDir, to: backupDir)
+        }
+
+        do {
+            try fileManager.moveItem(at: stagingDir, to: liveDir)
+            if hadExistingLiveDir, fileManager.fileExists(atPath: backupDir.path) {
+                try fileManager.removeItem(at: backupDir)
+            }
+        } catch {
+            if fileManager.fileExists(atPath: liveDir.path) {
+                try? fileManager.removeItem(at: liveDir)
+            }
+            if hadExistingLiveDir, fileManager.fileExists(atPath: backupDir.path) {
+                try? fileManager.moveItem(at: backupDir, to: liveDir)
+            }
+            throw error
+        }
+
+        let importedCount = try fileManager.contentsOfDirectory(at: liveDir, includingPropertiesForKeys: nil).count
+        print("[Import] 已导入 \(importedCount) 个附件")
     }
 
     // MARK: - 重置功能
@@ -1383,6 +1539,8 @@ final class DataExportManager {
         defaults.removeObject(forKey: "tagsExpanded")
         defaults.removeObject(forKey: "startupBehavior")
         defaults.removeObject(forKey: "accentColor")
+        defaults.removeObject(forKey: "logger.file_logging_enabled")
+        defaults.removeObject(forKey: "logger.keep_historical_files")
 
         // 清除存储位置设置
         defaults.removeObject(forKey: "storageLocationBookmark")

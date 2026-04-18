@@ -223,4 +223,5 @@
 "shortcut_toggle_markdown_preview" = "切换 Markdown 预览";
 "shortcut_toggle_table_of_contents" = "显示/隐藏目录";
 "shortcut_focus_search" = "聚焦搜索框";
+"shortcut_focus_current_note_search" = "搜索当前笔记";
 "shortcut_focus_editor" = "聚焦编辑器";

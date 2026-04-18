@@ -83,6 +83,8 @@ final class RadialMenuManager: ObservableObject {
                 ShortcutActionHandler.shared.toggleTableOfContentsPublisher.send()
             case .focusSearch:
                 ShortcutActionHandler.shared.focusSearchPublisher.send()
+            case .focusCurrentNoteSearch:
+                ShortcutActionHandler.shared.focusCurrentNoteSearchPublisher.send()
             case .focusEditor:
                 ShortcutActionHandler.shared.focusEditorPublisher.send()
             }

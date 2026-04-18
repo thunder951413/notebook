@@ -183,6 +183,7 @@ final class NoteSaveManager {
             let blockEntities = try context.fetch(blockDescriptor)
             if let blockEntity = blockEntities.first {
                 try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
+                AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
                 interval.end(.info, "result=success")
                 return .success
             }

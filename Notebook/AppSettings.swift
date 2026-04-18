@@ -32,6 +32,8 @@ final class AppSettings: ObservableObject {
         static let editorFontSize = "editor_font_size" // 编辑器字号
         static let tagsFilterMode = "tags_filter_mode" // 标签过滤模式: "current" 当前目录, "all" 所有标签
         static let editorFontColor = "editor_font_color" // 编辑器字体颜色
+        static let isFileLoggingEnabled = "logger.file_logging_enabled"
+        static let keepHistoricalLogFiles = "logger.keep_historical_files"
     }
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
@@ -110,6 +112,28 @@ final class AppSettings: ObservableObject {
             return behavior
         }
         set { defaults.set(newValue.rawValue, forKey: Keys.startupBehavior) }
+    }
+
+    // MARK: - 日志设置
+
+    var isFileLoggingEnabled: Bool {
+        get {
+            defaults.bool(forKey: Keys.isFileLoggingEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.isFileLoggingEnabled)
+            Logger.shared.reloadPersistenceSettings()
+        }
+    }
+
+    var keepHistoricalLogFiles: Bool {
+        get {
+            defaults.bool(forKey: Keys.keepHistoricalLogFiles)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.keepHistoricalLogFiles)
+            Logger.shared.reloadPersistenceSettings()
+        }
     }
 
     enum AppearanceMode: String, CaseIterable {

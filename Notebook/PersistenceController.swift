@@ -792,6 +792,18 @@ enum BlockDocumentNoteVersionStore {
         try context.save()
     }
 
+    static func markSynced(envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws {
+        let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
+        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+        syncState.lastCommonVersion = max(syncState.lastCommonVersion, envelope.currentVersion)
+        syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, envelope.currentVersion)
+        syncState.lastRemoteDeviceID = envelope.deviceID
+        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        syncState.lastSyncAt = Date()
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try context.save()
+    }
+
     static func deleteHistory(noteID: UUID, context: ModelContext) throws {
         for entry in try history(for: noteID, context: context) {
             context.delete(entry)

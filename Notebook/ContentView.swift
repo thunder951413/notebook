@@ -456,6 +456,10 @@ struct ContentView: View {
             // 聚焦搜索框 - 通过发送通知让搜索框获得焦点
             NotificationCenter.default.post(name: .focusSearchField, object: nil)
         }
+        .onReceive(ShortcutActionHandler.shared.focusCurrentNoteSearchPublisher) { _ in
+            guard let currentId = selection else { return }
+            NotificationCenter.default.post(name: .focusCurrentNoteSearch, object: currentId)
+        }
         // 格式设置快捷键
         .onReceive(ShortcutActionHandler.shared.toggleBoldPublisher) { _ in
             richTextController.toggleBold()
@@ -1615,6 +1619,9 @@ private struct EditorTopBarView: View {
     @State private var tempRecurrence: String = "none"
     @State private var currentRecordingMode: AudioRecordingMode = .microphone
     @State private var showingInsertTableDialog = false
+    @State private var showingNoteSearch = false
+    @State private var noteSearchText = ""
+    @FocusState private var isNoteSearchFieldFocused: Bool
 
     private func moveNoteToEncryptedFolder(_ folder: EncryptedFolder) {
         let noteTitle = note.title.isEmpty ? "(无标题)" : note.title
@@ -1652,334 +1659,361 @@ private struct EditorTopBarView: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            // 格式菜单（合并所有文本样式）
-            Menu {
-                Button {
-                    controller.toggleBold()
-                } label: {
-                    Label(l10n(L10nKeys.Editor.bold), systemImage: "bold")
-                }
-                Button {
-                    controller.toggleItalic()
-                } label: {
-                    Label(l10n(L10nKeys.Editor.italic), systemImage: "italic")
-                }
-                Button {
-                    controller.toggleUnderline()
-                } label: {
-                    Label(l10n(L10nKeys.Editor.underline), systemImage: "underline")
-                }
-                Button {
-                    controller.toggleStrikethrough()
-                } label: {
-                    Label(l10n(L10nKeys.Editor.strikethrough), systemImage: "strikethrough")
-                }
-                Divider()
-                Button(l10n(L10nKeys.Editor.heading1)) { controller.setHeading(level: 1) }
-                Button(l10n(L10nKeys.Editor.heading2)) { controller.setHeading(level: 2) }
-                Button(l10n(L10nKeys.Editor.heading3)) { controller.setHeading(level: 3) }
-                Divider()
-                Button {
-                    controller.clearFormatting()
-                } label: {
-                    Label(l10n(L10nKeys.Editor.clearFormatting), systemImage: "textformat.clear")
-                }
-            } label: {
-                Text("格式")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 40)
-
-            // 字体选择
-            Menu {
-                ForEach(AppSettings.availableFonts, id: \.name) { font in
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                // 格式菜单（合并所有文本样式）
+                Menu {
                     Button {
-                        controller.setFont(name: font.name)
+                        controller.toggleBold()
                     } label: {
-                        HStack {
-                            Text(font.displayName)
-                            // 显示当前选中区域使用的字体
-                            if let fontInfo = controller.getSelectedFontInfo() {
-                                let currentFontName = fontInfo.name
-                                let isMatch = (font.name == "System" && (currentFontName.contains(".AppleSystemUIFont") || currentFontName.contains("SF"))) ||
-                                             currentFontName.contains(font.name)
-                                if isMatch {
+                        Label(l10n(L10nKeys.Editor.bold), systemImage: "bold")
+                    }
+                    Button {
+                        controller.toggleItalic()
+                    } label: {
+                        Label(l10n(L10nKeys.Editor.italic), systemImage: "italic")
+                    }
+                    Button {
+                        controller.toggleUnderline()
+                    } label: {
+                        Label(l10n(L10nKeys.Editor.underline), systemImage: "underline")
+                    }
+                    Button {
+                        controller.toggleStrikethrough()
+                    } label: {
+                        Label(l10n(L10nKeys.Editor.strikethrough), systemImage: "strikethrough")
+                    }
+                    Divider()
+                    Button(l10n(L10nKeys.Editor.heading1)) { controller.setHeading(level: 1) }
+                    Button(l10n(L10nKeys.Editor.heading2)) { controller.setHeading(level: 2) }
+                    Button(l10n(L10nKeys.Editor.heading3)) { controller.setHeading(level: 3) }
+                    Divider()
+                    Button {
+                        controller.clearFormatting()
+                    } label: {
+                        Label(l10n(L10nKeys.Editor.clearFormatting), systemImage: "textformat.clear")
+                    }
+                } label: {
+                    Text("格式")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 40)
+
+                // 字体选择
+                Menu {
+                    ForEach(AppSettings.availableFonts, id: \.name) { font in
+                        Button {
+                            controller.setFont(name: font.name)
+                        } label: {
+                            HStack {
+                                Text(font.displayName)
+                                // 显示当前选中区域使用的字体
+                                if let fontInfo = controller.getSelectedFontInfo() {
+                                    let currentFontName = fontInfo.name
+                                    let isMatch = (font.name == "System" && (currentFontName.contains(".AppleSystemUIFont") || currentFontName.contains("SF"))) ||
+                                                 currentFontName.contains(font.name)
+                                    if isMatch {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Text("字体")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 40)
+
+                // 字号选择
+                Menu {
+                    ForEach(Array(stride(from: Int(AppSettings.minFontSize), through: Int(AppSettings.maxFontSize), by: 1)), id: \.self) { size in
+                        Button {
+                            controller.setFontSize(CGFloat(size))
+                        } label: {
+                            HStack {
+                                Text("\(size)pt")
+                                // 显示当前选中区域使用的字号
+                                if let fontInfo = controller.getSelectedFontInfo(),
+                                   Int(fontInfo.size) == size {
                                     Spacer()
                                     Image(systemName: "checkmark")
                                 }
                             }
                         }
                     }
+                } label: {
+                    Text("字号")
+                        .font(.caption)
                 }
-            } label: {
-                Text("字体")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 40)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 40)
 
-            // 字号选择
-            Menu {
-                ForEach(Array(stride(from: Int(AppSettings.minFontSize), through: Int(AppSettings.maxFontSize), by: 1)), id: \.self) { size in
+                // 字体颜色选择
+                colorPickerMenu
+
+                Divider().frame(height: 18)
+
+                // 列表菜单（合并所有列表类型）
+                Menu {
                     Button {
-                        controller.setFontSize(CGFloat(size))
+                        controller.toggleBullets()
                     } label: {
-                        HStack {
-                            Text("\(size)pt")
-                            // 显示当前选中区域使用的字号
-                            if let fontInfo = controller.getSelectedFontInfo(),
-                               Int(fontInfo.size) == size {
-                                Spacer()
-                                Image(systemName: "checkmark")
-                            }
+                        Text("•  " + l10n(L10nKeys.Editor.bulletList))
+                    }
+                    Button {
+                        controller.toggleDashList()
+                    } label: {
+                        Text("–  " + l10n(L10nKeys.Editor.dashList))
+                    }
+                    Button {
+                        controller.toggleNumberedList()
+                    } label: {
+                        Text("1. " + l10n(L10nKeys.Editor.numberedList))
+                    }
+                    Divider()
+                    Button {
+                        controller.toggleCheckbox()
+                    } label: {
+                        Text("☑  " + l10n(L10nKeys.Editor.checkbox))
+                    }
+                } label: {
+                    Image(systemName: "list.bullet")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
+
+                // 表格按钮
+                Button {
+                    showingInsertTableDialog = true
+                } label: {
+                    Image(systemName: "tablecells")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
+                .popover(isPresented: $showingInsertTableDialog, arrowEdge: .bottom) {
+                    InsertTableDialog(isPresented: $showingInsertTableDialog) { rows, columns in
+                        controller.insertTable(rows: rows, columns: columns)
+                    }
+                }
+
+                Divider().frame(height: 18)
+
+                // 增加缩进
+                Button { controller.increaseIndent() } label: {
+                    Image(systemName: "increase.indent")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
+
+                // 减少缩进
+                Button { controller.decreaseIndent() } label: {
+                    Image(systemName: "decrease.indent")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
+
+                // 文件夹选择
+                Menu {
+                    ForEach(store.folders) { folder in
+                        Button(folder.name) {
+                            note.folder = folder.name
+                            note.folderID = folder.id
                         }
                     }
-                }
-            } label: {
-                Text("字号")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 40)
 
-            // 字体颜色选择
-            colorPickerMenu
+                    if isEncryptedFolderUnlocked {
+                        Divider()
 
-            Divider().frame(height: 18)
-
-            // 列表菜单（合并所有列表类型）
-            Menu {
-                Button {
-                    controller.toggleBullets()
-                } label: {
-                    Text("•  " + l10n(L10nKeys.Editor.bulletList))
-                }
-                Button {
-                    controller.toggleDashList()
-                } label: {
-                    Text("–  " + l10n(L10nKeys.Editor.dashList))
-                }
-                Button {
-                    controller.toggleNumberedList()
-                } label: {
-                    Text("1. " + l10n(L10nKeys.Editor.numberedList))
-                }
-                Divider()
-                Button {
-                    controller.toggleCheckbox()
-                } label: {
-                    Text("☑  " + l10n(L10nKeys.Editor.checkbox))
-                }
-            } label: {
-                Image(systemName: "list.bullet")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
-
-            // 表格按钮
-            Button {
-                showingInsertTableDialog = true
-            } label: {
-                Image(systemName: "tablecells")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
-            .popover(isPresented: $showingInsertTableDialog, arrowEdge: .bottom) {
-                InsertTableDialog(isPresented: $showingInsertTableDialog) { rows, columns in
-                    controller.insertTable(rows: rows, columns: columns)
-                }
-            }
-
-            Divider().frame(height: 18)
-
-            // 增加缩进
-            Button { controller.increaseIndent() } label: {
-                Image(systemName: "increase.indent")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
-
-            // 减少缩进
-            Button { controller.decreaseIndent() } label: {
-                Image(systemName: "decrease.indent")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
-
-            // 文件夹选择
-            Menu {
-                ForEach(store.folders) { folder in
-                    Button(folder.name) {
-                        note.folder = folder.name
-                        note.folderID = folder.id
-                    }
-                }
-
-                if isEncryptedFolderUnlocked {
-                    Divider()
-
-                    Menu("🔒 加密文件夹") {
-                        if store.encryptedFolders.isEmpty {
-                            Text("无加密文件夹")
-                        } else {
-                            ForEach(store.encryptedFolders) { folder in
-                                Button(folder.name) {
-                                    moveNoteToEncryptedFolder(folder)
+                        Menu("🔒 加密文件夹") {
+                            if store.encryptedFolders.isEmpty {
+                                Text("无加密文件夹")
+                            } else {
+                                ForEach(store.encryptedFolders) { folder in
+                                    Button(folder.name) {
+                                        moveNoteToEncryptedFolder(folder)
+                                    }
                                 }
                             }
                         }
                     }
+                } label: {
+                    Image(systemName: "folder")
                 }
-            } label: {
-                Image(systemName: "folder")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(minWidth: 20)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 20)
 
-            // 标签按钮
-            TagButton(note: $note)
+                // 标签按钮
+                TagButton(note: $note)
 
-            // 提醒按钮
-            Button {
-                tempReminderAt = note.reminderAt ?? Date()
-                tempRecurrence = note.recurrenceRule
-                showingReminderPopover = true
-            } label: {
-                Image(systemName: note.hasReminder ? "bell.fill" : "bell")
-                    .foregroundStyle(note.hasReminder ? .orange : .secondary)
-            }
-            .buttonStyle(.plain)
-            .frame(minWidth: 20)
-            .popover(isPresented: $showingReminderPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(l10n(L10nKeys.Note.reminderTitle))
-                        .font(.headline)
-                    DatePicker(l10n(L10nKeys.Note.reminder), selection: $tempReminderAt)
-                    Picker(l10n(L10nKeys.Note.recurrence), selection: $tempRecurrence) {
-                        ForEach(recurrenceOptions, id: \.1) { name, value in
-                            Text(name).tag(value)
-                        }
-                    }
-                    HStack {
-                        Button(l10n(L10nKeys.common.cancel)) {
-                            showingReminderPopover = false
-                        }
-                        Spacer()
-                        Button(l10n(L10nKeys.Note.clearReminder)) {
-                            note.reminderAt = nil
-                            note.recurrenceRule = "none"
-                            showingReminderPopover = false
-                            NotificationManager.shared.cancel(noteID: note.id)
-                        }
-                        .disabled(!note.hasReminder)
-                        Button(l10n(L10nKeys.common.save)) {
-                            note.reminderAt = tempReminderAt
-                            note.recurrenceRule = tempRecurrence
-                            showingReminderPopover = false
-                            
-                            // 调度通知
-                            let body = note.content.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let preview = body.prefix(30) + (body.count > 30 ? "..." : "")
-                            Task {
-                                await NotificationManager.shared.schedule(
-                                    noteID: note.id,
-                                    title: note.title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : note.title,
-                                    body: String(preview),
-                                    reminderAt: tempReminderAt,
-                                    recurrence: tempRecurrence
-                                )
+                // 提醒按钮
+                Button {
+                    tempReminderAt = note.reminderAt ?? Date()
+                    tempRecurrence = note.recurrenceRule
+                    showingReminderPopover = true
+                } label: {
+                    Image(systemName: note.hasReminder ? "bell.fill" : "bell")
+                        .foregroundStyle(note.hasReminder ? .orange : .secondary)
+                }
+                .buttonStyle(.plain)
+                .frame(minWidth: 20)
+                .popover(isPresented: $showingReminderPopover, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(l10n(L10nKeys.Note.reminderTitle))
+                            .font(.headline)
+                        DatePicker(l10n(L10nKeys.Note.reminder), selection: $tempReminderAt)
+                        Picker(l10n(L10nKeys.Note.recurrence), selection: $tempRecurrence) {
+                            ForEach(recurrenceOptions, id: \.1) { name, value in
+                                Text(name).tag(value)
                             }
                         }
-                    }
-                }
-                .padding()
-                .frame(width: 320)
-            }
-
-            Spacer()
-            
-            Divider().frame(height: 18)
-
-            // 目录按钮（仅在预览或分屏模式下显示）
-            TableOfContentsMenu(
-                content: note.content.string,
-                viewMode: note.viewMode,
-                onSelect: { anchor in
-                    // 发送通知让 MarkdownWebView 滚动到指定位置
-                    NotificationCenter.default.post(
-                        name: .scrollToHeading,
-                        object: note.id,
-                        userInfo: ["anchor": anchor]
-                    )
-                }
-            )
-
-            Divider().frame(height: 18)
-
-            // Markdown 预览模式选择菜单
-            Menu {
-                ForEach(NoteViewMode.allCases, id: \.self) { mode in
-                    Button {
-                        // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
-                        DispatchQueue.main.async {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                note.viewMode = mode
-                                // 保存视图模式到数据库
-                                store.saveNoteViewMode(id: note.id, viewMode: mode)
-                            }
-                        }
-                    } label: {
                         HStack {
-                            Image(systemName: mode.icon)
-                            Text(mode.displayName)
-                            if note.viewMode == mode {
-                                Spacer()
-                                Image(systemName: "checkmark")
+                            Button(l10n(L10nKeys.common.cancel)) {
+                                showingReminderPopover = false
+                            }
+                            Spacer()
+                            Button(l10n(L10nKeys.Note.clearReminder)) {
+                                note.reminderAt = nil
+                                note.recurrenceRule = "none"
+                                showingReminderPopover = false
+                                NotificationManager.shared.cancel(noteID: note.id)
+                            }
+                            .disabled(!note.hasReminder)
+                            Button(l10n(L10nKeys.common.save)) {
+                                note.reminderAt = tempReminderAt
+                                note.recurrenceRule = tempRecurrence
+                                showingReminderPopover = false
+                                
+                                // 调度通知
+                                let body = note.content.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let preview = body.prefix(30) + (body.count > 30 ? "..." : "")
+                                Task {
+                                    await NotificationManager.shared.schedule(
+                                        noteID: note.id,
+                                        title: note.title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : note.title,
+                                        body: String(preview),
+                                        reminderAt: tempReminderAt,
+                                        recurrence: tempRecurrence
+                                    )
+                                }
                             }
                         }
                     }
+                    .padding()
+                    .frame(width: 320)
                 }
-            } label: {
-                Image(systemName: note.viewMode.icon)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(ThemeManager.shared.accentColor)
-            }
-            .buttonStyle(.plain)
-            .help("选择视图模式")
-            
-            Divider().frame(height: 18)
-            
-            // AI 助手按钮（使用与侧边栏类似的图标）
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    windowState.isRightSidebarExpanded.toggle()
+
+                Spacer()
+                
+                Divider().frame(height: 18)
+
+                // 目录按钮（仅在预览或分屏模式下显示）
+                TableOfContentsMenu(
+                    content: note.content.string,
+                    viewMode: note.viewMode,
+                    onSelect: { anchor in
+                        // 发送通知让 MarkdownWebView 滚动到指定位置
+                        NotificationCenter.default.post(
+                            name: .scrollToHeading,
+                            object: note.id,
+                            userInfo: ["anchor": anchor]
+                        )
+                    }
+                )
+
+                Divider().frame(height: 18)
+
+                // Markdown 预览模式选择菜单
+                Menu {
+                    ForEach(NoteViewMode.allCases, id: \.self) { mode in
+                        Button {
+                            // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
+                            DispatchQueue.main.async {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    note.viewMode = mode
+                                    // 保存视图模式到数据库
+                                    store.saveNoteViewMode(id: note.id, viewMode: mode)
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: mode.icon)
+                                Text(mode.displayName)
+                                if note.viewMode == mode {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: note.viewMode.icon)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(ThemeManager.shared.accentColor)
                 }
-            } label: {
-                Image(systemName: windowState.isRightSidebarExpanded ? "sidebar.right" : "sidebar.right")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(windowState.isRightSidebarExpanded ? ThemeManager.shared.accentColor : .secondary)
+                .buttonStyle(.plain)
+                .help("选择视图模式")
+                
+                Divider().frame(height: 18)
+                
+                // AI 助手按钮（使用与侧边栏类似的图标）
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        windowState.isRightSidebarExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: windowState.isRightSidebarExpanded ? "sidebar.right" : "sidebar.right")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(windowState.isRightSidebarExpanded ? ThemeManager.shared.accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help("AI 助手")
+                
+                Divider().frame(height: 18)
+                
+                // 录音按钮
+                recordingButton
+
+                // 本笔记搜索按钮
+                noteSearchButton
             }
-            .buttonStyle(.plain)
-            .help("AI 助手")
-            
-            Divider().frame(height: 18)
-            
-            // 录音按钮
-            recordingButton
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            if showingNoteSearch {
+                Divider()
+                    .padding(.horizontal, 12)
+
+                noteSearchBar
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
         .background(AppColors.editorBackground(colorScheme))
+        .onReceive(NotificationCenter.default.publisher(for: .focusCurrentNoteSearch)) { notification in
+            guard let targetNoteID = notification.object as? UUID, targetNoteID == note.id else { return }
+            openNoteSearchFromShortcut()
+        }
+        .onChange(of: note.id) { _, _ in
+            closeNoteSearch()
+        }
+        .onChange(of: note.viewMode) { _, newMode in
+            if newMode == .preview && showingNoteSearch {
+                closeNoteSearch()
+            }
+        }
     }
     
     // MARK: - 录音按钮
@@ -1996,6 +2030,123 @@ private struct EditorTopBarView: View {
         }
         .buttonStyle(.plain)
         .help("录音")
+    }
+
+    private var noteSearchButton: some View {
+        Button {
+            toggleNoteSearch()
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(showingNoteSearch ? ThemeManager.shared.accentColor : .secondary)
+        }
+        .buttonStyle(.plain)
+        .help("搜索当前笔记")
+    }
+
+    private var noteSearchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("搜索当前笔记", text: $noteSearchText)
+                .textFieldStyle(.plain)
+                .focused($isNoteSearchFieldFocused)
+                .onChange(of: noteSearchText) { _, newValue in
+                    controller.updateNoteSearch(query: newValue)
+                }
+                .onSubmit {
+                    controller.selectNextNoteSearchMatch()
+                    focusNoteSearchField()
+                }
+
+            Text(noteSearchStatusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 44, alignment: .trailing)
+
+            Button {
+                controller.selectPreviousNoteSearchMatch()
+                focusNoteSearchField()
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(controller.noteSearchResultCount == 0)
+            .help("上一个结果")
+
+            Button {
+                controller.selectNextNoteSearchMatch()
+                focusNoteSearchField()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.plain)
+            .disabled(controller.noteSearchResultCount == 0)
+            .help("下一个结果")
+
+            Button {
+                closeNoteSearch()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("关闭搜索")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.secondary.opacity(colorScheme == .dark ? 0.14 : 0.08))
+        )
+    }
+
+    private var noteSearchStatusText: String {
+        if noteSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "0/0"
+        }
+        if controller.noteSearchResultCount == 0 {
+            return "0/0"
+        }
+        return "\(controller.noteSearchCurrentMatchIndex)/\(controller.noteSearchResultCount)"
+    }
+
+    private func toggleNoteSearch() {
+        if showingNoteSearch {
+            focusNoteSearchField()
+            return
+        }
+
+        if note.viewMode == .preview {
+            note.viewMode = .split
+            store.saveNoteViewMode(id: note.id, viewMode: .split)
+        }
+
+        showingNoteSearch = true
+        focusNoteSearchField()
+        controller.updateNoteSearch(query: noteSearchText)
+    }
+
+    private func openNoteSearchFromShortcut() {
+        if showingNoteSearch {
+            focusNoteSearchField()
+            return
+        }
+        toggleNoteSearch()
+    }
+
+    private func focusNoteSearchField() {
+        DispatchQueue.main.async {
+            isNoteSearchFieldFocused = true
+        }
+    }
+
+    private func closeNoteSearch() {
+        showingNoteSearch = false
+        noteSearchText = ""
+        isNoteSearchFieldFocused = false
+        controller.clearNoteSearch()
     }
 
     private func presentAudioRecorderPanel() {

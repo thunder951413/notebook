@@ -23,6 +23,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case toggleMarkdownPreview = "toggle_markdown_preview"
     case toggleTableOfContents = "toggle_table_of_contents"
     case focusSearch = "focus_search"
+    case focusCurrentNoteSearch = "focus_current_note_search"
     case focusEditor = "focus_editor"
 
     var id: String { rawValue }
@@ -47,6 +48,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleMarkdownPreview: return l10n(L10nKeys.Shortcut.toggleMarkdownPreview)
         case .toggleTableOfContents: return l10n(L10nKeys.Shortcut.toggleTableOfContents)
         case .focusSearch: return l10n(L10nKeys.Shortcut.focusSearch)
+        case .focusCurrentNoteSearch: return l10n(L10nKeys.Shortcut.focusCurrentNoteSearch)
         case .focusEditor: return l10n(L10nKeys.Shortcut.focusEditor)
         }
     }
@@ -71,6 +73,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleMarkdownPreview: return "eye"
         case .toggleTableOfContents: return "list.bullet.rectangle"
         case .focusSearch: return "magnifyingglass"
+        case .focusCurrentNoteSearch: return "doc.text.magnifyingglass"
         case .focusEditor: return "doc.text"
         }
     }
@@ -95,6 +98,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .toggleMarkdownPreview: return KeyboardShortcut(key: .m, modifiers: [.command, .shift])
         case .toggleTableOfContents: return KeyboardShortcut(key: .t, modifiers: [.command, .shift])
         case .focusSearch: return KeyboardShortcut(key: .f, modifiers: [.command, .shift])
+        case .focusCurrentNoteSearch: return KeyboardShortcut(key: .f, modifiers: [.command])
         case .focusEditor: return KeyboardShortcut(key: .e, modifiers: [.command, .shift])
         }
     }
@@ -267,6 +271,7 @@ extension L10nKeys {
         static let toggleMarkdownPreview = "shortcut_toggle_markdown_preview"
         static let toggleTableOfContents = "shortcut_toggle_table_of_contents"
         static let focusSearch = "shortcut_focus_search"
+        static let focusCurrentNoteSearch = "shortcut_focus_current_note_search"
         static let focusEditor = "shortcut_focus_editor"
         
         static let title = "shortcut_settings_title"

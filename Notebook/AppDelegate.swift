@@ -8,6 +8,7 @@ extension Notification.Name {
     static let insertTextAtCursor = Notification.Name("insertTextAtCursor")
     static let editorFontDidChange = Notification.Name("editorFontDidChange")
     static let focusSearchField = Notification.Name("focusSearchField")
+    static let focusCurrentNoteSearch = Notification.Name("focusCurrentNoteSearch")
     static let toggleMarkdownPreview = Notification.Name("toggleMarkdownPreview")
     static let insertConversation = Notification.Name("insertConversation")
     static let scrollToHeading = Notification.Name("scrollToHeading")
@@ -26,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor let persistence = PersistenceController.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("[AppDelegate] applicationDidFinishLaunching - 程序启动")
+        Logger.shared.log(.app, .info, "[AppDelegate] applicationDidFinishLaunching - 程序启动")
 
         // 注册表格视图提供器（TextKit 2）
         if #available(macOS 12.0, *) {
@@ -43,13 +44,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task { @MainActor in
             _ = storage.startAccessIfPossible()
             try? persistence.configureIfPossible()
+            AutoSyncCoordinator.shared.configure(store: store)
             if let container = persistence.modelContainer {
                 store.setContext(container.mainContext)
                 // 同时设置 NoteSaveManager 的 context
                 NoteSaveManager.shared.setContext(container.mainContext)
-                
-                // 执行自动备份（每天首次启动）
-                await AutoBackupManager.shared.performAutoBackup(context: container.mainContext)
+                AutoSyncCoordinator.shared.handleApplicationLaunched()
             }
         }
 
@@ -67,32 +67,48 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        print("[AppDelegate] applicationWillTerminate - 程序正在退出！")
+        Logger.shared.log(.app, .info, "[AppDelegate] applicationWillTerminate - 程序正在退出！")
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { @MainActor in
+            AutoSyncCoordinator.shared.handleApplicationDidBecomeActive()
+        }
     }
     
     /// 应用即将退出时调用 - 返回 .terminateLater 以延迟退出，确保保存完成
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        print("[AppDelegate] applicationShouldTerminate - 准备退出，触发保存...")
+        Logger.shared.log(.app, .info, "[AppDelegate] applicationShouldTerminate - 准备退出，触发保存...")
         
         // 发送通知让 ContentView 保存当前笔记
         NotificationCenter.default.post(name: .appShouldTerminate, object: nil)
         
         // 刷新所有待保存内容
         NoteSaveManager.shared.flushAllPending()
-        
-        // 延迟一小段时间确保保存完成
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            print("[AppDelegate] 保存完成，允许退出")
+
+        Task { @MainActor in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await AutoSyncCoordinator.shared.flushPendingBeforeTermination()
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                }
+                _ = await group.next()
+                group.cancelAll()
+            }
+
+            Logger.shared.log(.app, .info, "[AppDelegate] 保存完成，允许退出")
             NSApp.reply(toApplicationShouldTerminate: true)
         }
-        
+
         // 返回 .terminateLater 延迟退出
         return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // 方案 A：关闭最后一个窗口时不退出，让应用常驻（Dock 图标和菜单栏入口都保留）
-        print("[AppDelegate] applicationShouldTerminateAfterLastWindowClosed - 返回 false，保持应用常驻")
+        Logger.shared.log(.app, .debug, "[AppDelegate] applicationShouldTerminateAfterLastWindowClosed - 返回 false，保持应用常驻")
         return false
     }
     
@@ -144,7 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func setupStatusItem() {
-        print("[AppDelegate] setupStatusItem - 创建菜单栏图标")
+        Logger.shared.log(.app, .debug, "[AppDelegate] setupStatusItem - 创建菜单栏图标")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
@@ -172,7 +188,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc func openMainWindow() {
-        print("[AppDelegate] openMainWindow - 通过 MainWindowController 显示主窗口")
+        Logger.shared.log(.app, .info, "[AppDelegate] openMainWindow - 通过 MainWindowController 显示主窗口")
         Task { @MainActor in
             MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
         }
@@ -184,7 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        print("[AppDelegate] applicationShouldHandleReopen - flag: \(flag)")
+        Logger.shared.log(.app, .debug, "[AppDelegate] applicationShouldHandleReopen - flag: \(flag)")
         Task { @MainActor in
             MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
         }

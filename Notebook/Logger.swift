@@ -54,11 +54,50 @@ struct LogInterval {
 final class Logger {
     static let shared = Logger()
 
+    enum FileRetentionMode {
+        case todayOnly
+        case keepAllByDay
+    }
+
+    private enum Keys {
+        static let isFileLoggingEnabled = "logger.file_logging_enabled"
+        static let keepHistoricalLogFiles = "logger.keep_historical_files"
+    }
+
     private let queue = DispatchQueue(label: "com.notebook.logger", qos: .utility)
     private var entries: [LogEntry] = []
     private let maxEntries = 5000
+    private let fileManager = FileManager.default
+    private let logsDirectoryURL = Logger.makeLogsDirectoryURL()
+    private let lineTimestampFormatter = ISO8601DateFormatter()
+    private let fileDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+    private var isFileLoggingEnabled = false
+    private var retentionMode: FileRetentionMode = .todayOnly
+    private var lastCleanupDayIdentifier: String?
 
-    private init() {}
+    static var fileLoggingDefaultsKey: String { Keys.isFileLoggingEnabled }
+    static var keepHistoricalLogFilesDefaultsKey: String { Keys.keepHistoricalLogFiles }
+
+    static var logsDirectoryPath: String {
+        makeLogsDirectoryURL().path
+    }
+
+    static func ensureLogsDirectoryExists() throws {
+        let url = makeLogsDirectoryURL()
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+    }
+
+    private init() {
+        reloadPersistenceSettings()
+    }
 
     func log(_ module: LogModule, _ level: LogLevel = .info, _ message: String) {
         let entry = LogEntry(timestamp: Date(), module: module, level: level, message: message)
@@ -66,6 +105,25 @@ final class Logger {
             self.entries.append(entry)
             if self.entries.count > self.maxEntries {
                 self.entries.removeFirst(self.entries.count - self.maxEntries)
+            }
+
+            self.persistEntryIfNeeded(entry)
+        }
+    }
+
+    func reloadPersistenceSettings() {
+        queue.async {
+            let defaults = UserDefaults.standard
+            self.isFileLoggingEnabled = defaults.bool(forKey: Keys.isFileLoggingEnabled)
+            self.retentionMode = defaults.bool(forKey: Keys.keepHistoricalLogFiles) ? .keepAllByDay : .todayOnly
+
+            guard self.isFileLoggingEnabled else { return }
+
+            do {
+                try self.prepareLogsDirectoryIfNeeded()
+                try self.cleanupLogFilesIfNeeded(referenceDate: Date(), force: true)
+            } catch {
+                self.writeInternalError("刷新日志文件设置失败: \(error.localizedDescription)")
             }
         }
     }
@@ -115,6 +173,75 @@ final class Logger {
         }
     }
 
+    private func persistEntryIfNeeded(_ entry: LogEntry) {
+        guard isFileLoggingEnabled else { return }
+
+        do {
+            try prepareLogsDirectoryIfNeeded()
+            try cleanupLogFilesIfNeeded(referenceDate: entry.timestamp, force: false)
+
+            let fileURL = logFileURL(for: entry.timestamp)
+            let line = formattedLine(for: entry) + "\n"
+            let data = Data(line.utf8)
+
+            if !fileManager.fileExists(atPath: fileURL.path) {
+                try data.write(to: fileURL, options: .atomic)
+                return
+            }
+
+            let handle = try FileHandle(forWritingTo: fileURL)
+            defer {
+                try? handle.close()
+            }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            writeInternalError("写入日志文件失败: \(error.localizedDescription)")
+        }
+    }
+
+    private func formattedLine(for entry: LogEntry) -> String {
+        let time = lineTimestampFormatter.string(from: entry.timestamp)
+        return "[\(time)] [\(entry.level.rawValue)] [\(entry.module.rawValue)] \(entry.message)"
+    }
+
+    private func logFileURL(for date: Date) -> URL {
+        let day = fileDayFormatter.string(from: date)
+        return logsDirectoryURL.appendingPathComponent("Notebook-\(day).log")
+    }
+
+    private func prepareLogsDirectoryIfNeeded() throws {
+        if !fileManager.fileExists(atPath: logsDirectoryURL.path) {
+            try fileManager.createDirectory(at: logsDirectoryURL, withIntermediateDirectories: true)
+        }
+    }
+
+    private func cleanupLogFilesIfNeeded(referenceDate: Date, force: Bool) throws {
+        let dayIdentifier = fileDayFormatter.string(from: referenceDate)
+        guard force || lastCleanupDayIdentifier != dayIdentifier else { return }
+
+        defer {
+            lastCleanupDayIdentifier = dayIdentifier
+        }
+
+        guard retentionMode == .todayOnly else { return }
+
+        let expectedFileName = "Notebook-\(dayIdentifier).log"
+        let urls = try fileManager.contentsOfDirectory(
+            at: logsDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+
+        for url in urls where url.pathExtension == "log" && url.lastPathComponent != expectedFileName {
+            try fileManager.removeItem(at: url)
+        }
+    }
+
+    private func writeInternalError(_ message: String) {
+        fputs("[Logger] \(message)\n", stderr)
+    }
+
     fileprivate static func mergeMetadata(_ lhs: String, with rhs: String) -> String {
         switch (lhs.isEmpty, rhs.isEmpty) {
         case (true, true):
@@ -126,5 +253,14 @@ final class Logger {
         case (false, false):
             return "\(rhs) | \(lhs)"
         }
+    }
+
+    private static func makeLogsDirectoryURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "Notebook"
+        return baseURL
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true)
     }
 }

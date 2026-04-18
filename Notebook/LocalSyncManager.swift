@@ -190,11 +190,7 @@ final class LocalSyncManager: ObservableObject {
         } else {
             try FileManager.default.moveItem(at: tempURL, to: fileURL)
         }
-        try BlockDocumentNoteVersionStore.markSynced(
-            noteID: noteID,
-            syncedVersion: envelope.currentVersion,
-            context: context
-        )
+        try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
     }
 
     private func syncNoteFromLocal(noteID: UUID, context: ModelContext) throws -> NoteSyncMergeResult {

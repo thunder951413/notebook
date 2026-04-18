@@ -81,6 +81,8 @@ struct SettingsGeneralView: View {
     @State private var startupBehavior = AppSettings.shared.startupBehavior
     @State private var showLogExportAlert = false
     @State private var logExportMessage = ""
+    @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
+    @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
 
     var body: some View {
         ScrollView {
@@ -251,11 +253,39 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Text("日志保存在内存中，可按模块导出用于排查问题")
+                    Text("可将运行日志自动保存到文件，用于临时抓取问题；关闭历史保留时只保留当天日志。")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
+                    Toggle("自动保存日志到文件", isOn: $isFileLoggingEnabled)
+                        .onChange(of: isFileLoggingEnabled) { _, newValue in
+                            AppSettings.shared.isFileLoggingEnabled = newValue
+                        }
+
+                    Toggle("保留历史日志（按天）", isOn: $keepHistoricalLogFiles)
+                        .disabled(!isFileLoggingEnabled)
+                        .onChange(of: keepHistoricalLogFiles) { _, newValue in
+                            AppSettings.shared.keepHistoricalLogFiles = newValue
+                        }
+
+                    Text(isFileLoggingEnabled
+                         ? "日志目录: \(Logger.logsDirectoryPath)"
+                         : "开启后将自动写入: \(Logger.logsDirectoryPath)")
+                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+
                     HStack(spacing: 12) {
+                        Button("打开日志目录") {
+                            do {
+                                try Logger.ensureLogsDirectoryExists()
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Logger.logsDirectoryPath)])
+                            } catch {
+                                logExportMessage = "打开日志目录失败: \(error.localizedDescription)"
+                                showLogExportAlert = true
+                            }
+                        }
+
                         Button("导出全部日志") {
                             exportLogs(module: nil)
                         }
@@ -651,25 +681,6 @@ struct DataManagementView: View {
 
                 Divider()
 
-                // 历史备份管理
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.title3)
-                            .foregroundColor(.purple)
-                        Text("历史备份管理")
-                            .font(.headline)
-                    }
-
-                    Text("每天首次启动时自动备份所有数据到 history 目录。可以设置最大保存数量，超过时会自动删除最旧的备份。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    AutoBackupSettingsView()
-                }
-
-                Divider()
-
                 // 数据重置
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -1046,13 +1057,22 @@ struct DataManagementView: View {
             guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
             }
+            let progressHandler: SSHSyncProgressHandler = { progress in
+                await MainActor.run {
+                    self.syncProgress = progress
+                }
+            }
             await MainActor.run {
                 self.syncProgress = SSHSyncProgress(phase: .pushNotes, current: 0, total: 1, message: "正在推送笔记...")
             }
             let syncedNoteIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
-                config: config
+                config: config,
+                progressHandler: progressHandler
             )
+            await MainActor.run {
+                AutoSyncCoordinator.shared.markLocalChangesPushed()
+            }
             return "推送完成，更新 \(syncedNoteIDs.count) 条笔记（含附件和文件夹/标签）"
         }
     }
@@ -1063,12 +1083,18 @@ struct DataManagementView: View {
             guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
             }
+            let progressHandler: SSHSyncProgressHandler = { progress in
+                await MainActor.run {
+                    self.syncProgress = progress
+                }
+            }
             await MainActor.run {
                 self.syncProgress = SSHSyncProgress(phase: .pullNotes, current: 0, total: 1, message: "正在拉取笔记...")
             }
             let results = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: container.mainContext,
-                config: config
+                config: config,
+                progressHandler: progressHandler
             )
             let conflicts = results.filter(\.detectedConflict)
             await MainActor.run {
@@ -1086,20 +1112,30 @@ struct DataManagementView: View {
             guard let container = self.persistence.modelContainer else {
                 throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
             }
+            let progressHandler: SSHSyncProgressHandler = { progress in
+                await MainActor.run {
+                    self.syncProgress = progress
+                }
+            }
             await MainActor.run {
                 self.syncProgress = SSHSyncProgress(phase: .pullNotes, current: 0, total: 1, message: "正在拉取...")
             }
             let pullResults = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: container.mainContext,
-                config: config
+                config: config,
+                progressHandler: progressHandler
             )
             await MainActor.run {
                 self.syncProgress = SSHSyncProgress(phase: .pushNotes, current: 0, total: 1, message: "正在推送...")
             }
             let pushIDs = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: container.mainContext,
-                config: config
+                config: config,
+                progressHandler: progressHandler
             )
+            await MainActor.run {
+                AutoSyncCoordinator.shared.markLocalChangesPushed()
+            }
             let conflicts = pullResults.filter(\.detectedConflict)
             await MainActor.run {
                 if !conflicts.isEmpty {
@@ -1117,30 +1153,31 @@ struct DataManagementView: View {
         syncResult = nil
         conflictResults = nil
         syncProgress = nil
+        AutoSyncCoordinator.shared.beginManualSync()
 
-        Task { [self] in
+        Task { @MainActor [self] in
+            defer {
+                AutoSyncCoordinator.shared.endManualSync()
+            }
+
             do {
                 let message = try await operation()
 
-                await MainActor.run { [self] in
-                    // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据
-                    self.store.fetchData()
+                // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据
+                self.store.fetchData()
 
-                    self.syncResult = .success(message)
-                    self.isSyncing = false
-                    self.syncProgress = nil
+                self.syncResult = .success(message)
+                self.isSyncing = false
+                self.syncProgress = nil
 
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                        self.syncResult = nil
-                        self.conflictResults = nil
-                    }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    self.syncResult = nil
+                    self.conflictResults = nil
                 }
             } catch {
-                await MainActor.run { [self] in
-                    self.syncResult = .failure("同步失败: \(error.localizedDescription)")
-                    self.isSyncing = false
-                    self.syncProgress = nil
-                }
+                self.syncResult = .failure("同步失败: \(error.localizedDescription)")
+                self.isSyncing = false
+                self.syncProgress = nil
             }
         }
     }

@@ -97,6 +97,8 @@ struct SSHSyncProgress {
     }
 }
 
+typealias SSHSyncProgressHandler = @Sendable (SSHSyncProgress) async -> Void
+
 enum SyncPhase: String {
     case pushLibrary = "推送文件夹/标签"
     case pushNotes = "推送笔记"
@@ -110,7 +112,7 @@ enum SyncPhase: String {
 }
 
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
-class SSHSyncManager {
+final class SSHSyncManager: @unchecked Sendable {
     static let shared = SSHSyncManager()
 
     private struct ProcessExecutionResult {
@@ -119,7 +121,247 @@ class SSHSyncManager {
         let standardError: String
     }
 
+    private struct RemoteSyncCacheState: Codable {
+        let noteIndexHash: String?
+        let noteIndexPayload: Data?
+        let assetsManifestHash: String?
+        let assetsManifestPayload: Data?
+        let updatedAt: Date
+    }
+
+    private struct RemoteNoteIndexBundle {
+        let index: RemoteNoteIndex?
+        let payloadHash: String?
+        let payload: Data?
+    }
+
+    private struct AssetsManifestBundle {
+        let manifest: AssetsManifest?
+        let payloadHash: String?
+        let payload: Data?
+    }
+
+    private struct RemoteFileDigestProbe {
+        let exists: Bool
+        let digest: String?
+    }
+
+    private struct RemoteNotePayloadDownload {
+        let noteID: UUID
+        let payload: Data?
+        let isMissing: Bool
+    }
+
+    private struct AssetDownloadJob {
+        let relativePath: String
+        let localURL: URL
+    }
+
+    private let noteDownloadConcurrencyLimit = 4
+    private let assetDownloadConcurrencyLimit = 4
+
+    // SSH 连接复用相关
+    private var activeControlMasterPaths: Set<String> = []
+    private let controlMasterLock = NSLock()
+    private var activeSyncOperationName: String?
+    private let syncOperationLock = NSLock()
+
     private init() {}
+
+    var isSyncOperationRunning: Bool {
+        syncOperationLock.withLock {
+            activeSyncOperationName != nil
+        }
+    }
+
+    private func beginSyncOperation(named operationName: String) throws {
+        let runningOperation = syncOperationLock.withLock { () -> String? in
+            if let activeSyncOperationName {
+                return activeSyncOperationName
+            }
+            activeSyncOperationName = operationName
+            return nil
+        }
+
+        if let runningOperation {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2001,
+                userInfo: [NSLocalizedDescriptionKey: "已有同步任务正在执行：\(runningOperation)"]
+            )
+        }
+    }
+
+    private func endSyncOperation() {
+        _ = syncOperationLock.withLock {
+            activeSyncOperationName = nil
+        }
+    }
+
+    /// 生成 SSH ControlPath
+    private func sshControlPath(for config: SSHConfig) -> String {
+        let sanitizedHost = config.host.replacingOccurrences(of: "/", with: "_")
+        return "/tmp/ssh-notebook-\(config.username)@\(sanitizedHost)-\(config.port)"
+    }
+
+    /// 建立 SSH 主连接（用于连接复用）
+    private func establishControlMasterConnection(
+        sshpassPath: String,
+        config: SSHConfig
+    ) async throws {
+        let controlPath = sshControlPath(for: config)
+
+        // 检查是否已经建立了主连接
+        let alreadyActive = controlMasterLock.withLock {
+            activeControlMasterPaths.contains(controlPath)
+        }
+        if alreadyActive {
+            return
+        }
+
+        // 检查控制 socket 是否已存在
+        if FileManager.default.fileExists(atPath: controlPath) {
+            // 验证连接是否仍然活跃
+            let checkResult = try await executeProcess(
+                executablePath: sshpassPath,
+                arguments: [
+                    "-p", config.password,
+                    "ssh",
+                    "-o", "ControlPath=\(controlPath)",
+                    "-o", "ControlMaster=no",
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    "-p", String(config.port),
+                    "\(config.username)@\(config.host)",
+                    "echo CONNECTED"
+                ],
+                password: config.password,
+                timeout: 10
+            )
+            if checkResult.terminationStatus == 0 && checkResult.standardOutput.contains("CONNECTED") {
+                _ = controlMasterLock.withLock {
+                    activeControlMasterPaths.insert(controlPath)
+                }
+                return
+            } else {
+                // 旧连接已失效，清理
+                try? FileManager.default.removeItem(atPath: controlPath)
+            }
+        }
+
+        // 建立新的主连接
+        let result = try await executeProcess(
+            executablePath: sshpassPath,
+            arguments: [
+                "-p", config.password,
+                "ssh",
+                "-f",  // 后台运行
+                "-N",  // 不执行远程命令
+                "-o", "ControlMaster=yes",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=600",  // 10 分钟无连接自动关闭
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "PreferredAuthentications=keyboard-interactive,password",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=1",
+                "-o", "ConnectTimeout=15",
+                "-p", String(config.port),
+                "\(config.username)@\(config.host)"
+            ],
+            password: config.password,
+            timeout: 20
+        )
+
+        if result.terminationStatus != 0 {
+            let errorMessage = result.standardError.isEmpty ? result.standardOutput : result.standardError
+            throw NSError(
+                domain: "SSHSync",
+                code: Int(result.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: Self.sanitizeLog("建立 SSH 主连接失败: \(errorMessage)", password: config.password)]
+            )
+        }
+
+        _ = controlMasterLock.withLock {
+            activeControlMasterPaths.insert(controlPath)
+        }
+
+        Logger.shared.log(.storage, .info, "[SSHSync] SSH 主连接已建立: \(config.username)@\(config.host):\(config.port)")
+    }
+
+    /// 关闭 SSH 主连接
+    private func closeControlMasterConnection(config: SSHConfig) {
+        let controlPath = sshControlPath(for: config)
+
+        let didRemove = controlMasterLock.withLock { () -> Bool in
+            guard activeControlMasterPaths.contains(controlPath) else { return false }
+            activeControlMasterPaths.remove(controlPath)
+            return true
+        }
+        guard didRemove else { return }
+
+        // 发送退出信号给 ControlMaster
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        task.arguments = [
+            "-o", "ControlPath=\(controlPath)",
+            "-o", "ControlMaster=no",
+            "-O", "exit",
+            "\(config.username)@\(config.host)"
+        ]
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            Logger.shared.log(.storage, .debug, "[SSHSync] SSH 主连接已关闭: \(config.username)@\(config.host):\(config.port)")
+        } catch {
+            Logger.shared.log(.storage, .warn, "[SSHSync] 关闭 SSH 主连接失败: \(error.localizedDescription)")
+        }
+
+        // 清理控制 socket 文件
+        try? FileManager.default.removeItem(atPath: controlPath)
+    }
+
+    /// 关闭所有活跃的 SSH 主连接
+    func closeAllControlMasterConnections() {
+        let paths = controlMasterLock.withLock {
+            Array(activeControlMasterPaths)
+        }
+
+        for path in paths {
+            if let config = extractConfigFromControlPath(path) {
+                closeControlMasterConnection(config: config)
+            }
+        }
+    }
+
+    /// 从 ControlPath 提取配置（用于清理）
+    private func extractConfigFromControlPath(_ controlPath: String) -> SSHConfig? {
+        // 解析格式: /tmp/ssh-notebook-username@host-port
+        let prefix = "/tmp/ssh-notebook-"
+        guard controlPath.hasPrefix(prefix) else { return nil }
+
+        let identifier = String(controlPath.dropFirst(prefix.count))
+        let parts = identifier.split(separator: "@")
+        guard parts.count == 2 else { return nil }
+
+        let username = String(parts[0])
+        let hostAndPort = String(parts[1]).split(separator: "-")
+        guard hostAndPort.count >= 2 else { return nil }
+
+        let port = Int(String(hostAndPort.last ?? "22")) ?? 22
+        let host = hostAndPort.dropLast().joined(separator: "-")
+
+        let config = SSHConfig(
+            host: host,
+            port: port,
+            username: username,
+            password: "",
+            repositoryPath: ""
+        )
+        return config
+    }
 
     /// 查找 sshpass 可执行文件路径 - 简化版本
     private func findSshpassPath() -> String? {
@@ -148,12 +390,12 @@ class SSHSyncManager {
                 }
             }
         } catch {
-            print("which sshpass 失败: \(error)")
+            Logger.shared.log(.storage, .warn, "which sshpass 失败: \(error.localizedDescription)")
         }
 
         // 回退到硬编码路径
         let hardcodedPath = "/usr/local/bin/sshpass"
-        print("使用硬编码路径: \(hardcodedPath)")
+        Logger.shared.log(.storage, .warn, "使用硬编码路径: \(hardcodedPath)")
         return hardcodedPath
     }
 
@@ -167,8 +409,16 @@ class SSHSyncManager {
     }
 
     private static func sanitizeLog(_ text: String, password: String) -> String {
-        guard !password.isEmpty else { return text }
-        return text.replacingOccurrences(of: password, with: "******")
+        let redacted = password.isEmpty ? text : text.replacingOccurrences(of: password, with: "******")
+        let filteredLines = redacted
+            .components(separatedBy: .newlines)
+            .filter { line in
+                let lowercased = line.lowercased()
+                return !lowercased.contains("warning: permanently added")
+                    && !lowercased.contains("permanently added")
+            }
+        let filtered = filteredLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return filtered.isEmpty ? redacted.trimmingCharacters(in: .whitespacesAndNewlines) : filtered
     }
 
     /// 使用密码认证测试连接
@@ -182,9 +432,9 @@ class SSHSyncManager {
         let output = result.standardOutput
         let errorOutput = result.standardError
 
-        print("SSH Test Output: \(Self.sanitizeLog(output, password: config.password))")
-        print("SSH Test Error: \(Self.sanitizeLog(errorOutput, password: config.password))")
-        print("SSH Test Exit Code: \(result.terminationStatus)")
+        Logger.shared.log(.storage, .debug, "SSH Test Output: \(Self.sanitizeLog(output, password: config.password))")
+        Logger.shared.log(.storage, .debug, "SSH Test Error: \(Self.sanitizeLog(errorOutput, password: config.password))")
+        Logger.shared.log(.storage, .debug, "SSH Test Exit Code: \(result.terminationStatus)")
 
         if result.terminationStatus != 0 {
             var errorMessage = "连接失败"
@@ -214,7 +464,7 @@ class SSHSyncManager {
     }
 
     /// 确保远程目录存在
-    func ensureRemoteDirectory(config: SSHConfig) async throws {
+    func ensureRemoteDirectory(config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
 
         let quotedRemotePath = config.repositoryPath
@@ -222,23 +472,25 @@ class SSHSyncManager {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(quotedRemotePath)'"
+            command: "mkdir -p '\(quotedRemotePath)'",
+            controlPath: controlPath
         )
     }
 
-    func syncNoteToRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws {
+    func syncNoteToRemote(noteID: UUID, context: ModelContext, config: SSHConfig, controlPath: String? = nil) async throws {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return
         }
 
         let sshpassPath = try checkSshpassAvailable()
-        try await ensureRemoteDirectory(config: config)
+        try await ensureRemoteDirectory(config: config, controlPath: controlPath)
 
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'"
+            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'",
+            controlPath: controlPath
         )
 
         let encoder = JSONEncoder()
@@ -256,40 +508,65 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             localPath: tempFileURL.path,
-            remotePath: remoteTempPath
+            remotePath: remoteTempPath,
+            controlPath: controlPath
         )
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            controlPath: controlPath
         )
 
         // 上传附件文件
-        try await uploadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config)
+        try await uploadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config, controlPath: controlPath)
 
-        try BlockDocumentNoteVersionStore.markSynced(
-            noteID: noteID,
-            syncedVersion: envelope.currentVersion,
-            context: context
-        )
+        try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
     }
 
-    func syncAllNotesToRemote(context: ModelContext, config: SSHConfig) async throws -> [UUID] {
+    func syncAllNotesToRemote(
+        context: ModelContext,
+        config: SSHConfig,
+        progressHandler: SSHSyncProgressHandler? = nil
+    ) async throws -> [UUID] {
+        try beginSyncOperation(named: "推送笔记")
+        defer { endSyncOperation() }
+
+        let sshpassPath = try checkSshpassAvailable()
+        let controlPath = sshControlPath(for: config)
+        
+        // 建立 SSH 主连接
+        try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
+        
+        defer {
+            // 同步完成后关闭主连接
+            closeControlMasterConnection(config: config)
+        }
+        
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
             .sorted { $0.updatedAt > $1.updatedAt }
         let existingNoteIDs = Set(notes.map { $0.id })
         var syncedNoteIDs: [UUID] = []
         var indexEntries: [RemoteNoteIndexEntry] = []
         var allAssetEntries: [AssetsManifestEntry] = []
+        let totalNotes = max(notes.count, 1)
 
-        for note in notes {
+        await reportProgress(
+            progressHandler,
+            phase: .pushNotes,
+            current: notes.isEmpty ? 1 : 0,
+            total: totalNotes,
+            message: notes.isEmpty ? "没有需要推送的笔记，正在整理远程索引..." : "正在推送笔记 0/\(notes.count)"
+        )
+
+        for (index, note) in notes.enumerated() {
             let syncState = try fetchSyncState(noteID: note.id, context: context)
             let shouldSync =
                 syncState == nil ||
                 syncState!.lastSyncedVersion < note.version ||
                 syncState!.pendingHistoryCount > 0
             if shouldSync {
-                try await syncNoteToRemote(noteID: note.id, context: context, config: config)
+                try await syncNoteToRemote(noteID: note.id, context: context, config: config, controlPath: controlPath)
                 syncedNoteIDs.append(note.id)
             }
             if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
@@ -300,6 +577,14 @@ class SSHSyncManager {
             if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
                 allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
             }
+
+            await reportProgress(
+                progressHandler,
+                phase: .pushNotes,
+                current: index + 1,
+                total: totalNotes,
+                message: "正在处理笔记 \(index + 1)/\(notes.count)"
+            )
         }
 
         // 收集本地已永久删除的笔记记录（SyncState存在但NoteEntity已不存在）
@@ -308,16 +593,38 @@ class SSHSyncManager {
             context: context
         )
 
-        try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config)
-        try await uploadAssetsManifest(entries: allAssetEntries, config: config)
-        try await syncLibraryToRemote(context: context, config: config)
+        await reportProgress(
+            progressHandler,
+            phase: .pushConfig,
+            current: 0,
+            total: 1,
+            message: "正在更新远程索引..."
+        )
+        try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config, controlPath: controlPath)
+        try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
+        await reportProgress(
+            progressHandler,
+            phase: .pushLibrary,
+            current: 0,
+            total: 1,
+            message: "正在同步文件夹和标签..."
+        )
+        try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
+        await reportProgress(
+            progressHandler,
+            phase: .pushLibrary,
+            current: 1,
+            total: 1,
+            message: "文件夹和标签同步完成"
+        )
 
         // 清理远程孤儿文件（已删除笔记的 .json 和附件）
         let activeNoteIDs = Set(indexEntries.map { $0.noteID })
         try await cleanupRemoteOrphanFiles(
             activeNoteIDs: activeNoteIDs,
             deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
-            config: config
+            config: config,
+            controlPath: controlPath
         )
 
         return syncedNoteIDs
@@ -325,6 +632,310 @@ class SSHSyncManager {
 
     func syncNoteFromRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws -> NoteSyncMergeResult {
         let sshpassPath = try checkSshpassAvailable()
+        let payload = try await downloadRemoteNotePayload(
+            noteID: noteID,
+            sshpassPath: sshpassPath,
+            config: config,
+            controlPath: nil
+        )
+        return try await syncDownloadedRemoteNotePayload(
+            noteID: noteID,
+            payload: payload,
+            context: context,
+            sshpassPath: sshpassPath,
+            config: config
+        )
+    }
+
+    func syncAllNotesFromRemote(
+        context: ModelContext,
+        config: SSHConfig,
+        progressHandler: SSHSyncProgressHandler? = nil
+    ) async throws -> [NoteSyncMergeResult] {
+        try beginSyncOperation(named: "拉取笔记")
+        defer { endSyncOperation() }
+
+        let sshpassPath = try checkSshpassAvailable()
+        let controlPath = sshControlPath(for: config)
+        
+        // 建立 SSH 主连接
+        try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
+        
+        defer {
+            // 同步完成后关闭主连接
+            closeControlMasterConnection(config: config)
+        }
+        
+        // 先拉取文件夹和标签
+        await reportProgress(
+            progressHandler,
+            phase: .pullLibrary,
+            current: 0,
+            total: 1,
+            message: "正在拉取文件夹和标签..."
+        )
+        try await syncLibraryFromRemote(context: context, config: config, controlPath: controlPath)
+        await reportProgress(
+            progressHandler,
+            phase: .pullLibrary,
+            current: 1,
+            total: 1,
+            message: "文件夹和标签拉取完成"
+        )
+
+        let cachedSyncState = loadRemoteSyncCacheState(config: config)
+        let remoteIndexBundle = try await resolveRemoteIndexBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
+        let remoteManifestBundle = try await resolveAssetsManifestBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
+        let remoteAssetMap = remoteManifestBundle.manifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
+            $0[$1.relativePath] = $1
+        } ?? [:]
+        var finalNoteIndexHash = remoteIndexBundle.payloadHash
+        var finalNoteIndexPayload = remoteIndexBundle.payload
+        let finalAssetsManifestHash = remoteManifestBundle.payloadHash
+        let finalAssetsManifestPayload = remoteManifestBundle.payload
+
+        guard let remoteIndex = remoteIndexBundle.index else {
+            // index.json 不存在视为空仓库，不做任何拉取
+            // 但仍需处理本地已有笔记的补充附件下载
+            Logger.shared.log(.storage, .info, "[SSHSync] 远程 index.json 不存在，视为空仓库")
+            await reportProgress(
+                progressHandler,
+                phase: .pullNotes,
+                current: 1,
+                total: 1,
+                message: "远程暂无可拉取的笔记"
+            )
+            _ = try await downloadMissingAssetsForExistingNotes(
+                context: context,
+                config: config,
+                remoteManifest: remoteManifestBundle.manifest,
+                progressHandler: progressHandler,
+                controlPath: controlPath
+            )
+            saveRemoteSyncCacheState(
+                RemoteSyncCacheState(
+                    noteIndexHash: finalNoteIndexHash,
+                    noteIndexPayload: finalNoteIndexPayload,
+                    assetsManifestHash: finalAssetsManifestHash,
+                    assetsManifestPayload: finalAssetsManifestPayload,
+                    updatedAt: Date()
+                ),
+                config: config
+            )
+            return []
+        }
+
+        let didRemoteIndexChange = remoteIndexBundle.payloadHash == nil || remoteIndexBundle.payloadHash != cachedSyncState?.noteIndexHash
+
+        // 处理远程已删除的笔记：对本地存在的笔记执行软删除
+        if didRemoteIndexChange {
+            try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
+        }
+
+        // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
+        let noteIDs: [UUID]
+        if didRemoteIndexChange {
+            let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
+            noteIDs = remoteIndex.entries
+                .filter { entry in
+                    // 跳过已删除的笔记
+                    guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
+                    guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
+                        return true
+                    }
+                    if entry.version > syncState.lastRemoteVersion {
+                        return true
+                    }
+                    return entry.contentHash != syncState.remoteFingerprint
+                }
+                .map(\.noteID)
+                .sorted { $0.uuidString < $1.uuidString }
+        } else {
+            noteIDs = []
+        }
+        let totalNotes = max(noteIDs.count, 1)
+
+        await reportProgress(
+            progressHandler,
+            phase: .pullNotes,
+            current: noteIDs.isEmpty ? 1 : 0,
+            total: totalNotes,
+            message: didRemoteIndexChange
+                ? (noteIDs.isEmpty ? "远程笔记清单有更新，但没有需要拉取的笔记" : "正在拉取笔记 0/\(noteIDs.count)")
+                : "远程笔记清单未变化，跳过笔记下载"
+        )
+
+        let syncOutcome = try await syncRemoteNotesInBatches(
+            noteIDs: noteIDs,
+            context: context,
+            config: config,
+            remoteAssetMap: remoteAssetMap,
+            hasRemoteAssetsManifest: remoteManifestBundle.manifest != nil,
+            progressHandler: progressHandler,
+            controlPath: controlPath
+        )
+        let results = syncOutcome.results
+        let missingRemoteNoteIDs = syncOutcome.missingRemoteNoteIDs
+
+        if !missingRemoteNoteIDs.isEmpty {
+            do {
+                let healedIndex = try await healRemoteIndex(
+                    remoteIndex,
+                    removingMissingNoteIDs: Set(missingRemoteNoteIDs),
+                    config: config,
+                    controlPath: controlPath
+                )
+                finalNoteIndexPayload = try encodeRemoteNoteIndex(healedIndex)
+                if let finalNoteIndexPayload {
+                    finalNoteIndexHash = Self.payloadDigest(for: finalNoteIndexPayload)
+                }
+                Logger.shared.log(.storage, .info, "[SSHSync] 远程索引自愈完成，移除 \(missingRemoteNoteIDs.count) 条缺失笔记引用")
+            } catch {
+                Logger.shared.log(.storage, .error, "[SSHSync] 远程索引自愈失败：\(error.localizedDescription)")
+            }
+        }
+
+        // 补充下载：检查所有已有笔记中缺失的附件文件
+        do {
+            _ = try await downloadMissingAssetsForExistingNotes(
+                context: context,
+                config: config,
+                remoteManifest: remoteManifestBundle.manifest,
+                progressHandler: progressHandler,
+                controlPath: controlPath
+            )
+        } catch {
+            if !isRemoteFileMissing(error) {
+                throw error
+            }
+            Logger.shared.log(.storage, .warn, "[SSHSync] 补充下载附件时远程文件缺失，跳过：\(error.localizedDescription)")
+        }
+
+        saveRemoteSyncCacheState(
+            RemoteSyncCacheState(
+                noteIndexHash: finalNoteIndexHash,
+                noteIndexPayload: finalNoteIndexPayload,
+                assetsManifestHash: finalAssetsManifestHash,
+                assetsManifestPayload: finalAssetsManifestPayload,
+                updatedAt: Date()
+            ),
+            config: config
+        )
+
+        return results
+    }
+
+    private func syncRemoteNotesInBatches(
+        noteIDs: [UUID],
+        context: ModelContext,
+        config: SSHConfig,
+        remoteAssetMap: [String: AssetsManifestEntry],
+        hasRemoteAssetsManifest: Bool,
+        progressHandler: SSHSyncProgressHandler?,
+        controlPath: String?
+    ) async throws -> (results: [NoteSyncMergeResult], missingRemoteNoteIDs: [UUID]) {
+        guard !noteIDs.isEmpty else {
+            return ([], [])
+        }
+
+        let sshpassPath = try checkSshpassAvailable()
+        let totalNotes = max(noteIDs.count, 1)
+        var results: [NoteSyncMergeResult] = []
+        var missingRemoteNoteIDs: [UUID] = []
+
+        for batchStart in stride(from: 0, to: noteIDs.count, by: noteDownloadConcurrencyLimit) {
+            let batchEnd = min(batchStart + noteDownloadConcurrencyLimit, noteIDs.count)
+            let batchNoteIDs = Array(noteIDs[batchStart..<batchEnd])
+            let downloads = try await downloadRemoteNotePayloads(
+                noteIDs: batchNoteIDs,
+                sshpassPath: sshpassPath,
+                config: config,
+                controlPath: controlPath
+            )
+            let downloadMap = Dictionary(uniqueKeysWithValues: downloads.map { ($0.noteID, $0) })
+
+            for noteID in batchNoteIDs {
+                guard let download = downloadMap[noteID] else { continue }
+                let currentIndex = results.count + missingRemoteNoteIDs.count + 1
+
+                if download.isMissing {
+                    missingRemoteNoteIDs.append(noteID)
+                    await reportProgress(
+                        progressHandler,
+                        phase: .pullNotes,
+                        current: currentIndex,
+                        total: totalNotes,
+                        message: "发现远程脏索引，已跳过 \(missingRemoteNoteIDs.count) 条"
+                    )
+                    continue
+                }
+
+                guard let payload = download.payload else { continue }
+                let result = try await syncDownloadedRemoteNotePayload(
+                    noteID: noteID,
+                    payload: payload,
+                    context: context,
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    remoteAssetMap: remoteAssetMap,
+                    hasRemoteAssetsManifest: hasRemoteAssetsManifest,
+                    controlPath: controlPath
+                )
+                results.append(result)
+
+                await reportProgress(
+                    progressHandler,
+                    phase: .pullNotes,
+                    current: currentIndex,
+                    total: totalNotes,
+                    message: "正在拉取笔记 \(currentIndex)/\(noteIDs.count)"
+                )
+            }
+        }
+
+        return (results, missingRemoteNoteIDs)
+    }
+
+    private func downloadRemoteNotePayloads(
+        noteIDs: [UUID],
+        sshpassPath: String,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws -> [RemoteNotePayloadDownload] {
+        try await withThrowingTaskGroup(of: RemoteNotePayloadDownload.self) { group in
+            for noteID in noteIDs {
+                group.addTask {
+                    do {
+                        let payload = try await self.downloadRemoteNotePayload(
+                            noteID: noteID,
+                            sshpassPath: sshpassPath,
+                            config: config,
+                            controlPath: controlPath
+                        )
+                        return RemoteNotePayloadDownload(noteID: noteID, payload: payload, isMissing: false)
+                    } catch {
+                        if self.isRemoteFileMissing(error) {
+                            return RemoteNotePayloadDownload(noteID: noteID, payload: nil, isMissing: true)
+                        }
+                        throw error
+                    }
+                }
+            }
+
+            var downloads: [RemoteNotePayloadDownload] = []
+            for try await download in group {
+                downloads.append(download)
+            }
+            return downloads
+        }
+    }
+
+    private func downloadRemoteNotePayload(
+        noteID: UUID,
+        sshpassPath: String,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws -> Data {
         let remotePath = "\(config.repositoryPath)/notes/\(noteID.uuidString).json"
         let tempFileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("note_sync_pull_\(noteID.uuidString)_\(UUID().uuidString).json")
@@ -334,18 +945,35 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             remotePath: remotePath,
-            localPath: tempFileURL.path
+            localPath: tempFileURL.path,
+            controlPath: controlPath
         )
 
-        let payload = try Data(contentsOf: tempFileURL)
+        return try Data(contentsOf: tempFileURL)
+    }
+
+    private func syncDownloadedRemoteNotePayload(
+        noteID: UUID,
+        payload: Data,
+        context: ModelContext,
+        sshpassPath: String,
+        config: SSHConfig,
+        remoteAssetMap: [String: AssetsManifestEntry] = [:],
+        hasRemoteAssetsManifest: Bool = false,
+        controlPath: String? = nil
+    ) async throws -> NoteSyncMergeResult {
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
 
-        // 先下载附件文件，确保文件到位后再导入笔记数据
-        // 这样如果附件下载失败，同步状态不会被更新，下次同步会重试
-        try await downloadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config)
+        try await downloadAssetsForNote(
+            envelope: envelope,
+            sshpassPath: sshpassPath,
+            config: config,
+            remoteAssetMap: remoteAssetMap,
+            hasRemoteAssetsManifest: hasRemoteAssetsManifest,
+            controlPath: controlPath
+        )
 
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
-
         if !result.detectedConflict {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
@@ -354,65 +982,6 @@ class SSHSyncManager {
             )
         }
         return result
-    }
-
-    func syncAllNotesFromRemote(context: ModelContext, config: SSHConfig) async throws -> [NoteSyncMergeResult] {
-        // 先拉取文件夹和标签
-        try await syncLibraryFromRemote(context: context, config: config)
-
-        let remoteIndex = try await downloadRemoteIndex(config: config)
-        guard let remoteIndex else {
-            // index.json 不存在视为空仓库，不做任何拉取
-            // 但仍需处理本地已有笔记的补充附件下载
-            print("[SSHSync] 远程 index.json 不存在，视为空仓库")
-            return []
-        }
-
-        // 处理远程已删除的笔记：对本地存在的笔记执行软删除
-        try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
-
-        // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
-        let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
-        let noteIDs = remoteIndex.entries
-            .filter { entry in
-                // 跳过已删除的笔记
-                guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
-                guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
-                    return true
-                }
-                if entry.version > syncState.lastRemoteVersion {
-                    return true
-                }
-                return entry.contentHash != syncState.remoteFingerprint
-            }
-            .map(\.noteID)
-            .sorted { $0.uuidString < $1.uuidString }
-
-        var results: [NoteSyncMergeResult] = []
-        for noteID in noteIDs {
-            do {
-                let result = try await syncNoteFromRemote(noteID: noteID, context: context, config: config)
-                results.append(result)
-            } catch {
-                if isRemoteFileMissing(error) {
-                    print("[SSHSync] 远程笔记文件不存在，跳过：\(noteID.uuidString)")
-                    continue
-                }
-                throw error
-            }
-        }
-
-        // 补充下载：检查所有已有笔记中缺失的附件文件
-        do {
-            try await downloadMissingAssetsForExistingNotes(context: context, config: config)
-        } catch {
-            if !isRemoteFileMissing(error) {
-                throw error
-            }
-            print("[SSHSync] 补充下载附件时远程文件缺失，跳过：\(error.localizedDescription)")
-        }
-
-        return results
     }
 
     private func makeRemoteIndexEntry(noteID: UUID, context: ModelContext) throws -> RemoteNoteIndexEntry? {
@@ -429,14 +998,15 @@ class SSHSyncManager {
         )
     }
 
-    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = [], config: SSHConfig) async throws {
+    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = [], config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
-        try await ensureRemoteDirectory(config: config)
+        try await ensureRemoteDirectory(config: config, controlPath: controlPath)
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'"
+            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'",
+            controlPath: controlPath
         )
 
         let index = RemoteNoteIndex(
@@ -445,9 +1015,7 @@ class SSHSyncManager {
             entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
             deletedEntries: deletedEntries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let payload = try encoder.encode(index)
+        let payload = try encodeRemoteNoteIndex(index)
         let tempFileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
         try payload.write(to: tempFileURL, options: [.atomic])
@@ -459,16 +1027,49 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             localPath: tempFileURL.path,
-            remotePath: remoteTempPath
+            remotePath: remoteTempPath,
+            controlPath: controlPath
         )
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            controlPath: controlPath
         )
     }
 
-    private func downloadRemoteIndex(config: SSHConfig) async throws -> RemoteNoteIndex? {
+    private func resolveRemoteIndexBundle(
+        config: SSHConfig,
+        cachedState: RemoteSyncCacheState?,
+        controlPath: String?
+    ) async throws -> RemoteNoteIndexBundle {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/index.json"
+        let probe = try await probeRemoteFileDigest(
+            sshpassPath: sshpassPath,
+            config: config,
+            remotePath: remotePath,
+            controlPath: controlPath
+        )
+
+        guard probe.exists else {
+            return RemoteNoteIndexBundle(index: nil, payloadHash: nil, payload: nil)
+        }
+
+        if let digest = probe.digest,
+           digest == cachedState?.noteIndexHash,
+           let cachedPayload = cachedState?.noteIndexPayload {
+            return RemoteNoteIndexBundle(
+                index: try JSONDecoder().decode(RemoteNoteIndex.self, from: cachedPayload),
+                payloadHash: digest,
+                payload: cachedPayload
+            )
+        }
+
+        return try await downloadRemoteIndexBundle(config: config, controlPath: controlPath)
+    }
+
+    private func downloadRemoteIndexBundle(config: SSHConfig, controlPath: String?) async throws -> RemoteNoteIndexBundle {
         let sshpassPath = try checkSshpassAvailable()
         let remotePath = "\(config.repositoryPath)/notes/index.json"
         let tempFileURL = FileManager.default.temporaryDirectory
@@ -480,23 +1081,60 @@ class SSHSyncManager {
                 sshpassPath: sshpassPath,
                 config: config,
                 remotePath: remotePath,
-                localPath: tempFileURL.path
+                localPath: tempFileURL.path,
+                controlPath: controlPath
             )
         } catch {
-            return nil
+            return RemoteNoteIndexBundle(index: nil, payloadHash: nil, payload: nil)
         }
 
         let payload = try Data(contentsOf: tempFileURL)
-        return try JSONDecoder().decode(RemoteNoteIndex.self, from: payload)
+        return RemoteNoteIndexBundle(
+            index: try JSONDecoder().decode(RemoteNoteIndex.self, from: payload),
+            payloadHash: Self.payloadDigest(for: payload),
+            payload: payload
+        )
     }
 
-    private func listRemoteNoteIDs(config: SSHConfig) async throws -> [UUID] {
+    private func resolveAssetsManifestBundle(
+        config: SSHConfig,
+        cachedState: RemoteSyncCacheState?,
+        controlPath: String?
+    ) async throws -> AssetsManifestBundle {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/assets_manifest.json"
+        let probe = try await probeRemoteFileDigest(
+            sshpassPath: sshpassPath,
+            config: config,
+            remotePath: remotePath,
+            controlPath: controlPath
+        )
+
+        guard probe.exists else {
+            return AssetsManifestBundle(manifest: nil, payloadHash: nil, payload: nil)
+        }
+
+        if let digest = probe.digest,
+           digest == cachedState?.assetsManifestHash,
+           let cachedPayload = cachedState?.assetsManifestPayload {
+            return AssetsManifestBundle(
+                manifest: try JSONDecoder().decode(AssetsManifest.self, from: cachedPayload),
+                payloadHash: digest,
+                payload: cachedPayload
+            )
+        }
+
+        return try await downloadAssetsManifestBundle(config: config, controlPath: controlPath)
+    }
+
+    private func listRemoteNoteIDs(config: SSHConfig, controlPath: String?) async throws -> [UUID] {
         let sshpassPath = try checkSshpassAvailable()
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
         let rawListing = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
-            command: "if [ -d '\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\(escapeSingleQuoted(remoteNoteDirectory))'; fi"
+            command: "if [ -d '\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\(escapeSingleQuoted(remoteNoteDirectory))'; fi",
+            controlPath: controlPath
         )
         return rawListing
             .split(whereSeparator: \.isNewline)
@@ -516,10 +1154,10 @@ class SSHSyncManager {
         return try context.fetch(descriptor).first
     }
 
-    private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String) async throws {
+    private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
-            arguments: sshArguments(config: config, command: command),
+            arguments: sshArguments(config: config, command: command, controlPath: controlPath),
             password: config.password
         )
         if result.terminationStatus != 0 {
@@ -532,10 +1170,10 @@ class SSHSyncManager {
         }
     }
 
-    private func runSSHCommandForOutput(sshpassPath: String, config: SSHConfig, command: String) async throws -> String {
+    private func runSSHCommandForOutput(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws -> String {
         let result = try await executeProcess(
             executablePath: sshpassPath,
-            arguments: sshArguments(config: config, command: command),
+            arguments: sshArguments(config: config, command: command, controlPath: controlPath),
             password: config.password
         )
         if result.terminationStatus != 0 {
@@ -549,10 +1187,46 @@ class SSHSyncManager {
         return result.standardOutput
     }
 
-    private func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String) async throws {
+    private func probeRemoteFileDigest(
+        sshpassPath: String,
+        config: SSHConfig,
+        remotePath: String,
+        controlPath: String?
+    ) async throws -> RemoteFileDigestProbe {
+        let escapedPath = escapeSingleQuoted(remotePath)
+        let output = try await runSSHCommandForOutput(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: """
+            if [ ! -f '\(escapedPath)' ]; then
+              echo NB_MISSING
+            elif command -v sha256sum >/dev/null 2>&1; then
+              sha256sum '\(escapedPath)' | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 '\(escapedPath)' | awk '{print $1}'
+            elif command -v openssl >/dev/null 2>&1; then
+              openssl dgst -sha256 '\(escapedPath)' | awk '{print $NF}'
+            else
+              echo NB_NO_DIGEST
+            fi
+            """,
+            controlPath: controlPath
+        )
+
+        let value = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value == "NB_MISSING" {
+            return RemoteFileDigestProbe(exists: false, digest: nil)
+        }
+        if value.isEmpty || value == "NB_NO_DIGEST" {
+            return RemoteFileDigestProbe(exists: true, digest: nil)
+        }
+        return RemoteFileDigestProbe(exists: true, digest: value)
+    }
+
+    private func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
-            arguments: scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath),
+            arguments: scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath, controlPath: controlPath),
             password: config.password,
             timeout: 120
         )
@@ -566,10 +1240,10 @@ class SSHSyncManager {
         }
     }
 
-    private func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String) async throws {
+    private func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
-            arguments: scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath),
+            arguments: scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath, controlPath: controlPath),
             password: config.password,
             timeout: 120
         )
@@ -583,38 +1257,38 @@ class SSHSyncManager {
         }
     }
 
-    private func sshArguments(config: SSHConfig, command: String) -> [String] {
+    private func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
         [
             "-p", config.password,
             "ssh"
-        ] + commonSSHOptions(port: config.port) + [
+        ] + commonSSHOptions(port: config.port, controlPath: controlPath) + [
             "\(config.username)@\(config.host)",
             command
         ]
     }
 
-    private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String) -> [String] {
+    private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) -> [String] {
         [
             "-p", config.password,
             "scp"
-        ] + commonSCPOptions(port: config.port) + [
+        ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
             localPath,
             "\(config.username)@\(config.host):\(remotePath)"
         ]
     }
 
-    private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String) -> [String] {
+    private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) -> [String] {
         [
             "-p", config.password,
             "scp"
-        ] + commonSCPOptions(port: config.port) + [
+        ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
             "\(config.username)@\(config.host):\(remotePath)",
             localPath
         ]
     }
 
-    private func commonSSHOptions(port: Int) -> [String] {
-        [
+    private func commonSSHOptions(port: Int, controlPath: String? = nil) -> [String] {
+        var options = [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "GlobalKnownHostsFile=/dev/null",
@@ -626,10 +1300,21 @@ class SSHSyncManager {
             "-o", "ServerAliveCountMax=2",
             "-p", String(port)
         ]
+        
+        // 如果提供了 controlPath，使用连接复用
+        if let controlPath = controlPath {
+            options.append(contentsOf: [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=600"
+            ])
+        }
+        
+        return options
     }
 
-    private func commonSCPOptions(port: Int) -> [String] {
-        [
+    private func commonSCPOptions(port: Int, controlPath: String? = nil) -> [String] {
+        var options = [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "GlobalKnownHostsFile=/dev/null",
@@ -641,6 +1326,17 @@ class SSHSyncManager {
             "-o", "ServerAliveCountMax=2",
             "-P", String(port)
         ]
+        
+        // 如果提供了 controlPath，使用连接复用
+        if let controlPath = controlPath {
+            options.append(contentsOf: [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=600"
+            ])
+        }
+        
+        return options
     }
 
     private func executeProcess(
@@ -718,7 +1414,7 @@ class SSHSyncManager {
     }
 
     /// 判断错误是否为远程文件不存在
-    private func isRemoteFileMissing(_ error: Error) -> Bool {
+    private nonisolated func isRemoteFileMissing(_ error: Error) -> Bool {
         let message = error.localizedDescription.lowercased()
         if message.contains("no such file") { return true }
         if message.contains("not found") { return true }
@@ -747,7 +1443,7 @@ class SSHSyncManager {
 
             // 本地笔记尚未标记删除 → 执行软删除
             if localNote.deletedAt == nil {
-                print("[SSHSync] 远程已删除笔记，本地执行软删除：\(noteID.uuidString)")
+                Logger.shared.log(.storage, .info, "[SSHSync] 远程已删除笔记，本地执行软删除：\(noteID.uuidString)")
                 localNote.deletedAt = entry.deletedAt
                 localNote.originalFolderID = localNote.folderID
                 localNote.originalFolderName = localNote.folderName
@@ -777,7 +1473,7 @@ class SSHSyncManager {
     }
 
     /// 清理远程孤儿文件（已删除笔记的 .json 和附件目录）
-    private func cleanupRemoteOrphanFiles(activeNoteIDs: Set<UUID>, deletedNoteIDs: Set<UUID>, config: SSHConfig) async throws {
+    private func cleanupRemoteOrphanFiles(activeNoteIDs: Set<UUID>, deletedNoteIDs: Set<UUID>, config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
 
@@ -785,7 +1481,8 @@ class SSHSyncManager {
         let listing = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
-            command: "if [ -d '\\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\\(escapeSingleQuoted(remoteNoteDirectory))'; else echo ''; fi"
+            command: "if [ -d '\\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\\(escapeSingleQuoted(remoteNoteDirectory))'; else echo ''; fi",
+            controlPath: controlPath
         )
 
         let remoteFiles = listing.split(whereSeparator: \.isNewline)
@@ -799,11 +1496,12 @@ class SSHSyncManager {
             // 仅删除明确在已删除列表中的远程文件，避免误删未同步过的笔记
             if deletedNoteIDs.contains(noteID) {
                 let remotePath = "\(remoteNoteDirectory)/\(filename)"
-                print("[SSHSync] 清理远程孤儿笔记文件：\(remotePath)")
+                Logger.shared.log(.storage, .info, "[SSHSync] 清理远程孤儿笔记文件：\(remotePath)")
                 try? await runSSHCommand(
                     sshpassPath: sshpassPath,
                     config: config,
-                    command: "rm -f '\\(escapeSingleQuoted(remotePath))'"
+                    command: "rm -f '\\(escapeSingleQuoted(remotePath))'",
+                    controlPath: controlPath
                 )
             }
         }
@@ -821,7 +1519,8 @@ class SSHSyncManager {
                 _ = try? await runSSHCommandForOutput(
                     sshpassPath: sshpassPath,
                     config: config,
-                    command: "if [ -d '\\(escapeSingleQuoted(noteAttachmentDir))' ]; then rm -rf '\\(escapeSingleQuoted(noteAttachmentDir))'; echo DELETED; else echo SKIP; fi"
+                    command: "if [ -d '\(escapeSingleQuoted(noteAttachmentDir))' ]; then rm -rf '\(escapeSingleQuoted(noteAttachmentDir))'; echo DELETED; else echo SKIP; fi",
+                    controlPath: controlPath
                 )
             }
         }
@@ -841,9 +1540,32 @@ class SSHSyncManager {
         try? context.save()
     }
 
+    private func healRemoteIndex(
+        _ remoteIndex: RemoteNoteIndex,
+        removingMissingNoteIDs missingNoteIDs: Set<UUID>,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws -> RemoteNoteIndex {
+        guard !missingNoteIDs.isEmpty else { return remoteIndex }
+
+        let healedIndex = RemoteNoteIndex(
+            generatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            entries: remoteIndex.entries.filter { !missingNoteIDs.contains($0.noteID) },
+            deletedEntries: remoteIndex.deletedEntries
+        )
+        try await uploadRemoteIndex(
+            entries: healedIndex.entries,
+            deletedEntries: healedIndex.deletedEntries,
+            config: config,
+            controlPath: controlPath
+        )
+        return healedIndex
+    }
+
     // MARK: - Attachment Sync Helpers
 
-    private func uploadAssetsForNote(envelope: VersionedNoteSyncEnvelope, sshpassPath: String, config: SSHConfig) async throws {
+    private func uploadAssetsForNote(envelope: VersionedNoteSyncEnvelope, sshpassPath: String, config: SSHConfig, controlPath: String? = nil) async throws {
         let storage = StorageLocationManager.shared
         let attachmentsRoot = try storage.attachmentsDirectoryURL()
 
@@ -860,7 +1582,8 @@ class SSHSyncManager {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteAttachmentsDir))'"
+            command: "mkdir -p '\(escapeSingleQuoted(remoteAttachmentsDir))'",
+            controlPath: controlPath
         )
 
         for asset in envelope.currentSnapshot.assets {
@@ -875,19 +1598,28 @@ class SSHSyncManager {
                 try await runSSHCommand(
                     sshpassPath: sshpassPath,
                     config: config,
-                    command: "mkdir -p '\(escapeSingleQuoted(remoteDir))'"
+                    command: "mkdir -p '\(escapeSingleQuoted(remoteDir))'",
+                    controlPath: controlPath
                 )
                 try await runSCPUpload(
                     sshpassPath: sshpassPath,
                     config: config,
                     localPath: localURL.path,
-                    remotePath: remotePath
+                    remotePath: remotePath,
+                    controlPath: controlPath
                 )
             }
         }
     }
 
-    private func downloadAssetsForNote(envelope: VersionedNoteSyncEnvelope, sshpassPath: String, config: SSHConfig) async throws {
+    private func downloadAssetsForNote(
+        envelope: VersionedNoteSyncEnvelope,
+        sshpassPath: String,
+        config: SSHConfig,
+        remoteAssetMap: [String: AssetsManifestEntry] = [:],
+        hasRemoteAssetsManifest: Bool = false,
+        controlPath: String? = nil
+    ) async throws {
         let storage = StorageLocationManager.shared
         let attachmentsRoot = try storage.attachmentsDirectoryURL()
 
@@ -905,31 +1637,42 @@ class SSHSyncManager {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
                 let localURL = attachmentsRoot.appendingPathComponent(relativePath)
-                // 如果本地已存在且文件大小大于 0，跳过
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: localURL.path),
                    let fileSize = attrs[.size] as? Int, fileSize > 0 {
-                    continue
+                    if let remoteEntry = remoteAssetMap[relativePath],
+                       let localData = try? Data(contentsOf: localURL),
+                       Self.payloadDigest(for: localData) == remoteEntry.contentHash {
+                        continue
+                    }
+                    if remoteAssetMap[relativePath] == nil {
+                        continue
+                    }
                 }
 
                 let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
 
-                // 确保本地目录存在
                 let localDir = localURL.deletingLastPathComponent()
                 try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
 
-                // 检查远程文件是否存在后再下载
-                let checkResult = try await runSSHCommandForOutput(
-                    sshpassPath: sshpassPath,
-                    config: config,
-                    command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING"
-                )
-                guard checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" else { continue }
+                if remoteAssetMap[relativePath] == nil {
+                    if hasRemoteAssetsManifest {
+                        continue
+                    }
+                    let checkResult = try await runSSHCommandForOutput(
+                        sshpassPath: sshpassPath,
+                        config: config,
+                        command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING",
+                        controlPath: controlPath
+                    )
+                    guard checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" else { continue }
+                }
 
                 try await runSCPDownload(
                     sshpassPath: sshpassPath,
                     config: config,
                     remotePath: remotePath,
-                    localPath: localURL.path
+                    localPath: localURL.path,
+                    controlPath: controlPath
                 )
             }
         }
@@ -956,16 +1699,14 @@ class SSHSyncManager {
         return entries
     }
 
-    private func uploadAssetsManifest(entries: [AssetsManifestEntry], config: SSHConfig) async throws {
+    private func uploadAssetsManifest(entries: [AssetsManifestEntry], config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
         let manifest = AssetsManifest(
             generatedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
             entries: entries.sorted { $0.relativePath < $1.relativePath }
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let payload = try encoder.encode(manifest)
+        let payload = try encodeAssetsManifest(manifest)
         let tempFileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("assets_manifest_\(UUID().uuidString).json")
         try payload.write(to: tempFileURL, options: [.atomic])
@@ -978,17 +1719,19 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             localPath: tempFileURL.path,
-            remotePath: remoteTempPath
+            remotePath: remoteTempPath,
+            controlPath: controlPath
         )
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            controlPath: controlPath
         )
     }
 
     /// 下载远程附件清单
-    private func downloadAssetsManifest(config: SSHConfig) async throws -> AssetsManifest? {
+    private func downloadAssetsManifestBundle(config: SSHConfig, controlPath: String?) async throws -> AssetsManifestBundle {
         let sshpassPath = try checkSshpassAvailable()
         let remotePath = "\(config.repositoryPath)/notes/assets_manifest.json"
         let tempFileURL = FileManager.default.temporaryDirectory
@@ -1000,42 +1743,91 @@ class SSHSyncManager {
                 sshpassPath: sshpassPath,
                 config: config,
                 remotePath: remotePath,
-                localPath: tempFileURL.path
+                localPath: tempFileURL.path,
+                controlPath: controlPath
             )
         } catch {
             // 如果文件不存在，返回nil（兼容旧版本）
-            return nil
+            return AssetsManifestBundle(manifest: nil, payloadHash: nil, payload: nil)
         }
 
         let payload = try Data(contentsOf: tempFileURL)
-        return try JSONDecoder().decode(AssetsManifest.self, from: payload)
+        return AssetsManifestBundle(
+            manifest: try JSONDecoder().decode(AssetsManifest.self, from: payload),
+            payloadHash: Self.payloadDigest(for: payload),
+            payload: payload
+        )
     }
 
     /// 检查并下载本地已有笔记中缺失的附件
-    private func downloadMissingAssetsForExistingNotes(context: ModelContext, config: SSHConfig) async throws {
+    private func downloadMissingAssetsForExistingNotes(
+        context: ModelContext,
+        config: SSHConfig,
+        remoteManifest: AssetsManifest? = nil,
+        progressHandler: SSHSyncProgressHandler? = nil,
+        controlPath: String? = nil
+    ) async throws -> String? {
         let sshpassPath = try checkSshpassAvailable()
 
         // 1. 获取所有本地笔记的附件
-        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
         let allAssets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
 
         // 如果没有任何附件，直接返回
         guard !allAssets.isEmpty else {
-            return
+            await reportProgress(
+                progressHandler,
+                phase: .checkMissingAssets,
+                current: 1,
+                total: 1,
+                message: "没有需要检查的附件"
+            )
+            return nil
         }
 
         // 2. 下载远程附件清单（如果存在）
-        let remoteManifest = try? await downloadAssetsManifest(config: config)
+        let resolvedRemoteManifest: AssetsManifest?
+        if let remoteManifest {
+            resolvedRemoteManifest = remoteManifest
+        } else {
+            let manifestBundle = try? await resolveAssetsManifestBundle(
+                config: config,
+                cachedState: loadRemoteSyncCacheState(config: config),
+                controlPath: controlPath
+            )
+            resolvedRemoteManifest = manifestBundle?.manifest
+        }
 
         // 3. 准备远程附件路径映射
-        let remoteAssetMap = remoteManifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
+        let remoteAssetMap = resolvedRemoteManifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
             $0[$1.relativePath] = $1
         } ?? [:]
+        let hasRemoteAssetsManifest = resolvedRemoteManifest != nil
 
         // 4. 检查并下载缺失附件
         let storage = StorageLocationManager.shared
         let attachmentsRoot = try storage.attachmentsDirectoryURL()
         let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
+        let assetPathsToCheck = allAssets.flatMap { asset -> [String] in
+            let sidecarPaths: [String]
+            if let sidecarPayload = asset.sidecarPathsPayload,
+               let paths = try? JSONDecoder().decode([String].self, from: sidecarPayload) {
+                sidecarPaths = paths
+            } else {
+                sidecarPaths = []
+            }
+            return [asset.relativeFilePath] + sidecarPaths
+        }
+        let totalAssets = max(assetPathsToCheck.count, 1)
+        var processedAssets = 0
+        var downloadJobs: [AssetDownloadJob] = []
+
+        await reportProgress(
+            progressHandler,
+            phase: .checkMissingAssets,
+            current: 0,
+            total: totalAssets,
+            message: "正在检查缺失附件 0/\(assetPathsToCheck.count)"
+        )
 
         for asset in allAssets {
             let sidecarPaths: [String]
@@ -1056,22 +1848,122 @@ class SSHSyncManager {
                     localURL: localURL,
                     relativePath: relativePath,
                     remoteEntry: remoteAssetMap[relativePath],
+                    hasRemoteAssetsManifest: hasRemoteAssetsManifest,
                     sshpassPath: sshpassPath,
                     config: config,
-                    remoteAttachmentsDir: remoteAttachmentsDir
+                    remoteAttachmentsDir: remoteAttachmentsDir,
+                    controlPath: controlPath
                 )
 
                 if shouldDownload {
-                    try await downloadSingleAsset(
-                        relativePath: relativePath,
-                        localURL: localURL,
-                        sshpassPath: sshpassPath,
-                        config: config,
-                        remoteAttachmentsDir: remoteAttachmentsDir
+                    downloadJobs.append(AssetDownloadJob(relativePath: relativePath, localURL: localURL))
+                }
+
+                processedAssets += 1
+                await reportProgress(
+                    progressHandler,
+                    phase: .checkMissingAssets,
+                    current: processedAssets,
+                    total: totalAssets,
+                    message: "正在检查缺失附件 \(processedAssets)/\(assetPathsToCheck.count)"
+                )
+            }
+        }
+
+        guard !downloadJobs.isEmpty else {
+            return try resolvedRemoteManifest.map { try Self.payloadDigest(for: encodeAssetsManifest($0)) }
+        }
+
+        var downloadedAssets = 0
+        for batchStart in stride(from: 0, to: downloadJobs.count, by: assetDownloadConcurrencyLimit) {
+            let batchEnd = min(batchStart + assetDownloadConcurrencyLimit, downloadJobs.count)
+            let batch = Array(downloadJobs[batchStart..<batchEnd])
+
+            await reportProgress(
+                progressHandler,
+                phase: .pullAssets,
+                current: downloadedAssets,
+                total: downloadJobs.count,
+                message: "正在补充附件 \(downloadedAssets)/\(downloadJobs.count)"
+            )
+
+            try await withThrowingTaskGroup(of: String.self) { group in
+                for job in batch {
+                    group.addTask {
+                        try await self.downloadSingleAsset(
+                            relativePath: job.relativePath,
+                            localURL: job.localURL,
+                            sshpassPath: sshpassPath,
+                            config: config,
+                            remoteAttachmentsDir: remoteAttachmentsDir,
+                            controlPath: controlPath
+                        )
+                        return job.relativePath
+                    }
+                }
+
+                for try await _ in group {
+                    downloadedAssets += 1
+                    await reportProgress(
+                        progressHandler,
+                        phase: .pullAssets,
+                        current: downloadedAssets,
+                        total: downloadJobs.count,
+                        message: "正在补充附件 \(downloadedAssets)/\(downloadJobs.count)"
                     )
                 }
             }
         }
+        return try resolvedRemoteManifest.map { try Self.payloadDigest(for: encodeAssetsManifest($0)) }
+    }
+
+    private func reportProgress(
+        _ progressHandler: SSHSyncProgressHandler?,
+        phase: SyncPhase,
+        current: Int,
+        total: Int,
+        message: String
+    ) async {
+        guard let progressHandler else { return }
+        await progressHandler(SSHSyncProgress(
+            phase: phase,
+            current: current,
+            total: total,
+            message: message
+        ))
+    }
+
+    private func loadRemoteSyncCacheState(config: SSHConfig) -> RemoteSyncCacheState? {
+        let key = remoteSyncCacheKey(for: config)
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(RemoteSyncCacheState.self, from: data)
+    }
+
+    private func saveRemoteSyncCacheState(_ state: RemoteSyncCacheState, config: SSHConfig) {
+        let key = remoteSyncCacheKey(for: config)
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    private func remoteSyncCacheKey(for config: SSHConfig) -> String {
+        let rawKey = "\(config.username)@\(config.host):\(config.port)|\(config.repositoryPath)"
+        return "SSHSyncManager.remoteCache.\(Self.payloadDigest(for: Data(rawKey.utf8)))"
+    }
+
+    private func encodeRemoteNoteIndex(_ index: RemoteNoteIndex) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(index)
+    }
+
+    private func encodeAssetsManifest(_ manifest: AssetsManifest) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(manifest)
+    }
+
+    private static func payloadDigest(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// 判断是否需要下载某个附件
@@ -1079,9 +1971,11 @@ class SSHSyncManager {
         localURL: URL,
         relativePath: String,
         remoteEntry: AssetsManifestEntry?,
+        hasRemoteAssetsManifest: Bool,
         sshpassPath: String,
         config: SSHConfig,
-        remoteAttachmentsDir: String
+        remoteAttachmentsDir: String,
+        controlPath: String?
     ) async throws -> Bool {
         let fileManager = FileManager.default
 
@@ -1093,7 +1987,7 @@ class SSHSyncManager {
                 // 如果有远程清单条目，验证哈希
                 if let remoteEntry = remoteEntry,
                    let localData = try? Data(contentsOf: localURL) {
-                    let localHash = SHA256.hash(data: localData).map { String(format: "%02x", $0) }.joined()
+                    let localHash = Self.payloadDigest(for: localData)
                     return localHash != remoteEntry.contentHash
                 }
 
@@ -1102,19 +1996,27 @@ class SSHSyncManager {
             }
         }
 
+        if remoteEntry != nil {
+            return true
+        }
+        if hasRemoteAssetsManifest {
+            return false
+        }
+
         // 本地文件不存在或大小为0，需要检查远程是否存在
         let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
         let checkResult = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
-            command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING"
+            command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING",
+            controlPath: controlPath
         )
 
         let exists = checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
 
         // 如果远程文件不存在，记录警告但继续处理其他文件
         if !exists {
-            print("警告：远程附件不存在：\(remotePath)")
+            Logger.shared.log(.storage, .warn, "警告：远程附件不存在：\(remotePath)")
         }
 
         return exists
@@ -1126,7 +2028,8 @@ class SSHSyncManager {
         localURL: URL,
         sshpassPath: String,
         config: SSHConfig,
-        remoteAttachmentsDir: String
+        remoteAttachmentsDir: String,
+        controlPath: String?
     ) async throws {
         // 确保本地目录存在
         let localDir = localURL.deletingLastPathComponent()
@@ -1138,17 +2041,18 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             remotePath: remotePath,
-            localPath: localURL.path
+            localPath: localURL.path,
+            controlPath: controlPath
         )
 
-        print("已下载附件：\(relativePath)")
+        Logger.shared.log(.storage, .debug, "已下载附件：\(relativePath)")
     }
 
     // MARK: - Library Sync (Folders & Tags)
 
-    private func syncLibraryToRemote(context: ModelContext, config: SSHConfig) async throws {
+    private func syncLibraryToRemote(context: ModelContext, config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
-        try await ensureRemoteDirectory(config: config)
+        try await ensureRemoteDirectory(config: config, controlPath: controlPath)
 
         let folders = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
             .sorted { $0.sortOrder < $1.sortOrder }
@@ -1185,16 +2089,18 @@ class SSHSyncManager {
             sshpassPath: sshpassPath,
             config: config,
             localPath: tempFileURL.path,
-            remotePath: remoteTempPath
+            remotePath: remoteTempPath,
+            controlPath: controlPath
         )
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            controlPath: controlPath
         )
     }
 
-    private func syncLibraryFromRemote(context: ModelContext, config: SSHConfig) async throws {
+    private func syncLibraryFromRemote(context: ModelContext, config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
         let remotePath = "\(config.repositoryPath)/library.json"
         let tempFileURL = FileManager.default.temporaryDirectory
@@ -1206,7 +2112,8 @@ class SSHSyncManager {
                 sshpassPath: sshpassPath,
                 config: config,
                 remotePath: remotePath,
-                localPath: tempFileURL.path
+                localPath: tempFileURL.path,
+                controlPath: controlPath
             )
         } catch {
             // library.json 不存在时静默跳过

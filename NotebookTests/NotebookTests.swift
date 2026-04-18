@@ -519,7 +519,98 @@ final class NotebookTests: XCTestCase {
     }
 
     @MainActor
-    func testCreateLocalBackupWritesArchiveToHistoryDirectory() async throws {
+    func testExportAllDataOmitsStorageBookmarkAndDatabaseDirectory() async throws {
+        let baseDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+
+        let storage = StorageLocationManager.shared
+        storage.setBaseDirectoryForTesting(baseDirectory)
+        defer {
+            storage.setBaseDirectoryForTesting(nil)
+            UserDefaults.standard.removeObject(forKey: "storageDirectoryBookmark")
+            try? FileManager.default.removeItem(at: baseDirectory)
+        }
+
+        try storage.ensureDirectoryStructureExists()
+        UserDefaults.standard.set(Data("bookmark".utf8), forKey: "storageDirectoryBookmark")
+
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        try insertMinimalBlockLibrary(context: context, title: "导出检查")
+
+        let exportURL = try await DataExportManager.shared.exportAllData(context: context)
+        defer { try? FileManager.default.removeItem(at: exportURL) }
+
+        let extractDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: extractDir) }
+
+        try DataExportManager.shared.extractArchive(at: exportURL, to: extractDir)
+
+        let userDefaultsURL = extractDir.appendingPathComponent("Config/UserDefaults.plist")
+        let exportedDefaults = try XCTUnwrap(
+            try PropertyListSerialization.propertyList(from: Data(contentsOf: userDefaultsURL), format: nil) as? [String: Any]
+        )
+
+        XCTAssertNil(exportedDefaults["storageDirectoryBookmark"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: extractDir.appendingPathComponent("Database").path))
+    }
+
+    @MainActor
+    func testImportConfigurationUsesPlistRadialSettingsAndSkipsStorageBookmark() async throws {
+        let defaults = UserDefaults.standard
+        let keysToClear = [
+            "radialMenuEnabled",
+            "radialMenuTrigger",
+            "radialMenuRadius",
+            "radialMenuItemSize",
+            "radialMenuScale",
+            "startup_behavior",
+            "storageDirectoryBookmark"
+        ]
+        defer {
+            for key in keysToClear {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let userDefaultsPayload: [String: Any] = [
+            "startup_behavior": "all_notes",
+            "storageDirectoryBookmark": Data("legacy-bookmark".utf8)
+        ]
+        try PropertyListSerialization.data(fromPropertyList: userDefaultsPayload, format: .xml, options: 0)
+            .write(to: rootDir.appendingPathComponent("UserDefaults.plist"))
+
+        let radialMenuPayload: [String: Any] = [
+            "isEnabled": true,
+            "trigger": "right_click",
+            "menuRadius": 160.0,
+            "itemSize": 52.0,
+            "menuScale": 1.2
+        ]
+        try PropertyListSerialization.data(fromPropertyList: radialMenuPayload, format: .xml, options: 0)
+            .write(to: rootDir.appendingPathComponent("RadialMenuSettings.plist"))
+
+        let zipURL = try DataExportManager.shared.createArchiveForTesting(from: rootDir, prefix: "ConfigImportTest")
+        defer { try? FileManager.default.removeItem(at: zipURL) }
+
+        try await DataExportManager.shared.importConfiguration(from: zipURL)
+
+        XCTAssertEqual(defaults.string(forKey: "startup_behavior"), "all_notes")
+        XCTAssertTrue(defaults.bool(forKey: "radialMenuEnabled"))
+        XCTAssertEqual(defaults.string(forKey: "radialMenuTrigger"), "right_click")
+        XCTAssertEqual(defaults.double(forKey: "radialMenuRadius"), 160.0, accuracy: 0.001)
+        XCTAssertEqual(defaults.double(forKey: "radialMenuItemSize"), 52.0, accuracy: 0.001)
+        XCTAssertEqual(defaults.double(forKey: "radialMenuScale"), 1.2, accuracy: 0.001)
+        XCTAssertNil(defaults.object(forKey: "storageDirectoryBookmark"))
+    }
+
+    @MainActor
+    func testImportAllDataPreflightFailureKeepsExistingLibraryUntouched() async throws {
         let baseDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
 
@@ -532,57 +623,41 @@ final class NotebookTests: XCTestCase {
 
         try storage.ensureDirectoryStructureExists()
 
-        let container = try makeInMemoryContainer()
-        let context = container.mainContext
-        let libraryID = UUID()
-        let noteID = UUID()
-        context.insert(
-            BlockDocumentLibraryEntity(
-                id: libraryID,
-                schemaVersion: "1.0",
-                sourceExportedAt: Date(),
-                importedAt: Date(),
-                noteCount: 1,
-                folderCount: 0,
-                tagCount: 0
-            )
-        )
-        context.insert(
-            BlockDocumentNoteEntity(
-                id: noteID,
-                libraryID: libraryID,
-                title: "备份前笔记",
-                createdAt: Date(),
-                updatedAt: Date(),
-                folderID: nil,
-                folderName: "未分类",
-                reminderAt: nil,
-                recurrenceRule: "none",
-                version: 1,
-                tagIDs: "",
-                viewMode: "text",
-                deletedAt: nil,
-                originalFolderID: nil,
-                originalFolderName: nil,
-                documentSchemaVersion: "1.0",
-                documentSource: "test",
-                blockCount: 0,
-                assetCount: 0
-            )
-        )
-        try context.save()
+        let sourceContainer = try makeInMemoryContainer()
+        let sourceContext = sourceContainer.mainContext
+        try insertMinimalBlockLibrary(context: sourceContext, title: "待导入数据")
 
-        let backupManager = AutoBackupManager.shared
-        let record = try await backupManager.createLocalBackup(context: context, fileNamePrefix: "TestMigrationBackup")
+        let notesArchiveURL = try await DataExportManager.shared.exportAllNotesOnly(context: sourceContext)
+        defer { try? FileManager.default.removeItem(at: notesArchiveURL) }
 
-        let historyDirectory = try backupManager.historyDirectoryURL()
-        let backupURL = historyDirectory.appendingPathComponent(record.fileName)
+        let destinationContainer = try makeInMemoryContainer()
+        let destinationContext = destinationContainer.mainContext
+        let existingNoteID = try insertMinimalBlockLibrary(context: destinationContext, title: "现有数据")
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
-        XCTAssertTrue(record.fileName.hasPrefix("TestMigrationBackup_"))
-        XCTAssertTrue(backupManager.localBackupRecords.contains(where: { $0.fileName == record.fileName }))
+        let importRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let notesDir = importRoot.appendingPathComponent("Notes", isDirectory: true)
+        let configDir = importRoot.appendingPathComponent("Config", isDirectory: true)
+        try FileManager.default.createDirectory(at: notesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: importRoot) }
 
-        try await backupManager.deleteBackup(record: record)
+        try DataExportManager.shared.extractArchive(at: notesArchiveURL, to: notesDir)
+        try Data("not-a-valid-plist".utf8).write(to: configDir.appendingPathComponent("RadialMenuSettings.plist"))
+
+        let importArchiveURL = try DataExportManager.shared.createArchiveForTesting(from: importRoot, prefix: "InvalidAllDataImport")
+        defer { try? FileManager.default.removeItem(at: importArchiveURL) }
+
+        do {
+            try await DataExportManager.shared.importAllData(from: importArchiveURL, context: destinationContext)
+            XCTFail("Expected invalid configuration preflight to throw")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+
+        let notes = try destinationContext.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertEqual(notes.first?.id, existingNoteID)
+        XCTAssertEqual(notes.first?.title, "现有数据")
     }
 
     @MainActor
@@ -3589,6 +3664,48 @@ final class NotebookTests: XCTestCase {
         StorageLocationManager.shared.setBaseDirectoryForTesting(nil)
         NoteSaveManager.shared.resetForTesting()
         BackupManager.shared.markSaveComplete()
+    }
+
+    @discardableResult
+    private func insertMinimalBlockLibrary(context: ModelContext, title: String) throws -> UUID {
+        let libraryID = UUID()
+        let noteID = UUID()
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: Date(),
+                importedAt: Date(),
+                noteCount: 1,
+                folderCount: 0,
+                tagCount: 0
+            )
+        )
+        context.insert(
+            BlockDocumentNoteEntity(
+                id: noteID,
+                libraryID: libraryID,
+                title: title,
+                createdAt: Date(),
+                updatedAt: Date(),
+                folderID: nil,
+                folderName: "未分类",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 1,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 0,
+                assetCount: 0
+            )
+        )
+        try context.save()
+        return noteID
     }
 
     private func makeLegacyCheckboxImage(size: CGFloat) throws -> NSImage {
