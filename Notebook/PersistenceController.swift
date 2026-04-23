@@ -180,6 +180,7 @@ final class BlockDocumentNoteEntity {
     var documentSource: String
     var blockCount: Int
     var assetCount: Int
+    var lastSavedContentHash: String
 
     init(
         id: UUID,
@@ -200,7 +201,8 @@ final class BlockDocumentNoteEntity {
         documentSchemaVersion: String,
         documentSource: String,
         blockCount: Int,
-        assetCount: Int
+        assetCount: Int,
+        lastSavedContentHash: String = ""
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -221,6 +223,7 @@ final class BlockDocumentNoteEntity {
         self.documentSource = documentSource
         self.blockCount = blockCount
         self.assetCount = assetCount
+        self.lastSavedContentHash = lastSavedContentHash
     }
 }
 
@@ -698,10 +701,98 @@ enum BlockDocumentNoteVersionStore {
         if let localNote {
             let hasDiverged = localNote.version > syncState.lastCommonVersion && syncState.lastSyncedVersion < localNote.version
             if hasDiverged && localNote.version != envelope.currentVersion {
+                // 冲突解决：将本地版本复制为冲突副本，然后应用远程版本到原笔记
+                let conflictCopyID = UUID()
+                let library = try ensureLibrary(context: context)
+                let conflictCopy = BlockDocumentNoteEntity(
+                    id: conflictCopyID,
+                    libraryID: library.id,
+                    title: "\(localNote.title) [冲突副本]",
+                    createdAt: localNote.createdAt,
+                    updatedAt: localNote.updatedAt,
+                    folderID: localNote.folderID,
+                    folderName: localNote.folderName,
+                    reminderAt: localNote.reminderAt,
+                    recurrenceRule: localNote.recurrenceRule,
+                    version: localNote.version,
+                    tagIDs: localNote.tagIDs,
+                    viewMode: localNote.viewMode,
+                    deletedAt: nil,
+                    originalFolderID: localNote.originalFolderID,
+                    originalFolderName: localNote.originalFolderName,
+                    documentSchemaVersion: localNote.documentSchemaVersion,
+                    documentSource: localNote.documentSource,
+                    blockCount: localNote.blockCount,
+                    assetCount: localNote.assetCount
+                )
+                context.insert(conflictCopy)
+                library.noteCount += 1
+
+                // 复制本地笔记的 blocks 和 assets 到冲突副本
+                let localBlocks = try context.fetch(
+                    FetchDescriptor<BlockDocumentBlockEntity>(
+                        predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == envelope.noteID },
+                        sortBy: [SortDescriptor(\.position)]
+                    )
+                )
+                let localAssets = try context.fetch(
+                    FetchDescriptor<BlockDocumentAssetEntity>(
+                        predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == envelope.noteID }
+                    )
+                )
+                for block in localBlocks {
+                    context.insert(BlockDocumentBlockEntity(
+                        noteID: conflictCopyID,
+                        position: block.position,
+                        blockID: block.blockID,
+                        kind: block.kind,
+                        sourceType: block.sourceType,
+                        textPayload: block.textPayload,
+                        level: block.level,
+                        listStyle: block.listStyle,
+                        order: block.order,
+                        checked: block.checked,
+                        indent: block.indent,
+                        assetID: block.assetID,
+                        tablePayload: block.tablePayload
+                    ))
+                }
+                for asset in localAssets {
+                    context.insert(BlockDocumentAssetEntity(
+                        noteID: conflictCopyID,
+                        assetID: asset.assetID,
+                        kind: asset.kind,
+                        sourceKind: asset.sourceKind,
+                        filename: asset.filename,
+                        mimeType: asset.mimeType,
+                        width: asset.width,
+                        height: asset.height,
+                        duration: asset.duration,
+                        createdAt: asset.createdAt,
+                        relativeFilePath: asset.relativeFilePath,
+                        sidecarPathsPayload: asset.sidecarPathsPayload
+                    ))
+                }
+
+                // 为冲突副本创建同步状态
+                let conflictSyncState = BlockDocumentNoteSyncStateEntity(noteID: conflictCopyID)
+                conflictSyncState.lastRecordedVersion = localNote.version
+                conflictSyncState.lastSyncedVersion = localNote.version
+                conflictSyncState.lastCommonVersion = localNote.version
+                context.insert(conflictSyncState)
+
+                // 应用远程版本到原笔记
+                try apply(snapshot: envelope.currentSnapshot, to: localNote, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt)
+                syncState.lastCommonVersion = envelope.currentVersion
+                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+                syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
+                syncState.lastSyncAt = Date()
+                syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+
                 try context.save()
                 return NoteSyncMergeResult(
                     noteID: envelope.noteID,
-                    appliedRemoteSnapshot: false,
+                    appliedRemoteSnapshot: true,
                     detectedConflict: true,
                     importedHistoryVersions: importedVersions,
                     localVersion: localNote.version,

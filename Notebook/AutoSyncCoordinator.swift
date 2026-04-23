@@ -12,9 +12,13 @@ final class AutoSyncCoordinator: ObservableObject {
         case success
     }
 
+    private static let pendingChangesKey = "AutoSyncCoordinator.hasPendingLocalChanges"
+
     private weak var store: NoteStore?
     private var pendingPushTimer: Timer?
-    private var hasPendingLocalChanges = false
+    private var hasPendingLocalChanges: Bool {
+        didSet { UserDefaults.standard.set(hasPendingLocalChanges, forKey: Self.pendingChangesKey) }
+    }
     private var isAutomaticSyncRunning = false
     private var isManualSyncRunning = false
     private var didScheduleInitialPull = false
@@ -25,10 +29,15 @@ final class AutoSyncCoordinator: ObservableObject {
     @Published private(set) var sidebarIndicatorState: SidebarIndicatorState = .idle
 
     private let foregroundPullInterval: TimeInterval = 5 * 60
-    private let savePushDebounceInterval: TimeInterval = 10 * 60
+    private let savePushDebounceInterval: TimeInterval = 2 * 60
+    private let pushRetryBaseInterval: TimeInterval = 2 * 60
+    private let pushRetryMaxInterval: TimeInterval = 30 * 60
     private let successIndicatorDurationNanoseconds: UInt64 = 3_000_000_000
+    private var pushRetryCount: Int = 0
 
-    private init() {}
+    private init() {
+        hasPendingLocalChanges = UserDefaults.standard.bool(forKey: Self.pendingChangesKey)
+    }
 
     func configure(store: NoteStore) {
         self.store = store
@@ -40,6 +49,11 @@ final class AutoSyncCoordinator: ObservableObject {
 
         Task { @MainActor [weak self] in
             await self?.runAutomaticPull(reason: "launch", force: true)
+
+            // 应用重启后若有未推送的本地修改，调度推送
+            if self?.hasPendingLocalChanges == true {
+                self?.scheduleDebouncedPush(reason: "recoveryAfterLaunch")
+            }
         }
     }
 
@@ -51,6 +65,7 @@ final class AutoSyncCoordinator: ObservableObject {
 
     func noteDidSave(noteID: UUID, reason: String) {
         hasPendingLocalChanges = true
+        pushRetryCount = 0
         scheduleDebouncedPush(reason: "note=\(noteID.uuidString.prefix(8)) reason=\(reason)")
     }
 
@@ -69,6 +84,7 @@ final class AutoSyncCoordinator: ObservableObject {
 
     func markLocalChangesPushed() {
         hasPendingLocalChanges = false
+        pushRetryCount = 0
         lastSuccessfulPushAt = Date()
         invalidatePendingPushTimer()
     }
@@ -87,7 +103,15 @@ final class AutoSyncCoordinator: ObservableObject {
         invalidatePendingPushTimer()
         guard canUseAutoSync else { return }
 
-        pendingPushTimer = Timer.scheduledTimer(withTimeInterval: savePushDebounceInterval, repeats: false) { [weak self] _ in
+        let interval: TimeInterval
+        if pushRetryCount > 0 {
+            // 指数退避：base * 2^retryCount，上限 maxInterval
+            interval = min(pushRetryBaseInterval * pow(2.0, Double(pushRetryCount)), pushRetryMaxInterval)
+        } else {
+            interval = savePushDebounceInterval
+        }
+
+        pendingPushTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 await self.runAutomaticPush(reason: reason)
@@ -163,7 +187,8 @@ final class AutoSyncCoordinator: ObservableObject {
             clearSidebarIndicator()
             Logger.shared.log(.app, .error, "[AutoSync] 自动推送失败 (\(reason)): \(error.localizedDescription)")
             if hasPendingLocalChanges && !isManualSyncRunning {
-                scheduleDebouncedPush(reason: "retryAfterFailure")
+                pushRetryCount += 1
+                scheduleDebouncedPush(reason: "retryAfterFailure(\(pushRetryCount))")
             }
         }
     }

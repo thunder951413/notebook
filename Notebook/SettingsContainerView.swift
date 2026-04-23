@@ -712,7 +712,7 @@ struct DataManagementView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            Text("冲突笔记已保留本地版本。可通过版本管理手动回退。")
+                            Text("冲突笔记已自动创建本地副本（标题含 [冲突副本]），原笔记已应用远程版本。")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }

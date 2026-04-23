@@ -225,7 +225,7 @@ final class SSHSyncManager: @unchecked Sendable {
             let checkResult = try await executeProcess(
                 executablePath: sshpassPath,
                 arguments: [
-                    "-p", config.password,
+                    "-e",
                     "ssh",
                     "-o", "ControlPath=\(controlPath)",
                     "-o", "ControlMaster=no",
@@ -253,7 +253,7 @@ final class SSHSyncManager: @unchecked Sendable {
         let result = try await executeProcess(
             executablePath: sshpassPath,
             arguments: [
-                "-p", config.password,
+                "-e",
                 "ssh",
                 "-f",  // 后台运行
                 "-N",  // 不执行远程命令
@@ -511,6 +511,39 @@ final class SSHSyncManager: @unchecked Sendable {
             remotePath: remoteTempPath,
             controlPath: controlPath
         )
+
+        // 上传校验：比对本地与远程文件的 sha256 哈希
+        let localHash = Self.payloadDigest(for: payload)
+        var uploadVerifyRetryCount = 0
+        while true {
+            let remoteHashOutput = try await runSSHCommandForOutput(
+                sshpassPath: sshpassPath,
+                config: config,
+                command: "shasum -a 256 '\(escapeSingleQuoted(remoteTempPath))' 2>/dev/null | cut -d' ' -f1",
+                controlPath: controlPath
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if remoteHashOutput == localHash {
+                break
+            }
+            uploadVerifyRetryCount += 1
+            if uploadVerifyRetryCount >= 2 {
+                Logger.shared.log(.storage, .error, "[SSHSync] 上传校验失败：本地=\(localHash.prefix(16))... 远程=\(remoteHashOutput.prefix(16))... noteID=\(noteID.uuidString.prefix(8))")
+                throw NSError(
+                    domain: "SSHSync",
+                    code: -2002,
+                    userInfo: [NSLocalizedDescriptionKey: "上传校验失败：远程文件哈希与本地不一致"]
+                )
+            }
+            Logger.shared.log(.storage, .warn, "[SSHSync] 上传校验不一致，重试 \(uploadVerifyRetryCount)/2：noteID=\(noteID.uuidString.prefix(8))")
+            try await runSCPUpload(
+                sshpassPath: sshpassPath,
+                config: config,
+                localPath: tempFileURL.path,
+                remotePath: remoteTempPath,
+                controlPath: controlPath
+            )
+        }
+
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
@@ -974,7 +1007,7 @@ final class SSHSyncManager: @unchecked Sendable {
         )
 
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
-        if !result.detectedConflict {
+        if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
                 syncedVersion: min(result.localVersion, result.remoteVersion),
@@ -1259,7 +1292,7 @@ final class SSHSyncManager: @unchecked Sendable {
 
     private func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
         [
-            "-p", config.password,
+            "-e",
             "ssh"
         ] + commonSSHOptions(port: config.port, controlPath: controlPath) + [
             "\(config.username)@\(config.host)",
@@ -1269,7 +1302,7 @@ final class SSHSyncManager: @unchecked Sendable {
 
     private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) -> [String] {
         [
-            "-p", config.password,
+            "-e",
             "scp"
         ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
             localPath,
@@ -1279,7 +1312,7 @@ final class SSHSyncManager: @unchecked Sendable {
 
     private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) -> [String] {
         [
-            "-p", config.password,
+            "-e",
             "scp"
         ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
             "\(config.username)@\(config.host):\(remotePath)",
@@ -1347,6 +1380,7 @@ final class SSHSyncManager: @unchecked Sendable {
     ) async throws -> ProcessExecutionResult {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        env["SSHPASS"] = password
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executablePath)
         task.arguments = arguments

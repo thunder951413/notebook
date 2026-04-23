@@ -182,8 +182,10 @@ final class NoteSaveManager {
             )
             let blockEntities = try context.fetch(blockDescriptor)
             if let blockEntity = blockEntities.first {
-                try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
-                AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
+                let hasContentChanged = try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
+                if hasContentChanged {
+                    AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
+                }
                 interval.end(.info, "result=success")
                 return .success
             }
@@ -196,11 +198,12 @@ final class NoteSaveManager {
         }
     }
 
+    @discardableResult
     private func saveBlockDocumentNote(
         entity: BlockDocumentNoteEntity,
         request: SaveRequest,
         context: ModelContext
-    ) throws {
+    ) throws -> Bool {
         let interval = Logger.shared.beginInterval(
             .save,
             "saveBlockDocumentNote",
@@ -248,13 +251,32 @@ final class NoteSaveManager {
         }
 
         let updatedAt = Date()
+
+        // 脏检查：计算新内容哈希，与上次保存对比，仅实际变化时递增 version
+        let newContentHash = Self.contentHashForDirtyCheck(
+            document: conversion.document,
+            title: request.title,
+            folderID: request.folderID,
+            folderName: request.folder,
+            reminderAt: request.reminderAt,
+            recurrenceRule: request.recurrenceRule
+        )
+        let hasContentChanged = newContentHash != entity.lastSavedContentHash
+        let newVersion: Int64
+        if hasContentChanged {
+            newVersion = max(entity.version + 1, 1)
+        } else {
+            newVersion = entity.version
+        }
+
         entity.title = request.title
-        entity.updatedAt = updatedAt
+        entity.updatedAt = hasContentChanged ? updatedAt : entity.updatedAt
         entity.folderID = request.folderID
         entity.folderName = request.folder
         entity.reminderAt = request.reminderAt
         entity.recurrenceRule = request.recurrenceRule
-        entity.version = max(entity.version + 1, 1)
+        entity.version = newVersion
+        entity.lastSavedContentHash = newContentHash
         entity.documentSchemaVersion = conversion.document.schemaVersion
         entity.documentSource = conversion.document.source
         entity.blockCount = conversion.document.blocks.count
@@ -329,8 +351,9 @@ final class NoteSaveManager {
 
         interval.end(
             .info,
-            "blocks=\(conversion.document.blocks.count) assets=\(persistedAssetsByID.count) normalizedLength=\(normalizedContent.length)"
+            "blocks=\(conversion.document.blocks.count) assets=\(persistedAssetsByID.count) normalizedLength=\(normalizedContent.length) dirty=\(hasContentChanged)"
         )
+        return hasContentChanged
     }
 
     private func decodeAttributedString(from data: Data) -> NSAttributedString {
@@ -794,6 +817,53 @@ final class NoteSaveManager {
         try jsonEncoder.encode(value)
     }
     
+    /// 计算内容哈希用于脏检查，仅当哈希变化时才递增 version
+    private static func contentHashForDirtyCheck(
+        document: MigratedDocument,
+        title: String,
+        folderID: UUID?,
+        folderName: String,
+        reminderAt: Date?,
+        recurrenceRule: String
+    ) -> String {
+        var hasher = Hasher()
+        hasher.combine(title)
+        hasher.combine(folderID)
+        hasher.combine(folderName)
+        hasher.combine(reminderAt)
+        hasher.combine(recurrenceRule)
+        for block in document.blocks {
+            hasher.combine(block.id)
+            hasher.combine(block.type)
+            if let text = block.text {
+                for span in text {
+                    hasher.combine(span.text)
+                    hasher.combine(span.bold)
+                    hasher.combine(span.italic)
+                    hasher.combine(span.underline)
+                    hasher.combine(span.strikethrough)
+                    hasher.combine(span.link)
+                }
+            }
+            hasher.combine(block.level)
+            hasher.combine(block.listStyle)
+            hasher.combine(block.order)
+            hasher.combine(block.checked)
+            hasher.combine(block.indent)
+            if let asset = block.asset {
+                hasher.combine(asset.id)
+                hasher.combine(asset.kind)
+                hasher.combine(asset.filename)
+            }
+            if let table = block.table {
+                hasher.combine(table.rows)
+                hasher.combine(table.columnWidths)
+                hasher.combine(table.rowHeights)
+            }
+        }
+        return String(hasher.finalize())
+    }
+
     /// 等待并重试保存
     private func waitAndRetry(request: SaveRequest, maxRetries: Int) -> SaveResult {
         var retries = 0

@@ -439,7 +439,7 @@ extension iCloudSyncManager {
         let payload = try Data(contentsOf: fileURL)
         let envelope = try jsonDecoder.decode(VersionedNoteSyncEnvelope.self, from: payload)
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
-        if !result.detectedConflict {
+        if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
                 syncedVersion: min(result.localVersion, result.remoteVersion),
