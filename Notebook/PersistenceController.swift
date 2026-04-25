@@ -691,7 +691,9 @@ enum BlockDocumentNoteVersionStore {
         let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
         syncState.lastRemoteVersion = envelope.currentVersion
         syncState.lastRemoteDeviceID = envelope.deviceID
-        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+
+        // 用内容指纹而非版本号做冲突检测，避免跨设备版本号不可比的问题
+        let incomingFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
 
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
             predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelope.noteID }
@@ -699,15 +701,28 @@ enum BlockDocumentNoteVersionStore {
         let localNote = try context.fetch(noteDescriptor).first
 
         if let localNote {
-            let hasDiverged = localNote.version > syncState.lastCommonVersion && syncState.lastSyncedVersion < localNote.version
-            if hasDiverged && localNote.version != envelope.currentVersion {
+            // localHasChanges: 自上次同步后本地是否有未推送的修改
+            let localHasChanges = localNote.version > syncState.lastSyncedVersion
+            // remoteHasChanged: 远程内容相比上次同步时是否有变化（首次同步时 fingerprint 为空视为有变化）
+            let remoteHasChanged = syncState.remoteFingerprint.isEmpty || incomingFingerprint != syncState.remoteFingerprint
+
+            if localHasChanges && remoteHasChanged {
                 // 冲突解决：将本地版本复制为冲突副本，然后应用远程版本到原笔记
                 let conflictCopyID = UUID()
                 let library = try ensureLibrary(context: context)
+
+                // 记录冲突元数据用于 UI 展示
+                let conflictID = UUID().uuidString.prefix(8)
+                let conflictNoteTitle = "\(localNote.title) [冲突副本]"
+                Logger.shared.log(.app, .warn, """
+                    [SyncConflict] detected noteID=\(envelope.noteID) \
+                    localVersion=\(localNote.version) remoteVersion=\(envelope.currentVersion) \
+                    deviceID=\(envelope.deviceID) conflictID=\(conflictID)
+                    """)
                 let conflictCopy = BlockDocumentNoteEntity(
                     id: conflictCopyID,
                     libraryID: library.id,
-                    title: "\(localNote.title) [冲突副本]",
+                    title: conflictNoteTitle,
                     createdAt: localNote.createdAt,
                     updatedAt: localNote.updatedAt,
                     folderID: localNote.folderID,
@@ -786,6 +801,7 @@ enum BlockDocumentNoteVersionStore {
                 syncState.lastCommonVersion = envelope.currentVersion
                 syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
                 syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
+                syncState.remoteFingerprint = incomingFingerprint
                 syncState.lastSyncAt = Date()
                 syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
 
@@ -798,13 +814,13 @@ enum BlockDocumentNoteVersionStore {
                     localVersion: localNote.version,
                     remoteVersion: envelope.currentVersion
                 )
-            }
-
-            if envelope.currentVersion > localNote.version {
+            } else if remoteHasChanged {
+                // 远程有变化但本地无未推送修改 → 快进应用远程版本
                 try apply(snapshot: envelope.currentSnapshot, to: localNote, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt)
                 syncState.lastCommonVersion = envelope.currentVersion
                 syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
                 syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
+                syncState.remoteFingerprint = incomingFingerprint
                 syncState.lastSyncAt = Date()
                 syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
                 try context.save()
@@ -816,20 +832,21 @@ enum BlockDocumentNoteVersionStore {
                     localVersion: localNote.version,
                     remoteVersion: envelope.currentVersion
                 )
+            } else {
+                // 远程无实质变化，保留本地内容
+                syncState.lastCommonVersion = max(syncState.lastCommonVersion, min(localNote.version, envelope.currentVersion))
+                syncState.lastSyncAt = Date()
+                syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+                try context.save()
+                return NoteSyncMergeResult(
+                    noteID: envelope.noteID,
+                    appliedRemoteSnapshot: false,
+                    detectedConflict: false,
+                    importedHistoryVersions: importedVersions,
+                    localVersion: localNote.version,
+                    remoteVersion: envelope.currentVersion
+                )
             }
-
-            syncState.lastCommonVersion = max(syncState.lastCommonVersion, min(localNote.version, envelope.currentVersion))
-            syncState.lastSyncAt = Date()
-            syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
-            try context.save()
-            return NoteSyncMergeResult(
-                noteID: envelope.noteID,
-                appliedRemoteSnapshot: false,
-                detectedConflict: false,
-                importedHistoryVersions: importedVersions,
-                localVersion: localNote.version,
-                remoteVersion: envelope.currentVersion
-            )
         }
 
         let library = try ensureLibrary(context: context)
@@ -860,6 +877,7 @@ enum BlockDocumentNoteVersionStore {
         syncState.lastCommonVersion = envelope.currentVersion
         syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
         syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, envelope.currentVersion)
+        syncState.remoteFingerprint = incomingFingerprint
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
         try context.save()
@@ -893,6 +911,34 @@ enum BlockDocumentNoteVersionStore {
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
         try context.save()
+    }
+
+    /// 裁剪历史版本：保留最近 maxCount 个且不超过 maxAge 天的版本
+    static func pruneHistory(
+        noteID: UUID,
+        context: ModelContext,
+        maxCount: Int = 50,
+        maxAgeDays: Int = 30
+    ) throws {
+        let allVersions = try history(for: noteID, context: context)
+        guard allVersions.count > maxCount else { return }
+
+        let cutoffDate = Date().addingTimeInterval(-Double(maxAgeDays) * 86400)
+        // 按版本号升序排列，最旧的在前面
+        let sorted = allVersions.sorted { $0.version < $1.version }
+        // 保留最新的 maxCount 个
+        let keepFromIndex = sorted.count - maxCount
+        let toDelete = sorted.prefix(keepFromIndex).filter { entry in
+            // 不删除 30 天内的版本
+            entry.recordedAt < cutoffDate
+        }
+
+        for entry in toDelete {
+            context.delete(entry)
+        }
+        if !toDelete.isEmpty {
+            Logger.shared.log(.app, .debug, "[PruneHistory] noteID=\(noteID.uuidString.prefix(8)) deleted=\(toDelete.count) remaining=\(sorted.count - toDelete.count)")
+        }
     }
 
     static func deleteHistory(noteID: UUID, context: ModelContext) throws {

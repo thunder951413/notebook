@@ -115,7 +115,7 @@ enum SyncPhase: String {
 final class SSHSyncManager: @unchecked Sendable {
     static let shared = SSHSyncManager()
 
-    private struct ProcessExecutionResult {
+    struct ProcessExecutionResult {
         let terminationStatus: Int32
         let standardOutput: String
         let standardError: String
@@ -199,13 +199,13 @@ final class SSHSyncManager: @unchecked Sendable {
     }
 
     /// 生成 SSH ControlPath
-    private func sshControlPath(for config: SSHConfig) -> String {
+    func sshControlPath(for config: SSHConfig) -> String {
         let sanitizedHost = config.host.replacingOccurrences(of: "/", with: "_")
         return "/tmp/ssh-notebook-\(config.username)@\(sanitizedHost)-\(config.port)"
     }
 
     /// 建立 SSH 主连接（用于连接复用）
-    private func establishControlMasterConnection(
+    func establishControlMasterConnection(
         sshpassPath: String,
         config: SSHConfig
     ) async throws {
@@ -291,7 +291,7 @@ final class SSHSyncManager: @unchecked Sendable {
     }
 
     /// 关闭 SSH 主连接
-    private func closeControlMasterConnection(config: SSHConfig) {
+    func closeControlMasterConnection(config: SSHConfig) {
         let controlPath = sshControlPath(for: config)
 
         let didRemove = controlMasterLock.withLock { () -> Bool in
@@ -400,7 +400,7 @@ final class SSHSyncManager: @unchecked Sendable {
     }
 
     /// 检查 sshpass 是否可用
-    private func checkSshpassAvailable() throws -> String {
+    func checkSshpassAvailable() throws -> String {
         if let path = findSshpassPath(), !path.isEmpty {
             return path
         }
@@ -408,7 +408,7 @@ final class SSHSyncManager: @unchecked Sendable {
         return "/usr/local/bin/sshpass"
     }
 
-    private static func sanitizeLog(_ text: String, password: String) -> String {
+    static func sanitizeLog(_ text: String, password: String) -> String {
         let redacted = password.isEmpty ? text : text.replacingOccurrences(of: password, with: "******")
         let filteredLines = redacted
             .components(separatedBy: .newlines)
@@ -1187,7 +1187,7 @@ final class SSHSyncManager: @unchecked Sendable {
         return try context.fetch(descriptor).first
     }
 
-    private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws {
+    func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
             arguments: sshArguments(config: config, command: command, controlPath: controlPath),
@@ -1203,7 +1203,7 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    private func runSSHCommandForOutput(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws -> String {
+    func runSSHCommandForOutput(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws -> String {
         let result = try await executeProcess(
             executablePath: sshpassPath,
             arguments: sshArguments(config: config, command: command, controlPath: controlPath),
@@ -1256,7 +1256,7 @@ final class SSHSyncManager: @unchecked Sendable {
         return RemoteFileDigestProbe(exists: true, digest: value)
     }
 
-    private func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) async throws {
+    func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
             arguments: scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath, controlPath: controlPath),
@@ -1273,7 +1273,7 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    private func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) async throws {
+    func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) async throws {
         let result = try await executeProcess(
             executablePath: sshpassPath,
             arguments: scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath, controlPath: controlPath),
@@ -1290,7 +1290,7 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    private func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
+    func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
         [
             "-e",
             "ssh"
@@ -1300,7 +1300,7 @@ final class SSHSyncManager: @unchecked Sendable {
         ]
     }
 
-    private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) -> [String] {
+    func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) -> [String] {
         [
             "-e",
             "scp"
@@ -1310,7 +1310,7 @@ final class SSHSyncManager: @unchecked Sendable {
         ]
     }
 
-    private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) -> [String] {
+    func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) -> [String] {
         [
             "-e",
             "scp"
@@ -1320,7 +1320,7 @@ final class SSHSyncManager: @unchecked Sendable {
         ]
     }
 
-    private func commonSSHOptions(port: Int, controlPath: String? = nil) -> [String] {
+    func commonSSHOptions(port: Int, controlPath: String? = nil) -> [String] {
         var options = [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -1346,7 +1346,7 @@ final class SSHSyncManager: @unchecked Sendable {
         return options
     }
 
-    private func commonSCPOptions(port: Int, controlPath: String? = nil) -> [String] {
+    func commonSCPOptions(port: Int, controlPath: String? = nil) -> [String] {
         var options = [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -1372,7 +1372,7 @@ final class SSHSyncManager: @unchecked Sendable {
         return options
     }
 
-    private func executeProcess(
+    func executeProcess(
         executablePath: String,
         arguments: [String],
         password: String,
@@ -1443,7 +1443,7 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    private func escapeSingleQuoted(_ value: String) -> String {
+    func escapeSingleQuoted(_ value: String) -> String {
         value.replacingOccurrences(of: "'", with: "'\"'\"'")
     }
 

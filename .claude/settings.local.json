@@ -9,7 +9,8 @@
       "Bash(xcodebuild -project Notebook.xcodeproj -scheme \"Notebook\" -destination \"platform=macOS\" build)",
       "Bash(xcodebuild -project Notebook.xcodeproj -scheme \"Notebook\" -destination \"platform=macOS\" -skipPackageAppValidation clean build)",
       "Bash(xcodebuild -project Notebook.xcodeproj -scheme \"Notebook\" -destination \"platform=macOS\" clean build)",
-      "Bash(xcodebuild:*)"
+      "Bash(xcodebuild:*)",
+      "Bash(python3 *)"
     ]
   }
 }

@@ -64,20 +64,20 @@ final class RichTextController: ObservableObject {
                     if self.lastSavedContentHash != currentHash {
                         self.lastSavedContentHash = currentHash
                         onSave()
-                        print("[RichTextController] Auto-save triggered")
+                        Logger.shared.log(.save, .debug, "Auto-save triggered")
                     }
                 }
             }
         }
 
-        print("[RichTextController] Auto-save started with interval: \(interval)s")
+        Logger.shared.log(.save, .debug, "Auto-save started with interval: \(interval)s")
     }
 
     /// 停止定期自动保存
     func stopAutoSave() {
         autoSaveTimer?.invalidate()
         autoSaveTimer = nil
-        print("[RichTextController] Auto-save stopped")
+        Logger.shared.log(.save, .debug, "Auto-save stopped")
     }
 
     /// 更新保存状态（在手动保存后调用）
@@ -139,7 +139,7 @@ final class RichTextController: ObservableObject {
     /// - Returns: 编辑器内容，如果 textView 不可用则返回 nil（调用者应使用内存中的内容）
     func snapshotAttributedString() -> NSAttributedString? {
         guard let tv = textView else {
-            print("[RichTextController] snapshot: textView is nil, returning nil to use memory content")
+            Logger.shared.log(.editor, .debug, "snapshot: textView is nil, returning nil to use memory content")
             return nil
         }
 
@@ -162,7 +162,7 @@ final class RichTextController: ObservableObject {
         }
         
         let content = tv.attributedString()
-        print("[RichTextController] snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
+        Logger.shared.log(.editor, .debug, "snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
         
         // 强制结束输入法会话（防止中文输入未提交时内容丢失）
         if let inputContext = tv.inputContext {
@@ -605,44 +605,44 @@ final class RichTextController: ObservableObject {
 
     // MARK: - 缩进功能
 
+    private let indentStep: CGFloat = 20 // 每级缩进 20pt
+
     func increaseIndent() {
-        guard let tv = textView else { return }
+        guard let tv = textView, let textStorage = tv.textStorage else { return }
         let nsString = tv.string as NSString
         let selectedRange = tv.selectedRange()
         let lineRange = nsString.lineRange(for: selectedRange)
 
-        // 在行首插入制表符或空格
-        let indentString = "    " // 4个空格
-        tv.textStorage?.insert(NSAttributedString(string: indentString), at: lineRange.location)
+        // 获取当前段落样式，增加 headIndent / firstLineHeadIndent
+        let currentStyle = textStorage.attribute(.paragraphStyle, at: lineRange.location, effectiveRange: nil) as? NSParagraphStyle ?? NSParagraphStyle.default
+        let mutableStyle = currentStyle.mutableCopy() as! NSMutableParagraphStyle
+        mutableStyle.headIndent += indentStep
+        mutableStyle.firstLineHeadIndent += indentStep
+
+        textStorage.addAttribute(.paragraphStyle, value: mutableStyle, range: lineRange)
         tv.didChangeText()
 
         // 调整选中范围
-        let newLocation = selectedRange.location + indentString.count
-        tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
+        tv.setSelectedRange(NSRange(location: selectedRange.location, length: selectedRange.length))
     }
 
     func decreaseIndent() {
-        guard let tv = textView else { return }
+        guard let tv = textView, let textStorage = tv.textStorage else { return }
         let nsString = tv.string as NSString
         let selectedRange = tv.selectedRange()
         let lineRange = nsString.lineRange(for: selectedRange)
 
-        // 检查行首是否有缩进
-        let lineContent = nsString.substring(with: lineRange)
-        let leadingWhitespace = lineContent.prefix { $0 == " " || $0 == "\t" }
+        // 获取当前段落样式，减少 headIndent / firstLineHeadIndent
+        let currentStyle = textStorage.attribute(.paragraphStyle, at: lineRange.location, effectiveRange: nil) as? NSParagraphStyle ?? NSParagraphStyle.default
+        let mutableStyle = currentStyle.mutableCopy() as! NSMutableParagraphStyle
+        mutableStyle.headIndent = max(0, mutableStyle.headIndent - indentStep)
+        mutableStyle.firstLineHeadIndent = max(0, mutableStyle.firstLineHeadIndent - indentStep)
 
-        if !leadingWhitespace.isEmpty {
-            // 删除最多4个空格或1个制表符
-            let deleteCount = min(leadingWhitespace.count, 4)
-            let deleteRange = NSRange(location: lineRange.location, length: deleteCount)
+        textStorage.addAttribute(.paragraphStyle, value: mutableStyle, range: lineRange)
+        tv.didChangeText()
 
-            tv.textStorage?.deleteCharacters(in: deleteRange)
-            tv.didChangeText()
-
-            // 调整选中范围
-            let newLocation = max(lineRange.location, selectedRange.location - deleteCount)
-            tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
-        }
+        // 调整选中范围
+        tv.setSelectedRange(NSRange(location: selectedRange.location, length: selectedRange.length))
     }
 
     // MARK: - 列表功能增强
@@ -674,6 +674,10 @@ final class RichTextController: ObservableObject {
             let deleteRange = NSRange(location: lineRange.location, length: match.range.length)
             tv.textStorage?.deleteCharacters(in: deleteRange)
             tv.didChangeText()
+            // 恢复默认段落样式
+            let updatedNs = tv.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: NSRange(location: lineRange.location, length: 0))
+            (tv as? RichTextView)?.removeListParagraphStyle(lineRange: updatedLineRange)
 
             // 调整光标位置
             let newLocation = selectedRange.location - match.range.length
@@ -683,11 +687,16 @@ final class RichTextController: ObservableObject {
             removeOtherListPrefixes(tv: tv, lineRange: lineRange)
 
             // 添加编号 "1. "
-            tv.textStorage?.insert(NSAttributedString(string: "1. "), at: lineRange.location)
+            let marker = "1. "
+            tv.textStorage?.insert(NSAttributedString(string: marker), at: lineRange.location)
             tv.didChangeText()
+            // 应用列表段落样式
+            let updatedNs = tv.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: NSRange(location: lineRange.location, length: 0))
+            (tv as? RichTextView)?.applyListParagraphStyle(lineRange: updatedLineRange, markerText: marker)
 
             // 调整光标位置
-            let newLocation = selectedRange.location + 3
+            let newLocation = selectedRange.location + marker.count
             tv.setSelectedRange(NSRange(location: newLocation, length: 0))
         }
     }
@@ -707,6 +716,10 @@ final class RichTextController: ObservableObject {
             let deleteRange = NSRange(location: lineRange.location, length: prefix.count)
             tv.textStorage?.deleteCharacters(in: deleteRange)
             tv.didChangeText()
+            // 恢复默认段落样式
+            let updatedNs = tv.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: NSRange(location: lineRange.location, length: 0))
+            (tv as? RichTextView)?.removeListParagraphStyle(lineRange: updatedLineRange)
 
             // 调整光标位置
             let newLocation = selectedRange.location - prefix.count
@@ -718,6 +731,10 @@ final class RichTextController: ObservableObject {
             // 添加前缀
             tv.textStorage?.insert(NSAttributedString(string: prefix), at: lineRange.location)
             tv.didChangeText()
+            // 应用列表段落样式（折行对齐到 marker 之后）
+            let updatedNs = tv.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: NSRange(location: lineRange.location, length: 0))
+            (tv as? RichTextView)?.applyListParagraphStyle(lineRange: updatedLineRange, markerText: prefix)
 
             // 调整光标位置
             let newLocation = selectedRange.location + prefix.count
@@ -730,9 +747,9 @@ final class RichTextController: ObservableObject {
         let nsString = tv.string as NSString
         let lineContent = nsString.substring(with: lineRange)
 
-        let prefixes = ["• ", "- ", "1. ", "2. ", "3. ", "4. ", "5. ", "6. ", "7. ", "8. ", "9. "]
-
-        for prefix in prefixes {
+        // 先处理两个字符的简单前缀
+        let simplePrefixes = ["• ", "- ", "* "]
+        for prefix in simplePrefixes {
             if lineContent.hasPrefix(prefix) {
                 let deleteRange = NSRange(location: lineRange.location, length: prefix.count)
                 tv.textStorage?.deleteCharacters(in: deleteRange)
@@ -740,7 +757,7 @@ final class RichTextController: ObservableObject {
             }
         }
 
-        // 检查编号模式 (数字+点+空格)
+        // 通用编号模式 (任意位数 + 点 + 空格)
         let numberedPattern = "^\\d+\\. "
         if let regex = try? NSRegularExpression(pattern: numberedPattern),
            let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
@@ -772,22 +789,13 @@ final class RichTextController: ObservableObject {
     }
 
     func clearFormatting() {
-        guard let tv = textView else {
-            print("[RichTextController] clearFormatting: textView is nil")
-            return
-        }
+        guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 {
-            print("[RichTextController] clearFormatting: no selection")
-            return
-        }
+        if range.length == 0 { return }
 
         // 检查范围是否有效
         let textLength = tv.string.utf16.count
-        guard range.location >= 0, range.location + range.length <= textLength else {
-            print("[RichTextController] clearFormatting: invalid range \(range), text length \(textLength)")
-            return
-        }
+        guard range.location >= 0, range.location + range.length <= textLength else { return }
 
         // 从临近文字获取格式（优先从选中范围前的文字获取，如果没有则从后的文字获取）
         let (inheritedFont, inheritedColor) = getFormatFromNearbyText(for: range, in: tv)
@@ -897,7 +905,7 @@ final class RichTextController: ObservableObject {
                 tv.textStorage?.insert(mutableAttr, at: tv.selectedRange().location)
                 tv.didChangeText()
             } catch {
-                print("Failed to insert image: \(error)")
+                Logger.shared.log(.editor, .warn, "Failed to insert image: \(error)")
             }
         }
     }
@@ -917,7 +925,7 @@ final class RichTextController: ObservableObject {
             let player = try AVAudioPlayer(contentsOf: fileURL)
             duration = player.duration
         } catch {
-            print("[RichTextEditor] 无法获取音频时长: \(error)")
+            Logger.shared.log(.editor, .warn, "无法获取音频时长: \(error)")
         }
         
         let attachment = AudioBlockAttachment(fileURL: fileURL, duration: duration, createDate: Date())
@@ -941,7 +949,7 @@ final class RichTextController: ObservableObject {
                 let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: url, noteID: noteID, kind: .audio)
                 insertAudio(from: destURL)
             } catch {
-                print("Failed to insert audio: \(error)")
+                Logger.shared.log(.editor, .warn, "Failed to insert audio: \(error)")
             }
         }
     }
@@ -1033,6 +1041,30 @@ class RichTextView: NSTextView {
     weak var pasteCoordinator: PasteCoordinatorProtocol?
     private var audioPlayerPanel: NSPanel?
 
+    // MARK: - 列表段落样式
+
+    /// 为指定行应用列表段落样式（firstLineHeadIndent / headIndent / tabStops），
+    /// 保证编辑器中新建的列表项与从 BlockDocument 加载的列表项折行对齐一致。
+    func applyListParagraphStyle(lineRange: NSRange, markerText: String) {
+        guard let textStorage = self.textStorage else { return }
+        let markerFont = AppSettings.shared.editorFont
+        let markerSize = (markerText as NSString).size(withAttributes: [.font: markerFont])
+        let markerWidth = max(markerSize.width + 4, 16)
+
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = 0
+        style.headIndent = markerWidth
+        style.tabStops = [NSTextTab(textAlignment: .left, location: markerWidth)]
+
+        textStorage.addAttribute(.paragraphStyle, value: style, range: lineRange)
+    }
+
+    /// 移除指定行的列表段落样式，恢复默认
+    func removeListParagraphStyle(lineRange: NSRange) {
+        guard let textStorage = self.textStorage else { return }
+        textStorage.addAttribute(.paragraphStyle, value: NSParagraphStyle.default, range: lineRange)
+    }
+
     private struct ImageResizeState {
         let range: NSRange
         let initialPoint: CGPoint
@@ -1053,30 +1085,24 @@ class RichTextView: NSTextView {
     private var suppressNextMouseUp = false // 用于阻止双击后的 mouseUp 触发链接
 
     override func paste(_ sender: Any?) {
-        print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
         // 首先尝试让 coordinator 处理图片粘贴
         if let coordinator = pasteCoordinator {
             if coordinator.handlePaste(in: self) {
                 // 图片粘贴成功，不调用父类方法
-                print("[RichTextView] Image paste handled by coordinator")
                 return
             }
         }
         // 如果不是图片，调用标准粘贴
-        print("[RichTextView] Falling back to super.paste")
         super.paste(sender)
     }
 
     // 处理拖放粘贴
     override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
-        print("[RichTextView] readSelection(from:type:) called, type: \(type)")
         return super.readSelection(from: pboard, type: type)
     }
     
     // 处理拖放操作
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
-        print("[RichTextView] performDragOperation called")
-        
         let pasteboard = draggingInfo.draggingPasteboard
         
         // 尝试读取文件URL
@@ -1087,7 +1113,7 @@ class RichTextView: NSTextView {
             let ext = fileURL.pathExtension.lowercased()
             
             if imageExtensions.contains(ext) {
-                print("[RichTextView] Dropped image file: \(fileURL)")
+                Logger.shared.log(.editor, .debug, "Dropped image file: \(fileURL.lastPathComponent)")
                 if let coordinator = pasteCoordinator as? RichTextEditor.Coordinator {
                     if coordinator.handleDroppedImage(fileURL: fileURL, in: self) {
                         return true
@@ -1103,7 +1129,6 @@ class RichTextView: NSTextView {
     // 处理 validateMenuItem 确保粘贴菜单可用
     override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(NSTextView.paste(_:)) {
-            print("[RichTextView] validateMenuItem for paste")
             return true
         }
         return super.validateMenuItem(menuItem)
@@ -1211,7 +1236,7 @@ class RichTextView: NSTextView {
                 if let url = value as? URL, isAudioURL(url) {
                     let fallbackAttachment = AudioBlockAttachment(fileURL: url)
                     let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
-                    print("[RichTextEditor] 通过 link 打开音频播放器: \(url.lastPathComponent)")
+                    Logger.shared.log(.editor, .debug, "通过 link 打开音频播放器: \(url.lastPathComponent)")
                     showAudioPlayerPopover(for: fallbackAttachment, at: rect)
                     return
                 }
@@ -1220,7 +1245,7 @@ class RichTextView: NSTextView {
                    isAudioURL(url) {
                     let fallbackAttachment = AudioBlockAttachment(fileURL: url)
                     let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
-                    print("[RichTextEditor] 通过 link(字符串) 打开音频播放器: \(url.lastPathComponent)")
+                    Logger.shared.log(.editor, .debug, "通过 link(字符串) 打开音频播放器: \(url.lastPathComponent)")
                     showAudioPlayerPopover(for: fallbackAttachment, at: rect)
                     return
                 }
@@ -1511,16 +1536,15 @@ class RichTextView: NSTextView {
         }
 
         guard let url = imageURL, FileManager.default.fileExists(atPath: url.path) else {
-            print("[RichTextEditor] 图片文件不存在")
             return false
         }
 
-        print("[RichTextEditor] 双击打开图片: \(url.lastPathComponent)")
+        Logger.shared.log(.editor, .debug, "双击打开图片: \(url.lastPathComponent)")
 
         // 使用系统预览打开图片
         NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Preview.app"), configuration: NSWorkspace.OpenConfiguration()) { app, error in
             if let error = error {
-                print("[RichTextEditor] 打开预览失败: \(error)")
+                Logger.shared.log(.editor, .warn, "打开预览失败: \(error)")
                 // 失败时使用默认方式打开
                 NSWorkspace.shared.open(url)
             }
@@ -1567,13 +1591,6 @@ class RichTextView: NSTextView {
         }
         textStorage.endEditing()
 
-        if let currentW = textStorage.attribute(.notebookImageWidth, at: state.range.location, effectiveRange: nil) as? CGFloat,
-           let currentH = textStorage.attribute(.notebookImageHeight, at: state.range.location, effectiveRange: nil) as? CGFloat,
-           let currentLink = textStorage.attribute(.link, at: state.range.location, effectiveRange: nil) {
-            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=\(currentW)x\(currentH), link=\(currentLink), freeResize=\(state.freeResize)")
-        } else {
-            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=<missing>, freeResize=\(state.freeResize)")
-        }
         self.didChangeText()
         if let coordinator = self.delegate as? RichTextEditor.Coordinator {
             coordinator.syncBindingFromTextView(self)
@@ -1855,7 +1872,7 @@ class RichTextView: NSTextView {
             let attrString = NSAttributedString(attachment: attachment)
             textStorage.replaceCharacters(in: range, with: attrString)
             if let data = try? JSONEncoder().encode(attachment.tableData) {
-                print("[TableTrace] hideActiveTableEditor write notebookTableData bytes=\(data.count) rows=\(attachment.tableData.rowCount)")
+                Logger.shared.log(.table, .debug, "hideActiveTableEditor write notebookTableData bytes=\(data.count) rows=\(attachment.tableData.rowCount)")
                 textStorage.addAttribute(.notebookTableData, value: data, range: NSRange(location: range.location, length: 1))
             }
             textStorage.edited(.editedAttributes, range: range, changeInLength: 0)
@@ -1919,7 +1936,7 @@ class RichTextView: NSTextView {
             let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
             guard expandedRect.contains(clickPoint) else { return false }
 
-            print("[RichTextEditor] 打开音频播放器: \(audioAttachment.fileURL.lastPathComponent)")
+            Logger.shared.log(.editor, .debug, "打开音频播放器: \(audioAttachment.fileURL.lastPathComponent)")
             showAudioPlayerPopover(for: audioAttachment, at: attachmentRect)
             return true
         }
@@ -1936,7 +1953,7 @@ class RichTextView: NSTextView {
             let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
             guard expandedRect.contains(clickPoint) else { return false }
 
-            print("[RichTextEditor] 打开音频播放器(兼容模式): \(fallbackURL.lastPathComponent)")
+            Logger.shared.log(.editor, .debug, "打开音频播放器(兼容模式): \(fallbackURL.lastPathComponent)")
             showAudioPlayerPopover(for: fallbackAttachment, at: attachmentRect)
             return true
         }
@@ -1953,7 +1970,7 @@ class RichTextView: NSTextView {
         guard let textStorage else { return }
         let fullRange = NSRange(location: 0, length: textStorage.length)
         
-        print("[LoadDebug] normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)")
+        Logger.shared.log(.editor, .debug, "normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)")
 
         textStorage.beginEditing()
         defer { textStorage.endEditing() }
@@ -1961,7 +1978,7 @@ class RichTextView: NSTextView {
         textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
             guard let attachment = value as? NSTextAttachment else { return }
             
-            print("[LoadDebug] Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))")
+            Logger.shared.log(.editor, .debug, "Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))")
 
             // 0) 先做附件自愈：把普通 NSTextAttachment 的图片/音频替换为自定义附件
             if !(attachment is AttachmentTextAttachment),
@@ -2001,7 +2018,7 @@ class RichTextView: NSTextView {
                     let savedHeight = textStorage.attribute(.notebookImageHeight, at: range.location, effectiveRange: nil) as? CGFloat
                     if let savedWidth, let savedHeight, savedWidth > 1, savedHeight > 1 {
                         textAttachment.bounds = NSRect(x: 0, y: 0, width: savedWidth, height: savedHeight)
-                        print("[Attachment Load] Restored image bounds from attrs: \(savedWidth)x\(savedHeight)")
+                        Logger.shared.log(.attachment, .debug, "Restored image bounds from attrs: \(savedWidth)x\(savedHeight)")
                         restored = true
                     }
 
@@ -2010,7 +2027,7 @@ class RichTextView: NSTextView {
                         textAttachment.bounds = NSRect(x: 0, y: 0, width: parsed.width, height: parsed.height)
                         textStorage.addAttribute(.notebookImageWidth, value: parsed.width, range: range)
                         textStorage.addAttribute(.notebookImageHeight, value: parsed.height, range: range)
-                        print("[Attachment Load] Restored image bounds from link: \(parsed.width)x\(parsed.height)")
+                        Logger.shared.log(.attachment, .debug, "Restored image bounds from link: \(parsed.width)x\(parsed.height)")
                     }
                 }
                 textAttachment.refreshPresentationIfNeeded()
@@ -2025,27 +2042,27 @@ class RichTextView: NSTextView {
 
             // 3) 表格附件：检查并刷新
             if let tableAttachment = attachment as? TableTextAttachment {
-                print("[LoadDebug] Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)")
+                Logger.shared.log(.table, .debug, "Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)")
                 if let rawData = textStorage.attribute(.notebookTableData, at: range.location, effectiveRange: nil) as? Data,
                    let decoded = try? JSONDecoder().decode(TableData.self, from: rawData) {
-                    print("[TableTrace] load notebookTableData bytes=\(rawData.count) rows=\(decoded.rowCount)")
+                    Logger.shared.log(.table, .debug, "load notebookTableData bytes=\(rawData.count) rows=\(decoded.rowCount)")
                     tableAttachment.tableData = decoded
                 } else if let (tableData, _) = TableTextAttachment.extractTableData(from: tableAttachment.contents) {
-                    print("[TableTrace] load from contents rows=\(tableData.rowCount)")
+                    Logger.shared.log(.table, .debug, "load from contents rows=\(tableData.rowCount)")
                     tableAttachment.tableData = tableData
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        Logger.shared.log(.table, .debug, "backfill notebookTableData bytes=\(encoded.count)")
                     }
                 } else if let wrapper = tableAttachment.fileWrapper,
                           wrapper.isDirectory,
                           let jsonData = wrapper.fileWrappers?["table.json"]?.regularFileContents,
                           let tableData = try? JSONDecoder().decode(TableData.self, from: jsonData) {
-                    print("[TableTrace] load from fileWrapper json bytes=\(jsonData.count) rows=\(tableData.rowCount)")
+                    Logger.shared.log(.table, .debug, "load from fileWrapper json bytes=\(jsonData.count) rows=\(tableData.rowCount)")
                     tableAttachment.tableData = tableData
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        Logger.shared.log(.table, .debug, "backfill notebookTableData bytes=\(encoded.count)")
                     }
                     if let pngData = wrapper.fileWrappers?["table.png"]?.regularFileContents, !pngData.isEmpty {
                         tableAttachment.contents = pngData
@@ -2054,15 +2071,15 @@ class RichTextView: NSTextView {
                           wrapper.isRegularFile,
                           let data = wrapper.regularFileContents,
                           let (tableData, _) = TableTextAttachment.extractTableData(from: data) {
-                    print("[TableTrace] load from fileWrapper bytes=\(data.count) rows=\(tableData.rowCount)")
+                    Logger.shared.log(.table, .debug, "load from fileWrapper bytes=\(data.count) rows=\(tableData.rowCount)")
                     tableAttachment.tableData = tableData
                     tableAttachment.contents = data
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        Logger.shared.log(.table, .debug, "backfill notebookTableData bytes=\(encoded.count)")
                     }
                 } else {
-                    print("[TableTrace] load failed: no table data")
+                    Logger.shared.log(.table, .warn, "load failed: no table data")
                 }
                 if (tableAttachment.contents?.isEmpty ?? true),
                    let wrapper = tableAttachment.fileWrapper {
@@ -2079,9 +2096,9 @@ class RichTextView: NSTextView {
                 if tableAttachment.fileType == nil || tableAttachment.fileType?.hasPrefix("dyn.") == true {
                     tableAttachment.fileType = "public.png"
                 }
-                print("[LoadDebug] TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
+                Logger.shared.log(.table, .debug, "TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
                 tableAttachment.updateImage()
-                print("[LoadDebug] TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
+                Logger.shared.log(.table, .debug, "TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
                 return
             }
             
@@ -2092,16 +2109,16 @@ class RichTextView: NSTextView {
                                    attachment is AudioBlockAttachment ||
                                    attachment is TableTextAttachment ||
                                    attachment is CheckboxTextAttachment
-            print("[LoadDebug] Attachment class: \(attachmentClassName), isKnownCustom: \(isKnownCustomType)")
+            Logger.shared.log(.editor, .debug, "Attachment class: \(attachmentClassName), isKnownCustom: \(isKnownCustomType)")
             
             if !isKnownCustomType {
-                print("[LoadDebug] Unknown attachment type, checking if looks like table...")
-                print("[LoadDebug] Attachment bounds: \(attachment.bounds.width) x \(attachment.bounds.height)")
-                print("[LoadDebug] Attachment contents: \(attachment.contents?.count ?? 0) bytes")
-                print("[LoadDebug] Attachment image: \(attachment.image != nil ? "exists" : "nil")")
+                Logger.shared.log(.editor, .debug, "Unknown attachment type, checking if looks like table...")
+                Logger.shared.log(.editor, .debug, "Attachment bounds: \(attachment.bounds.width) x \(attachment.bounds.height)")
+                Logger.shared.log(.editor, .debug, "Attachment contents: \(attachment.contents?.count ?? 0) bytes")
+                Logger.shared.log(.editor, .debug, "Attachment image: \(attachment.image != nil ? "exists" : "nil")")
                 
                 if TableTextAttachment.looksLikeTable(attachment) {
-                    print("[LoadDebug] Found potential table attachment, attempting recovery...")
+                    Logger.shared.log(.editor, .debug, "Found potential table attachment, attempting recovery...")
                     
                     // 尝试恢复表格附件
                     if let recovered = TableTextAttachment.recover(from: attachment) {
@@ -2110,11 +2127,11 @@ class RichTextView: NSTextView {
                         if let tableDataAttr {
                             textStorage.addAttribute(.notebookTableData, value: tableDataAttr, range: range)
                         }
-                        print("[LoadDebug] Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
+                        Logger.shared.log(.table, .info, "Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
                         return
                     }
                 } else {
-                    print("[LoadDebug] Does not look like table")
+                    Logger.shared.log(.editor, .debug, "Does not look like table")
                 }
             }
 
@@ -2162,7 +2179,7 @@ class RichTextView: NSTextView {
                     }
                     return newAttachment
                 } catch {
-                    print("[Attachment Migrate] Failed writing legacy image data: \(error)")
+                    Logger.shared.log(.attachment, .warn, "Failed writing legacy image data: \(error)")
                 }
             }
         }
@@ -2184,7 +2201,7 @@ class RichTextView: NSTextView {
                 }
                 return newAttachment
             } catch {
-                print("[Attachment Migrate] Failed exporting legacy image: \(error)")
+                Logger.shared.log(.attachment, .warn, "Failed exporting legacy image: \(error)")
             }
         }
 
@@ -2209,7 +2226,7 @@ class RichTextView: NSTextView {
                         attachmentFilename: filename
                     )
                 } catch {
-                    print("[Attachment Migrate] Failed writing legacy audio data: \(error)")
+                    Logger.shared.log(.attachment, .warn, "Failed writing legacy audio data: \(error)")
                 }
             }
         }
@@ -2322,7 +2339,7 @@ class RichTextView: NSTextView {
     /// 显示音频播放器弹窗
     private func showAudioPlayerPopover(for attachment: AudioBlockAttachment, at rect: CGRect) {
         guard FileManager.default.fileExists(atPath: attachment.fileURL.path) else {
-            print("[RichTextEditor] 音频文件不存在: \(attachment.fileURL.path)")
+            Logger.shared.log(.editor, .warn, "音频文件不存在: \(attachment.fileURL.path)")
             return
         }
 
@@ -2458,6 +2475,12 @@ class RichTextView: NSTextView {
         let selectedRange = self.selectedRange()
         let currentLineRange = nsString.lineRange(for: selectedRange)
 
+        // 0. 如果当前光标处是标题行，换行时把新段落的 paragraphStyle / font 重置为普通段落
+        //    避免 heading 的段前段后间距 + 大字号延续到下一行。
+        if isInsideHeadingLine(at: selectedRange.location) {
+            return handleHeadingReturn()
+        }
+
         // 1. 检查复选框
         if let checkboxRange = findCheckboxAtLineStart(lineRange: currentLineRange) {
             return handleCheckboxReturn(checkboxRange: checkboxRange, currentLineRange: currentLineRange, nsString: nsString)
@@ -2480,6 +2503,44 @@ class RichTextView: NSTextView {
 
         // 5. 没有列表，继承上一行的格式（字号、字体、颜色）
         return handleFormatInheritance(currentLineRange: currentLineRange)
+    }
+
+    /// 当前光标是否位于 heading 行（带 notebookHeadingLevel 属性）
+    private func isInsideHeadingLine(at location: Int) -> Bool {
+        guard let textStorage = self.textStorage, textStorage.length > 0 else { return false }
+        let probe = max(0, min(location, textStorage.length - 1))
+        return textStorage.attribute(.notebookHeadingLevel, at: probe, effectiveRange: nil) != nil
+    }
+
+    /// 从 heading 回车：插入换行，然后把新行的 paragraphStyle / font / headingLevel 清成普通段落
+    private func handleHeadingReturn() -> Bool {
+        guard let textStorage = self.textStorage else { return false }
+        self.insertNewline(nil)
+
+        let caret = self.selectedRange().location
+        guard caret <= textStorage.length else { return true }
+
+        let newLineRange = (self.string as NSString).lineRange(for: NSRange(location: caret, length: 0))
+        let normalFont = AppSettings.shared.editorFont
+        let normalStyle = NSParagraphStyle.default
+
+        textStorage.beginEditing()
+        if newLineRange.length > 0 {
+            textStorage.addAttribute(.font, value: normalFont, range: newLineRange)
+            textStorage.addAttribute(.paragraphStyle, value: normalStyle, range: newLineRange)
+            textStorage.removeAttribute(.notebookHeadingLevel, range: newLineRange)
+        }
+        textStorage.endEditing()
+
+        // typingAttributes 同步重置，保证之后新输入的字也是普通段落
+        var typingAttrs = self.typingAttributes
+        typingAttrs[.font] = normalFont
+        typingAttrs[.paragraphStyle] = normalStyle
+        typingAttrs.removeValue(forKey: .notebookHeadingLevel)
+        self.typingAttributes = typingAttrs
+
+        self.didChangeText()
+        return true
     }
 
     /// 处理格式继承 - 从当前行或上一行获取格式
@@ -2642,10 +2703,14 @@ class RichTextView: NSTextView {
         let trimmedContent = contentAfterCheckbox.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmedContent.isEmpty {
-            // 空行，删除复选框
+            // 空行，删除复选框，恢复默认段落样式
             let deleteRange = NSRange(location: checkboxRange.location, length: checkboxRange.length + 1) // +1 for space
             self.textStorage?.deleteCharacters(in: deleteRange)
             self.insertNewline(nil)
+            // 新行恢复默认段落样式
+            let updatedNs = self.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: self.selectedRange())
+            self.removeListParagraphStyle(lineRange: updatedLineRange)
             self.didChangeText()
             return true
         } else {
@@ -2663,6 +2728,10 @@ class RichTextView: NSTextView {
             mutableAttr.append(NSAttributedString(string: " "))
 
             self.textStorage?.insert(mutableAttr, at: newLineRange.location)
+
+            // 应用列表段落样式（复选框 marker 宽度对齐）
+            let styledLineRange = (self.string as NSString).lineRange(for: NSRange(location: newLineRange.location, length: 0))
+            self.applyListParagraphStyle(lineRange: styledLineRange, markerText: "☐ ")
 
             // 应用继承的格式到复选框之后的内容（跳过复选框和空格）
             let contentStartLocation = newLineRange.location + mutableAttr.length
@@ -2683,10 +2752,14 @@ class RichTextView: NSTextView {
         let trimmedContent = contentAfterPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmedContent.isEmpty {
-            // 空行，删除前缀
+            // 空行，删除前缀，恢复默认段落样式
             let deleteRange = NSRange(location: prefixRange.location, length: prefixRange.length)
             self.textStorage?.deleteCharacters(in: deleteRange)
             self.insertNewline(nil)
+            // 新行恢复默认段落样式
+            let updatedNs = self.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: self.selectedRange())
+            self.removeListParagraphStyle(lineRange: updatedLineRange)
             self.didChangeText()
             return true
         } else {
@@ -2699,6 +2772,10 @@ class RichTextView: NSTextView {
             // 在新行插入相同的前缀
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
             self.textStorage?.insert(NSAttributedString(string: prefix), at: newLineRange.location)
+
+            // 应用列表段落样式（折行对齐）
+            let styledLineRange = (self.string as NSString).lineRange(for: NSRange(location: newLineRange.location, length: 0))
+            self.applyListParagraphStyle(lineRange: styledLineRange, markerText: prefix)
 
             // 应用继承的格式到前缀之后的内容
             let contentStartLocation = newLineRange.location + prefix.count
@@ -2714,17 +2791,19 @@ class RichTextView: NSTextView {
 
     /// 处理编号列表回车
     private func handleNumberedListReturn(numberRange: NSRange, currentNumber: Int, currentLineRange: NSRange, nsString: NSString) -> Bool {
-        _ = "\(currentNumber). "
-
         // 检查当前行是否只有编号（空行）
         let contentAfterNumber = nsString.substring(with: NSRange(location: numberRange.upperBound, length: currentLineRange.upperBound - numberRange.upperBound))
         let trimmedContent = contentAfterNumber.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmedContent.isEmpty {
-            // 空行，删除编号
+            // 空行，删除编号，恢复默认段落样式
             let deleteRange = NSRange(location: numberRange.location, length: numberRange.length)
             self.textStorage?.deleteCharacters(in: deleteRange)
             self.insertNewline(nil)
+            // 新行恢复默认段落样式
+            let updatedNs = self.string as NSString
+            let updatedLineRange = updatedNs.lineRange(for: self.selectedRange())
+            self.removeListParagraphStyle(lineRange: updatedLineRange)
             self.didChangeText()
             return true
         } else {
@@ -2739,6 +2818,10 @@ class RichTextView: NSTextView {
             let nextNumber = currentNumber + 1
             let newPrefix = "\(nextNumber). "
             self.textStorage?.insert(NSAttributedString(string: newPrefix), at: newLineRange.location)
+
+            // 应用列表段落样式（折行对齐）
+            let styledLineRange = (self.string as NSString).lineRange(for: NSRange(location: newLineRange.location, length: 0))
+            self.applyListParagraphStyle(lineRange: styledLineRange, markerText: newPrefix)
 
             // 应用继承的格式到编号之后的内容
             let contentStartLocation = newLineRange.location + newPrefix.count
@@ -2928,6 +3011,40 @@ struct RichTextEditor: NSViewRepresentable {
             Self.refreshAppearanceSensitiveAttachments(in: textView)
             context.coordinator.lastAppliedColorScheme = scheme
             interval.end(.info, "contentLength=\(textView.string.count)")
+        } else {
+            // 同一笔记：若 @Binding 的内容被外部（非编辑器自身）改动（例如 AI 追加、同步拉取、
+            // 撤销重放），需要回灌到 textView，避免外部变更被丢弃。
+            // 守卫：排除本次编辑刚产生的回写 / 输入法未提交 / 程序性更新中。
+            if !context.coordinator.isProgrammaticUpdate,
+               !controller.hasMarkedText {
+                let currentLength = textView.textStorage?.length ?? 0
+                let incomingLength = attributedText.length
+                let stringMismatch = incomingLength != currentLength || attributedText.string != textView.string
+                if stringMismatch {
+                    let interval = Logger.shared.beginInterval(
+                        .editor,
+                        "richTextExternalReflow",
+                        metadata: "noteID=\(noteID.uuidString.prefix(8)) incoming=\(incomingLength) existing=\(currentLength)"
+                    )
+                    context.coordinator.isProgrammaticUpdate = true
+                    let selectedRange = textView.selectedRange()
+                    textView.textStorage?.setAttributedString(attributedText)
+                    textView.normalizeAttachmentsAfterLoad()
+                    if updateDefaultTextColors(in: textView, for: scheme) {
+                        context.coordinator.attributedText = NSAttributedString(attributedString: textView.attributedString())
+                    }
+                    Self.refreshAppearanceSensitiveAttachments(in: textView)
+                    // 尽量保留光标位置
+                    let newLength = textView.textStorage?.length ?? 0
+                    let clamped = NSRange(
+                        location: min(selectedRange.location, newLength),
+                        length: 0
+                    )
+                    textView.setSelectedRange(clamped)
+                    context.coordinator.isProgrammaticUpdate = false
+                    interval.end(.info, "renderedLength=\(textView.string.count)")
+                }
+            }
         }
     }
 
@@ -3037,18 +3154,58 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         /// 应用字体设置到当前文本视图
+        /// 仅替换"看起来是默认系统字体"的片段，保留标题字号、bold/italic、
+        /// 用户手动调过的字体家族/字号等显式样式
         private func applyFontSetting() {
-            guard let textView = controller?.textView else { return }
-            let font = AppSettings.shared.editorFont
-            textView.font = font
+            guard let textView = controller?.textView,
+                  let textStorage = textView.textStorage else { return }
+            let newFont = AppSettings.shared.editorFont
+            textView.font = newFont
 
-            // 更新整个文本存储的字体
-            textView.textStorage?.enumerateAttributes(in: NSRange(location: 0, length: textView.textStorage?.length ?? 0), options: []) { attrs, range, stop in
-                // 只更新没有特定字体属性的文本（保留用户手动设置的字体）
-                var newAttrs = attrs
-                newAttrs[.font] = font
-                textView.textStorage?.setAttributes(newAttrs, range: range)
+            // 更新 typingAttributes，保证之后新输入的文字用新字号
+            var typingAttrs = textView.typingAttributes
+            typingAttrs[.font] = newFont
+            textView.typingAttributes = typingAttrs
+
+            let fullRange = NSRange(location: 0, length: textStorage.length)
+            guard fullRange.length > 0 else { return }
+
+            textStorage.beginEditing()
+            textStorage.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+                // 附件不动
+                if attrs[.attachment] != nil { return }
+
+                // 标题行保留原字体（有自定义 headingLevel 标记或明显非默认 size 的都跳过）
+                if attrs[.notebookHeadingLevel] != nil { return }
+
+                guard let currentFont = attrs[.font] as? NSFont else {
+                    // 根本没设字体，直接打上新字体
+                    textStorage.addAttribute(.font, value: newFont, range: range)
+                    return
+                }
+
+                // 保留有 bold/italic trait 的字体；只在"看起来是纯默认系统字体"时替换
+                let traits = NSFontManager.shared.traits(of: currentFont)
+                let hasBold = traits.contains(.boldFontMask)
+                let hasItalic = traits.contains(.italicFontMask)
+                if hasBold || hasItalic { return }
+
+                // 家族不是系统字体 → 用户显式换过字体，不覆盖
+                let isSystemFamily = currentFont.familyName == NSFont.systemFont(ofSize: currentFont.pointSize).familyName
+                if !isSystemFamily { return }
+
+                // 字号与旧默认不同 → 用户显式调过字号，不覆盖
+                // 这里用当前设置前的 pointSize 判断不了，退而用一个容忍：只替换 pointSize 等于常见默认值的
+                let currentSize = currentFont.pointSize
+                let looksDefault = abs(currentSize - AppSettings.defaultFontSize) < 0.5
+                    || abs(currentSize - 13) < 0.5  // legacy 默认
+                    || abs(currentSize - 14) < 0.5
+                    || abs(currentSize - 16) < 0.5
+                guard looksDefault else { return }
+
+                textStorage.addAttribute(.font, value: newFont, range: range)
             }
+            textStorage.endEditing()
         }
         
         /// 检查是否有 marked text（输入法正在编辑）
@@ -3121,24 +3278,16 @@ struct RichTextEditor: NSViewRepresentable {
         
         /// 处理粘贴操作，支持粘贴图片和文件
         func handlePaste(in textView: NSTextView) -> Bool {
-            print("[Coordinator] handlePaste called")
             let pasteboard = NSPasteboard.general
 
             // 获取当前笔记ID
             guard let noteID = controller?.attachmentTargetNoteID() else {
-                print("[Coordinator] No noteID available")
                 return false
             }
-            print("[Coordinator] noteID: \(noteID.uuidString.prefix(8))")
-
-            // 打印剪贴板类型信息
-            let types = pasteboard.types ?? []
-            print("[Coordinator] Pasteboard types: \(types)")
 
             // 1. 首先尝试读取文件URL（从Finder复制的文件）- 优先处理原文件
             if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
                !fileURLs.isEmpty {
-                print("[Coordinator] File URLs found: \(fileURLs)")
                 // 只处理第一个文件
                 let fileURL = fileURLs[0]
 
@@ -3147,48 +3296,42 @@ struct RichTextEditor: NSViewRepresentable {
                 let ext = fileURL.pathExtension.lowercased()
 
                 if imageExtensions.contains(ext) {
-                    print("[Coordinator] Image file detected: \(ext)")
                     // 是图片文件，复制到附件目录
                     do {
                         let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
                         insertAttachment(at: destURL, kind: .image, in: textView)
                         return true
                     } catch {
-                        print("[Coordinator] Failed to copy image file: \(error)")
+                        Logger.shared.log(.attachment, .warn, "Failed to copy image file: \(error)")
                         return false
                     }
                 }
-                print("[Coordinator] Not an image file: \(ext)")
                 // 其他类型文件不处理，返回false让系统处理
                 return false
             }
 
             // 2. 尝试读取图片数据（截图或复制的图片数据）
             if let image = readImageFromPasteboard(pasteboard) {
-                print("[Coordinator] Image data found in pasteboard")
                 do {
                     let destURL = try savePastedImage(image: image, noteID: noteID)
                     insertAttachment(at: destURL, kind: .image, in: textView)
                     return true
                 } catch {
-                    print("[Coordinator] Failed to save pasted image: \(error)")
+                    Logger.shared.log(.attachment, .warn, "Failed to save pasted image: \(error)")
                     return false
                 }
             }
-            print("[Coordinator] No image found in pasteboard")
 
             // 3. 尝试读取HTML表格并转换为TableTextAttachment
             if let htmlString = pasteboard.string(forType: .html) ?? pasteboard.string(forType: NSPasteboard.PasteboardType("public.html")) {
-                print("[Coordinator] HTML content found, checking for table")
                 if let tableData = parseHTMLTable(htmlString) {
-                    print("[Coordinator] Table detected in HTML, converting to TableTextAttachment")
+                    Logger.shared.log(.table, .debug, "Table detected in HTML paste, converting to TableTextAttachment")
                     insertTableAttachment(tableData: tableData, in: textView)
                     return true
                 }
             }
 
             // 如果不是图片或文件，返回false让系统处理其他粘贴类型
-            print("[Coordinator] No file URLs found, falling back to default paste")
             return false
         }
 
@@ -3297,20 +3440,16 @@ struct RichTextEditor: NSViewRepresentable {
         
         /// 处理拖放的图片文件
         func handleDroppedImage(fileURL: URL, in textView: NSTextView) -> Bool {
-            print("[Coordinator] handleDroppedImage called: \(fileURL)")
-            
             guard let noteID = controller?.attachmentTargetNoteID() else {
-                print("[Coordinator] No noteID available for drop")
                 return false
             }
             
             do {
                 let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
                 insertAttachment(at: destURL, kind: .image, in: textView)
-                print("[Coordinator] Dropped image handled successfully")
                 return true
             } catch {
-                print("[Coordinator] Failed to handle dropped image: \(error)")
+                Logger.shared.log(.attachment, .warn, "Failed to handle dropped image: \(error)")
                 return false
             }
         }

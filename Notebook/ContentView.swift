@@ -1387,6 +1387,35 @@ private struct NotesListView: View {
     }
 }
 
+/// 笔记列表的摘要生成工具：把附件字符（\uFFFC）替换为可读占位，避免显示成方框
+enum NotePreviewFormatter {
+    static func summary(from attributed: NSAttributedString, maxLines: Int) -> String {
+        let ns = NSMutableString(string: attributed.string)
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        attributed.enumerateAttribute(.attachment, in: fullRange, options: .reverse) { value, range, _ in
+            guard let value else { return }
+            let placeholder: String
+            switch value {
+            case is CheckboxTextAttachment:
+                placeholder = ""
+            case is TableTextAttachment:
+                placeholder = "[表格]"
+            case is AudioBlockAttachment:
+                placeholder = "[音频]"
+            default:
+                placeholder = "[图片]"
+            }
+            ns.replaceCharacters(in: range, with: placeholder)
+        }
+        let cleaned = (ns as String).replacingOccurrences(of: "\u{FFFC}", with: "")
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed
+            .components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        return lines.prefix(maxLines).joined(separator: " ")
+    }
+}
+
 struct NoteRowView: View {
     let note: Note
     let isSelected: Bool
@@ -1426,10 +1455,7 @@ struct NoteRowView: View {
     }
 
     private func preview(from attributed: NSAttributedString) -> String {
-        let str = attributed.string
-        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = trimmed.components(separatedBy: .newlines)
-        return lines.prefix(2).joined(separator: " ")
+        return NotePreviewFormatter.summary(from: attributed, maxLines: 2)
     }
 }
 
@@ -3198,10 +3224,7 @@ private struct RecycleBinRow: View {
     }
 
     private func preview(from attributed: NSAttributedString) -> String {
-        let str = attributed.string
-        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = trimmed.components(separatedBy: .newlines)
-        return lines.prefix(2).joined(separator: " ")
+        return NotePreviewFormatter.summary(from: attributed, maxLines: 2)
     }
 }
 
@@ -3215,10 +3238,13 @@ private struct NoteMarkdownPreviewView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var renderedContent: NSAttributedString = NSAttributedString(string: "")
     @State private var renderWorkItem: DispatchWorkItem?
+    @State private var lastRevision: Int = 0
 
-    private var contentRevision: Int {
-        // 不能只看 content.string：附件尺寸变化不会触发
-        // 也不能只看 RTFD：自定义尺寸属性不会稳定进入 RTFD
+    /// 计算内容的"修订哈希"：
+    /// - 不能只看 content.string：附件尺寸变化不会触发
+    /// - 也不能只看 RTFD：自定义尺寸属性不会稳定进入 RTFD
+    /// 注意：O(N) 枚举，应只在 content 真正变化时调用，不要放进 body 里
+    private static func computeRevision(for content: NSAttributedString) -> Int {
         var hasher = Hasher()
         hasher.combine(content.string)
         hasher.combine(content.length)
@@ -3260,13 +3286,18 @@ private struct NoteMarkdownPreviewView: View {
         .background(AppColors.editorBackground(colorScheme))
         .onAppear {
             renderedContent = content.copy() as? NSAttributedString ?? content
+            lastRevision = Self.computeRevision(for: content)
         }
         .onDisappear {
             renderWorkItem?.cancel()
         }
-        .onChange(of: contentRevision) { _, _ in
+        .onChange(of: content) { _, newContent in
+            // 只有真正编辑/附件变化时才重新计算哈希并调度渲染
+            let revision = Self.computeRevision(for: newContent)
+            guard revision != lastRevision else { return }
+            lastRevision = revision
             renderWorkItem?.cancel()
-            let snapshot = content.copy() as? NSAttributedString ?? content
+            let snapshot = newContent.copy() as? NSAttributedString ?? newContent
             let workItem = DispatchWorkItem {
                 renderedContent = snapshot
             }
@@ -4506,8 +4537,22 @@ struct MarkdownWebView: NSViewRepresentable {
             }
         }
 
-        // 第二步：处理行内代码
-        html = html.replacingOccurrences(of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
+        // 第二步：提取行内代码为占位符（与代码块一样，先保护再处理）
+        var inlineCodes: [(placeholder: String, content: String)] = []
+        var inlineCodeIndex = 0
+        let inlineCodePattern = #"`([^`\n]+)`"#
+        if let inlineRegex = try? NSRegularExpression(pattern: inlineCodePattern, options: []) {
+            let matches = inlineRegex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+            for match in matches.reversed() {
+                guard let fullRange = Range(match.range, in: html),
+                      let codeRange = Range(match.range(at: 1), in: html) else { continue }
+                let code = String(html[codeRange])
+                let placeholder = "INLINECODE_\(inlineCodeIndex)_END"
+                inlineCodes.append((placeholder: placeholder, content: code))
+                inlineCodeIndex += 1
+                html.replaceSubrange(fullRange, with: placeholder)
+            }
+        }
 
         // 第三步：转义 HTML 特殊字符
         html = html
@@ -4535,14 +4580,28 @@ struct MarkdownWebView: NSViewRepresentable {
         html = html.replacingOccurrences(of: "\n", with: "<br>")
 
         // 第四步：恢复代码块
+        func escapeCodeContent(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+        }
         for (placeholder, content, isMermaid) in codeBlocks {
             let replacement: String
             if isMermaid {
+                // Mermaid 由 JS 解析，不做 HTML 转义（会破坏语法）
                 replacement = "<div class=\"mermaid\">\(content)</div>"
             } else {
-                replacement = "<pre><code>\(content)</code></pre>"
+                replacement = "<pre><code>\(escapeCodeContent(content))</code></pre>"
             }
             html = html.replacingOccurrences(of: placeholder, with: replacement)
+        }
+
+        // 恢复行内代码（内容做 HTML 转义）
+        for inline in inlineCodes {
+            html = html.replacingOccurrences(
+                of: inline.placeholder,
+                with: "<code>\(escapeCodeContent(inline.content))</code>"
+            )
         }
 
         // 第五步：恢复附件 HTML 块（避免被转义和自动换行污染）

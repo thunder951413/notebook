@@ -13,6 +13,7 @@
 import Foundation
 import SwiftData
 import AppKit
+import CryptoKit
 
 /// 保存结果
 enum SaveResult {
@@ -326,7 +327,11 @@ final class NoteSaveManager {
         }
 
         try context.save()
-        _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
+        let recorded = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
+        // 节流：每 20 个版本清理一次，避免每次保存都全表扫描
+        if let version = recorded?.version, version > 0, version % 20 == 0 {
+            try BlockDocumentNoteVersionStore.pruneHistory(noteID: request.noteID, context: context)
+        }
         try context.save()
 
         let preservedRelativePaths = Set(
@@ -818,6 +823,7 @@ final class NoteSaveManager {
     }
     
     /// 计算内容哈希用于脏检查，仅当哈希变化时才递增 version
+    /// 使用 SHA256 确保跨进程/设备哈希一致性
     private static func contentHashForDirtyCheck(
         document: MigratedDocument,
         title: String,
@@ -826,42 +832,34 @@ final class NoteSaveManager {
         reminderAt: Date?,
         recurrenceRule: String
     ) -> String {
-        var hasher = Hasher()
-        hasher.combine(title)
-        hasher.combine(folderID)
-        hasher.combine(folderName)
-        hasher.combine(reminderAt)
-        hasher.combine(recurrenceRule)
-        for block in document.blocks {
-            hasher.combine(block.id)
-            hasher.combine(block.type)
-            if let text = block.text {
-                for span in text {
-                    hasher.combine(span.text)
-                    hasher.combine(span.bold)
-                    hasher.combine(span.italic)
-                    hasher.combine(span.underline)
-                    hasher.combine(span.strikethrough)
-                    hasher.combine(span.link)
-                }
-            }
-            hasher.combine(block.level)
-            hasher.combine(block.listStyle)
-            hasher.combine(block.order)
-            hasher.combine(block.checked)
-            hasher.combine(block.indent)
-            if let asset = block.asset {
-                hasher.combine(asset.id)
-                hasher.combine(asset.kind)
-                hasher.combine(asset.filename)
-            }
-            if let table = block.table {
-                hasher.combine(table.rows)
-                hasher.combine(table.columnWidths)
-                hasher.combine(table.rowHeights)
-            }
+        let payload = DirtyCheckPayload(
+            title: title,
+            folderID: folderID,
+            folderName: folderName,
+            reminderAt: reminderAt,
+            recurrenceRule: recurrenceRule,
+            blocks: document.blocks
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: "+inf",
+            negativeInfinity: "-inf",
+            nan: "nan"
+        )
+        guard let data = try? encoder.encode(payload) else {
+            // 极端情况下退回基于 Hasher 的粗粒度哈希，保证保存流程不中断
+            var hasher = Hasher()
+            hasher.combine(title)
+            hasher.combine(folderID)
+            hasher.combine(folderName)
+            hasher.combine(reminderAt)
+            hasher.combine(recurrenceRule)
+            hasher.combine(document.blocks.count)
+            return "fallback-\(hasher.finalize())"
         }
-        return String(hasher.finalize())
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// 等待并重试保存
@@ -963,4 +961,14 @@ extension NoteSaveManager {
             timestamp: Date()
         )
     }
+}
+
+/// 脏检查负载，通过 JSONEncoder + SHA256 生成跨进程一致的内容哈希
+private struct DirtyCheckPayload: Codable {
+    let title: String
+    let folderID: UUID?
+    let folderName: String
+    let reminderAt: Date?
+    let recurrenceRule: String
+    let blocks: [MigratedDocumentBlock]
 }

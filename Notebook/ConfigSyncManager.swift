@@ -611,7 +611,7 @@ class ConfigSyncManager {
 
     /// 同步配置到远程服务器
     func syncConfigToRemote(config: SSHConfig) async throws {
-        let sshpassPath = try findSshpassPath()
+        let sshpassPath = try SSHSyncManager.shared.checkSshpassAvailable()
 
         // 收集本地配置
         let configEnvelope = collectLocalConfig()
@@ -628,23 +628,23 @@ class ConfigSyncManager {
         defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
         // 确保远程目录存在
-        try await ensureRemoteDirectory(config: config)
+        try await SSHSyncManager.shared.ensureRemoteDirectory(config: config)
 
         // 上传配置
         let remoteTempPath = "\(config.repositoryPath)/config.json.tmp"
         let remoteTargetPath = "\(config.repositoryPath)/config.json"
 
-        try await runSCPUpload(
+        try await SSHSyncManager.shared.runSCPUpload(
             sshpassPath: sshpassPath,
             config: config,
             localPath: tempFileURL.path,
             remotePath: remoteTempPath
         )
 
-        try await runSSHCommand(
+        try await SSHSyncManager.shared.runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv '\(SSHSyncManager.shared.escapeSingleQuoted(remoteTempPath))' '\(SSHSyncManager.shared.escapeSingleQuoted(remoteTargetPath))'"
         )
 
         print("配置同步完成：已上传到 \(remoteTargetPath)")
@@ -652,7 +652,7 @@ class ConfigSyncManager {
 
     /// 从远程服务器同步配置
     func syncConfigFromRemote(config: SSHConfig, mergeStrategy: ConfigMergeStrategy = .preferNewer) async throws -> ConfigSyncResult {
-        let sshpassPath = try findSshpassPath()
+        let sshpassPath = try SSHSyncManager.shared.checkSshpassAvailable()
 
         let remotePath = "\(config.repositoryPath)/config.json"
         let tempFileURL = FileManager.default.temporaryDirectory
@@ -660,7 +660,7 @@ class ConfigSyncManager {
         defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
         do {
-            try await runSCPDownload(
+            try await SSHSyncManager.shared.runSCPDownload(
                 sshpassPath: sshpassPath,
                 config: config,
                 remotePath: remotePath,
@@ -680,248 +680,6 @@ class ConfigSyncManager {
 
         print("配置同步完成：从 \(configEnvelope.deviceID) 同步了 \(result.totalApplied) 项配置")
         return result
-    }
-
-    // MARK: - SSH工具方法（从SSHSyncManager复制）
-
-    private func findSshpassPath() throws -> String {
-        // 复用SSHSyncManager中的逻辑
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-c", "which sshpass 2>/dev/null || echo ''"]
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-        task.environment = env
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-
-            if task.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !path.isEmpty {
-                    return path
-                }
-            }
-        } catch {
-            print("which sshpass 失败: \(error)")
-        }
-
-        // 回退到硬编码路径
-        return "/usr/local/bin/sshpass"
-    }
-
-    private func ensureRemoteDirectory(config: SSHConfig) async throws {
-        let sshpassPath = try findSshpassPath()
-        let quotedRemotePath = config.repositoryPath
-            .replacingOccurrences(of: "'", with: "'\"'\"'")
-        try await runSSHCommand(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "mkdir -p '\(quotedRemotePath)'"
-        )
-    }
-
-    private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String) async throws {
-        let result = try await executeProcess(
-            executablePath: sshpassPath,
-            arguments: sshArguments(config: config, command: command),
-            password: config.password
-        )
-        if result.terminationStatus != 0 {
-            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
-            throw NSError(
-                domain: "ConfigSync",
-                code: Int(result.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: sanitizeLog(message.isEmpty ? "执行远程命令失败" : message, password: config.password)]
-            )
-        }
-    }
-
-    private func runSCPUpload(sshpassPath: String, config: SSHConfig, localPath: String, remotePath: String) async throws {
-        let result = try await executeProcess(
-            executablePath: sshpassPath,
-            arguments: scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath),
-            password: config.password,
-            timeout: 120
-        )
-        if result.terminationStatus != 0 {
-            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
-            throw NSError(
-                domain: "ConfigSync",
-                code: Int(result.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: sanitizeLog(message.isEmpty ? "上传失败" : message, password: config.password)]
-            )
-        }
-    }
-
-    private func runSCPDownload(sshpassPath: String, config: SSHConfig, remotePath: String, localPath: String) async throws {
-        let result = try await executeProcess(
-            executablePath: sshpassPath,
-            arguments: scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath),
-            password: config.password,
-            timeout: 120
-        )
-        if result.terminationStatus != 0 {
-            let message = result.standardError.isEmpty ? result.standardOutput : result.standardError
-            throw NSError(
-                domain: "ConfigSync",
-                code: Int(result.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: sanitizeLog(message.isEmpty ? "下载失败" : message, password: config.password)]
-            )
-        }
-    }
-
-    private func sshArguments(config: SSHConfig, command: String) -> [String] {
-        [
-            "-p", config.password,
-            "ssh"
-        ] + commonSSHOptions(port: config.port) + [
-            "\(config.username)@\(config.host)",
-            command
-        ]
-    }
-
-    private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String) -> [String] {
-        [
-            "-p", config.password,
-            "scp"
-        ] + commonSCPOptions(port: config.port) + [
-            localPath,
-            "\(config.username)@\(config.host):\(remotePath)"
-        ]
-    }
-
-    private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String) -> [String] {
-        [
-            "-p", config.password,
-            "scp"
-        ] + commonSCPOptions(port: config.port) + [
-            "\(config.username)@\(config.host):\(remotePath)",
-            localPath
-        ]
-    }
-
-    private func commonSSHOptions(port: Int) -> [String] {
-        [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-p", String(port)
-        ]
-    }
-
-    private func commonSCPOptions(port: Int) -> [String] {
-        [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-P", String(port)
-        ]
-    }
-
-    private func executeProcess(
-        executablePath: String,
-        arguments: [String],
-        password: String,
-        timeout: TimeInterval = 45
-    ) async throws -> ProcessExecutionResult {
-        // 复制SSHSyncManager中的ProcessExecutionResult逻辑
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executablePath)
-        task.arguments = arguments
-        task.environment = env
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
-
-        let timeoutErrorMessage = sanitizeLog("SSH操作超时，请检查服务器连通性、端口配置或网络状态", password: password)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var finished = false
-            let finishedQueue = DispatchQueue(label: "com.notebook.configsync.finished")
-
-            @Sendable func resume(_ result: Result<ProcessExecutionResult, Error>) {
-                lock.lock()
-                defer { lock.unlock() }
-
-                var shouldResume = false
-                finishedQueue.sync {
-                    guard !finished else { return }
-                    finished = true
-                    shouldResume = true
-                }
-
-                guard shouldResume else { return }
-                continuation.resume(with: result)
-            }
-
-            task.terminationHandler = { process in
-                let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                resume(.success(ProcessExecutionResult(
-                    terminationStatus: process.terminationStatus,
-                    standardOutput: output,
-                    standardError: error
-                )))
-            }
-
-            do {
-                try task.run()
-            } catch {
-                resume(.failure(error))
-                return
-            }
-
-            Task.detached {
-                let delay = UInt64(max(1, timeout) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: delay)
-                guard task.isRunning else { return }
-                task.terminate()
-                resume(.failure(NSError(
-                    domain: "ConfigSync",
-                    code: -1001,
-                    userInfo: [NSLocalizedDescriptionKey: timeoutErrorMessage]
-                )))
-            }
-        }
-    }
-
-    private struct ProcessExecutionResult {
-        let terminationStatus: Int32
-        let standardOutput: String
-        let standardError: String
-    }
-
-    private func escapeSingleQuoted(_ value: String) -> String {
-        value.replacingOccurrences(of: "'", with: "'\"'\"'")
-    }
-
-    private func sanitizeLog(_ text: String, password: String) -> String {
-        guard !password.isEmpty else { return text }
-        return text.replacingOccurrences(of: password, with: "******")
     }
 
     private func isRemoteConfigFileMissing(_ error: Error) -> Bool {

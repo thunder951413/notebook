@@ -156,24 +156,62 @@ struct BlockDocumentAttributedStringBuilder {
                 content.addAttribute(.font, value: font, range: subrange)
             }
             content.addAttribute(.notebookHeadingLevel, value: block.level ?? 1, range: range)
+
+            // 标题使用独立段前段后间距，视觉层级更清晰
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.paragraphSpacingBefore = fontSize * 0.6
+            paragraphStyle.paragraphSpacing = fontSize * 0.3
+            content.addAttribute(.paragraphStyle, value: paragraphStyle, range: range)
         }
         return content
     }
 
     private func listItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
-        result.append(NSAttributedString(string: listMarker(for: block)))
+        let marker = listMarker(for: block)
+        let result = NSMutableAttributedString(string: marker)
         result.append(sanitizedListInlineText(from: block.textPayload))
+        applyListParagraphStyle(on: result, indent: block.indent, markerText: marker)
         return result
     }
 
     private func todoItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
         let attachment = CheckboxTextAttachment(checked: block.checked ?? false)
-        result.append(NSAttributedString(attachment: attachment))
+        let result = NSMutableAttributedString(attachment: attachment)
         result.append(NSAttributedString(string: " "))
         result.append(sanitizedTodoInlineText(from: block.textPayload))
+        // checkbox 渲染宽度约 18pt，+ 空格，作为 marker 宽度近似
+        applyListParagraphStyle(on: result, indent: block.indent, markerWidth: 22)
         return result
+    }
+
+    /// 为列表/todo 项应用缩进段落样式，避免用空格模拟缩进导致折行后不对齐
+    private func applyListParagraphStyle(
+        on text: NSMutableAttributedString,
+        indent: Int?,
+        markerText: String? = nil,
+        markerWidth overrideWidth: CGFloat? = nil
+    ) {
+        guard text.length > 0 else { return }
+        let level = CGFloat(max(0, indent ?? 0))
+        let levelWidth: CGFloat = 24
+        let base = level * levelWidth
+        let markerWidth: CGFloat
+        if let overrideWidth { markerWidth = overrideWidth }
+        else if let markerText {
+            let measureFont = NSFont.systemFont(ofSize: CGFloat(AppSettings.shared.editorFontSize))
+            let size = (markerText as NSString).size(withAttributes: [.font: measureFont])
+            markerWidth = max(size.width + 4, 16)
+        } else {
+            markerWidth = 18
+        }
+
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = base
+        style.headIndent = base + markerWidth
+        style.tabStops = [NSTextTab(textAlignment: .left, location: base + markerWidth)]
+
+        let range = NSRange(location: 0, length: text.length)
+        text.addAttribute(.paragraphStyle, value: style, range: range)
     }
 
     private func recoveredLegacyTodoBlock(
@@ -188,10 +226,10 @@ struct BlockDocumentAttributedStringBuilder {
         guard isLikelyLegacyCheckboxImageBlock(imageBlock, assetsByID: assetsByID) else { return nil }
 
         let checked = recoveredLegacyCheckboxState(from: imageBlock, assetsByID: assetsByID) ?? false
-        let result = NSMutableAttributedString(string: indentationPrefix(level: textBlock.indent))
-        result.append(NSAttributedString(attachment: CheckboxTextAttachment(checked: checked)))
+        let result = NSMutableAttributedString(attachment: CheckboxTextAttachment(checked: checked))
         result.append(NSAttributedString(string: " "))
         result.append(sanitizedTodoInlineText(from: textBlock.textPayload))
+        applyListParagraphStyle(on: result, indent: textBlock.indent, markerWidth: 22)
         return result
     }
 
@@ -376,7 +414,8 @@ struct BlockDocumentAttributedStringBuilder {
 
     private func attributes(for span: BlockDocumentTextSpanPayload) -> [NSAttributedString.Key: Any] {
         var attributes: [NSAttributedString.Key: Any] = [:]
-        let fontSize = CGFloat(span.fontSize ?? 16)
+        // 默认字号跟随用户设置的编辑器字号，保持一致观感
+        let fontSize = CGFloat(span.fontSize ?? Double(AppSettings.shared.editorFontSize))
         attributes[.font] = resolvedFont(
             family: span.fontFamily,
             size: fontSize,
@@ -477,10 +516,6 @@ struct BlockDocumentAttributedStringBuilder {
             style.tailIndent = tailIndent
         }
         return style
-    }
-
-    private func indentationPrefix(level: Int?) -> String {
-        String(repeating: "    ", count: max(0, level ?? 0))
     }
 
     private func listMarker(for block: BlockDocumentBlockEntity) -> String {
@@ -1297,6 +1332,7 @@ class NoteStore: ObservableObject {
             entity.deletedAt = deletedAt
             entity.originalFolderID = entity.folderID
             entity.originalFolderName = entity.folderName
+            entity.version += 1
             entity.updatedAt = deletedAt
             try? context.save()
             if let idx = notes.firstIndex(where: { $0.id == id }) {
@@ -1305,6 +1341,8 @@ class NoteStore: ObservableObject {
                 notes[idx].originalFolderName = entity.originalFolderName
                 notes[idx].updatedAt = deletedAt
             }
+            // 触发同步推送，让远端感知删除状态
+            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "softDelete")
         }
     }
 
@@ -1337,8 +1375,10 @@ class NoteStore: ObservableObject {
             entity.folderName = restoredFolderName
             entity.originalFolderID = nil
             entity.originalFolderName = nil
+            entity.version += 1
             entity.updatedAt = Date()
             try? context.save()
+            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "restore")
             if let idx = notes.firstIndex(where: { $0.id == id }) {
                 notes[idx].deletedAt = nil
                 notes[idx].folderID = restoredFolderID
@@ -1399,6 +1439,8 @@ class NoteStore: ObservableObject {
             try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
             try? context.save()
             notes.removeAll { $0.id == id }
+            // 触发同步推送，通知远端该笔记已永久删除
+            AutoSyncCoordinator.shared.requestPush(reason: "permanentDelete")
         }
     }
 
