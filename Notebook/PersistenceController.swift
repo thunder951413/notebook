@@ -181,6 +181,8 @@ final class BlockDocumentNoteEntity {
     var blockCount: Int = 0
     var assetCount: Int = 0
     var lastSavedContentHash: String = ""
+    var hasConflict: Bool = false
+    @Attribute(.externalStorage) var conflictRemoteSnapshotData: Data?
 
     init(
         id: UUID,
@@ -707,108 +709,27 @@ enum BlockDocumentNoteVersionStore {
             let remoteHasChanged = syncState.remoteFingerprint.isEmpty || incomingFingerprint != syncState.remoteFingerprint
 
             if localHasChanges && remoteHasChanged {
-                // 冲突解决：将本地版本复制为冲突副本，然后应用远程版本到原笔记
-                let conflictCopyID = UUID()
-                let library = try ensureLibrary(context: context)
-
-                // 记录冲突元数据用于 UI 展示
-                let conflictID = UUID().uuidString.prefix(8)
-                let conflictNoteTitle = "\(localNote.title) [冲突副本]"
+                // 冲突标记：不再创建副本，而是在笔记上标记冲突状态并保存远程快照
+                // 用户稍后可通过 diff 视图手动解决冲突
                 Logger.shared.log(.app, .warn, """
                     [SyncConflict] detected noteID=\(envelope.noteID) \
                     localVersion=\(localNote.version) remoteVersion=\(envelope.currentVersion) \
-                    deviceID=\(envelope.deviceID) conflictID=\(conflictID)
+                    deviceID=\(envelope.deviceID)
                     """)
-                let conflictCopy = BlockDocumentNoteEntity(
-                    id: conflictCopyID,
-                    libraryID: library.id,
-                    title: conflictNoteTitle,
-                    createdAt: localNote.createdAt,
-                    updatedAt: localNote.updatedAt,
-                    folderID: localNote.folderID,
-                    folderName: localNote.folderName,
-                    reminderAt: localNote.reminderAt,
-                    recurrenceRule: localNote.recurrenceRule,
-                    version: localNote.version,
-                    tagIDs: localNote.tagIDs,
-                    viewMode: localNote.viewMode,
-                    deletedAt: nil,
-                    originalFolderID: localNote.originalFolderID,
-                    originalFolderName: localNote.originalFolderName,
-                    documentSchemaVersion: localNote.documentSchemaVersion,
-                    documentSource: localNote.documentSource,
-                    blockCount: localNote.blockCount,
-                    assetCount: localNote.assetCount
-                )
-                context.insert(conflictCopy)
-                library.noteCount += 1
 
-                // 复制本地笔记的 blocks 和 assets 到冲突副本
-                let localBlocks = try context.fetch(
-                    FetchDescriptor<BlockDocumentBlockEntity>(
-                        predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == envelope.noteID },
-                        sortBy: [SortDescriptor(\.position)]
-                    )
-                )
-                let localAssets = try context.fetch(
-                    FetchDescriptor<BlockDocumentAssetEntity>(
-                        predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == envelope.noteID }
-                    )
-                )
-                for block in localBlocks {
-                    context.insert(BlockDocumentBlockEntity(
-                        noteID: conflictCopyID,
-                        position: block.position,
-                        blockID: block.blockID,
-                        kind: block.kind,
-                        sourceType: block.sourceType,
-                        textPayload: block.textPayload,
-                        level: block.level,
-                        listStyle: block.listStyle,
-                        order: block.order,
-                        checked: block.checked,
-                        indent: block.indent,
-                        assetID: block.assetID,
-                        tablePayload: block.tablePayload
-                    ))
-                }
-                for asset in localAssets {
-                    context.insert(BlockDocumentAssetEntity(
-                        noteID: conflictCopyID,
-                        assetID: asset.assetID,
-                        kind: asset.kind,
-                        sourceKind: asset.sourceKind,
-                        filename: asset.filename,
-                        mimeType: asset.mimeType,
-                        width: asset.width,
-                        height: asset.height,
-                        duration: asset.duration,
-                        createdAt: asset.createdAt,
-                        relativeFilePath: asset.relativeFilePath,
-                        sidecarPathsPayload: asset.sidecarPathsPayload
-                    ))
-                }
+                // 保存远程快照数据供 diff 使用
+                localNote.hasConflict = true
+                localNote.conflictRemoteSnapshotData = try? jsonEncoder.encode(envelope.currentSnapshot)
 
-                // 为冲突副本创建同步状态
-                let conflictSyncState = BlockDocumentNoteSyncStateEntity(noteID: conflictCopyID)
-                conflictSyncState.lastRecordedVersion = localNote.version
-                conflictSyncState.lastSyncedVersion = localNote.version
-                conflictSyncState.lastCommonVersion = localNote.version
-                context.insert(conflictSyncState)
-
-                // 应用远程版本到原笔记
-                try apply(snapshot: envelope.currentSnapshot, to: localNote, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt)
-                syncState.lastCommonVersion = envelope.currentVersion
-                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
-                syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
-                syncState.remoteFingerprint = incomingFingerprint
+                // 不应用远程版本，保留本地内容；同步状态也不推进，避免下次拉取重复触发
+                syncState.lastRemoteVersion = envelope.currentVersion
+                syncState.lastRemoteDeviceID = envelope.deviceID
                 syncState.lastSyncAt = Date()
-                syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
 
                 try context.save()
                 return NoteSyncMergeResult(
                     noteID: envelope.noteID,
-                    appliedRemoteSnapshot: true,
+                    appliedRemoteSnapshot: false,
                     detectedConflict: true,
                     importedHistoryVersions: importedVersions,
                     localVersion: localNote.version,
@@ -908,6 +829,66 @@ enum BlockDocumentNoteVersionStore {
         syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, envelope.currentVersion)
         syncState.lastRemoteDeviceID = envelope.deviceID
         syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        syncState.lastSyncAt = Date()
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try context.save()
+    }
+
+    // MARK: - 冲突解决
+
+    /// 获取笔记的远程冲突快照（用于 diff 展示）
+    static func conflictRemoteSnapshot(for noteID: UUID, context: ModelContext) throws -> VersionedNoteSnapshot? {
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(descriptor).first,
+              let data = note.conflictRemoteSnapshotData else { return nil }
+        return try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: data)
+    }
+
+    /// 解决冲突：保留本地版本
+    static func resolveConflictKeepLocal(noteID: UUID, context: ModelContext) throws {
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(descriptor).first else { return }
+
+        // 从存储的远程快照计算 fingerprint，避免下次拉取重复触发冲突
+        let remoteFp: String? = note.conflictRemoteSnapshotData.flatMap { data in
+            (try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: data)).flatMap { try? fingerprint(for: try jsonEncoder.encode($0)) }
+        }
+
+        note.hasConflict = false
+        note.conflictRemoteSnapshotData = nil
+
+        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        // 更新 remoteFingerprint：让下次拉取认为远程版本"已见过"
+        if let fp = remoteFp {
+            syncState.remoteFingerprint = fp
+        }
+        // 不推进 lastSyncedVersion：保留本地版本需要下次推送覆盖远程
+        syncState.lastSyncAt = Date()
+        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try context.save()
+    }
+
+    /// 解决冲突：采用远程版本
+    static func resolveConflictKeepRemote(noteID: UUID, context: ModelContext) throws {
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let note = try context.fetch(descriptor).first,
+              let data = note.conflictRemoteSnapshotData,
+              let snapshot = try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: data) else { return }
+
+        try apply(snapshot: snapshot, to: note, context: context, restoredAt: snapshot.metadata.updatedAt)
+        note.hasConflict = false
+        note.conflictRemoteSnapshotData = nil
+
+        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, note.version)
+        syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, note.version)
+        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(snapshot))
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
         try context.save()

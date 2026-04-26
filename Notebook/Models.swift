@@ -686,7 +686,8 @@ class NoteStore: ObservableObject {
                 viewMode: NoteViewMode(rawValue: entity.viewMode) ?? .text,
                 deletedAt: entity.deletedAt,
                 originalFolderID: entity.originalFolderID,
-                originalFolderName: entity.originalFolderName
+                originalFolderName: entity.originalFolderName,
+                hasConflict: entity.hasConflict
             )
         }
 
@@ -1815,6 +1816,9 @@ struct Note: Identifiable, Hashable {
     /// 原始文件夹名称（用于恢复）
     var originalFolderName: String?
 
+    /// 同步冲突标记
+    var hasConflict: Bool
+
     var hasReminder: Bool {
         return reminderAt != nil
     }
@@ -1838,7 +1842,8 @@ struct Note: Identifiable, Hashable {
         viewMode: NoteViewMode = .text,
         deletedAt: Date? = nil,
         originalFolderID: UUID? = nil,
-        originalFolderName: String? = nil
+        originalFolderName: String? = nil,
+        hasConflict: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -1855,6 +1860,7 @@ struct Note: Identifiable, Hashable {
         self.deletedAt = deletedAt
         self.originalFolderID = originalFolderID
         self.originalFolderName = originalFolderName
+        self.hasConflict = hasConflict
     }
     
     func hash(into hasher: inout Hasher) {

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import SwiftData
 import UniformTypeIdentifiers
 import AppKit
 import Combine
@@ -26,6 +27,7 @@ struct ContentView: View {
     @State private var selectedTagID: UUID?
     @State private var selectedEncryptedFolderID: UUID? = nil
     @State private var isRecycleBinSelected: Bool = false
+    @State private var isConflictSelected: Bool = false
     @State private var showingDeleteConfirm = false
     @State private var pendingDeleteNoteID: UUID?
     @State private var searchInAllFolders: Bool = false
@@ -49,7 +51,13 @@ struct ContentView: View {
             Logger.shared.log(.search, .debug, "After tag filter: \(notes.count) notes")
         }
 
-        // 2. 文件夹筛选
+        // 2. 冲突筛选
+        if isConflictSelected {
+            notes = notes.filter { $0.hasConflict }
+            Logger.shared.log(.search, .debug, "After conflict filter: \(notes.count) notes")
+        }
+
+        // 3. 文件夹筛选
         // 如果有搜索词且选择搜索所有文件夹，则跳过文件夹筛选
         let shouldApplyFolderFilter = selectedFolder != l10n(L10nKeys.Folder.allNotes) &&
                                        selectedFolder != "未分类" &&
@@ -87,7 +95,7 @@ struct ContentView: View {
             Logger.shared.log(.search, .debug, "Skipping folder filter (searching all folders)")
         }
 
-        // 3. 搜索词筛选
+        // 4. 搜索词筛选
         if !q.isEmpty {
             notes = notes.filter {
                 $0.title.localizedCaseInsensitiveContains(q) ||
@@ -268,6 +276,7 @@ struct ContentView: View {
                 selectedEncryptedFolderID: $selectedEncryptedFolderID,
                 isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
                 isRecycleBinSelected: $isRecycleBinSelected,
+                isConflictSelected: $isConflictSelected,
                 onCreateNote: createNote
             )
         } content: {
@@ -367,6 +376,7 @@ struct ContentView: View {
             selectedEncryptedFolderID = nil
             isEncryptedFolderUnlocked = false
             isRecycleBinSelected = false
+            isConflictSelected = false
             selectedFolder = note.folder
             searchText = ""
             updateSelection(id, reason: "externalNavigation")
@@ -377,12 +387,18 @@ struct ContentView: View {
             guard let folder = newValue else { return }
             selectedTagID = nil
             isRecycleBinSelected = false
+            isConflictSelected = false
             searchText = ""
             selectedFolder = folder
             store.selectedFolderForNavigation = nil
         }
         .onChange(of: filteredNoteIDs) { _, currentIDs in
             guard !isRecycleBinSelected else { return }
+            // 如果冲突筛选下已无冲突笔记，自动退出冲突视图
+            if isConflictSelected && !store.activeNotes.contains(where: { $0.hasConflict }) {
+                isConflictSelected = false
+                selectedFolder = l10n(L10nKeys.Folder.allNotes)
+            }
             let nextSelection = VisibleNoteSelectionCoordinator.selectionForVisibleNotes(
                 currentSelection: selection,
                 availableIDs: currentIDs
@@ -723,6 +739,7 @@ private struct SidebarView: View {
     @Binding var selectedEncryptedFolderID: UUID?
     @Binding var isEncryptedFolderUnlocked: Bool
     @Binding var isRecycleBinSelected: Bool
+    @Binding var isConflictSelected: Bool
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
@@ -764,6 +781,7 @@ private struct SidebarView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         allNotesRow
                         uncategorizedNotesRow
+                        conflictNotesRow
                         recycleBinRow
                         foldersSection
                         encryptedFolderRow
@@ -817,6 +835,7 @@ private struct SidebarView: View {
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
             isRecycleBinSelected = false
+            isConflictSelected = false
         }
         .onChange(of: isRecycleBinSelected) { _, newValue in
             if newValue {
@@ -888,8 +907,37 @@ private struct SidebarView: View {
             selectedFolder = "未分类"
             selectedTagID = nil
             isRecycleBinSelected = false
+            isConflictSelected = false
         }
         .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private var conflictNotesRow: some View {
+        let conflictCount = store.activeNotes.filter { $0.hasConflict }.count
+        if conflictCount > 0 {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(isConflictSelected ? .white : .yellow)
+                Text("有冲突")
+                Spacer()
+                Text("\(conflictCount)")
+                    .font(.caption)
+                    .foregroundStyle(isConflictSelected ? .white.opacity(0.7) : .secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(isConflictSelected ? themeManager.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isConflictSelected = true
+                selectedFolder = l10n(L10nKeys.Folder.allNotes)
+                selectedTagID = nil
+                isRecycleBinSelected = false
+            }
+            .padding(.horizontal, 8)
+        }
     }
 
     private var recycleBinRow: some View {
@@ -913,6 +961,7 @@ private struct SidebarView: View {
             selectedEncryptedFolderID = nil
             isEncryptedFolderUnlocked = false
             isRecycleBinSelected = true
+            isConflictSelected = false
             selection = nil
         }
         .padding(.horizontal, 8)
@@ -1117,6 +1166,7 @@ private struct SidebarView: View {
             selectedTagID = tag.id
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             isRecycleBinSelected = false
+            isConflictSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -1151,6 +1201,7 @@ private struct SidebarView: View {
             selectedFolder = folder.name
             selectedTagID = nil
             isRecycleBinSelected = false
+            isConflictSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -1297,6 +1348,7 @@ private struct SidebarView: View {
             selectedFolder = EncryptedFolderManager.folderName
             selectedTagID = nil
             isRecycleBinSelected = false
+            isConflictSelected = false
         }
         .padding(.horizontal, 8)
     }
@@ -1401,6 +1453,11 @@ struct NoteRowView: View {
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? .white : .primary)
                 Spacer()
+                if note.hasConflict {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(isSelected ? .white.opacity(0.8) : .yellow)
+                }
                 if note.hasReminder {
                     Image(systemName: "bell.fill")
                         .font(.caption2)
@@ -1449,6 +1506,7 @@ private struct NoteEditorView: View {
     @State private var lastSavedTitle: String = ""
     @State private var lastSavedContentHash: Int = 0
     @State private var pendingSaveWorkItem: DispatchWorkItem?
+    @State private var showingConflictDiff = false
     
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
@@ -1480,6 +1538,35 @@ private struct NoteEditorView: View {
                         isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
                         onSelectViewMode: applyViewMode
                     )
+
+                    // 冲突横幅
+                    if note.hasConflict {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            Text("此笔记与远程版本有冲突")
+                                .font(.subheadline)
+                            Spacer()
+                            Button("查看差异") {
+                                showingConflictDiff = true
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("保留本地") {
+                                resolveConflict(keepLocal: true)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("采用远程") {
+                                resolveConflict(keepLocal: false)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.yellow.opacity(0.1))
+                    }
 
                     VStack(alignment: .leading, spacing: 0) {
                         TextField(l10n(L10nKeys.Note.titlePlaceholder), text: $note.title)
@@ -1562,6 +1649,9 @@ private struct NoteEditorView: View {
         .onDisappear {
             pendingSaveWorkItem?.cancel()
         }
+        .sheet(isPresented: $showingConflictDiff) {
+            ConflictDiffView(noteID: note.id, localContent: note.content)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .toggleMarkdownPreview)) { _ in
             // 快捷键循环切换三种模式
             let newMode: NoteViewMode
@@ -1591,7 +1681,22 @@ private struct NoteEditorView: View {
             }
         }
     }
-    
+
+    private func resolveConflict(keepLocal: Bool) {
+        guard let context = PersistenceController.shared.modelContainer?.mainContext else { return }
+        do {
+            if keepLocal {
+                try BlockDocumentNoteVersionStore.resolveConflictKeepLocal(noteID: note.id, context: context)
+            } else {
+                try BlockDocumentNoteVersionStore.resolveConflictKeepRemote(noteID: note.id, context: context)
+                store.fetchData()
+            }
+            note.hasConflict = false
+        } catch {
+            Logger.shared.log(.app, .warn, "Failed to resolve conflict: \(error)")
+        }
+    }
+
     private func debouncedScheduleAutoSave(title: String, content: NSAttributedString) {
         let contentHash = content.hashValue
         let titleChanged = title != lastSavedTitle

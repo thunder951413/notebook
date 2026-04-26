@@ -707,6 +707,7 @@ extension Note {
         self.deletedAt = nil
         self.originalFolderID = nil
         self.originalFolderName = nil
+        self.hasConflict = false
         
         // 解析 viewMode
         if let viewModeString = record["viewMode"] as? String,
