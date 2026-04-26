@@ -707,9 +707,12 @@ enum BlockDocumentNoteVersionStore {
             let localHasChanges = localNote.version > syncState.lastSyncedVersion
             // remoteHasChanged: 远程内容相比上次同步时是否有变化（首次同步时 fingerprint 为空视为有变化）
             let remoteHasChanged = syncState.remoteFingerprint.isEmpty || incomingFingerprint != syncState.remoteFingerprint
+            // sameDeviceEcho: 远程数据来自本机推送，不是真正的冲突
+            let sameDeviceEcho = envelope.deviceID == currentDeviceID()
 
-            if localHasChanges && remoteHasChanged {
-                // 冲突标记：不再创建副本，而是在笔记上标记冲突状态并保存远程快照
+            if localHasChanges && remoteHasChanged && !sameDeviceEcho {
+                // 真正的冲突：本地有未推送修改 + 远程有来自其他设备的变化
+                // 不再创建副本，而是在笔记上标记冲突状态并保存远程快照
                 // 用户稍后可通过 diff 视图手动解决冲突
                 Logger.shared.log(.app, .warn, """
                     [SyncConflict] detected noteID=\(envelope.noteID) \
@@ -721,9 +724,11 @@ enum BlockDocumentNoteVersionStore {
                 localNote.hasConflict = true
                 localNote.conflictRemoteSnapshotData = try? jsonEncoder.encode(envelope.currentSnapshot)
 
-                // 不应用远程版本，保留本地内容；同步状态也不推进，避免下次拉取重复触发
+                // 不应用远程版本，保留本地内容
                 syncState.lastRemoteVersion = envelope.currentVersion
                 syncState.lastRemoteDeviceID = envelope.deviceID
+                // 更新 remoteFingerprint：避免下次拉取重复触发冲突
+                syncState.remoteFingerprint = incomingFingerprint
                 syncState.lastSyncAt = Date()
 
                 try context.save()
@@ -731,6 +736,28 @@ enum BlockDocumentNoteVersionStore {
                     noteID: envelope.noteID,
                     appliedRemoteSnapshot: false,
                     detectedConflict: true,
+                    importedHistoryVersions: importedVersions,
+                    localVersion: localNote.version,
+                    remoteVersion: envelope.currentVersion
+                )
+            } else if sameDeviceEcho {
+                // 同设备回声：远程数据就是本机推送的，只需同步状态，不应用快照也不标记冲突
+                // 同时清除可能存在的假冲突标记
+                if localNote.hasConflict {
+                    localNote.hasConflict = false
+                    localNote.conflictRemoteSnapshotData = nil
+                }
+                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+                syncState.lastCommonVersion = max(syncState.lastCommonVersion, envelope.currentVersion)
+                syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
+                syncState.remoteFingerprint = incomingFingerprint
+                syncState.lastSyncAt = Date()
+                syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+                try context.save()
+                return NoteSyncMergeResult(
+                    noteID: envelope.noteID,
+                    appliedRemoteSnapshot: false,
+                    detectedConflict: false,
                     importedHistoryVersions: importedVersions,
                     localVersion: localNote.version,
                     remoteVersion: envelope.currentVersion
