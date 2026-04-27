@@ -1021,8 +1021,7 @@ final class SSHSyncManager: @unchecked Sendable {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return nil
         }
-        let snapshotData = try JSONEncoder().encode(envelope.currentSnapshot)
-        let contentHash = SHA256.hash(data: snapshotData).map { String(format: "%02x", $0) }.joined()
+        let contentHash = try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot)
         return RemoteNoteIndexEntry(
             noteID: noteID,
             version: envelope.currentVersion,

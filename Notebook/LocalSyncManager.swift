@@ -212,13 +212,11 @@ final class LocalSyncManager: ObservableObject {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return nil
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let snapshotData = try encoder.encode(envelope.currentSnapshot)
+        let contentHash = try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot)
         return LocalNoteIndexEntry(
             noteID: noteID,
             version: envelope.currentVersion,
-            contentHash: fingerprint(for: snapshotData),
+            contentHash: contentHash,
             historyCount: envelope.history.count
         )
     }
@@ -267,10 +265,6 @@ final class LocalSyncManager: ObservableObject {
             predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
         )
         return try context.fetch(descriptor).first
-    }
-
-    private func fingerprint(for data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

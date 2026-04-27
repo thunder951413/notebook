@@ -524,8 +524,8 @@ enum BlockDocumentNoteVersionStore {
         }
 
         let snapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets)
+        let contentHash = try snapshotFingerprint(snapshot)
         let snapshotData = try jsonEncoder.encode(snapshot)
-        let contentHash = fingerprint(for: snapshotData)
         let entry = BlockDocumentNoteVersionEntity(
             noteID: note.id,
             version: note.version,
@@ -695,7 +695,7 @@ enum BlockDocumentNoteVersionStore {
         syncState.lastRemoteDeviceID = envelope.deviceID
 
         // 用内容指纹而非版本号做冲突检测，避免跨设备版本号不可比的问题
-        let incomingFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        let incomingFingerprint = try snapshotFingerprint(envelope.currentSnapshot)
 
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
             predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelope.noteID }
@@ -766,7 +766,9 @@ enum BlockDocumentNoteVersionStore {
                 // 远程有变化但本地无未推送修改 → 快进应用远程版本
                 try apply(snapshot: envelope.currentSnapshot, to: localNote, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt)
                 syncState.lastCommonVersion = envelope.currentVersion
-                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
+                // apply 会递增 localNote.version，lastSyncedVersion 必须推进到 localNote.version
+                // 否则 localNote.version > lastSyncedVersion 永远为 true，导致 localHasChanges 误判
+                syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, localNote.version)
                 syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, localNote.version)
                 syncState.remoteFingerprint = incomingFingerprint
                 syncState.lastSyncAt = Date()
@@ -823,8 +825,8 @@ enum BlockDocumentNoteVersionStore {
         library.noteCount += 1
         try apply(snapshot: envelope.currentSnapshot, to: note, context: context, restoredAt: envelope.currentSnapshot.metadata.updatedAt, replaceExistingArtifacts: false)
         syncState.lastCommonVersion = envelope.currentVersion
-        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
-        syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, envelope.currentVersion)
+        syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, note.version)
+        syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, note.version)
         syncState.remoteFingerprint = incomingFingerprint
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
@@ -855,7 +857,7 @@ enum BlockDocumentNoteVersionStore {
         syncState.lastCommonVersion = max(syncState.lastCommonVersion, envelope.currentVersion)
         syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, envelope.currentVersion)
         syncState.lastRemoteDeviceID = envelope.deviceID
-        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(envelope.currentSnapshot))
+        syncState.remoteFingerprint = try snapshotFingerprint(envelope.currentSnapshot)
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
         try context.save()
@@ -880,19 +882,12 @@ enum BlockDocumentNoteVersionStore {
         )
         guard let note = try context.fetch(descriptor).first else { return }
 
-        // 从存储的远程快照计算 fingerprint，避免下次拉取重复触发冲突
-        let remoteFp: String? = note.conflictRemoteSnapshotData.flatMap { data in
-            (try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: data)).flatMap { try? fingerprint(for: try jsonEncoder.encode($0)) }
-        }
-
         note.hasConflict = false
         note.conflictRemoteSnapshotData = nil
 
         let syncState = try ensureSyncState(noteID: noteID, context: context)
-        // 更新 remoteFingerprint：让下次拉取认为远程版本"已见过"
-        if let fp = remoteFp {
-            syncState.remoteFingerprint = fp
-        }
+        // 不覆盖 remoteFingerprint：冲突检测时已正确设置为 incomingFingerprint
+        // 重新从快照计算可能因 JSON round-trip 产生不同指纹，导致下次拉取重复触发冲突
         // 不推进 lastSyncedVersion：保留本地版本需要下次推送覆盖远程
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
@@ -915,7 +910,8 @@ enum BlockDocumentNoteVersionStore {
         let syncState = try ensureSyncState(noteID: noteID, context: context)
         syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, note.version)
         syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, note.version)
-        syncState.remoteFingerprint = fingerprint(for: try jsonEncoder.encode(snapshot))
+        // 不覆盖 remoteFingerprint：冲突检测时已正确设置为 incomingFingerprint
+        // 重新从快照计算可能因 JSON round-trip 产生不同指纹
         syncState.lastSyncAt = Date()
         syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
         try context.save()
@@ -1287,7 +1283,12 @@ enum BlockDocumentNoteVersionStore {
         ].joined(separator: "\u{241F}")
     }
 
-    private static func fingerprint(for data: Data) -> String {
+    static func fingerprint(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 用统一的 jsonEncoder 编码快照并计算指纹，确保所有模块的指纹计算方式一致
+    static func snapshotFingerprint(_ snapshot: VersionedNoteSnapshot) throws -> String {
+        fingerprint(for: try jsonEncoder.encode(snapshot))
     }
 }

@@ -467,11 +467,11 @@ extension iCloudSyncManager {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return nil
         }
-        let snapshotData = try jsonEncoder.encode(envelope.currentSnapshot)
+        let contentHash = try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot)
         return iCloudNoteIndexEntry(
             noteID: noteID,
             version: envelope.currentVersion,
-            contentHash: fingerprint(for: snapshotData),
+            contentHash: contentHash,
             historyCount: envelope.history.count
         )
     }
@@ -509,10 +509,6 @@ extension iCloudSyncManager {
         return try context.fetch(descriptor).first
     }
 
-    private func fingerprint(for data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-    
     /// 上传笔记到 CloudKit
     func uploadNote(_ note: Note) async throws {
         guard privateDatabase != nil else {
