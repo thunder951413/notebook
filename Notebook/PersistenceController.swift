@@ -465,7 +465,11 @@ struct NoteSyncMergeResult {
 
 enum BlockDocumentNoteVersionStore {
     private static let deviceIdentityKey = "BlockDocumentNoteVersionStore.deviceID"
-    private static let jsonEncoder = JSONEncoder()
+    private static let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }()
     private static let jsonDecoder = JSONDecoder()
 
     static func currentDeviceID(defaults: UserDefaults = .standard) -> String {
@@ -941,6 +945,7 @@ enum BlockDocumentNoteVersionStore {
             context.delete(entry)
         }
         if !toDelete.isEmpty {
+            try context.save()
             Logger.shared.log(.app, .debug, "[PruneHistory] noteID=\(noteID.uuidString.prefix(8)) deleted=\(toDelete.count) remaining=\(sorted.count - toDelete.count)")
         }
     }
@@ -1103,6 +1108,8 @@ enum BlockDocumentNoteVersionStore {
                 )
             )
         }
+        // 清空脏检查哈希：应用远程/冲突快照后，下次本地保存将重新计算并纠正
+        note.lastSavedContentHash = ""
     }
 
     private static func makeSnapshot(

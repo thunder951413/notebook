@@ -594,10 +594,12 @@ final class SSHSyncManager: @unchecked Sendable {
 
         for (index, note) in notes.enumerated() {
             let syncState = try fetchSyncState(noteID: note.id, context: context)
-            let shouldSync =
+            let hasUnresolvedConflict = note.hasConflict
+            let shouldSync = !hasUnresolvedConflict && (
                 syncState == nil ||
                 syncState!.lastSyncedVersion < note.version ||
                 syncState!.pendingHistoryCount > 0
+            )
             if shouldSync {
                 try await syncNoteToRemote(noteID: note.id, context: context, config: config, controlPath: controlPath)
                 syncedNoteIDs.append(note.id)
@@ -634,6 +636,12 @@ final class SSHSyncManager: @unchecked Sendable {
             message: "正在更新远程索引..."
         )
         try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config, controlPath: controlPath)
+
+        // 清理已同步删除记录的 SyncState，避免下次推送重复收集
+        cleanupDeletedSyncStates(
+            deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
+            context: context
+        )
         try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
         await reportProgress(
             progressHandler,
@@ -659,6 +667,11 @@ final class SSHSyncManager: @unchecked Sendable {
             config: config,
             controlPath: controlPath
         )
+
+        // 裁剪历史版本，避免无限增长
+        for note in notes {
+            try? BlockDocumentNoteVersionStore.pruneHistory(noteID: note.id, context: context)
+        }
 
         return syncedNoteIDs
     }
@@ -854,6 +867,11 @@ final class SSHSyncManager: @unchecked Sendable {
             ),
             config: config
         )
+
+        // 裁剪历史版本，避免远程导入后本地历史无限增长
+        for result in results {
+            try? BlockDocumentNoteVersionStore.pruneHistory(noteID: result.noteID, context: context)
+        }
 
         return results
     }

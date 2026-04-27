@@ -325,7 +325,6 @@ final class NoteSaveManager {
             )
         }
 
-        try context.save()
         _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
         try context.save()
 
@@ -876,6 +875,15 @@ final class NoteSaveManager {
             retries += 1
         }
 
+        // 重试耗尽后再次检查锁，若仍被占用则返回失败而非绕过锁
+        if currentlySaving.contains(request.noteID) {
+            Logger.shared.log(.save, .error, "waitAndRetry exhausted for noteID=\(request.noteID.uuidString.prefix(8))")
+            return .failure(NSError(
+                domain: "SaveManager",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "笔记正在保存中，请稍后重试"]
+            ))
+        }
         return performSave(request: request)
     }
 
