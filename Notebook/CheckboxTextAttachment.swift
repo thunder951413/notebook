@@ -562,8 +562,9 @@ extension NSTextView {
         self.textStorage?.endEditing()
 
         // 恢复撤销跟踪并清除撤销栈
-        undoManager?.enableUndoRegistration()
+        // 先清除操作再恢复注册，避免 didChangeText 触发内部 undo 时残留指向旧状态的 target
         undoManager?.removeAllActions()
+        undoManager?.enableUndoRegistration()
 
         self.didChangeText()
     }

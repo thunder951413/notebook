@@ -401,13 +401,48 @@ final class RichTextController: ObservableObject {
         return true
     }
 
+    private func attributesForInsertionPoint(in textView: NSTextView, at location: Int) -> [NSAttributedString.Key: Any] {
+        guard let textStorage = textView.textStorage, textStorage.length > 0 else {
+            var attributes = textView.typingAttributes
+            attributes[.font] = attributes[.font] as? NSFont ?? AppSettings.shared.editorFont
+            attributes[.foregroundColor] = attributes[.foregroundColor] as? NSColor ?? NSColor.textColor
+            return attributes
+        }
+
+        let lookupLocation: Int
+        if location > 0 {
+            lookupLocation = min(location - 1, textStorage.length - 1)
+        } else {
+            lookupLocation = min(location, textStorage.length - 1)
+        }
+
+        var attributes = textStorage.attributes(at: lookupLocation, effectiveRange: nil)
+        for (key, value) in textView.typingAttributes {
+            attributes[key] = value
+        }
+        attributes[.font] = attributes[.font] as? NSFont ?? AppSettings.shared.editorFont
+        attributes[.foregroundColor] = attributes[.foregroundColor] as? NSColor ?? NSColor.textColor
+        attributes.removeValue(forKey: .attachment)
+        return attributes
+    }
+
+    private func applyTypingAttribute(_ value: Any?, for key: NSAttributedString.Key, in textView: NSTextView) {
+        var attributes = attributesForInsertionPoint(in: textView, at: textView.selectedRange().location)
+        if let value {
+            attributes[key] = value
+        } else {
+            attributes.removeValue(forKey: key)
+        }
+        textView.typingAttributes = attributes
+    }
+
     func toggleBold() {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
 
         // 获取当前字体
-        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let currentAttributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let currentFont = currentAttributes[.font] as? NSFont ?? AppSettings.shared.editorFont
 
         // 切换粗体
         let newFont: NSFont
@@ -415,6 +450,11 @@ final class RichTextController: ObservableObject {
             newFont = NSFontManager.shared.convert(currentFont, toNotHaveTrait: .boldFontMask)
         } else {
             newFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .boldFontMask)
+        }
+
+        if range.length == 0 {
+            applyTypingAttribute(newFont, for: .font, in: tv)
+            return
         }
 
         tv.textStorage?.beginEditing()
@@ -432,26 +472,28 @@ final class RichTextController: ObservableObject {
     func toggleItalic() {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
 
         // 获取当前字体
-        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let fontSize = currentFont.pointSize
+        let currentAttributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let currentFont = currentAttributes[.font] as? NSFont ?? AppSettings.shared.editorFont
 
         // 切换斜体
         let fontManager = NSFontManager.shared
         let traits = fontManager.traits(of: currentFont)
         let newFont: NSFont
         if traits.contains(.italicFontMask) {
-            // 移除斜体 - 使用系统常规字体
-            newFont = NSFont.systemFont(ofSize: fontSize)
+            newFont = fontManager.convert(currentFont, toNotHaveTrait: .italicFontMask)
         } else {
-            // 添加斜体 - 使用系统斜体字体
             newFont = NSFontManager.shared.font(withFamily: currentFont.familyName ?? ".AppleSystemUIFont",
                                                  traits: [.italicFontMask],
                                                  weight: fontManager.weight(of: currentFont),
-                                                 size: fontSize)
-                ?? NSFontManager.shared.convert(NSFont.systemFont(ofSize: fontSize), toHaveTrait: .italicFontMask)
+                                                 size: currentFont.pointSize)
+                ?? NSFontManager.shared.convert(currentFont, toHaveTrait: .italicFontMask)
+        }
+
+        if range.length == 0 {
+            applyTypingAttribute(newFont, for: .font, in: tv)
+            return
         }
 
         tv.textStorage?.beginEditing()
@@ -469,11 +511,15 @@ final class RichTextController: ObservableObject {
     func toggleUnderline() {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
 
         // 检查是否已有下划线
-        let attributes = tv.textStorage?.attributes(at: range.location, effectiveRange: nil)
-        let hasUnderline = attributes?[.underlineStyle] != nil
+        let attributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let hasUnderline = attributes[.underlineStyle] != nil
+
+        if range.length == 0 {
+            applyTypingAttribute(hasUnderline ? nil : NSUnderlineStyle.single.rawValue, for: .underlineStyle, in: tv)
+            return
+        }
 
         tv.textStorage?.beginEditing()
         if hasUnderline {
@@ -494,11 +540,15 @@ final class RichTextController: ObservableObject {
         default: size = 16
         }
         let range = tv.selectedRange()
-        let targetRange = range.length == 0 ? NSRange(location: 0, length: tv.string.utf16.count) : range
+        let targetRange = range.length == 0 ? (tv.string as NSString).lineRange(for: range) : range
         tv.textStorage?.addAttributes([
             .font: NSFont.systemFont(ofSize: size, weight: .semibold),
             .notebookHeadingLevel: level
         ], range: targetRange)
+        if range.length == 0 {
+            applyTypingAttribute(NSFont.systemFont(ofSize: size, weight: .semibold), for: .font, in: tv)
+        }
+        tv.didChangeText()
     }
 
     // MARK: - 字体设置
@@ -507,10 +557,10 @@ final class RichTextController: ObservableObject {
     func setFont(name: String) {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
 
         // 获取当前字体
-        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let currentAttributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let currentFont = currentAttributes[.font] as? NSFont ?? AppSettings.shared.editorFont
         let fontSize = currentFont.pointSize
 
         // 创建新字体
@@ -519,6 +569,11 @@ final class RichTextController: ObservableObject {
             newFont = NSFont.systemFont(ofSize: fontSize)
         } else {
             newFont = NSFont(name: name, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
+        }
+
+        if range.length == 0 {
+            applyTypingAttribute(newFont, for: .font, in: tv)
+            return
         }
 
         tv.textStorage?.beginEditing()
@@ -537,14 +592,19 @@ final class RichTextController: ObservableObject {
     func setFontSize(_ size: CGFloat) {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
-        if range.length == 0 { return }
 
         // 获取当前字体
-        let currentFont = tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let currentAttributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let currentFont = currentAttributes[.font] as? NSFont ?? AppSettings.shared.editorFont
 
         // 创建新字体，保持其他属性
         let fontManager = NSFontManager.shared
         let newFont = fontManager.convert(currentFont, toSize: size)
+
+        if range.length == 0 {
+            applyTypingAttribute(newFont, for: .font, in: tv)
+            return
+        }
 
         tv.textStorage?.beginEditing()
         tv.textStorage?.addAttribute(.font, value: newFont, range: range)
@@ -563,9 +623,7 @@ final class RichTextController: ObservableObject {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
 
-        var typingAttributes = tv.typingAttributes
-        typingAttributes[.foregroundColor] = color
-        tv.typingAttributes = typingAttributes
+        applyTypingAttribute(color, for: .foregroundColor, in: tv)
 
         if range.length == 0 { return }
 
@@ -595,7 +653,7 @@ final class RichTextController: ObservableObject {
 
     func toggleCheckbox() {
         guard let tv = textView else { return }
-        tv.toggleCheckboxForCurrentLine()
+        toggleCheckboxForSelectedLines(in: tv)
     }
 
     func toggleCheckbox(at location: Int) -> Bool {
@@ -607,42 +665,12 @@ final class RichTextController: ObservableObject {
 
     func increaseIndent() {
         guard let tv = textView else { return }
-        let nsString = tv.string as NSString
-        let selectedRange = tv.selectedRange()
-        let lineRange = nsString.lineRange(for: selectedRange)
-
-        // 在行首插入制表符或空格
-        let indentString = "    " // 4个空格
-        tv.textStorage?.insert(NSAttributedString(string: indentString), at: lineRange.location)
-        tv.didChangeText()
-
-        // 调整选中范围
-        let newLocation = selectedRange.location + indentString.count
-        tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
+        adjustIndent(in: tv, increase: true)
     }
 
     func decreaseIndent() {
         guard let tv = textView else { return }
-        let nsString = tv.string as NSString
-        let selectedRange = tv.selectedRange()
-        let lineRange = nsString.lineRange(for: selectedRange)
-
-        // 检查行首是否有缩进
-        let lineContent = nsString.substring(with: lineRange)
-        let leadingWhitespace = lineContent.prefix { $0 == " " || $0 == "\t" }
-
-        if !leadingWhitespace.isEmpty {
-            // 删除最多4个空格或1个制表符
-            let deleteCount = min(leadingWhitespace.count, 4)
-            let deleteRange = NSRange(location: lineRange.location, length: deleteCount)
-
-            tv.textStorage?.deleteCharacters(in: deleteRange)
-            tv.didChangeText()
-
-            // 调整选中范围
-            let newLocation = max(lineRange.location, selectedRange.location - deleteCount)
-            tv.setSelectedRange(NSRange(location: newLocation, length: selectedRange.length))
-        }
+        adjustIndent(in: tv, increase: false)
     }
 
     // MARK: - 列表功能增强
@@ -660,69 +688,276 @@ final class RichTextController: ObservableObject {
     /// 切换编号列表
     func toggleNumberedList() {
         guard let tv = textView else { return }
-        let nsString = tv.string as NSString
-        let selectedRange = tv.selectedRange()
-        let lineRange = nsString.lineRange(for: selectedRange)
-
-        // 检查是否已经有编号
-        let lineContent = nsString.substring(with: lineRange)
-        let numberedPattern = "^\\d+\\. "
-
-        if let regex = try? NSRegularExpression(pattern: numberedPattern),
-           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
-            // 移除编号
-            let deleteRange = NSRange(location: lineRange.location, length: match.range.length)
-            tv.textStorage?.deleteCharacters(in: deleteRange)
-            tv.didChangeText()
-
-            // 调整光标位置
-            let newLocation = selectedRange.location - match.range.length
-            tv.setSelectedRange(NSRange(location: max(lineRange.location, newLocation), length: 0))
-        } else {
-            // 移除其他列表前缀
-            removeOtherListPrefixes(tv: tv, lineRange: lineRange)
-
-            // 添加编号 "1. "
-            tv.textStorage?.insert(NSAttributedString(string: "1. "), at: lineRange.location)
-            tv.didChangeText()
-
-            // 调整光标位置
-            let newLocation = selectedRange.location + 3
-            tv.setSelectedRange(NSRange(location: newLocation, length: 0))
-        }
+        toggleNumberedListForSelectedLines(in: tv)
     }
 
     /// 通用列表切换方法
     private func toggleListType(prefix: String) {
         guard let tv = textView else { return }
-        let nsString = tv.string as NSString
-        let selectedRange = tv.selectedRange()
-        let lineRange = nsString.lineRange(for: selectedRange)
+        toggleTextListForSelectedLines(in: tv, prefix: prefix)
+    }
 
-        // 检查是否已经有该前缀
-        let lineContent = nsString.substring(with: lineRange)
+    private func selectedLineRanges(in textView: NSTextView) -> [NSRange] {
+        let nsString = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+        var effectiveRange = selectedRange
 
-        if lineContent.hasPrefix(prefix) {
-            // 移除前缀
-            let deleteRange = NSRange(location: lineRange.location, length: prefix.count)
-            tv.textStorage?.deleteCharacters(in: deleteRange)
-            tv.didChangeText()
-
-            // 调整光标位置
-            let newLocation = selectedRange.location - prefix.count
-            tv.setSelectedRange(NSRange(location: max(lineRange.location, newLocation), length: 0))
-        } else {
-            // 移除其他列表前缀
-            removeOtherListPrefixes(tv: tv, lineRange: lineRange)
-
-            // 添加前缀
-            tv.textStorage?.insert(NSAttributedString(string: prefix), at: lineRange.location)
-            tv.didChangeText()
-
-            // 调整光标位置
-            let newLocation = selectedRange.location + prefix.count
-            tv.setSelectedRange(NSRange(location: newLocation, length: 0))
+        if effectiveRange.length > 0,
+           NSMaxRange(effectiveRange) <= nsString.length,
+           NSMaxRange(effectiveRange) > effectiveRange.location,
+           nsString.character(at: NSMaxRange(effectiveRange) - 1) == 10 {
+            effectiveRange.length -= 1
         }
+
+        let fullLineRange = nsString.lineRange(for: effectiveRange)
+        guard fullLineRange.length > 0 else {
+            return [fullLineRange]
+        }
+
+        var ranges: [NSRange] = []
+        var location = fullLineRange.location
+        let end = NSMaxRange(fullLineRange)
+
+        while location < end {
+            let lineRange = nsString.lineRange(for: NSRange(location: location, length: 0))
+            ranges.append(lineRange)
+            let nextLocation = NSMaxRange(lineRange)
+            guard nextLocation > location else { break }
+            location = nextLocation
+        }
+
+        return ranges
+    }
+
+    private func leadingWhitespaceBoundary(in lineRange: NSRange, textView: NSTextView) -> Int {
+        let nsString = textView.string as NSString
+        let end = NSMaxRange(lineRange)
+        var location = lineRange.location
+
+        while location < end {
+            let scalar = nsString.character(at: location)
+            if scalar == 32 || scalar == 9 {
+                location += 1
+                continue
+            }
+            break
+        }
+
+        return location
+    }
+
+    private func checkboxRangeAtLineStart(in textView: NSTextView, lineRange: NSRange) -> NSRange? {
+        let location = leadingWhitespaceBoundary(in: lineRange, textView: textView)
+        guard location < textView.attributedString().length else { return nil }
+
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        guard textView.normalizedCheckboxAttachment(at: location, effectiveRange: &effectiveRange) != nil else {
+            return nil
+        }
+        return effectiveRange
+    }
+
+    private func textListPrefixRange(in textView: NSTextView, lineRange: NSRange, matching prefix: String? = nil) -> NSRange? {
+        let nsString = textView.string as NSString
+        let prefixLocation = leadingWhitespaceBoundary(in: lineRange, textView: textView)
+        guard prefixLocation < NSMaxRange(lineRange), prefixLocation < nsString.length else { return nil }
+
+        let lineContent = nsString.substring(with: NSRange(location: prefixLocation, length: NSMaxRange(lineRange) - prefixLocation))
+        if let prefix {
+            return lineContent.hasPrefix(prefix) ? NSRange(location: prefixLocation, length: prefix.utf16.count) : nil
+        }
+
+        for candidate in ["• ", "- ", "* "] {
+            if lineContent.hasPrefix(candidate) {
+                return NSRange(location: prefixLocation, length: candidate.utf16.count)
+            }
+        }
+
+        if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
+           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
+            return NSRange(location: prefixLocation, length: match.range.length)
+        }
+
+        return nil
+    }
+
+    private func removeLinePrefix(in textView: NSTextView, lineRange: NSRange) -> Int {
+        if let checkboxRange = checkboxRangeAtLineStart(in: textView, lineRange: lineRange) {
+            let nsString = textView.string as NSString
+            var deleteRange = checkboxRange
+            if checkboxRange.upperBound < NSMaxRange(lineRange),
+               checkboxRange.upperBound < nsString.length,
+               nsString.substring(with: NSRange(location: checkboxRange.upperBound, length: 1)) == " " {
+                deleteRange.length += 1
+            }
+            textView.textStorage?.deleteCharacters(in: deleteRange)
+            return deleteRange.length
+        }
+
+        if let prefixRange = textListPrefixRange(in: textView, lineRange: lineRange) {
+            textView.textStorage?.deleteCharacters(in: prefixRange)
+            return prefixRange.length
+        }
+
+        return 0
+    }
+
+    private func toggleTextListForSelectedLines(in textView: NSTextView, prefix: String) {
+        let selectedRange = textView.selectedRange()
+        let ranges = selectedLineRanges(in: textView)
+        let shouldRemove = ranges.allSatisfy { textListPrefixRange(in: textView, lineRange: $0, matching: prefix) != nil }
+        var deltaBeforeSelection = 0
+        var totalDelta = 0
+
+        textView.textStorage?.beginEditing()
+        for lineRange in ranges.reversed() {
+            if shouldRemove {
+                guard let prefixRange = textListPrefixRange(in: textView, lineRange: lineRange, matching: prefix) else { continue }
+                textView.textStorage?.deleteCharacters(in: prefixRange)
+                totalDelta -= prefixRange.length
+                if prefixRange.location < selectedRange.location {
+                    deltaBeforeSelection -= prefixRange.length
+                }
+            } else {
+                let removed = removeLinePrefix(in: textView, lineRange: lineRange)
+                let insertionLocation = leadingWhitespaceBoundary(in: lineRange, textView: textView)
+                textView.textStorage?.insert(NSAttributedString(string: prefix), at: insertionLocation)
+                let delta = prefix.utf16.count - removed
+                totalDelta += delta
+                if insertionLocation < selectedRange.location {
+                    deltaBeforeSelection += delta
+                }
+            }
+        }
+        textView.textStorage?.endEditing()
+
+        let newLocation = max(0, selectedRange.location + deltaBeforeSelection)
+        let newLength = max(0, selectedRange.length + totalDelta - deltaBeforeSelection)
+        textView.setSelectedRange(NSRange(location: newLocation, length: newLength))
+        textView.didChangeText()
+    }
+
+    private func toggleNumberedListForSelectedLines(in textView: NSTextView) {
+        let selectedRange = textView.selectedRange()
+        let ranges = selectedLineRanges(in: textView)
+        let shouldRemove = ranges.allSatisfy { lineRange in
+            guard let prefixRange = textListPrefixRange(in: textView, lineRange: lineRange) else { return false }
+            let prefix = (textView.string as NSString).substring(with: prefixRange)
+            return prefix.range(of: "^\\d+\\.\\s$", options: .regularExpression) != nil
+        }
+        var deltaBeforeSelection = 0
+        var totalDelta = 0
+        var number = ranges.count
+
+        textView.textStorage?.beginEditing()
+        for lineRange in ranges.reversed() {
+            if shouldRemove {
+                guard let prefixRange = textListPrefixRange(in: textView, lineRange: lineRange) else { continue }
+                textView.textStorage?.deleteCharacters(in: prefixRange)
+                totalDelta -= prefixRange.length
+                if prefixRange.location < selectedRange.location {
+                    deltaBeforeSelection -= prefixRange.length
+                }
+            } else {
+                let removed = removeLinePrefix(in: textView, lineRange: lineRange)
+                let insertionLocation = leadingWhitespaceBoundary(in: lineRange, textView: textView)
+                let prefix = "\(number). "
+                textView.textStorage?.insert(NSAttributedString(string: prefix), at: insertionLocation)
+                let delta = prefix.utf16.count - removed
+                totalDelta += delta
+                if insertionLocation < selectedRange.location {
+                    deltaBeforeSelection += delta
+                }
+                number -= 1
+            }
+        }
+        textView.textStorage?.endEditing()
+
+        let newLocation = max(0, selectedRange.location + deltaBeforeSelection)
+        let newLength = max(0, selectedRange.length + totalDelta - deltaBeforeSelection)
+        textView.setSelectedRange(NSRange(location: newLocation, length: newLength))
+        textView.didChangeText()
+    }
+
+    private func toggleCheckboxForSelectedLines(in textView: NSTextView) {
+        let selectedRange = textView.selectedRange()
+        let ranges = selectedLineRanges(in: textView)
+        let shouldRemove = ranges.allSatisfy { checkboxRangeAtLineStart(in: textView, lineRange: $0) != nil }
+        var deltaBeforeSelection = 0
+        var totalDelta = 0
+
+        textView.textStorage?.beginEditing()
+        for lineRange in ranges.reversed() {
+            if shouldRemove {
+                let removed = removeLinePrefix(in: textView, lineRange: lineRange)
+                totalDelta -= removed
+                if lineRange.location < selectedRange.location {
+                    deltaBeforeSelection -= removed
+                }
+            } else {
+                let removed = removeLinePrefix(in: textView, lineRange: lineRange)
+                let insertionLocation = leadingWhitespaceBoundary(in: lineRange, textView: textView)
+                let checkbox = NSMutableAttributedString(attachment: CheckboxTextAttachment(checked: false))
+                checkbox.append(NSAttributedString(string: " "))
+                textView.textStorage?.insert(checkbox, at: insertionLocation)
+                let delta = checkbox.length - removed
+                totalDelta += delta
+                if insertionLocation < selectedRange.location {
+                    deltaBeforeSelection += delta
+                }
+            }
+        }
+        textView.textStorage?.endEditing()
+
+        let newLocation = max(0, selectedRange.location + deltaBeforeSelection)
+        let newLength = max(0, selectedRange.length + totalDelta - deltaBeforeSelection)
+        textView.setSelectedRange(NSRange(location: newLocation, length: newLength))
+        textView.didChangeText()
+    }
+
+    private func adjustIndent(in textView: NSTextView, increase: Bool) {
+        let selectedRange = textView.selectedRange()
+        let ranges = selectedLineRanges(in: textView)
+        var deltaBeforeSelection = 0
+        var totalDelta = 0
+
+        textView.textStorage?.beginEditing()
+        for lineRange in ranges.reversed() {
+            if increase {
+                textView.textStorage?.insert(NSAttributedString(string: "    "), at: lineRange.location)
+                totalDelta += 4
+                if lineRange.location < selectedRange.location {
+                    deltaBeforeSelection += 4
+                }
+            } else {
+                let nsString = textView.string as NSString
+                let maxDelete = min(4, NSMaxRange(lineRange) - lineRange.location)
+                var deleteLength = 0
+                while deleteLength < maxDelete {
+                    let scalar = nsString.character(at: lineRange.location + deleteLength)
+                    if scalar == 32 {
+                        deleteLength += 1
+                    } else if scalar == 9 {
+                        deleteLength += 1
+                        break
+                    } else {
+                        break
+                    }
+                }
+                guard deleteLength > 0 else { continue }
+                textView.textStorage?.deleteCharacters(in: NSRange(location: lineRange.location, length: deleteLength))
+                totalDelta -= deleteLength
+                if lineRange.location < selectedRange.location {
+                    deltaBeforeSelection -= deleteLength
+                }
+            }
+        }
+        textView.textStorage?.endEditing()
+
+        let newLocation = max(0, selectedRange.location + deltaBeforeSelection)
+        let newLength = max(0, selectedRange.length + totalDelta - deltaBeforeSelection)
+        textView.setSelectedRange(NSRange(location: newLocation, length: newLength))
+        textView.didChangeText()
     }
 
     /// 移除其他列表前缀（避免混合列表类型）
@@ -755,11 +990,14 @@ final class RichTextController: ObservableObject {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
 
-        if range.length == 0 { return }
-
         // 检查是否已经有删除线
-        let attributes = tv.textStorage?.attributes(at: range.location, effectiveRange: nil)
-        let hasStrikethrough = attributes?[.strikethroughStyle] != nil
+        let attributes = attributesForInsertionPoint(in: tv, at: range.location)
+        let hasStrikethrough = attributes[.strikethroughStyle] != nil
+
+        if range.length == 0 {
+            applyTypingAttribute(hasStrikethrough ? nil : NSUnderlineStyle.single.rawValue, for: .strikethroughStyle, in: tv)
+            return
+        }
 
         tv.textStorage?.beginEditing()
         if hasStrikethrough {
@@ -1052,6 +1290,15 @@ class RichTextView: NSTextView {
     private let doubleClickDistanceThreshold: CGFloat = 10.0 // 双击位置最大偏移（像素）
     private var suppressNextMouseUp = false // 用于阻止双击后的 mouseUp 触发链接
 
+    // 当视图从 window 移除时（即将被释放），清除所在 undoManager 的所有操作，
+    // 防止已释放的 NSTextView 仍然作为 undo target 导致 EXC_BAD_ACCESS。
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, let undoManager = self.undoManager {
+            undoManager.removeAllActions()
+        }
+    }
+
     override func paste(_ sender: Any?) {
         print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
         // 首先尝试让 coordinator 处理图片粘贴
@@ -1062,9 +1309,40 @@ class RichTextView: NSTextView {
                 return
             }
         }
+        if insertNormalizedPlainTextFromPasteboard() {
+            print("[RichTextView] Plain text paste normalized")
+            return
+        }
         // 如果不是图片，调用标准粘贴
         print("[RichTextView] Falling back to super.paste")
         super.paste(sender)
+    }
+
+    private func insertNormalizedPlainTextFromPasteboard() -> Bool {
+        guard let rawText = NSPasteboard.general.string(forType: .string), !rawText.isEmpty else {
+            return false
+        }
+
+        let normalizedText = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+
+        var attributes = self.typingAttributes
+        attributes[.font] = attributes[.font] as? NSFont ?? AppSettings.shared.editorFont
+        attributes[.foregroundColor] = attributes[.foregroundColor] as? NSColor ?? NSColor.textColor
+        attributes.removeValue(forKey: .attachment)
+        attributes.removeValue(forKey: .link)
+        attributes.removeValue(forKey: .paragraphStyle)
+        attributes.removeValue(forKey: .notebookHeadingLevel)
+
+        let replacementRange = self.selectedRange()
+        let attributedText = NSAttributedString(string: normalizedText, attributes: attributes)
+        self.textStorage?.replaceCharacters(in: replacementRange, with: attributedText)
+        self.setSelectedRange(NSRange(location: replacementRange.location + attributedText.length, length: 0))
+        self.typingAttributes = attributes
+        self.didChangeText()
+        return true
     }
 
     // 处理拖放粘贴
@@ -2390,6 +2668,16 @@ class RichTextView: NSTextView {
             return
         }
 
+        if event.keyCode == 48 {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+            let isShiftOnly = flags == .shift
+            let hasNoModifiers = flags.isEmpty
+            if (hasNoModifiers || isShiftOnly), shouldIndentSelectionWithTab() {
+                adjustIndentForSelectedLines(increase: !isShiftOnly)
+                return
+            }
+        }
+
         // 检查是否是回车键
         if event.keyCode == 36 || event.keyCode == 76 { // 36 = Return, 76 = Enter
             // 先检查是否有 marked text（输入法正在编辑中）
@@ -2404,6 +2692,103 @@ class RichTextView: NSTextView {
         }
 
         super.keyDown(with: event)
+    }
+
+    private func selectedLineRangesForEditing() -> [NSRange] {
+        let nsString = self.string as NSString
+        let selectedRange = self.selectedRange()
+        var effectiveRange = selectedRange
+
+        if effectiveRange.length > 0,
+           NSMaxRange(effectiveRange) <= nsString.length,
+           NSMaxRange(effectiveRange) > effectiveRange.location,
+           nsString.character(at: NSMaxRange(effectiveRange) - 1) == 10 {
+            effectiveRange.length -= 1
+        }
+
+        let fullLineRange = nsString.lineRange(for: effectiveRange)
+        guard fullLineRange.length > 0 else { return [fullLineRange] }
+
+        var ranges: [NSRange] = []
+        var location = fullLineRange.location
+        let end = NSMaxRange(fullLineRange)
+
+        while location < end {
+            let lineRange = nsString.lineRange(for: NSRange(location: location, length: 0))
+            ranges.append(lineRange)
+            let nextLocation = NSMaxRange(lineRange)
+            guard nextLocation > location else { break }
+            location = nextLocation
+        }
+
+        return ranges
+    }
+
+    private func shouldIndentSelectionWithTab() -> Bool {
+        let selectedRange = self.selectedRange()
+        if selectedRange.length > 0 {
+            return true
+        }
+
+        let lineRange = (self.string as NSString).lineRange(for: selectedRange)
+        if findCheckboxAtLineStart(lineRange: lineRange) != nil {
+            return true
+        }
+        if findPrefixAtLineStart(lineRange: lineRange, prefix: "• ") != nil {
+            return true
+        }
+        if findPrefixAtLineStart(lineRange: lineRange, prefix: "- ") != nil {
+            return true
+        }
+        if findNumberedListAtLineStart(lineRange: lineRange) != nil {
+            return true
+        }
+        return false
+    }
+
+    private func adjustIndentForSelectedLines(increase: Bool) {
+        let selectedRange = self.selectedRange()
+        let ranges = selectedLineRangesForEditing()
+        var deltaBeforeSelection = 0
+        var totalDelta = 0
+
+        self.textStorage?.beginEditing()
+        for lineRange in ranges.reversed() {
+            if increase {
+                self.textStorage?.insert(NSAttributedString(string: "    "), at: lineRange.location)
+                totalDelta += 4
+                if lineRange.location < selectedRange.location {
+                    deltaBeforeSelection += 4
+                }
+            } else {
+                let nsString = self.string as NSString
+                let maxDelete = min(4, NSMaxRange(lineRange) - lineRange.location)
+                var deleteLength = 0
+                while deleteLength < maxDelete {
+                    let scalar = nsString.character(at: lineRange.location + deleteLength)
+                    if scalar == 32 {
+                        deleteLength += 1
+                    } else if scalar == 9 {
+                        deleteLength += 1
+                        break
+                    } else {
+                        break
+                    }
+                }
+                guard deleteLength > 0 else { continue }
+                self.textStorage?.deleteCharacters(in: NSRange(location: lineRange.location, length: deleteLength))
+                totalDelta -= deleteLength
+                if lineRange.location < selectedRange.location {
+                    deltaBeforeSelection -= deleteLength
+                }
+            }
+        }
+        self.textStorage?.endEditing()
+
+        let newLocation = max(0, selectedRange.location + deltaBeforeSelection)
+        let newLength = max(0, selectedRange.length + totalDelta - deltaBeforeSelection)
+        self.setSelectedRange(NSRange(location: newLocation, length: newLength))
+        self.didChangeText()
     }
 
     override func cancelOperation(_ sender: Any?) {
@@ -2439,9 +2824,7 @@ class RichTextView: NSTextView {
         guard markedRange.location != NSNotFound, markedRange.length > 0 else { return false }
         
         let fullString = self.string as NSString
-        var markedString = fullString.substring(with: markedRange)
-        
-        markedString = markedString.replacingOccurrences(of: "'", with: "")
+        let markedString = fullString.substring(with: markedRange)
         
         self.textStorage?.beginEditing()
         self.textStorage?.deleteCharacters(in: markedRange)
@@ -2456,6 +2839,7 @@ class RichTextView: NSTextView {
     private func handleReturnKey() -> Bool {
         let nsString = self.string as NSString
         let selectedRange = self.selectedRange()
+        guard selectedRange.length == 0 else { return false }
         let currentLineRange = nsString.lineRange(for: selectedRange)
 
         // 1. 检查复选框
@@ -2478,8 +2862,39 @@ class RichTextView: NSTextView {
             return handleNumberedListReturn(numberRange: numberRange, currentNumber: number, currentLineRange: currentLineRange, nsString: nsString)
         }
 
+        if handleHeadingReturn(currentLineRange: currentLineRange) {
+            return true
+        }
+
         // 5. 没有列表，继承上一行的格式（字号、字体、颜色）
         return handleFormatInheritance(currentLineRange: currentLineRange)
+    }
+
+    private func handleHeadingReturn(currentLineRange: NSRange) -> Bool {
+        guard let textStorage = self.textStorage else { return false }
+        let contentLocation = contentStartLocation(in: currentLineRange)
+        let lookupLocation: Int
+        if contentLocation < textStorage.length {
+            lookupLocation = contentLocation
+        } else if currentLineRange.location < textStorage.length {
+            lookupLocation = currentLineRange.location
+        } else {
+            return false
+        }
+
+        guard textStorage.attribute(.notebookHeadingLevel, at: lookupLocation, effectiveRange: nil) != nil else {
+            return false
+        }
+
+        self.insertNewline(nil)
+        var attributes = self.typingAttributes
+        attributes[.font] = AppSettings.shared.editorFont
+        attributes[.foregroundColor] = attributes[.foregroundColor] as? NSColor ?? NSColor.textColor
+        attributes.removeValue(forKey: .notebookHeadingLevel)
+        attributes.removeValue(forKey: .notebookExplicitBold)
+        self.typingAttributes = attributes
+        self.didChangeText()
+        return true
     }
 
     /// 处理格式继承 - 从当前行或上一行获取格式
@@ -2506,6 +2921,39 @@ class RichTextView: NSTextView {
         return false
     }
 
+    private func contentStartLocation(in lineRange: NSRange) -> Int {
+        let nsString = self.string as NSString
+        let prefixLocation = leadingWhitespaceBoundary(in: lineRange)
+        let lineEnd = NSMaxRange(lineRange)
+        guard prefixLocation < lineEnd else { return prefixLocation }
+
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        if normalizedCheckboxAttachment(at: prefixLocation, effectiveRange: &effectiveRange) != nil {
+            var contentLocation = NSMaxRange(effectiveRange)
+            if contentLocation < lineEnd,
+               contentLocation < nsString.length,
+               nsString.substring(with: NSRange(location: contentLocation, length: 1)) == " " {
+                contentLocation += 1
+            }
+            return contentLocation
+        }
+
+        let contentRange = NSRange(location: prefixLocation, length: lineEnd - prefixLocation)
+        let lineContent = nsString.substring(with: contentRange)
+        for prefix in ["• ", "- ", "* "] {
+            if lineContent.hasPrefix(prefix) {
+                return prefixLocation + prefix.utf16.count
+            }
+        }
+
+        if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
+           let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
+            return prefixLocation + match.range.length
+        }
+
+        return prefixLocation
+    }
+
     /// 获取要继承的格式（从当前行或上一行）
     private func getFormatToInherit(from lineRange: NSRange) -> (font: NSFont?, color: NSColor?) {
         guard let textStorage = self.textStorage else { return (nil, nil) }
@@ -2514,27 +2962,8 @@ class RichTextView: NSTextView {
         var font: NSFont?
         var color: NSColor?
 
-        // 尝试从当前行获取格式（跳过列表符号部分）
         if lineRange.location < textStorage.length {
-            // 查找行中第一个非列表符号的字符位置
-            let lineContent = (self.string as NSString).substring(with: lineRange)
-            var contentStartOffset = 0
-
-            // 跳过常见的列表前缀
-            let prefixes = ["☐ ", "☑ ", "• ", "- ", "* "]
-            for prefix in prefixes {
-                if lineContent.hasPrefix(prefix) {
-                    contentStartOffset = prefix.count
-                    break
-                }
-            }
-            // 检查数字编号 (如 "1. ", "2. ")
-            if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
-               let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.count)) {
-                contentStartOffset = match.range.length
-            }
-
-            let contentLocation = lineRange.location + contentStartOffset
+            let contentLocation = contentStartLocation(in: lineRange)
             if contentLocation < textStorage.length {
                 font = textStorage.attribute(.font, at: contentLocation, effectiveRange: &effectiveRange) as? NSFont
                 color = textStorage.attribute(.foregroundColor, at: contentLocation, effectiveRange: &effectiveRange) as? NSColor
@@ -2561,22 +2990,7 @@ class RichTextView: NSTextView {
             if previousLocation < textStorage.length {
                 let previousLineRange = (self.string as NSString).lineRange(for: NSRange(location: previousLocation, length: 0))
 
-                // 从上一行获取格式（跳过列表符号）
-                let prevLineContent = (self.string as NSString).substring(with: previousLineRange)
-                var prevContentOffset = 0
-                let prefixes = ["☐ ", "☑ ", "• ", "- ", "* "]
-                for prefix in prefixes {
-                    if prevLineContent.hasPrefix(prefix) {
-                        prevContentOffset = prefix.count
-                        break
-                    }
-                }
-                if let regex = try? NSRegularExpression(pattern: "^\\d+\\.\\s"),
-                   let match = regex.firstMatch(in: prevLineContent, options: [], range: NSRange(location: 0, length: prevLineContent.count)) {
-                    prevContentOffset = match.range.length
-                }
-
-                let prevContentLocation = previousLineRange.location + prevContentOffset
+                let prevContentLocation = contentStartLocation(in: previousLineRange)
                 if prevContentLocation < textStorage.length {
                     // 优先使用上一行的颜色（如果是自定义颜色）
                     if let prevColor = textStorage.attribute(.foregroundColor, at: prevContentLocation, effectiveRange: &effectiveRange) as? NSColor {
@@ -2635,6 +3049,49 @@ class RichTextView: NSTextView {
         self.didChangeText()
     }
 
+    private func inheritedAttributes(font: NSFont?, color: NSColor?) -> [NSAttributedString.Key: Any] {
+        let effectiveFont = font ?? (self.typingAttributes[.font] as? NSFont) ?? AppSettings.shared.editorFont
+        let effectiveColor = color ?? (self.typingAttributes[.foregroundColor] as? NSColor) ?? NSColor.textColor
+        return [
+            .font: effectiveFont,
+            .foregroundColor: effectiveColor
+        ]
+    }
+
+    private func inheritedAttributedString(_ string: String, font: NSFont?, color: NSColor?) -> NSAttributedString {
+        NSAttributedString(string: string, attributes: inheritedAttributes(font: font, color: color))
+    }
+
+    private func leadingWhitespaceBoundary(in lineRange: NSRange) -> Int {
+        let nsString = self.string as NSString
+        let end = NSMaxRange(lineRange)
+        var location = lineRange.location
+
+        while location < end {
+            let scalar = nsString.character(at: location)
+            if scalar == 32 || scalar == 9 {
+                location += 1
+                continue
+            }
+            break
+        }
+
+        return location
+    }
+
+    private func moveInsertionPointAfterDeletingListPrefix(_ deleteRange: NSRange) {
+        self.textStorage?.deleteCharacters(in: deleteRange)
+        self.setSelectedRange(NSRange(location: deleteRange.location, length: 0))
+        self.didChangeText()
+    }
+
+    private func indentationPrefix(for lineRange: NSRange) -> String {
+        let nsString = self.string as NSString
+        let indentationEnd = leadingWhitespaceBoundary(in: lineRange)
+        guard indentationEnd > lineRange.location else { return "" }
+        return nsString.substring(with: NSRange(location: lineRange.location, length: indentationEnd - lineRange.location))
+    }
+
     /// 处理复选框回车
     private func handleCheckboxReturn(checkboxRange: NSRange, currentLineRange: NSRange, nsString: NSString) -> Bool {
         // 检查当前行是否只有复选框（空行）
@@ -2643,10 +3100,15 @@ class RichTextView: NSTextView {
 
         if trimmedContent.isEmpty {
             // 空行，删除复选框
-            let deleteRange = NSRange(location: checkboxRange.location, length: checkboxRange.length + 1) // +1 for space
-            self.textStorage?.deleteCharacters(in: deleteRange)
-            self.insertNewline(nil)
-            self.didChangeText()
+            var deleteRange = checkboxRange
+            if checkboxRange.upperBound < currentLineRange.upperBound {
+                let nextCharRange = NSRange(location: checkboxRange.upperBound, length: 1)
+                if nextCharRange.upperBound <= nsString.length,
+                   nsString.substring(with: nextCharRange) == " " {
+                    deleteRange.length += 1
+                }
+            }
+            moveInsertionPointAfterDeletingListPrefix(deleteRange)
             return true
         } else {
             // 获取要继承的格式
@@ -2657,10 +3119,12 @@ class RichTextView: NSTextView {
 
             // 在新行插入复选框（未选中状态）
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
+            let indentation = indentationPrefix(for: currentLineRange)
             let newAttachment = CheckboxTextAttachment(checked: false)
-            let attrString = NSAttributedString(attachment: newAttachment)
-            let mutableAttr = NSMutableAttributedString(attributedString: attrString)
-            mutableAttr.append(NSAttributedString(string: " "))
+            let mutableAttr = NSMutableAttributedString()
+            mutableAttr.append(inheritedAttributedString(indentation, font: font, color: color))
+            mutableAttr.append(NSAttributedString(attachment: newAttachment))
+            mutableAttr.append(inheritedAttributedString(" ", font: font, color: color))
 
             self.textStorage?.insert(mutableAttr, at: newLineRange.location)
 
@@ -2685,9 +3149,7 @@ class RichTextView: NSTextView {
         if trimmedContent.isEmpty {
             // 空行，删除前缀
             let deleteRange = NSRange(location: prefixRange.location, length: prefixRange.length)
-            self.textStorage?.deleteCharacters(in: deleteRange)
-            self.insertNewline(nil)
-            self.didChangeText()
+            moveInsertionPointAfterDeletingListPrefix(deleteRange)
             return true
         } else {
             // 获取要继承的格式
@@ -2698,10 +3160,11 @@ class RichTextView: NSTextView {
 
             // 在新行插入相同的前缀
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
-            self.textStorage?.insert(NSAttributedString(string: prefix), at: newLineRange.location)
+            let newPrefix = indentationPrefix(for: currentLineRange) + prefix
+            self.textStorage?.insert(inheritedAttributedString(newPrefix, font: font, color: color), at: newLineRange.location)
 
             // 应用继承的格式到前缀之后的内容
-            let contentStartLocation = newLineRange.location + prefix.count
+            let contentStartLocation = newLineRange.location + newPrefix.utf16.count
             let contentRange = NSRange(location: contentStartLocation, length: 0)
             applyFormat(font: font, color: color, to: contentRange)
             
@@ -2723,9 +3186,7 @@ class RichTextView: NSTextView {
         if trimmedContent.isEmpty {
             // 空行，删除编号
             let deleteRange = NSRange(location: numberRange.location, length: numberRange.length)
-            self.textStorage?.deleteCharacters(in: deleteRange)
-            self.insertNewline(nil)
-            self.didChangeText()
+            moveInsertionPointAfterDeletingListPrefix(deleteRange)
             return true
         } else {
             // 获取要继承的格式
@@ -2737,11 +3198,11 @@ class RichTextView: NSTextView {
             // 在新行插入下一个编号
             let newLineRange = (self.string as NSString).lineRange(for: self.selectedRange())
             let nextNumber = currentNumber + 1
-            let newPrefix = "\(nextNumber). "
-            self.textStorage?.insert(NSAttributedString(string: newPrefix), at: newLineRange.location)
+            let newPrefix = indentationPrefix(for: currentLineRange) + "\(nextNumber). "
+            self.textStorage?.insert(inheritedAttributedString(newPrefix, font: font, color: color), at: newLineRange.location)
 
             // 应用继承的格式到编号之后的内容
-            let contentStartLocation = newLineRange.location + newPrefix.count
+            let contentStartLocation = newLineRange.location + newPrefix.utf16.count
             let contentRange = NSRange(location: contentStartLocation, length: 0)
             applyFormat(font: font, color: color, to: contentRange)
             
@@ -2755,12 +3216,13 @@ class RichTextView: NSTextView {
     /// 查找行首的复选框
     private func findCheckboxAtLineStart(lineRange: NSRange) -> NSRange? {
         let attr = self.attributedString()
+        let checkboxLocation = leadingWhitespaceBoundary(in: lineRange)
 
         // 检查行首字符
-        if lineRange.location >= attr.length { return nil }
+        if checkboxLocation >= attr.length { return nil }
 
         var effectiveRange = NSRange(location: NSNotFound, length: 0)
-        if attr.attribute(.attachment, at: lineRange.location, effectiveRange: &effectiveRange) is CheckboxTextAttachment {
+        if normalizedCheckboxAttachment(at: checkboxLocation, effectiveRange: &effectiveRange) != nil {
             return effectiveRange
         }
 
@@ -2770,11 +3232,13 @@ class RichTextView: NSTextView {
     /// 查找行首的特定前缀
     private func findPrefixAtLineStart(lineRange: NSRange, prefix: String) -> NSRange? {
         let nsString = self.string as NSString
-        if lineRange.location >= nsString.length { return nil }
+        let prefixLocation = leadingWhitespaceBoundary(in: lineRange)
+        if prefixLocation >= nsString.length { return nil }
 
-        let lineContent = nsString.substring(with: lineRange)
+        let contentRange = NSRange(location: prefixLocation, length: NSMaxRange(lineRange) - prefixLocation)
+        let lineContent = nsString.substring(with: contentRange)
         if lineContent.hasPrefix(prefix) {
-            return NSRange(location: lineRange.location, length: prefix.utf16.count)
+            return NSRange(location: prefixLocation, length: prefix.utf16.count)
         }
 
         return nil
@@ -2783,15 +3247,17 @@ class RichTextView: NSTextView {
     /// 查找行首的编号列表
     private func findNumberedListAtLineStart(lineRange: NSRange) -> (range: NSRange, number: Int)? {
         let nsString = self.string as NSString
-        if lineRange.location >= nsString.length { return nil }
+        let prefixLocation = leadingWhitespaceBoundary(in: lineRange)
+        if prefixLocation >= nsString.length { return nil }
 
-        let lineContent = nsString.substring(with: lineRange)
+        let contentRange = NSRange(location: prefixLocation, length: NSMaxRange(lineRange) - prefixLocation)
+        let lineContent = nsString.substring(with: contentRange)
         let numberedPattern = "^(\\d+)\\. "
 
         if let regex = try? NSRegularExpression(pattern: numberedPattern),
            let match = regex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: (lineContent as NSString).length)) {
 
-            let fullRange = NSRange(location: lineRange.location, length: match.range.length)
+            let fullRange = NSRange(location: prefixLocation, length: match.range.length)
             let numberRange = match.range(at: 1)
             let numberStr = (lineContent as NSString).substring(with: numberRange)
 
@@ -2845,7 +3311,10 @@ struct RichTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.pasteCoordinator = context.coordinator
 
-        textView.typingAttributes[.foregroundColor] = Self.adaptiveDefaultTextColor
+        textView.typingAttributes = [
+            .font: AppSettings.shared.editorFont,
+            .foregroundColor: Self.adaptiveDefaultTextColor
+        ]
 
         textView.textStorage?.setAttributedString(attributedText)
         textView.normalizeAttachmentsAfterLoad()
@@ -2880,7 +3349,6 @@ struct RichTextEditor: NSViewRepresentable {
         textView.textColor = .textColor
         nsView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
 
-        textView.typingAttributes[.foregroundColor] = Self.adaptiveDefaultTextColor
         textView.isEditable = isEditable
 
         // 关键：切换笔记时强制刷新内容；同一笔记编辑时避免 update 覆盖用户输入。
@@ -2895,11 +3363,11 @@ struct RichTextEditor: NSViewRepresentable {
             context.coordinator.lastAppliedNoteID = noteID
 
             // 清除撤销管理器，避免切换笔记后撤销操作导致崩溃
-            // 先禁用撤销注册，再清除所有操作，最后重新启用
+            // 先禁用撤销注册并清除所有操作；在所有内容修改完成后再重新启用，
+            // 防止 setAttributedString 等内部操作错误地注册指向已释放对象的 undo target。
             if let undoManager = textView.undoManager {
                 undoManager.disableUndoRegistration()
                 undoManager.removeAllActions()
-                undoManager.enableUndoRegistration()
             }
 
             textView.textStorage?.setAttributedString(attributedText)
@@ -2915,6 +3383,11 @@ struct RichTextEditor: NSViewRepresentable {
 
             // 只有在内容实际更新后才绑定新的 noteID
             controller.bind(textView: textView, noteID: noteID)
+
+            // 内容更新完成后再恢复撤销注册
+            if let undoManager = textView.undoManager {
+                undoManager.enableUndoRegistration()
+            }
             interval.end(.info, "renderedLength=\(textView.string.count)")
         } else if didChangeColorScheme {
             let interval = Logger.shared.beginInterval(
