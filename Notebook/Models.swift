@@ -1299,13 +1299,17 @@ class NoteStore: ObservableObject {
             entity.originalFolderID = entity.folderID
             entity.originalFolderName = entity.folderName
             entity.updatedAt = deletedAt
+            entity.version = max(entity.version + 1, 1)
+            _ = try? BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: id, context: context)
             try? context.save()
             if let idx = notes.firstIndex(where: { $0.id == id }) {
                 notes[idx].deletedAt = deletedAt
                 notes[idx].originalFolderID = entity.originalFolderID
                 notes[idx].originalFolderName = entity.originalFolderName
                 notes[idx].updatedAt = deletedAt
+                notes[idx].version = entity.version
             }
+            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "moveToRecycleBin")
         }
     }
 
@@ -1339,6 +1343,9 @@ class NoteStore: ObservableObject {
             entity.originalFolderID = nil
             entity.originalFolderName = nil
             entity.updatedAt = Date()
+            entity.version = max(entity.version + 1, 1)
+            try? BlockDocumentNoteVersionStore.cleanupDeletedTombstones(noteIDs: [id], context: context)
+            _ = try? BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: id, context: context)
             try? context.save()
             if let idx = notes.firstIndex(where: { $0.id == id }) {
                 notes[idx].deletedAt = nil
@@ -1347,7 +1354,9 @@ class NoteStore: ObservableObject {
                 notes[idx].originalFolderID = nil
                 notes[idx].originalFolderName = nil
                 notes[idx].updatedAt = entity.updatedAt
+                notes[idx].version = entity.version
             }
+            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "restoreFromRecycleBin")
         }
     }
 
@@ -1369,6 +1378,12 @@ class NoteStore: ObservableObject {
         )
 
         if let entity = try? context.fetch(descriptor).first {
+            let deletedAt = Date()
+            try? BlockDocumentNoteVersionStore.recordDeletedTombstone(
+                noteID: id,
+                deletedAt: deletedAt,
+                context: context
+            )
             let blockDescriptor = FetchDescriptor<BlockDocumentBlockEntity>(
                 predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == idToMatch }
             )
@@ -1400,6 +1415,7 @@ class NoteStore: ObservableObject {
             try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
             try? context.save()
             notes.removeAll { $0.id == id }
+            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "deletePermanently")
         }
     }
 

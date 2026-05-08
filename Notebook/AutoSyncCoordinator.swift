@@ -161,7 +161,10 @@ final class AutoSyncCoordinator: ObservableObject {
     private func runAutomaticPush(reason: String) async {
         guard canUseAutoSync else { return }
         guard hasPendingLocalChanges else { return }
-        guard !isAutomaticSyncRunning, !isManualSyncRunning else { return }
+        guard !isAutomaticSyncRunning, !isManualSyncRunning else {
+            scheduleDebouncedPush(reason: "deferredBecauseSyncRunning")
+            return
+        }
         guard let context = PersistenceController.shared.modelContainer?.mainContext else { return }
 
         isAutomaticSyncRunning = true
@@ -175,6 +178,12 @@ final class AutoSyncCoordinator: ObservableObject {
         NoteSaveManager.shared.flushAllPending()
 
         do {
+            _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
+                context: context,
+                config: SSHConfigManager.shared.config
+            )
+            lastSuccessfulPullAt = Date()
+
             _ = try await SSHSyncManager.shared.syncAllNotesToRemote(
                 context: context,
                 config: SSHConfigManager.shared.config

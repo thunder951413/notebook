@@ -1978,6 +1978,19 @@ class RichTextView: NSTextView {
 
     // MARK: - 表格点击处理
 
+    private func attachmentRectForTable(_ attachment: TableTextAttachment,
+                                        glyphRange: NSRange,
+                                        layoutManager: NSLayoutManager,
+                                        textContainer: NSTextContainer) -> CGRect {
+        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+            attachmentRect.size = attachment.bounds.size
+        }
+        attachmentRect.origin.x += self.textContainerInset.width
+        attachmentRect.origin.y += self.textContainerInset.height
+        return attachmentRect
+    }
+
     private func handleTableClick(at point: CGPoint, event: NSEvent) -> Bool {
         guard let layoutManager = self.layoutManager,
               let textContainer = self.textContainer,
@@ -2005,9 +2018,7 @@ class RichTextView: NSTextView {
             }
 
             let glyphRange = layoutManager.glyphRange(forCharacterRange: effectiveRange, actualCharacterRange: nil)
-            var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-            attachmentRect.origin.x += self.textContainerInset.width
-            attachmentRect.origin.y += self.textContainerInset.height
+            let attachmentRect = attachmentRectForTable(tableAttachment, glyphRange: glyphRange, layoutManager: layoutManager, textContainer: textContainer)
 
             let expandedRect = attachmentRect.insetBy(dx: -5, dy: -5)
             if expandedRect.contains(point) {
@@ -2045,9 +2056,15 @@ class RichTextView: NSTextView {
         layoutManager.ensureLayout(for: textContainer)
 
         let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-        var attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-        attachmentRect.origin.x += textContainerInset.width
-        attachmentRect.origin.y += textContainerInset.height
+        let attachmentRect: CGRect
+        if let tableAttachment = activeTableAttachment {
+            attachmentRect = attachmentRectForTable(tableAttachment, glyphRange: glyphRange, layoutManager: layoutManager, textContainer: textContainer)
+        } else {
+            var fallbackRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            fallbackRect.origin.x += textContainerInset.width
+            fallbackRect.origin.y += textContainerInset.height
+            attachmentRect = fallbackRect
+        }
 
         let editorSize = editor.frame.size
         editor.frame = NSRect(
@@ -2233,8 +2250,9 @@ class RichTextView: NSTextView {
         
         print("[LoadDebug] normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)")
 
+        var tableRangesNeedingLayoutRefresh: [NSRange] = []
+
         textStorage.beginEditing()
-        defer { textStorage.endEditing() }
 
         textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
             guard let attachment = value as? NSTextAttachment else { return }
@@ -2360,6 +2378,7 @@ class RichTextView: NSTextView {
                 print("[LoadDebug] TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
                 tableAttachment.updateImage()
                 print("[LoadDebug] TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
+                tableRangesNeedingLayoutRefresh.append(range)
                 return
             }
             
@@ -2388,6 +2407,7 @@ class RichTextView: NSTextView {
                         if let tableDataAttr {
                             textStorage.addAttribute(.notebookTableData, value: tableDataAttr, range: range)
                         }
+                        tableRangesNeedingLayoutRefresh.append(range)
                         print("[LoadDebug] Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
                         return
                     }
@@ -2408,6 +2428,18 @@ class RichTextView: NSTextView {
             if let fallbackURL = resolveAudioURLFromAttachment(attachment) {
                 textStorage.addAttribute(.link, value: fallbackURL, range: range)
             }
+        }
+        textStorage.endEditing()
+
+        if !tableRangesNeedingLayoutRefresh.isEmpty {
+            for range in tableRangesNeedingLayoutRefresh {
+                layoutManager?.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+                layoutManager?.invalidateDisplay(forCharacterRange: range)
+            }
+            if let textContainer {
+                layoutManager?.ensureLayout(for: textContainer)
+            }
+            needsDisplay = true
         }
     }
 

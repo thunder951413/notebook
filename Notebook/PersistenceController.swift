@@ -17,7 +17,8 @@ final class PersistenceController: ObservableObject {
         BlockDocumentBlockEntity.self,
         BlockDocumentAssetEntity.self,
         BlockDocumentNoteVersionEntity.self,
-        BlockDocumentNoteSyncStateEntity.self
+        BlockDocumentNoteSyncStateEntity.self,
+        BlockDocumentDeletedNoteTombstoneEntity.self
     ])
 
     private init() {}
@@ -393,6 +394,26 @@ final class BlockDocumentNoteSyncStateEntity {
         self.lastRemoteDeviceID = lastRemoteDeviceID
         self.remoteFingerprint = remoteFingerprint
         self.pendingHistoryCount = pendingHistoryCount
+    }
+}
+
+@Model
+final class BlockDocumentDeletedNoteTombstoneEntity {
+    @Attribute(.unique) var noteID: UUID
+    var deletedAt: Date
+    var deletedByDeviceID: String
+    var createdAt: Date
+
+    init(
+        noteID: UUID,
+        deletedAt: Date,
+        deletedByDeviceID: String,
+        createdAt: Date = Date()
+    ) {
+        self.noteID = noteID
+        self.deletedAt = deletedAt
+        self.deletedByDeviceID = deletedByDeviceID
+        self.createdAt = createdAt
     }
 }
 
@@ -960,6 +981,41 @@ enum BlockDocumentNoteVersionStore {
         )
         if let syncState = try context.fetch(syncStateDescriptor).first {
             context.delete(syncState)
+        }
+    }
+
+    static func recordDeletedTombstone(noteID: UUID, deletedAt: Date = Date(), context: ModelContext) throws {
+        let descriptor = FetchDescriptor<BlockDocumentDeletedNoteTombstoneEntity>(
+            predicate: #Predicate<BlockDocumentDeletedNoteTombstoneEntity> { $0.noteID == noteID }
+        )
+        if let existing = try context.fetch(descriptor).first {
+            existing.deletedAt = max(existing.deletedAt, deletedAt)
+            existing.deletedByDeviceID = currentDeviceID()
+            return
+        }
+
+        context.insert(
+            BlockDocumentDeletedNoteTombstoneEntity(
+                noteID: noteID,
+                deletedAt: deletedAt,
+                deletedByDeviceID: currentDeviceID()
+            )
+        )
+    }
+
+    static func deletedTombstones(context: ModelContext) throws -> [BlockDocumentDeletedNoteTombstoneEntity] {
+        try context.fetch(FetchDescriptor<BlockDocumentDeletedNoteTombstoneEntity>())
+    }
+
+    static func cleanupDeletedTombstones(noteIDs: Set<UUID>, context: ModelContext) throws {
+        guard !noteIDs.isEmpty else { return }
+        for noteID in noteIDs {
+            let descriptor = FetchDescriptor<BlockDocumentDeletedNoteTombstoneEntity>(
+                predicate: #Predicate<BlockDocumentDeletedNoteTombstoneEntity> { $0.noteID == noteID }
+            )
+            if let tombstone = try context.fetch(descriptor).first {
+                context.delete(tombstone)
+            }
         }
     }
 

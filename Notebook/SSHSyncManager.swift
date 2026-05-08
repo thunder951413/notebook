@@ -579,6 +579,7 @@ final class SSHSyncManager: @unchecked Sendable {
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
             .sorted { $0.updatedAt > $1.updatedAt }
         let existingNoteIDs = Set(notes.map { $0.id })
+        let tombstonedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
         var syncedNoteIDs: [UUID] = []
         var indexEntries: [RemoteNoteIndexEntry] = []
         var allAssetEntries: [AssetsManifestEntry] = []
@@ -593,6 +594,17 @@ final class SSHSyncManager: @unchecked Sendable {
         )
 
         for (index, note) in notes.enumerated() {
+            guard !tombstonedNoteIDs.contains(note.id) else {
+                await reportProgress(
+                    progressHandler,
+                    phase: .pushNotes,
+                    current: index + 1,
+                    total: totalNotes,
+                    message: "跳过已永久删除笔记 \(index + 1)/\(notes.count)"
+                )
+                continue
+            }
+
             let syncState = try fetchSyncState(noteID: note.id, context: context)
             let hasUnresolvedConflict = note.hasConflict
             let shouldSync = !hasUnresolvedConflict && (
@@ -622,7 +634,7 @@ final class SSHSyncManager: @unchecked Sendable {
             )
         }
 
-        // 收集本地已永久删除的笔记记录（SyncState存在但NoteEntity已不存在）
+        // 收集本地已永久删除的笔记记录
         let deletedEntries = try collectLocallyDeletedEntries(
             existingNoteIDs: existingNoteIDs,
             context: context
@@ -1484,6 +1496,11 @@ final class SSHSyncManager: @unchecked Sendable {
 
         for entry in deletedEntries {
             let noteID = entry.noteID
+            try BlockDocumentNoteVersionStore.recordDeletedTombstone(
+                noteID: noteID,
+                deletedAt: entry.deletedAt,
+                context: context
+            )
             let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
                 predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
             )
@@ -1499,26 +1516,24 @@ final class SSHSyncManager: @unchecked Sendable {
                 localNote.originalFolderID = localNote.folderID
                 localNote.originalFolderName = localNote.folderName
                 localNote.updatedAt = entry.deletedAt
+                localNote.version = max(localNote.version + 1, 1)
+                _ = try? BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: noteID, context: context)
             }
         }
         try context.save()
     }
 
-    /// 收集本地已永久删除的笔记记录（SyncState存在但NoteEntity已不存在）
+    /// 收集本地已永久删除的笔记记录
     private func collectLocallyDeletedEntries(existingNoteIDs: Set<UUID>, context: ModelContext) throws -> [RemoteDeletedEntry] {
-        let allSyncStates = try context.fetch(FetchDescriptor<BlockDocumentNoteSyncStateEntity>())
-        let deviceID = BlockDocumentNoteVersionStore.currentDeviceID()
+        _ = existingNoteIDs
         var deletedEntries: [RemoteDeletedEntry] = []
 
-        for syncState in allSyncStates {
-            // SyncState 存在但对应的 NoteEntity 已不存在 → 笔记已被永久删除
-            if !existingNoteIDs.contains(syncState.noteID) {
-                deletedEntries.append(RemoteDeletedEntry(
-                    noteID: syncState.noteID,
-                    deletedAt: syncState.lastSyncAt ?? Date(),
-                    deletedByDeviceID: syncState.lastRemoteDeviceID ?? deviceID
-                ))
-            }
+        for tombstone in try BlockDocumentNoteVersionStore.deletedTombstones(context: context) {
+            deletedEntries.append(RemoteDeletedEntry(
+                noteID: tombstone.noteID,
+                deletedAt: tombstone.deletedAt,
+                deletedByDeviceID: tombstone.deletedByDeviceID
+            ))
         }
         return deletedEntries
     }
@@ -1577,7 +1592,7 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    /// 清理本地已同步删除记录的 SyncState（避免每次推送都重复收集）
+    /// 清理本地已同步删除记录（避免每次推送都重复收集）
     private func cleanupDeletedSyncStates(deletedNoteIDs: Set<UUID>, context: ModelContext) {
         guard !deletedNoteIDs.isEmpty else { return }
         for noteID in deletedNoteIDs {
@@ -1588,6 +1603,7 @@ final class SSHSyncManager: @unchecked Sendable {
                 context.delete(syncState)
             }
         }
+        try? BlockDocumentNoteVersionStore.cleanupDeletedTombstones(noteIDs: deletedNoteIDs, context: context)
         try? context.save()
     }
 
