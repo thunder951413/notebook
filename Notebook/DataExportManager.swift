@@ -2834,6 +2834,8 @@ struct LegacyNoteDocumentConverter {
             if let attachmentBlock = try buildAttachmentBlock(from: item, content: content) {
                 blocks.append(attachmentBlock)
                 prefersParagraphSemantics = false
+            } else {
+                prefersParagraphSemantics = false
             }
 
             cursor = NSMaxRange(item.range)
@@ -2905,26 +2907,30 @@ struct LegacyNoteDocumentConverter {
     }
 
     private mutating func buildTextBlock(_ content: NSAttributedString, range: NSRange, prefersParagraphSemantics: Bool) -> MigratedDocumentBlock? {
-        guard range.length > 0 else { return nil }
         let nsString = content.string as NSString
-        let raw = nsString.substring(with: range)
+        let workingRange = prefersParagraphSemantics
+            ? range
+            : sanitizedInlineContinuationRange(range, in: nsString)
+        guard workingRange.length > 0 else { return nil }
+
+        let raw = nsString.substring(with: workingRange)
         if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return MigratedDocumentBlock(id: nextBlockID(), type: "paragraph", text: [], level: nil, listStyle: nil, order: nil, checked: nil, indent: leadingIndentLevel(in: raw), asset: nil, table: nil)
         }
 
-        var finalRange = range
+        var finalRange = workingRange
         var type = "paragraph"
         var level: Int?
         var listStyle: String?
         var order: Int?
-        let indent = leadingIndentLevel(in: raw)
+        let indent = prefersParagraphSemantics ? leadingIndentLevel(in: raw) : 0
 
-        if prefersParagraphSemantics, let listDescriptor = detectListDescriptor(in: raw, baseLocation: range.location) {
+        if prefersParagraphSemantics, let listDescriptor = detectListDescriptor(in: raw, baseLocation: workingRange.location) {
             type = "list_item"
             listStyle = listDescriptor.style
             order = listDescriptor.order
             finalRange = sanitizedListContentRange(listDescriptor.contentRange, in: content.string as NSString)
-        } else if prefersParagraphSemantics, let headingLevel = detectHeadingLevel(in: content, range: range) {
+        } else if prefersParagraphSemantics, let headingLevel = detectHeadingLevel(in: content, range: workingRange) {
             type = "heading"
             level = headingLevel
         }
@@ -2942,6 +2948,29 @@ struct LegacyNoteDocumentConverter {
             asset: nil,
             table: nil
         )
+    }
+
+    private func sanitizedInlineContinuationRange(_ range: NSRange, in nsString: NSString) -> NSRange {
+        let maxLength = nsString.length
+        var start = max(0, min(range.location, maxLength))
+        let end = max(start, min(NSMaxRange(range), maxLength))
+
+        while start < end {
+            let scalar = nsString.character(at: start)
+            if scalar == 0xFFFC ||
+                scalar == 32 ||
+                scalar == 9 ||
+                scalar == 10 ||
+                scalar == 13 ||
+                scalar == 0x2028 ||
+                scalar == 0x2029 {
+                start += 1
+                continue
+            }
+            break
+        }
+
+        return NSRange(location: start, length: max(0, end - start))
     }
 
     private mutating func buildAttachmentBlock(from item: AttachmentItem, content: NSAttributedString) throws -> MigratedDocumentBlock? {

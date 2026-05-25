@@ -80,6 +80,15 @@ struct MarkdownWebView: NSViewRepresentable {
         Coordinator(self)
     }
 
+    func generateHTML(from markdown: String, attributed: NSAttributedString?, colorScheme: ColorScheme) -> String {
+        MarkdownHTMLRenderer(
+            markdown: markdown,
+            attributedContent: attributed,
+            colorScheme: colorScheme,
+            noteID: noteID
+        ).generateHTML()
+    }
+
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: MarkdownWebView
         var webView: WKWebView?
@@ -252,4 +261,3 @@ struct MarkdownPreviewNavigationState {
         return nil
     }
 }
-

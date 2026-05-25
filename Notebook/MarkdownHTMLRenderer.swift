@@ -23,16 +23,13 @@ struct MarkdownHTMLRenderer {
         let markdownSource: String
         var attachmentBlocks: [(placeholder: String, html: String)] = []
         var inlineHTMLBlocks: [(placeholder: String, html: String)] = []
-        let usesAttributedPipeline: Bool
         if let attributedContent, shouldRenderFromAttributedContent(attributedContent) {
             let conversion = attributedToMarkdownWithAttachments(attributedContent)
             markdownSource = conversion.markdown
             attachmentBlocks = conversion.blocks
             inlineHTMLBlocks = conversion.inlineBlocks
-            usesAttributedPipeline = true
         } else {
             markdownSource = markdown
-            usesAttributedPipeline = false
         }
 
         // 提取目录项用于生成锚点
@@ -264,18 +261,10 @@ struct MarkdownHTMLRenderer {
                 return
             }
 
-            if let link = attrs[.link] {
-                if let raw = link as? String {
-                    if !raw.hasPrefix("http://") && !raw.hasPrefix("https://") && !raw.hasPrefix("mailto:") {
-                        shouldUseAttributedPipeline = true
-                        stop.pointee = true
-                        return
-                    }
-                } else {
-                    shouldUseAttributedPipeline = true
-                    stop.pointee = true
-                    return
-                }
+            if attrs[.link] != nil || hasPreviewableInlineStyle(attrs) {
+                shouldUseAttributedPipeline = true
+                stop.pointee = true
+                return
             }
 
             if attrs[.backgroundColor] != nil ||
@@ -290,6 +279,31 @@ struct MarkdownHTMLRenderer {
         }
 
         return shouldUseAttributedPipeline
+    }
+
+    private func hasPreviewableInlineStyle(_ attributes: [NSAttributedString.Key: Any]) -> Bool {
+        let editorFont = AppSettings.shared.editorFont
+        if let color = previewForegroundColorHex(for: attributes), !color.isEmpty {
+            return true
+        }
+
+        guard let font = attributes[.font] as? NSFont else {
+            return false
+        }
+
+        let traits = NSFontManager.shared.traits(of: font)
+        if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
+            return true
+        }
+        if abs(font.pointSize - editorFont.pointSize) > 0.5 {
+            return true
+        }
+        if let fontFamily = font.familyName,
+           fontFamily != editorFont.familyName {
+            return true
+        }
+
+        return false
     }
 
     private func attributedToMarkdownWithAttachments(_ attributed: NSAttributedString) -> (
@@ -565,29 +579,33 @@ struct MarkdownHTMLRenderer {
         let editorFont = AppSettings.shared.editorFont
         let textDecorations = previewTextDecorations(for: attributes)
 
-        if attributes[.notebookExplicitBold] != nil {
+        let traits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
+
+        if attributes[.notebookExplicitBold] != nil || traits.contains(.boldFontMask) {
             styles.append("font-weight: 600")
         }
-        if attributes[.notebookExplicitItalic] != nil {
+        if attributes[.notebookExplicitItalic] != nil || traits.contains(.italicFontMask) {
             styles.append("font-style: italic")
         }
         if !textDecorations.isEmpty {
             styles.append("text-decoration: \(textDecorations.joined(separator: " "))")
         }
-        if attributes[.notebookExplicitForegroundColor] != nil,
-           let color = previewForegroundColorHex(for: attributes) {
+        if let color = previewForegroundColorHex(for: attributes) {
             styles.append("color: \(color)")
         }
         if let color = (attributes[.backgroundColor] as? NSColor).flatMap(previewColorHex) {
             styles.append("background-color: \(color)")
         }
         if let font,
-           attributes[.notebookExplicitFontSize] != nil || attributes[.notebookHeadingLevel] != nil {
+           attributes[.notebookExplicitFontSize] != nil ||
+            attributes[.notebookHeadingLevel] != nil ||
+            abs(font.pointSize - editorFont.pointSize) > 0.5 {
             styles.append("font-size: \(Int(font.pointSize.rounded()))px")
             styles.append("line-height: 1.45")
         }
         if let fontFamily = font?.familyName,
-           attributes[.notebookExplicitFontFamily] != nil && fontFamily != editorFont.familyName {
+           (attributes[.notebookExplicitFontFamily] != nil || fontFamily != editorFont.familyName) &&
+            fontFamily != editorFont.familyName {
             styles.append("font-family: '\(htmlAttributeEscaped(fontFamily))'")
         }
         if let kern = (attributes[.kern] as? NSNumber)?.doubleValue,

@@ -249,54 +249,60 @@ class TableInlineEditorView: NSView {
         NSMenu.popUpContextMenu(menu, with: NSEvent.mouseEvent(with: .rightMouseDown, location: location, modifierFlags: [], timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!, for: self)
     }
     
-    @objc private func insertRowAbove(_ sender: Any?) {
-        guard let selected = selectedCell else { return }
+    @objc private func insertRowAbove(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell else { return nil }
         tableData.addRow(at: selected.row)
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
     
-    @objc private func insertRowBelow(_ sender: Any?) {
-        guard let selected = selectedCell else { return }
+    @objc private func insertRowBelow(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell else { return nil }
         tableData.addRow(at: selected.row + 1)
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
     
-    @objc private func insertColumnLeft(_ sender: Any?) {
-        guard let selected = selectedCell else { return }
+    @objc private func insertColumnLeft(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell else { return nil }
         tableData.addColumn(at: selected.col)
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
     
-    @objc private func insertColumnRight(_ sender: Any?) {
-        guard let selected = selectedCell else { return }
+    @objc private func insertColumnRight(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell else { return nil }
         tableData.addColumn(at: selected.col + 1)
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
     
-    @objc private func deleteCurrentRow(_ sender: Any?) {
-        guard let selected = selectedCell, tableData.rowCount > 1 else { return }
+    @objc private func deleteCurrentRow(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell, tableData.rowCount > 1 else { return nil }
         tableData.removeRow(at: selected.row)
         selectedCell = nil
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
     
-    @objc private func deleteCurrentColumn(_ sender: Any?) {
-        guard let selected = selectedCell, tableData.columnCount > 1 else { return }
+    @objc private func deleteCurrentColumn(_ sender: Any?) -> NSNumber? {
+        guard let selected = selectedCell, tableData.columnCount > 1 else { return nil }
         tableData.removeColumn(at: selected.col)
         selectedCell = nil
         onDataChanged?(tableData)
         updateFrame()
         needsDisplay = true
+        return NSNumber(value: true)
     }
 }
 

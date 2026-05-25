@@ -1192,7 +1192,10 @@ final class RichTextController: ObservableObject {
         attachment.tableData = tableData
         attachment.updateImage()
         
-        let attr = NSAttributedString(attachment: attachment)
+        let attr = NSMutableAttributedString(attachment: attachment)
+        if let data = try? JSONEncoder().encode(tableData) {
+            attr.addAttribute(.notebookTableData, value: data, range: NSRange(location: 0, length: attr.length))
+        }
         let selectedRange = tv.selectedRange()
         tv.textStorage?.insert(attr, at: selectedRange.location)
         tv.didChangeText()
@@ -1328,21 +1331,126 @@ class RichTextView: NSTextView {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00a0}", with: " ")
 
+        let replacementRange = self.selectedRange()
+        let attributes = attributesForPlainTextInsertion(at: replacementRange.location)
+        let attributedText = attributedStringForNormalizedPaste(
+            normalizedText,
+            replacementRange: replacementRange,
+            attributes: attributes
+        )
+        self.textStorage?.replaceCharacters(in: replacementRange, with: attributedText)
+        self.setSelectedRange(NSRange(location: replacementRange.location + attributedText.length, length: 0))
+        self.typingAttributes = attributes
+        self.didChangeText()
+        return true
+    }
+
+    private enum PasteLineContinuation {
+        case textPrefix(String)
+        case checkbox(indentation: String)
+        case numbered(indentation: String, nextNumber: Int)
+    }
+
+    private func attributesForPlainTextInsertion(at location: Int) -> [NSAttributedString.Key: Any] {
         var attributes = self.typingAttributes
+
+        if let textStorage, textStorage.length > 0 {
+            let lookupLocation = location > 0
+                ? min(location - 1, textStorage.length - 1)
+                : min(location, textStorage.length - 1)
+            var nearbyAttributes = textStorage.attributes(at: lookupLocation, effectiveRange: nil)
+            for (key, value) in attributes {
+                nearbyAttributes[key] = value
+            }
+            attributes = nearbyAttributes
+        }
+
         attributes[.font] = attributes[.font] as? NSFont ?? AppSettings.shared.editorFont
         attributes[.foregroundColor] = attributes[.foregroundColor] as? NSColor ?? NSColor.textColor
         attributes.removeValue(forKey: .attachment)
         attributes.removeValue(forKey: .link)
         attributes.removeValue(forKey: .paragraphStyle)
         attributes.removeValue(forKey: .notebookHeadingLevel)
+        attributes.removeValue(forKey: .notebookExplicitBold)
+        attributes.removeValue(forKey: .notebookExplicitItalic)
+        attributes.removeValue(forKey: .notebookExplicitFontFamily)
+        attributes.removeValue(forKey: .notebookExplicitFontSize)
+        attributes.removeValue(forKey: .notebookExplicitForegroundColor)
+        return attributes
+    }
 
-        let replacementRange = self.selectedRange()
-        let attributedText = NSAttributedString(string: normalizedText, attributes: attributes)
-        self.textStorage?.replaceCharacters(in: replacementRange, with: attributedText)
-        self.setSelectedRange(NSRange(location: replacementRange.location + attributedText.length, length: 0))
-        self.typingAttributes = attributes
-        self.didChangeText()
-        return true
+    private func attributedStringForNormalizedPaste(
+        _ text: String,
+        replacementRange: NSRange,
+        attributes: [NSAttributedString.Key: Any]
+    ) -> NSAttributedString {
+        guard text.contains("\n"),
+              let continuation = pasteLineContinuation(at: replacementRange.location) else {
+            return NSAttributedString(string: text, attributes: attributes)
+        }
+
+        let result = NSMutableAttributedString()
+        let lines = text.components(separatedBy: "\n")
+        guard let firstLine = lines.first else {
+            return NSAttributedString(string: text, attributes: attributes)
+        }
+
+        result.append(NSAttributedString(string: firstLine, attributes: attributes))
+
+        var nextNumber: Int?
+        if case .numbered(_, let number) = continuation {
+            nextNumber = number
+        }
+
+        for index in lines.indices.dropFirst() {
+            let line = lines[index]
+            let isTrailingEmptyLine = index == lines.indices.last && line.isEmpty
+
+            result.append(NSAttributedString(string: "\n", attributes: attributes))
+            guard !isTrailingEmptyLine else { continue }
+
+            switch continuation {
+            case .textPrefix(let prefix):
+                result.append(NSAttributedString(string: prefix, attributes: attributes))
+            case .checkbox(let indentation):
+                result.append(NSAttributedString(string: indentation, attributes: attributes))
+                result.append(NSAttributedString(attachment: CheckboxTextAttachment(checked: false)))
+                result.append(NSAttributedString(string: " ", attributes: attributes))
+            case .numbered(let indentation, _):
+                let number = nextNumber ?? 1
+                result.append(NSAttributedString(string: "\(indentation)\(number). ", attributes: attributes))
+                nextNumber = number + 1
+            }
+
+            result.append(NSAttributedString(string: line, attributes: attributes))
+        }
+
+        return result
+    }
+
+    private func pasteLineContinuation(at location: Int) -> PasteLineContinuation? {
+        let nsString = self.string as NSString
+        let safeLocation = max(0, min(location, nsString.length))
+        let lineRange = nsString.lineRange(for: NSRange(location: safeLocation, length: 0))
+        let indentation = indentationPrefix(for: lineRange)
+
+        if findCheckboxAtLineStart(lineRange: lineRange) != nil {
+            return .checkbox(indentation: indentation)
+        }
+
+        if findPrefixAtLineStart(lineRange: lineRange, prefix: "• ") != nil {
+            return .textPrefix(indentation + "• ")
+        }
+
+        if findPrefixAtLineStart(lineRange: lineRange, prefix: "- ") != nil {
+            return .textPrefix(indentation + "- ")
+        }
+
+        if let (_, number) = findNumberedListAtLineStart(lineRange: lineRange) {
+            return .numbered(indentation: indentation, nextNumber: number + 1)
+        }
+
+        return nil
     }
 
     // 处理拖放粘贴
@@ -3054,9 +3162,7 @@ class RichTextView: NSTextView {
         guard let textStorage = self.textStorage else { return }
 
         // 根据当前外观模式确定默认颜色
-        let isDark = self.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let defaultColor = isDark ? NSColor.white : NSColor.black
-        let effectiveColor = color ?? defaultColor
+        let effectiveColor = color ?? NSColor.textColor
 
         // 设置 typingAttributes ，让新输入的文字继承格式
         var newTypingAttributes = self.typingAttributes
@@ -3241,7 +3347,57 @@ class RichTextView: NSTextView {
             // 设置光标位置在编号之后
             self.setSelectedRange(NSRange(location: contentStartLocation, length: 0))
 
+            renumberFollowingNumberedList(
+                afterLineContaining: contentStartLocation,
+                indentation: indentationPrefix(for: currentLineRange),
+                nextNumber: nextNumber + 1
+            )
+
             return true
+        }
+    }
+
+    private func renumberFollowingNumberedList(
+        afterLineContaining location: Int,
+        indentation: String,
+        nextNumber: Int
+    ) {
+        guard let textStorage = self.textStorage else { return }
+
+        var number = nextNumber
+        var scanLocation = NSMaxRange((self.string as NSString).lineRange(for: NSRange(location: min(location, self.string.utf16.count), length: 0)))
+        var didRenumber = false
+
+        textStorage.beginEditing()
+        while scanLocation < textStorage.length {
+            let nsString = self.string as NSString
+            let lineRange = nsString.lineRange(for: NSRange(location: scanLocation, length: 0))
+            guard lineRange.length > 0 else { break }
+
+            let lineIndentation = indentationPrefix(for: lineRange)
+            let trimmedLine = nsString.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if lineIndentation == indentation,
+               let numbered = findNumberedListAtLineStart(lineRange: lineRange) {
+                let replacement = "\(number). "
+                textStorage.replaceCharacters(in: numbered.range, with: replacement)
+                didRenumber = true
+                number += 1
+                let updatedLineRange = (self.string as NSString).lineRange(for: NSRange(location: lineRange.location, length: 0))
+                scanLocation = NSMaxRange(updatedLineRange)
+                continue
+            }
+
+            if trimmedLine.isEmpty || lineIndentation.hasPrefix(indentation + " ") || lineIndentation.hasPrefix(indentation + "\t") {
+                scanLocation = NSMaxRange(lineRange)
+                continue
+            }
+
+            break
+        }
+        textStorage.endEditing()
+        if didRenumber {
+            self.didChangeText()
         }
     }
 
@@ -3757,7 +3913,10 @@ struct RichTextEditor: NSViewRepresentable {
             attachment.tableData = tableData
             attachment.updateImage()
 
-            let attributedString = NSAttributedString(attachment: attachment)
+            let attributedString = NSMutableAttributedString(attachment: attachment)
+            if let data = try? JSONEncoder().encode(tableData) {
+                attributedString.addAttribute(.notebookTableData, value: data, range: NSRange(location: 0, length: attributedString.length))
+            }
             let selectedRange = textView.selectedRange()
             textView.textStorage?.insert(attributedString, at: selectedRange.location)
             textView.didChangeText()
