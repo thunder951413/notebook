@@ -547,6 +547,8 @@ class NoteStore: ObservableObject {
     @Published var selectedFolderForNavigation: String?
     
     private var modelContext: ModelContext?
+    private var searchableTextCache: [UUID: String] = [:]
+    private let plainTextDecoder = JSONDecoder()
     
     private let encryptedFoldersKey = "encrypted_folders"
     
@@ -653,28 +655,25 @@ class NoteStore: ObservableObject {
         let noteEntities = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
             .filter { $0.libraryID == library.id }
             .sorted { $0.updatedAt > $1.updatedAt }
-        let blockEntities = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
-        let assetEntities = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
 
-        let blocksByNoteID = Dictionary(grouping: blockEntities, by: \.noteID)
-        let assetsByNoteID = Dictionary(grouping: assetEntities, by: \.noteID)
-        let attachmentsRoot = try? StorageLocationManager.shared.attachmentsDirectoryURL()
+        let loadedContentIDs = recentNoteContentIDs(from: noteEntities)
+        searchableTextCache.removeAll()
 
-        self.notes = noteEntities.map { entity in
-            let blocks = (blocksByNoteID[entity.id] ?? []).sorted { $0.position < $1.position }
-            let assets = Dictionary(uniqueKeysWithValues: (assetsByNoteID[entity.id] ?? []).map { ($0.assetID, $0) })
-            let content = Self.fixCheckboxAttachments(
-                in: loadBlockBackedContent(
-                    blocks: blocks,
-                    assetsByID: assets,
-                    attachmentsRoot: attachmentsRoot
-                )
-            )
+        self.notes = try noteEntities.map { entity in
+            let isContentLoaded = loadedContentIDs.contains(entity.id)
+            let content = isContentLoaded
+                ? try loadFullBlockContent(noteID: entity.id, context: context)
+                : NSAttributedString(string: "")
+            let contentPreview = isContentLoaded
+                ? Self.previewText(from: content.string)
+                : try loadPlainTextPreview(noteID: entity.id, context: context)
 
             return Note(
                 id: entity.id,
                 title: entity.title,
                 content: content,
+                contentPreview: contentPreview,
+                isContentLoaded: isContentLoaded,
                 createdAt: entity.createdAt,
                 updatedAt: entity.updatedAt,
                 folderID: entity.folderID,
@@ -739,6 +738,229 @@ class NoteStore: ObservableObject {
     ) -> NSAttributedString {
         BlockDocumentAttributedStringBuilder(attachmentsRoot: attachmentsRoot)
             .build(blocks: blocks, assetsByID: assetsByID)
+    }
+
+    private func recentNoteContentIDs(from noteEntities: [BlockDocumentNoteEntity]) -> Set<UUID> {
+        let existingNoteIDs = Set(noteEntities.map(\.id))
+        let limit = AppSettings.shared.recentNoteLoadLimit
+        var orderedIDs: [UUID] = []
+
+        func appendIfAvailable(_ id: UUID?) {
+            guard let id, existingNoteIDs.contains(id), !orderedIDs.contains(id) else { return }
+            orderedIDs.append(id)
+        }
+
+        for id in AppSettings.shared.recentSelectedNoteIDs {
+            appendIfAvailable(id)
+        }
+        appendIfAvailable(AppSettings.shared.lastSelectedNoteID)
+
+        if orderedIDs.isEmpty {
+            appendIfAvailable(noteEntities.first?.id)
+        }
+
+        return Set(orderedIDs.prefix(limit))
+    }
+
+    private func fetchBlocks(
+        noteID: UUID,
+        context: ModelContext,
+        limit: Int? = nil
+    ) throws -> [BlockDocumentBlockEntity] {
+        let idToMatch = noteID
+        var descriptor = FetchDescriptor<BlockDocumentBlockEntity>(
+            predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == idToMatch },
+            sortBy: [SortDescriptor(\.position)]
+        )
+        if let limit {
+            descriptor.fetchLimit = limit
+        }
+        return try context.fetch(descriptor)
+    }
+
+    private func fetchAssets(
+        noteID: UUID,
+        context: ModelContext
+    ) throws -> [BlockDocumentAssetEntity] {
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<BlockDocumentAssetEntity>(
+            predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == idToMatch }
+        )
+        return try context.fetch(descriptor)
+    }
+
+    private func loadFullBlockContent(noteID: UUID, context: ModelContext) throws -> NSAttributedString {
+        let blocks = try fetchBlocks(noteID: noteID, context: context)
+        let assets = Dictionary(uniqueKeysWithValues: try fetchAssets(noteID: noteID, context: context).map { ($0.assetID, $0) })
+        let attachmentsRoot = try? StorageLocationManager.shared.attachmentsDirectoryURL()
+
+        return Self.fixCheckboxAttachments(
+            in: loadBlockBackedContent(
+                blocks: blocks,
+                assetsByID: assets,
+                attachmentsRoot: attachmentsRoot
+            )
+        )
+    }
+
+    private func loadPlainTextPreview(noteID: UUID, context: ModelContext) throws -> String {
+        let blocks = try fetchBlocks(noteID: noteID, context: context, limit: 8)
+        return Self.previewText(from: plainText(from: blocks, maxCharacters: 300))
+    }
+
+    private func loadSearchableText(noteID: UUID, context: ModelContext) throws -> String {
+        if let cached = searchableTextCache[noteID] {
+            return cached
+        }
+
+        let blocks = try fetchBlocks(noteID: noteID, context: context)
+        let text = plainText(from: blocks)
+        searchableTextCache[noteID] = text
+        return text
+    }
+
+    private func plainText(from blocks: [BlockDocumentBlockEntity], maxCharacters: Int? = nil) -> String {
+        var result = ""
+
+        func append(_ rawText: String) {
+            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            if !result.isEmpty {
+                result.append("\n")
+            }
+
+            if let maxCharacters {
+                let remaining = maxCharacters - result.count
+                guard remaining > 0 else { return }
+                result.append(contentsOf: text.prefix(remaining))
+            } else {
+                result.append(text)
+            }
+        }
+
+        for block in blocks {
+            if let maxCharacters, result.count >= maxCharacters {
+                break
+            }
+            append(plainText(for: block))
+        }
+
+        return result
+    }
+
+    private func plainText(for block: BlockDocumentBlockEntity) -> String {
+        if let payload = block.textPayload,
+           let spans = try? plainTextDecoder.decode([BlockDocumentTextSpanPayload].self, from: payload) {
+            return spans.map(\.text).joined()
+        }
+
+        if block.kind == "table",
+           let payloadData = block.tablePayload,
+           let payload = try? plainTextDecoder.decode(BlockDocumentTablePayload.self, from: payloadData) {
+            return payload.rows
+                .map { $0.joined(separator: " ") }
+                .joined(separator: "\n")
+        }
+
+        switch block.kind {
+        case "image":
+            return "[图片]"
+        case "audio":
+            return "[音频]"
+        default:
+            return ""
+        }
+    }
+
+    nonisolated static func previewText(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.components(separatedBy: .newlines)
+        return lines.prefix(2).joined(separator: " ")
+    }
+
+    @discardableResult
+    func ensureNoteContentLoaded(
+        id: UUID?,
+        rememberSelection: Bool = false,
+        pruneAfterLoad: Bool = true
+    ) -> Note? {
+        guard let id else { return nil }
+        if rememberSelection {
+            AppSettings.shared.recordRecentlySelectedNote(id)
+        }
+
+        guard let context = modelContext,
+              let index = notes.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+
+        if !notes[index].isContentLoaded {
+            do {
+                let content = try loadFullBlockContent(noteID: id, context: context)
+                notes[index].content = content
+                notes[index].contentPreview = Self.previewText(from: content.string)
+                notes[index].isContentLoaded = true
+            } catch {
+                print("[NoteStore] Failed to load note content for \(id): \(error)")
+            }
+        }
+
+        if pruneAfterLoad {
+            pruneLoadedNoteContents(keeping: id)
+        }
+
+        return notes.first(where: { $0.id == id })
+    }
+
+    func refreshRecentNoteContentWindow(keeping keepID: UUID? = nil) {
+        let recentIDs = Array(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
+        for id in recentIDs {
+            _ = ensureNoteContentLoaded(id: id, pruneAfterLoad: false)
+        }
+        pruneLoadedNoteContents(keeping: keepID ?? recentIDs.first)
+    }
+
+    func noteMatchesSearch(_ note: Note, query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return true }
+
+        if note.title.localizedCaseInsensitiveContains(q) {
+            return true
+        }
+
+        if note.isContentLoaded {
+            return note.content.string.localizedCaseInsensitiveContains(q)
+        }
+
+        guard let context = modelContext else {
+            return note.contentPreview.localizedCaseInsensitiveContains(q)
+        }
+
+        do {
+            return try loadSearchableText(noteID: note.id, context: context)
+                .localizedCaseInsensitiveContains(q)
+        } catch {
+            print("[Search] Failed to load searchable text for \(note.id): \(error)")
+            return note.contentPreview.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    func markNoteContentUpdated(id: UUID, content: NSAttributedString) {
+        searchableTextCache.removeValue(forKey: id)
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].content = content
+        notes[index].contentPreview = Self.previewText(from: content.string)
+        notes[index].isContentLoaded = true
+    }
+
+    private func pruneLoadedNoteContents(keeping keepID: UUID? = nil) {
+        let allowedIDs = Set(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
+        for index in notes.indices {
+            let noteID = notes[index].id
+            guard noteID != keepID, !allowedIDs.contains(noteID), notes[index].isContentLoaded else { continue }
+            notes[index].content = NSAttributedString(string: "")
+            notes[index].isContentLoaded = false
+        }
     }
     
     private func cleanupExpiredOneTimeReminders(context: ModelContext) {
@@ -1173,6 +1395,7 @@ class NoteStore: ObservableObject {
             return
         }
         let folderID = folders.first { $0.name == folder }?.id
+        let decodedContent = decodeRTFDContent(rtfdData)
         guard let request = NoteSaveManager.shared.createRequest(
             noteID: id,
             title: title,
@@ -1180,16 +1403,21 @@ class NoteStore: ObservableObject {
             folder: folder,
             reminderAt: reminderAt,
             recurrenceRule: recurrenceRule,
-            content: decodeRTFDContent(rtfdData),
+            content: decodedContent,
             reason: reason
         ) else {
             return
         }
 
         _ = NoteSaveManager.shared.saveImmediately(request: request)
+        searchableTextCache.removeValue(forKey: id)
 
         if let idx = notes.firstIndex(where: { $0.id == id }) {
             notes[idx].title = title
+            if notes[idx].isContentLoaded {
+                notes[idx].content = decodedContent
+                notes[idx].contentPreview = Self.previewText(from: decodedContent.string)
+            }
             notes[idx].folder = folder
             notes[idx].folderID = folderID
             notes[idx].reminderAt = reminderAt
@@ -1242,9 +1470,13 @@ class NoteStore: ObservableObject {
         }
 
         _ = NoteSaveManager.shared.saveImmediately(request: request)
+        searchableTextCache.removeValue(forKey: note.id)
 
         if let idx = notes.firstIndex(where: { $0.id == note.id }) {
-            notes[idx] = note
+            var updatedNote = note
+            updatedNote.contentPreview = Self.previewText(from: note.content.string)
+            updatedNote.isContentLoaded = true
+            notes[idx] = updatedNote
             notes[idx].updatedAt = Date()
         }
     }
@@ -1810,6 +2042,8 @@ struct Note: Identifiable, Hashable {
     let id: UUID
     var title: String
     var content: NSAttributedString
+    var contentPreview: String
+    var isContentLoaded: Bool
     var createdAt: Date
     var updatedAt: Date
     
@@ -1847,6 +2081,8 @@ struct Note: Identifiable, Hashable {
         id: UUID = UUID(),
         title: String,
         content: NSAttributedString,
+        contentPreview: String? = nil,
+        isContentLoaded: Bool = true,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         folderID: UUID? = nil,
@@ -1864,6 +2100,8 @@ struct Note: Identifiable, Hashable {
         self.id = id
         self.title = title
         self.content = content
+        self.contentPreview = contentPreview ?? Note.previewText(from: content.string)
+        self.isContentLoaded = isContentLoaded
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.folderID = folderID
@@ -1885,5 +2123,11 @@ struct Note: Identifiable, Hashable {
     
     static func == (lhs: Note, rhs: Note) -> Bool {
         lhs.id == rhs.id
+    }
+
+    private static func previewText(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.components(separatedBy: .newlines)
+        return lines.prefix(2).joined(separator: " ")
     }
 }

@@ -727,6 +727,8 @@ extension Note {
         } else {
             self.content = NSAttributedString(string: "")
         }
+        self.contentPreview = NoteStore.previewText(from: self.content.string)
+        self.isContentLoaded = true
     }
 }
 

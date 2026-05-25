@@ -98,8 +98,7 @@ struct ContentView: View {
         // 4. 搜索词筛选
         if !q.isEmpty {
             notes = notes.filter {
-                $0.title.localizedCaseInsensitiveContains(q) ||
-                $0.content.string.localizedCaseInsensitiveContains(q)
+                store.noteMatchesSearch($0, query: q)
             }
             Logger.shared.log(.search, .debug, "After search filter '\(q)': \(notes.count) notes")
         }
@@ -141,6 +140,7 @@ struct ContentView: View {
 
         switch NoteSaveManager.shared.saveImmediately(request: request) {
         case .success:
+            store.markNoteContentUpdated(id: noteID, content: content)
             richTextController.recordSavedState(noteID: noteID, title: note.title, content: content)
             interval.end(.info, "result=success")
             return true
@@ -230,6 +230,9 @@ struct ContentView: View {
             } else if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
                 contentToSave = store.notes[oldIndex].content
             } else {
+                if let newSelection {
+                    store.ensureNoteContentLoaded(id: newSelection, rememberSelection: true)
+                }
                 selection = newSelection
                 AppSettings.shared.lastSelectedNoteID = newSelection
                 return
@@ -263,6 +266,9 @@ struct ContentView: View {
             }
         }
 
+        if let newSelection {
+            store.ensureNoteContentLoaded(id: newSelection, rememberSelection: true)
+        }
         selection = newSelection
         AppSettings.shared.lastSelectedNoteID = newSelection
     }
@@ -302,12 +308,21 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(AppColors.editorBackground(colorScheme))
             } else if let currentId = selection, let index = store.notes.firstIndex(where: { $0.id == currentId }) {
-                let noteBinding = $store.notes[index]
-                NoteEditorView(
-                    note: noteBinding,
-                    controller: richTextController,
-                    isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
-                )
+                if store.notes[index].isContentLoaded {
+                    let noteBinding = $store.notes[index]
+                    NoteEditorView(
+                        note: noteBinding,
+                        controller: richTextController,
+                        isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
+                    )
+                } else {
+                    ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(AppColors.editorBackground(colorScheme))
+                        .onAppear {
+                            store.ensureNoteContentLoaded(id: currentId, rememberSelection: true)
+                        }
+                }
             } else {
                 ContentUnavailableView(l10n(L10nKeys.Note.noSelection), systemImage: "note")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -338,18 +353,18 @@ struct ContentView: View {
             Text("所有笔记").tag(true)
         }
         .onAppear {
+            store.fetchData()
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
-                selection = pending
+                updateSelection(pending, reason: "initialExternalNavigation")
                 didSyncSelectionFromStore = true
             }
             if selection == nil {
-                selection = store.activeNotes.first?.id
+                updateSelection(store.activeNotes.first?.id, reason: "initial")
             }
-            store.fetchData()
 
-        if isRecycleBinSelected {
-            selection = nil
-        }
+            if isRecycleBinSelected {
+                selection = nil
+            }
 
             // 启动定期自动保存（每30秒）
             richTextController.startAutoSave(interval: 30.0) { [weak store] in
@@ -438,7 +453,11 @@ struct ContentView: View {
                 if let id = pendingDeleteNoteID {
                     store.deleteNote(id: id)
                     if selection == id {
-                        selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                        let nextSelection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                        if let nextSelection {
+                            store.ensureNoteContentLoaded(id: nextSelection, rememberSelection: true)
+                        }
+                        selection = nextSelection
                     }
                 }
                 pendingDeleteNoteID = nil
@@ -536,7 +555,7 @@ struct ContentView: View {
            let encryptedFolderID = selectedEncryptedFolderID {
             // 在加密文件夹的子目录中创建加密笔记
             if let newNote = store.createEncryptedNote(in: encryptedFolderID) {
-                selection = newNote.id
+                updateSelection(newNote.id, reason: "createEncrypted")
             }
             return
         }
@@ -547,7 +566,7 @@ struct ContentView: View {
             if let selectedTagID {
                 store.addTagToNote(tagID: selectedTagID, noteID: newNote.id)
             }
-            selection = newNote.id
+            updateSelection(newNote.id, reason: "create")
         }
     }
 
@@ -600,33 +619,33 @@ struct ContentView: View {
                     let noteInCurrentFolder = selectedFolder == allNotesTitle || note.folder == selectedFolder
 
                     if noteInCurrentFolder {
-                        selection = lastID
+                        updateSelection(lastID, reason: "launchRestore")
                         print("[Launch] Restored last selected note: \(lastID)")
                     } else {
                         // 笔记不在当前文件夹中，选择当前文件夹的第一个笔记
-                        selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                        updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchFallback")
                         print("[Launch] Last note not in current folder, selecting first note in folder")
                     }
                 } else {
                     // 笔记不存在，选择当前文件夹的第一个笔记
-                    selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                    updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchMissingLastNote")
                     print("[Launch] Last note not found, selecting first note in folder")
                 }
             } else {
-                selection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchNoLastNote")
                 print("[Launch] No last note saved, selecting first note")
             }
 
         case .selectNone:
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
-            selection = nil
+            updateSelection(nil, reason: "launchSelectNone")
             print("[Launch] Selecting none as per settings")
 
         case .showAllNotes:
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
-            selection = store.activeNotes.first?.id
+            updateSelection(store.activeNotes.first?.id, reason: "launchShowAllNotes")
             print("[Launch] Showing all notes")
         }
     }
@@ -1464,7 +1483,7 @@ struct NoteRowView: View {
                         .foregroundStyle(isSelected ? .white.opacity(0.8) : .orange)
                 }
             }
-            Text(preview(from: note.content))
+            Text(preview(from: note))
                 .font(.system(size: 12))
                 .lineLimit(2)
                 .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
@@ -1482,8 +1501,8 @@ struct NoteRowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
-    private func preview(from attributed: NSAttributedString) -> String {
-        let str = attributed.string
+    private func preview(from note: Note) -> String {
+        let str = note.isContentLoaded ? note.content.string : note.contentPreview
         let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = trimmed.components(separatedBy: .newlines)
         return lines.prefix(2).joined(separator: " ")
@@ -2878,7 +2897,9 @@ private struct AIPanelView: View {
             let title = String(text[titleRange])
             
             // 查找匹配的笔记（通过ID前缀匹配）
-            if let note = store.notes.first(where: { $0.id.uuidString.hasPrefix(shortID) }) {
+            if let noteID = store.notes.first(where: { $0.id.uuidString.hasPrefix(shortID) })?.id {
+                store.ensureNoteContentLoaded(id: noteID, pruneAfterLoad: false)
+                guard let note = store.notes.first(where: { $0.id == noteID }) else { continue }
                 print("[AI Debug] Found note: \(note.title), content length: \(note.content.length)")
                 
                 // 提取笔记纯文本内容
@@ -3282,7 +3303,7 @@ private struct RecycleBinRow: View {
                     .foregroundStyle(.primary)
                 Spacer()
             }
-            Text(preview(from: note.content))
+            Text(preview(from: note))
                 .font(.system(size: 12))
                 .lineLimit(2)
                 .foregroundStyle(.secondary)
@@ -3302,8 +3323,8 @@ private struct RecycleBinRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
-    private func preview(from attributed: NSAttributedString) -> String {
-        let str = attributed.string
+    private func preview(from note: Note) -> String {
+        let str = note.isContentLoaded ? note.content.string : note.contentPreview
         let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = trimmed.components(separatedBy: .newlines)
         return lines.prefix(2).joined(separator: " ")

@@ -86,6 +86,7 @@ struct SettingsGeneralView: View {
     @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
+    @State private var recentNoteLoadLimit = AppSettings.shared.recentNoteLoadLimit
     @State private var githubTokenInput = ""
     @State private var githubTokenStatusMessage = ""
 
@@ -134,6 +135,37 @@ struct SettingsGeneralView: View {
                     }
 
                     Text(l10n(L10nKeys.Settings.startupDescription))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider()
+
+                // 笔记加载设置
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("笔记加载")
+                        .font(.title2)
+                        .bold()
+
+                    Stepper(
+                        value: $recentNoteLoadLimit,
+                        in: AppSettings.minRecentNoteLoadLimit...AppSettings.maxRecentNoteLoadLimit
+                    ) {
+                        HStack {
+                            Text("保留最近选择的笔记内容")
+                            Spacer()
+                            Text("\(recentNoteLoadLimit) 篇")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .frame(maxWidth: 360)
+                    }
+                    .onChange(of: recentNoteLoadLimit) { _, newValue in
+                        AppSettings.shared.recentNoteLoadLimit = newValue
+                        store.refreshRecentNoteContentWindow()
+                    }
+
+                    Text("列表和搜索仍覆盖全部笔记；这里只限制富文本正文和附件在内存中的常驻数量。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

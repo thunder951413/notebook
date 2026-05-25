@@ -293,7 +293,7 @@ struct NoteExport: Codable {
     init(from note: Note) {
         self.id = note.id
         self.title = note.title
-        self.content = note.content.string // 转换为纯文本
+        self.content = note.isContentLoaded ? note.content.string : note.contentPreview // 转换为纯文本
         self.createdAt = note.createdAt
         self.updatedAt = note.updatedAt
         self.folder = note.folder

@@ -16,12 +16,9 @@ struct PopoverView: View {
     private var filteredNotes: [Note] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return recentNotes }
-        let lower = q.lowercased()
 
         return nonEncryptedNotes.filter { note in
-            if note.title.lowercased().contains(lower) { return true }
-            let content = note.content.string.lowercased()
-            return content.contains(lower)
+            store.noteMatchesSearch(note, query: q)
         }
     }
 
@@ -61,7 +58,7 @@ struct PopoverView: View {
                             Text(note.title)
                                 .lineLimit(1)
                                 .fontWeight(.medium)
-                            Text(note.content.string)
+                            Text(note.isContentLoaded ? note.content.string : note.contentPreview)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)

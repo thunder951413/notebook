@@ -35,7 +35,13 @@ final class AppSettings: ObservableObject {
         static let isFileLoggingEnabled = "logger.file_logging_enabled"
         static let keepHistoricalLogFiles = "logger.keep_historical_files"
         static let githubRepositoryURL = "update.github_repository_url"
+        static let recentNoteLoadLimit = "notes.recent_load_limit"
+        static let recentSelectedNoteIDs = "notes.recent_selected_ids"
     }
+
+    static let defaultRecentNoteLoadLimit = 5
+    static let minRecentNoteLoadLimit = 1
+    static let maxRecentNoteLoadLimit = 50
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
     private enum iCloudKeys {
@@ -71,6 +77,46 @@ final class AppSettings: ObservableObject {
                 defaults.removeObject(forKey: Keys.lastSelectedNoteID)
             }
         }
+    }
+
+    // MARK: - 最近笔记内容加载
+
+    var recentNoteLoadLimit: Int {
+        get {
+            let storedValue = defaults.object(forKey: Keys.recentNoteLoadLimit) as? Int
+            return Self.clampedRecentNoteLoadLimit(storedValue ?? Self.defaultRecentNoteLoadLimit)
+        }
+        set {
+            defaults.set(Self.clampedRecentNoteLoadLimit(newValue), forKey: Keys.recentNoteLoadLimit)
+        }
+    }
+
+    var recentSelectedNoteIDs: [UUID] {
+        get {
+            defaults.stringArray(forKey: Keys.recentSelectedNoteIDs)?
+                .compactMap(UUID.init(uuidString:)) ?? []
+        }
+        set {
+            var seen = Set<UUID>()
+            let uniqueIDs = newValue.filter { seen.insert($0).inserted }
+            defaults.set(
+                uniqueIDs
+                    .prefix(Self.maxRecentNoteLoadLimit)
+                    .map(\.uuidString),
+                forKey: Keys.recentSelectedNoteIDs
+            )
+        }
+    }
+
+    func recordRecentlySelectedNote(_ id: UUID?) {
+        guard let id else { return }
+        var ids = recentSelectedNoteIDs.filter { $0 != id }
+        ids.insert(id, at: 0)
+        recentSelectedNoteIDs = ids
+    }
+
+    private static func clampedRecentNoteLoadLimit(_ value: Int) -> Int {
+        min(max(value, minRecentNoteLoadLimit), maxRecentNoteLoadLimit)
     }
 
     // MARK: - 最后选中的文件夹
