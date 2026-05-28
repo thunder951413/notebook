@@ -6,6 +6,7 @@ struct MarkdownHTMLRenderer {
     let attributedContent: NSAttributedString?
     let colorScheme: ColorScheme
     let noteID: UUID
+    let renderAttributedContent: Bool
 
     /// 使用 NSRegularExpression 进行替换，支持 anchorsMatchLines 选项
     private func replaceWithRegex(_ string: String, pattern: String, replacement: String) -> String {
@@ -23,7 +24,9 @@ struct MarkdownHTMLRenderer {
         let markdownSource: String
         var attachmentBlocks: [(placeholder: String, html: String)] = []
         var inlineHTMLBlocks: [(placeholder: String, html: String)] = []
-        if let attributedContent, shouldRenderFromAttributedContent(attributedContent) {
+        if renderAttributedContent,
+           let attributedContent,
+           shouldRenderFromAttributedContent(attributedContent) {
             let conversion = attributedToMarkdownWithAttachments(attributedContent)
             markdownSource = conversion.markdown
             attachmentBlocks = conversion.blocks
@@ -261,13 +264,14 @@ struct MarkdownHTMLRenderer {
                 return
             }
 
-            if attrs[.link] != nil || hasPreviewableInlineStyle(attrs) {
+            if attrs[.link] != nil {
                 shouldUseAttributedPipeline = true
                 stop.pointee = true
                 return
             }
 
-            if attrs[.backgroundColor] != nil ||
+            if previewForegroundColorHex(for: attrs) != nil ||
+                attrs[.backgroundColor] != nil ||
                 attrs[.kern] != nil ||
                 attrs[.baselineOffset] != nil ||
                 ((attrs[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0 ||

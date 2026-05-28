@@ -1379,6 +1379,13 @@ class NoteStore: ObservableObject {
     }
     
     // MARK: - Note Save Operations
+
+    func updateNoteTitleInMemory(id: UUID, title: String) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        var updatedNotes = notes
+        updatedNotes[idx].title = title
+        notes = updatedNotes
+    }
     
     func saveNote(
         id: UUID,

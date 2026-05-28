@@ -20,6 +20,7 @@ struct MarkdownWebView: NSViewRepresentable {
     let colorScheme: ColorScheme
     @Binding var height: CGFloat
     let noteID: UUID
+    var renderAttributedContent: Bool = true
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -43,7 +44,8 @@ struct MarkdownWebView: NSViewRepresentable {
             markdown: markdown,
             attributedContent: attributedContent,
             colorScheme: colorScheme,
-            noteID: noteID
+            noteID: noteID,
+            renderAttributedContent: renderAttributedContent
         ).generateHTML()
 
         // 避免重复加载同一份 HTML，减少闪烁
@@ -80,12 +82,18 @@ struct MarkdownWebView: NSViewRepresentable {
         Coordinator(self)
     }
 
-    func generateHTML(from markdown: String, attributed: NSAttributedString?, colorScheme: ColorScheme) -> String {
+    func generateHTML(
+        from markdown: String,
+        attributed: NSAttributedString?,
+        colorScheme: ColorScheme,
+        renderAttributedContent: Bool? = nil
+    ) -> String {
         MarkdownHTMLRenderer(
             markdown: markdown,
             attributedContent: attributed,
             colorScheme: colorScheme,
-            noteID: noteID
+            noteID: noteID,
+            renderAttributedContent: renderAttributedContent ?? self.renderAttributedContent
         ).generateHTML()
     }
 

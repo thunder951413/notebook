@@ -48,7 +48,8 @@ struct NoteMarkdownPreviewView: View {
             attributedContent: renderedContent,
             colorScheme: colorScheme,
             height: $webViewHeight,
-            noteID: noteID
+            noteID: noteID,
+            renderAttributedContent: false
         )
         .frame(maxHeight: .infinity)
         .padding(.horizontal, 16)
@@ -71,4 +72,3 @@ struct NoteMarkdownPreviewView: View {
         }
     }
 }
-

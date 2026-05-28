@@ -1408,6 +1408,7 @@ private struct NotesListView: View {
                 Section {
                     ForEach(sortedNotes) { note in
                         NoteRowView(note: note, isSelected: selection == note.id)
+                            .id("\(note.id.uuidString)-\(note.title)")
                             .tag(note.id)
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -1595,6 +1596,7 @@ private struct NoteEditorView: View {
                             .padding(.top, 14)
                             .padding(.bottom, 10)
                             .onChange(of: note.title) { _, newTitle in
+                                store.updateNoteTitleInMemory(id: note.id, title: newTitle)
                                 debouncedScheduleAutoSave(title: newTitle, content: note.content)
                             }
 
