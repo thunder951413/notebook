@@ -40,6 +40,9 @@ final class LocalSyncManager: ObservableObject {
     private var notesDirectory: URL {
         syncDirectory.appendingPathComponent("notes", isDirectory: true)
     }
+    private var attachmentsDirectory: URL {
+        syncDirectory.appendingPathComponent("attachments", isDirectory: true)
+    }
     
     private init() {
         createSyncDirectoryIfNeeded()
@@ -51,6 +54,9 @@ final class LocalSyncManager: ObservableObject {
         }
         if !FileManager.default.fileExists(atPath: notesDirectory.path) {
             try? FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
+        }
+        if !FileManager.default.fileExists(atPath: attachmentsDirectory.path) {
+            try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
         }
     }
     
@@ -190,6 +196,7 @@ final class LocalSyncManager: ObservableObject {
         } else {
             try FileManager.default.moveItem(at: tempURL, to: fileURL)
         }
+        try copyAssetsForExport(envelope: envelope)
         try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
     }
 
@@ -197,6 +204,7 @@ final class LocalSyncManager: ObservableObject {
         let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
         let payload = try Data(contentsOf: fileURL)
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
+        try copyAssetsForImport(envelope: envelope)
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
         if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
@@ -265,6 +273,74 @@ final class LocalSyncManager: ObservableObject {
             predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
         )
         return try context.fetch(descriptor).first
+    }
+
+    private func copyAssetsForExport(envelope: VersionedNoteSyncEnvelope) throws {
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else { return }
+        try storage.withSecurityScopedAccess(base) {
+            let sourceRoot = try storage.attachmentsDirectoryURL()
+            try copyAssets(
+                envelope: envelope,
+                sourceRoot: sourceRoot,
+                destinationRoot: attachmentsDirectory
+            )
+        }
+    }
+
+    private func copyAssetsForImport(envelope: VersionedNoteSyncEnvelope) throws {
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else { return }
+        try storage.withSecurityScopedAccess(base) {
+            let destinationRoot = try storage.attachmentsDirectoryURL()
+            try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+            try copyAssets(
+                envelope: envelope,
+                sourceRoot: attachmentsDirectory,
+                destinationRoot: destinationRoot
+            )
+        }
+    }
+
+    private func copyAssets(
+        envelope: VersionedNoteSyncEnvelope,
+        sourceRoot: URL,
+        destinationRoot: URL
+    ) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+
+        for asset in envelope.currentSnapshot.assets {
+            let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
+            for relativePath in paths {
+                guard isSafeRelativeAssetPath(relativePath) else { continue }
+                let sourceURL = sourceRoot.appendingPathComponent(relativePath)
+                guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
+
+                let destinationURL = destinationRoot.appendingPathComponent(relativePath)
+                guard sourceURL.standardizedFileURL != destinationURL.standardizedFileURL else { continue }
+                try fileManager.createDirectory(
+                    at: destinationURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            }
+        }
+    }
+
+    private func isSafeRelativeAssetPath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.contains("\\") else {
+            return false
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        return components.allSatisfy { component in
+            !component.isEmpty && component != "." && component != ".."
+        }
     }
 }
 

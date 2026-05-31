@@ -1383,6 +1383,7 @@ private struct NotesListView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("noteSortOption") private var sortOption: NoteSortOption = .modifiedDate
+    @State private var syncingNoteIDs: Set<UUID> = []
 
     let notes: [Note]
     @Binding var selection: Note.ID?
@@ -1415,6 +1416,22 @@ private struct NotesListView: View {
                                 selection = note.id
                             }
                             .contextMenu {
+                                Button {
+                                    pushNoteToRemote(note.id)
+                                } label: {
+                                    Label("推送本笔记", systemImage: "arrow.up.doc")
+                                }
+                                .disabled(syncingNoteIDs.contains(note.id))
+
+                                Button {
+                                    pullNoteFromRemote(note.id)
+                                } label: {
+                                    Label("拉取远程笔记", systemImage: "arrow.down.doc")
+                                }
+                                .disabled(syncingNoteIDs.contains(note.id))
+
+                                Divider()
+
                                 Button(l10n(L10nKeys.common.delete)) {
                                     onDeleteRequest(note.id)
                                 }
@@ -1456,6 +1473,68 @@ private struct NotesListView: View {
         }
         .frame(minWidth: 220, maxWidth: 280)
         .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func pushNoteToRemote(_ noteID: UUID) {
+        runSingleNoteSync(noteID: noteID, successMessage: "本笔记已推送到远程") { context in
+            NoteSaveManager.shared.flushAllPending()
+            try await SSHSyncManager.shared.syncNoteToRemote(
+                noteID: noteID,
+                context: context,
+                config: SSHConfigManager.shared.config
+            )
+        }
+    }
+
+    private func pullNoteFromRemote(_ noteID: UUID) {
+        runSingleNoteSync(noteID: noteID, successMessage: "远程笔记已拉取") { context in
+            _ = try await SSHSyncManager.shared.syncNoteFromRemote(
+                noteID: noteID,
+                context: context,
+                config: SSHConfigManager.shared.config
+            )
+            store.fetchData()
+        }
+    }
+
+    private func runSingleNoteSync(
+        noteID: UUID,
+        successMessage: String,
+        operation: @escaping (ModelContext) async throws -> Void
+    ) {
+        guard SSHConfigManager.shared.isConfigured else {
+            showSyncAlert(message: "请先在设置中配置 SSH 同步服务器")
+            return
+        }
+        guard let context = PersistenceController.shared.modelContainer?.mainContext else {
+            showSyncAlert(message: "数据容器未配置")
+            return
+        }
+        guard !syncingNoteIDs.contains(noteID) else { return }
+
+        syncingNoteIDs.insert(noteID)
+        AutoSyncCoordinator.shared.beginManualSync()
+
+        Task { @MainActor in
+            defer {
+                syncingNoteIDs.remove(noteID)
+                AutoSyncCoordinator.shared.endManualSync()
+            }
+
+            do {
+                try await operation(context)
+                showSyncAlert(message: successMessage)
+            } catch {
+                showSyncAlert(message: "同步失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func showSyncAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 }
 

@@ -477,7 +477,13 @@ final class SSHSyncManager: @unchecked Sendable {
         )
     }
 
-    func syncNoteToRemote(noteID: UUID, context: ModelContext, config: SSHConfig, controlPath: String? = nil) async throws {
+    func syncNoteToRemote(
+        noteID: UUID,
+        context: ModelContext,
+        config: SSHConfig,
+        controlPath: String? = nil,
+        updateRemoteCatalog: Bool = true
+    ) async throws {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return
         }
@@ -489,7 +495,7 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'",
+            command: "mkdir -p \(shellQuotedRemotePath(remoteNoteDirectory))",
             controlPath: controlPath
         )
 
@@ -519,7 +525,7 @@ final class SSHSyncManager: @unchecked Sendable {
             let remoteHashOutput = try await runSSHCommandForOutput(
                 sshpassPath: sshpassPath,
                 config: config,
-                command: "shasum -a 256 '\(escapeSingleQuoted(remoteTempPath))' 2>/dev/null | cut -d' ' -f1",
+                command: "shasum -a 256 \(shellQuotedRemotePath(remoteTempPath)) 2>/dev/null | cut -d' ' -f1",
                 controlPath: controlPath
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             if remoteHashOutput == localHash {
@@ -547,7 +553,7 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
             controlPath: controlPath
         )
 
@@ -555,6 +561,15 @@ final class SSHSyncManager: @unchecked Sendable {
         try await uploadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config, controlPath: controlPath)
 
         try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+
+        if updateRemoteCatalog {
+            try await updateRemoteCatalogForSingleNote(
+                envelope: envelope,
+                context: context,
+                config: config,
+                controlPath: controlPath
+            )
+        }
     }
 
     func syncAllNotesToRemote(
@@ -613,7 +628,13 @@ final class SSHSyncManager: @unchecked Sendable {
                 syncState!.pendingHistoryCount > 0
             )
             if shouldSync {
-                try await syncNoteToRemote(noteID: note.id, context: context, config: config, controlPath: controlPath)
+                try await syncNoteToRemote(
+                    noteID: note.id,
+                    context: context,
+                    config: config,
+                    controlPath: controlPath,
+                    updateRemoteCatalog: false
+                )
                 syncedNoteIDs.append(note.id)
             }
             if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
@@ -1060,6 +1081,39 @@ final class SSHSyncManager: @unchecked Sendable {
         )
     }
 
+    private func updateRemoteCatalogForSingleNote(
+        envelope: VersionedNoteSyncEnvelope,
+        context: ModelContext,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        let remoteIndexBundle = try await downloadRemoteIndexBundle(config: config, controlPath: controlPath)
+        var indexEntries = remoteIndexBundle.index?.entries ?? []
+        if let entry = try makeRemoteIndexEntry(noteID: envelope.noteID, context: context) {
+            indexEntries.removeAll { $0.noteID == envelope.noteID }
+            indexEntries.append(entry)
+        }
+        let deletedEntries = (remoteIndexBundle.index?.deletedEntries ?? [])
+            .filter { $0.noteID != envelope.noteID }
+        try await uploadRemoteIndex(
+            entries: indexEntries,
+            deletedEntries: deletedEntries,
+            config: config,
+            controlPath: controlPath
+        )
+
+        let manifestBundle = try await downloadAssetsManifestBundle(config: config, controlPath: controlPath)
+        var manifestEntries = manifestBundle.manifest?.entries ?? []
+        let noteAssetPaths = Set(envelope.currentSnapshot.assets.flatMap { [$0.relativeFilePath] + $0.sidecarRelativePaths })
+        manifestEntries.removeAll { noteAssetPaths.contains($0.relativePath) }
+        manifestEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
+        try await uploadAssetsManifest(
+            entries: manifestEntries,
+            config: config,
+            controlPath: controlPath
+        )
+    }
+
     private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = [], config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
         try await ensureRemoteDirectory(config: config, controlPath: controlPath)
@@ -1067,7 +1121,7 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteNoteDirectory))'",
+            command: "mkdir -p \(shellQuotedRemotePath(remoteNoteDirectory))",
             controlPath: controlPath
         )
 
@@ -1095,7 +1149,7 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
             controlPath: controlPath
         )
     }
@@ -1255,19 +1309,19 @@ final class SSHSyncManager: @unchecked Sendable {
         remotePath: String,
         controlPath: String?
     ) async throws -> RemoteFileDigestProbe {
-        let escapedPath = escapeSingleQuoted(remotePath)
+        let quotedPath = shellQuotedRemotePath(remotePath)
         let output = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
             command: """
-            if [ ! -f '\(escapedPath)' ]; then
+            if [ ! -f \(quotedPath) ]; then
               echo NB_MISSING
             elif command -v sha256sum >/dev/null 2>&1; then
-              sha256sum '\(escapedPath)' | awk '{print $1}'
+              sha256sum \(quotedPath) | awk '{print $1}'
             elif command -v shasum >/dev/null 2>&1; then
-              shasum -a 256 '\(escapedPath)' | awk '{print $1}'
+              shasum -a 256 \(quotedPath) | awk '{print $1}'
             elif command -v openssl >/dev/null 2>&1; then
-              openssl dgst -sha256 '\(escapedPath)' | awk '{print $NF}'
+              openssl dgst -sha256 \(quotedPath) | awk '{print $NF}'
             else
               echo NB_NO_DIGEST
             fi
@@ -1476,6 +1530,17 @@ final class SSHSyncManager: @unchecked Sendable {
         value.replacingOccurrences(of: "'", with: "'\"'\"'")
     }
 
+    private func shellQuotedRemotePath(_ path: String) -> String {
+        if path == "~" {
+            return "~"
+        }
+        if path.hasPrefix("~/") {
+            let suffix = String(path.dropFirst(2))
+            return "~/" + "'\(escapeSingleQuoted(suffix))'"
+        }
+        return "'\(escapeSingleQuoted(path))'"
+    }
+
     /// 判断错误是否为远程文件不存在
     private nonisolated func isRemoteFileMissing(_ error: Error) -> Bool {
         let message = error.localizedDescription.lowercased()
@@ -1649,15 +1714,19 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(escapeSingleQuoted(remoteAttachmentsDir))'",
+            command: "mkdir -p \(shellQuotedRemotePath(remoteAttachmentsDir))",
             controlPath: controlPath
         )
 
+        var missingRelativePaths: [String] = []
         for asset in envelope.currentSnapshot.assets {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
                 let localURL = attachmentsRoot.appendingPathComponent(relativePath)
-                guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
+                guard FileManager.default.fileExists(atPath: localURL.path) else {
+                    missingRelativePaths.append(relativePath)
+                    continue
+                }
 
                 let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
                 let remoteDir = String(remotePath[..<remotePath.range(of: "/", options: .backwards)!.lowerBound])
@@ -1665,7 +1734,7 @@ final class SSHSyncManager: @unchecked Sendable {
                 try await runSSHCommand(
                     sshpassPath: sshpassPath,
                     config: config,
-                    command: "mkdir -p '\(escapeSingleQuoted(remoteDir))'",
+                    command: "mkdir -p \(shellQuotedRemotePath(remoteDir))",
                     controlPath: controlPath
                 )
                 try await runSCPUpload(
@@ -1676,6 +1745,19 @@ final class SSHSyncManager: @unchecked Sendable {
                     controlPath: controlPath
                 )
             }
+        }
+
+        if !missingRelativePaths.isEmpty {
+            Logger.shared.log(
+                .storage,
+                .error,
+                "[SSHSync] 推送附件失败，本地附件缺失：\(missingRelativePaths.joined(separator: ", "))"
+            )
+            throw NSError(
+                domain: "SSHSync",
+                code: -2003,
+                userInfo: [NSLocalizedDescriptionKey: "本地附件文件缺失，图片没有推送成功"]
+            )
         }
     }
 
@@ -1728,7 +1810,7 @@ final class SSHSyncManager: @unchecked Sendable {
                     let checkResult = try await runSSHCommandForOutput(
                         sshpassPath: sshpassPath,
                         config: config,
-                        command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING",
+                        command: "test -f \(shellQuotedRemotePath(remotePath)) && echo EXISTS || echo MISSING",
                         controlPath: controlPath
                     )
                     guard checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" else { continue }
@@ -1792,7 +1874,7 @@ final class SSHSyncManager: @unchecked Sendable {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
+            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
             controlPath: controlPath
         )
     }
@@ -2075,7 +2157,7 @@ final class SSHSyncManager: @unchecked Sendable {
         let checkResult = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
-            command: "test -f '\(escapeSingleQuoted(remotePath))' && echo EXISTS || echo MISSING",
+            command: "test -f \(shellQuotedRemotePath(remotePath)) && echo EXISTS || echo MISSING",
             controlPath: controlPath
         )
 

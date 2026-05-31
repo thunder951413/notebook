@@ -412,6 +412,14 @@ extension iCloudSyncManager {
         return root.appendingPathComponent("notes", isDirectory: true)
     }
 
+    private var attachmentsDirectoryURL: URL? {
+        guard let root = FileManager.default.url(forUbiquityContainerIdentifier: nil)?
+            .appendingPathComponent("Documents/NotebookSync", isDirectory: true) else {
+            return nil
+        }
+        return root.appendingPathComponent("attachments", isDirectory: true)
+    }
+
     private func ensureNotesDirectory(_ notesDirectory: URL) throws {
         if !FileManager.default.fileExists(atPath: notesDirectory.path) {
             try FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
@@ -431,6 +439,7 @@ extension iCloudSyncManager {
         } else {
             try FileManager.default.moveItem(at: tempURL, to: fileURL)
         }
+        try copyAssetsToiCloud(envelope: envelope)
         try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
     }
 
@@ -438,6 +447,7 @@ extension iCloudSyncManager {
         let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
         let payload = try Data(contentsOf: fileURL)
         let envelope = try jsonDecoder.decode(VersionedNoteSyncEnvelope.self, from: payload)
+        try copyAssetsFromiCloud(envelope: envelope)
         let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
         if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
@@ -507,6 +517,80 @@ extension iCloudSyncManager {
             predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
         )
         return try context.fetch(descriptor).first
+    }
+
+    private func copyAssetsToiCloud(envelope: VersionedNoteSyncEnvelope) throws {
+        guard let attachmentsDirectory = attachmentsDirectoryURL else {
+            throw iCloudSyncError.iCloudNotAvailable
+        }
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else { return }
+        try storage.withSecurityScopedAccess(base) {
+            let sourceRoot = try storage.attachmentsDirectoryURL()
+            try copyAssets(
+                envelope: envelope,
+                sourceRoot: sourceRoot,
+                destinationRoot: attachmentsDirectory
+            )
+        }
+    }
+
+    private func copyAssetsFromiCloud(envelope: VersionedNoteSyncEnvelope) throws {
+        guard let attachmentsDirectory = attachmentsDirectoryURL else {
+            throw iCloudSyncError.iCloudNotAvailable
+        }
+        let storage = StorageLocationManager.shared
+        guard let base = storage.baseDirectoryURL else { return }
+        try storage.withSecurityScopedAccess(base) {
+            let destinationRoot = try storage.attachmentsDirectoryURL()
+            try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+            try copyAssets(
+                envelope: envelope,
+                sourceRoot: attachmentsDirectory,
+                destinationRoot: destinationRoot
+            )
+        }
+    }
+
+    private func copyAssets(
+        envelope: VersionedNoteSyncEnvelope,
+        sourceRoot: URL,
+        destinationRoot: URL
+    ) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+
+        for asset in envelope.currentSnapshot.assets {
+            let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
+            for relativePath in paths {
+                guard isSafeRelativeAssetPath(relativePath) else { continue }
+                let sourceURL = sourceRoot.appendingPathComponent(relativePath)
+                guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
+
+                let destinationURL = destinationRoot.appendingPathComponent(relativePath)
+                guard sourceURL.standardizedFileURL != destinationURL.standardizedFileURL else { continue }
+                try fileManager.createDirectory(
+                    at: destinationURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            }
+        }
+    }
+
+    private func isSafeRelativeAssetPath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.contains("\\") else {
+            return false
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        return components.allSatisfy { component in
+            !component.isEmpty && component != "." && component != ".."
+        }
     }
 
     /// 上传笔记到 CloudKit
