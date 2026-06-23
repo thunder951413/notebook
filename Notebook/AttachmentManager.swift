@@ -89,7 +89,7 @@ final class AttachmentManager {
                     try FileManager.default.removeItem(at: folder)
                 }
             } catch {
-                print("Failed to delete attachments: \(error)")
+                DebugLog.attachment("Failed to delete attachments: \(error)", level: .warn)
             }
         }
     }
@@ -330,15 +330,15 @@ final class AttachmentManager {
                         folderSignature: preCleanupSignature,
                         nextEligibleCleanupAt: nil
                     )
-                    print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) attachment folder does not exist")
+                    DebugLog.attachment("Note \(noteID.uuidString.prefix(8)) attachment folder does not exist", level: .debug)
                     return
                 }
 
-                print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) has \(referencedFiles.count) referenced attachments")
+                DebugLog.attachment("Note \(noteID.uuidString.prefix(8)) has \(referencedFiles.count) referenced attachments", level: .debug)
 
                 // 获取文件夹中的所有文件
                 let allFiles = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
-                print("[AttachmentManager] Note \(noteID.uuidString.prefix(8)) folder has \(allFiles.count) files")
+                DebugLog.attachment("Note \(noteID.uuidString.prefix(8)) folder has \(allFiles.count) files", level: .debug)
 
                 var deletedCount = 0
                 var nextEligibleCleanupAt: Date?
@@ -349,7 +349,7 @@ final class AttachmentManager {
                     // 如果文件未被引用，先做“新文件保护”：避免录音刚生成但尚未完成插入时被误删
                     if !referencedFiles.contains(filename) {
                         if let protectionExpiry = self.recentAttachmentProtectionExpiry(for: fileURL), protectionExpiry > now {
-                            print("[AttachmentManager] Skip deleting recent attachment: \(filename)")
+                            DebugLog.attachment("Skip deleting recent attachment: \(filename)", level: .debug)
                             if let existing = nextEligibleCleanupAt {
                                 nextEligibleCleanupAt = max(existing, protectionExpiry)
                             } else {
@@ -359,17 +359,17 @@ final class AttachmentManager {
                         }
 
                         try FileManager.default.removeItem(at: fileURL)
-                        print("[AttachmentManager] Deleted unused attachment: \(filename)")
+                        DebugLog.attachment("Deleted unused attachment: \(filename)", level: .debug)
                         deletedCount += 1
                     } else {
-                        print("[AttachmentManager] Keeping referenced attachment: \(filename)")
+                        DebugLog.attachment("Keeping referenced attachment: \(filename)", level: .debug)
                     }
                 }
 
                 if deletedCount > 0 {
-                    print("[AttachmentManager] Cleaned up \(deletedCount) unused attachments for note \(noteID.uuidString.prefix(8))")
+                    DebugLog.attachment("Cleaned up \(deletedCount) unused attachments for note \(noteID.uuidString.prefix(8))", level: .debug)
                 } else {
-                    print("[AttachmentManager] No unused attachments to clean for note \(noteID.uuidString.prefix(8))")
+                    DebugLog.attachment("No unused attachments to clean for note \(noteID.uuidString.prefix(8))", level: .debug)
                 }
 
                 self.cleanupCheckpoints[noteID] = CleanupCheckpoint(
@@ -378,7 +378,7 @@ final class AttachmentManager {
                     nextEligibleCleanupAt: nextEligibleCleanupAt
                 )
             } catch {
-                print("[AttachmentManager] Failed to cleanup unused attachments: \(error)")
+                DebugLog.attachment("Failed to cleanup unused attachments: \(error)", level: .warn)
             }
         }
     }
@@ -492,16 +492,16 @@ final class AttachmentManager {
                     // 如果文件夹名称不是有效的笔记ID，则删除整个文件夹
                     if !validNoteIDStrings.contains(folderName) {
                         try FileManager.default.removeItem(at: folderURL)
-                        print("[AttachmentManager] Deleted orphaned attachment folder: \(folderName)")
+                        DebugLog.attachment("Deleted orphaned attachment folder: \(folderName)", level: .debug)
                         deletedCount += 1
                     }
                 }
 
                 if deletedCount > 0 {
-                    print("[AttachmentManager] Cleaned up \(deletedCount) orphaned attachment folders")
+                    DebugLog.attachment("Cleaned up \(deletedCount) orphaned attachment folders", level: .debug)
                 }
             } catch {
-                print("[AttachmentManager] Failed to cleanup orphaned attachments: \(error)")
+                DebugLog.attachment("Failed to cleanup orphaned attachments: \(error)", level: .warn)
             }
         }
     }

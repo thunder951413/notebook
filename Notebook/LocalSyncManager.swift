@@ -79,7 +79,7 @@ final class LocalSyncManager: ObservableObject {
         lastSyncDate = Date()
         syncStatus = .completed
         
-        print("[LocalSyncManager] Data exported to: \(fileURL.path)")
+        DebugLog.storage("Data exported to: \(fileURL.path)", level: .debug)
     }
     
     /// 从本地导入数据
@@ -91,7 +91,7 @@ final class LocalSyncManager: ObservableObject {
         
         syncStatus = .completed
         
-        print("[LocalSyncManager] Data imported from: \(fileURL.path)")
+        DebugLog.storage("Data imported from: \(fileURL.path)", level: .debug)
         return exportData
     }
     

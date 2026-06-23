@@ -1,5 +1,4 @@
 import Foundation
-import Security
 import Combine
 
 @MainActor
@@ -12,11 +11,11 @@ final class GitHubTokenManager: ObservableObject {
     private let account = "update_token"
 
     private init() {
-        self.hasToken = Self.loadTokenFromKeychain(service: service, account: account) != nil
+        self.hasToken = KeychainHelper.load(service: service, account: account) != nil
     }
 
     func loadToken() -> String? {
-        Self.loadTokenFromKeychain(service: service, account: account)
+        KeychainHelper.loadString(service: service, account: account)
     }
 
     @discardableResult
@@ -26,52 +25,26 @@ final class GitHubTokenManager: ObservableObject {
             return false
         }
 
-        _ = deleteToken()
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        let success = status == errSecSuccess
-        hasToken = success
-        return success
+        do {
+            try KeychainHelper.save(data, service: service, account: account)
+            hasToken = true
+            return true
+        } catch {
+            Logger.shared.log(.app, .error, "保存 GitHub Token 到 Keychain 失败: \(error.localizedDescription)")
+            hasToken = false
+            return false
+        }
     }
 
     @discardableResult
     func deleteToken() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-
-        let status = SecItemDelete(query as CFDictionary)
-        let success = status == errSecSuccess || status == errSecItemNotFound
-        hasToken = !success ? hasToken : false
-        return success
-    }
-
-    private static func loadTokenFromKeychain(service: String, account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data else {
-            return nil
+        do {
+            try KeychainHelper.delete(service: service, account: account)
+            hasToken = false
+            return true
+        } catch {
+            Logger.shared.log(.app, .error, "删除 GitHub Token 失败: \(error.localizedDescription)")
+            return false
         }
-
-        return String(data: data, encoding: .utf8)
     }
 }

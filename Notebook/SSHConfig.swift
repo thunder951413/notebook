@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import Security
 
 /// SSH 配置模型
 struct SSHConfig: Codable {
@@ -8,8 +7,19 @@ struct SSHConfig: Codable {
     var port: Int
     var username: String
     /// 密码不序列化到 JSON，而是存储在 Keychain 中
-    var password: String = ""
+    var password: String {
+        get {
+            transientPassword.isEmpty ? Self.loadPasswordFromKeychain() ?? "" : transientPassword
+        }
+        set {
+            transientPassword = newValue
+        }
+    }
     var repositoryPath: String
+    private var transientPassword: String = ""
+
+    static let keychainService = "com.notebook.ssh.password"
+    static let keychainAccount = "ssh_password"
 
     static let `default` = SSHConfig(
         host: "",
@@ -23,6 +33,26 @@ struct SSHConfig: Codable {
     enum CodingKeys: String, CodingKey {
         case host, port, username, repositoryPath
     }
+
+    init(host: String, port: Int, username: String, password: String = "", repositoryPath: String) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.repositoryPath = repositoryPath
+        self.transientPassword = password
+    }
+
+    var hasTransientPassword: Bool {
+        !transientPassword.isEmpty
+    }
+
+    mutating func clearTransientPassword() {
+        transientPassword = ""
+    }
+
+    static func loadPasswordFromKeychain() -> String? {
+        KeychainHelper.loadString(service: keychainService, account: keychainAccount)
+    }
 }
 
 /// SSH 配置管理器
@@ -30,12 +60,18 @@ class SSHConfigManager: ObservableObject {
     static let shared = SSHConfigManager()
 
     private let configKey = "ssh_config"
-    private static let keychainService = "com.notebook.ssh.password"
-    private static let keychainAccount = "ssh_password"
+    private var isNormalizingConfig = false
 
     @Published var config: SSHConfig {
         didSet {
+            guard !isNormalizingConfig else { return }
+            let shouldClearTransientPassword = config.hasTransientPassword
             saveConfig(config)
+            if shouldClearTransientPassword {
+                isNormalizingConfig = true
+                config.clearTransientPassword()
+                isNormalizingConfig = false
+            }
         }
     }
 
@@ -46,12 +82,10 @@ class SSHConfigManager: ObservableObject {
     private init() {
         if let data = UserDefaults.standard.data(forKey: configKey),
            let loaded = try? JSONDecoder().decode(SSHConfig.self, from: data) {
-            let pw = Self.loadPasswordFromKeychain() ?? loaded.password
             self.config = SSHConfig(
                 host: loaded.host,
                 port: loaded.port,
                 username: loaded.username,
-                password: pw,
                 repositoryPath: loaded.repositoryPath
             )
         } else {
@@ -71,7 +105,7 @@ class SSHConfigManager: ObservableObject {
             let data = try encoder.encode(config)
             UserDefaults.standard.set(data, forKey: configKey)
         } catch {
-            print("[SSHConfig] Failed to save config: \(error)")
+            Logger.shared.log(.storage, .error, "保存 SSH 配置失败: \(error.localizedDescription)")
         }
 
         if !config.password.isEmpty {
@@ -81,52 +115,36 @@ class SSHConfigManager: ObservableObject {
         }
     }
 
+    func loadPassword() -> String? {
+        SSHConfig.loadPasswordFromKeychain()
+    }
+
     // MARK: - Keychain Operations (static)
 
     private static func savePasswordToKeychain(_ password: String) {
-        deletePasswordFromKeychain()
-
         guard let data = password.data(using: .utf8) else { return }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            print("[SSHConfig] Failed to save password to Keychain: \(status)")
+        do {
+            try KeychainHelper.save(
+                data,
+                service: SSHConfig.keychainService,
+                account: SSHConfig.keychainAccount,
+                accessibility: kSecAttrAccessibleAfterFirstUnlock
+            )
+        } catch {
+            Logger.shared.log(.storage, .error, "保存 SSH 密码到 Keychain 失败: \(error.localizedDescription)")
         }
     }
 
     private static func loadPasswordFromKeychain() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
+        SSHConfig.loadPasswordFromKeychain()
     }
 
     private static func deletePasswordFromKeychain() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
-        ]
-
-        SecItemDelete(query as CFDictionary)
+        do {
+            try KeychainHelper.delete(service: SSHConfig.keychainService, account: SSHConfig.keychainAccount)
+        } catch {
+            Logger.shared.log(.storage, .error, "删除 SSH 密码失败: \(error.localizedDescription)")
+        }
     }
 }

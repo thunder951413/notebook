@@ -13,6 +13,7 @@
 import Foundation
 import SwiftData
 import AppKit
+import CryptoKit
 
 /// 保存结果
 enum SaveResult {
@@ -28,7 +29,10 @@ struct SaveRequest {
     let folder: String
     let reminderAt: Date?
     let recurrenceRule: String
+    /// RTFD 序列化数据（用于备份恢复）
     let rtfdData: Data
+    /// 已解码的 NSAttributedString（避免保存路径的 RTFD → 反 RTFD 往返）
+    let decodedContent: NSAttributedString
     let reason: String
     let timestamp: Date
 }
@@ -209,7 +213,7 @@ final class NoteSaveManager {
             "saveBlockDocumentNote",
             metadata: "noteID=\(request.noteID.uuidString.prefix(8)) reason=\(request.reason)"
         )
-        let decodedContent = decodeAttributedString(from: request.rtfdData)
+        let decodedContent = request.decodedContent
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotebookBlockSave_\(request.noteID.uuidString)_\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
@@ -242,13 +246,7 @@ final class NoteSaveManager {
             predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
         )
         let previousAssets = try context.fetch(oldAssetDescriptor)
-
-        for block in try context.fetch(oldBlockDescriptor) {
-            context.delete(block)
-        }
-        for asset in previousAssets {
-            context.delete(asset)
-        }
+        let previousBlocks = try context.fetch(oldBlockDescriptor)
 
         let updatedAt = Date()
 
@@ -281,49 +279,38 @@ final class NoteSaveManager {
         entity.documentSource = conversion.document.source
         entity.blockCount = conversion.document.blocks.count
         entity.assetCount = persistedAssetsByID.count
+        // 写入时一次性算好预览文本，避免列表加载时对每条笔记做额外的 blocks fetch
+        entity.previewText = Self.previewTextForList(from: request.decodedContent.string)
+        // 标记旧版复选框图片块已被转换器规范化为 todo_item 类型，
+        // 后续加载时可跳过昂贵的像素检测启发式
+        entity.hasLegacyCheckboxMigrated = true
 
         let orderedPersistedAssets = conversion.document.blocks
             .compactMap(\.asset)
             .compactMap { persistedAssetsByID[$0.id] }
 
-        for persistedAsset in orderedPersistedAssets {
-            context.insert(
-                BlockDocumentAssetEntity(
-                    noteID: request.noteID,
-                    assetID: persistedAsset.reference.id,
-                    kind: persistedAsset.reference.kind,
-                    sourceKind: persistedAsset.reference.kind,
-                    filename: persistedAsset.reference.filename,
-                    mimeType: persistedAsset.reference.mimeType,
-                    width: persistedAsset.reference.width,
-                    height: persistedAsset.reference.height,
-                    duration: persistedAsset.reference.duration,
-                    createdAt: persistedAsset.reference.createdAt,
-                    relativeFilePath: persistedAsset.relativeFilePath,
-                    sidecarPathsPayload: try encodeJSON(persistedAsset.sidecarRelativePaths)
-                )
-            )
-        }
+        // ========================================
+        // 增量更新 Asset 实体：按 assetID 进行 diff，避免每次全删全插
+        // ========================================
+        try Self.reconcileAssets(
+            noteID: noteID,
+            previousAssets: previousAssets,
+            orderedPersistedAssets: orderedPersistedAssets,
+            context: context,
+            encodeJSON: encodeJSON(_:)
+        )
 
-        for (position, block) in conversion.document.blocks.enumerated() {
-            context.insert(
-                BlockDocumentBlockEntity(
-                    noteID: request.noteID,
-                    position: position,
-                    blockID: block.id,
-                    kind: block.type,
-                    sourceType: block.type,
-                    textPayload: try encodeTextPayload(block.text ?? []),
-                    level: block.level,
-                    listStyle: block.listStyle,
-                    order: block.order,
-                    checked: block.checked,
-                    indent: block.indent,
-                    assetID: block.asset?.id,
-                    tablePayload: try encodeTablePayload(block.table)
-                )
-            )
-        }
+        // ========================================
+        // 增量更新 Block 实体：按 blockID 进行 diff，避免每次全删全插
+        // ========================================
+        try Self.reconcileBlocks(
+            noteID: noteID,
+            previousBlocks: previousBlocks,
+            newBlocks: conversion.document.blocks,
+            context: context,
+            encodeText: encodeTextPayload(_:),
+            encodeTable: encodeTablePayload(_:)
+        )
 
         _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
         try context.save()
@@ -816,7 +803,13 @@ final class NoteSaveManager {
         try jsonEncoder.encode(value)
     }
     
-    /// 计算内容哈希用于脏检查，仅当哈希变化时才递增 version
+    /// 使用 SHA-256 稳定计算内容哈希用于脏检查。
+    ///
+    /// 注意：**不**使用 Swift 标准库 `Hasher`，因为它在每次进程启动时使用随机种子，
+    /// 导致相同的输入产生不同的哈希值，这使得跨重启的脏检查失效。
+    ///
+    /// 改用 `CryptoKit.SHA256` 保证确定性输出，同时与同步模块的 `snapshotFingerprint`
+    /// 保持一致的哈希强度。
     private static func contentHashForDirtyCheck(
         document: MigratedDocument,
         title: String,
@@ -825,42 +818,167 @@ final class NoteSaveManager {
         reminderAt: Date?,
         recurrenceRule: String
     ) -> String {
-        var hasher = Hasher()
-        hasher.combine(title)
-        hasher.combine(folderID)
-        hasher.combine(folderName)
-        hasher.combine(reminderAt)
-        hasher.combine(recurrenceRule)
-        for block in document.blocks {
-            hasher.combine(block.id)
-            hasher.combine(block.type)
-            if let text = block.text {
-                for span in text {
-                    hasher.combine(span.text)
-                    hasher.combine(span.bold)
-                    hasher.combine(span.italic)
-                    hasher.combine(span.underline)
-                    hasher.combine(span.strikethrough)
-                    hasher.combine(span.link)
+        let payload = DirtyCheckHashPayload(
+            title: title,
+            folderID: folderID?.uuidString,
+            folderName: folderName,
+            reminderAtTimestamp: reminderAt?.timeIntervalSince1970,
+            recurrenceRule: recurrenceRule,
+            document: document
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(payload)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 为列表生成预览文本（与 `NoteStore.previewText(from:)` 保持一致）
+    nonisolated static func previewTextForList(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = trimmed.components(separatedBy: .newlines)
+        return lines.prefix(2).joined(separator: " ")
+    }
+
+    // MARK: — 增量更新: Asset 实体（按 assetID diff，避免全删全插）
+
+    private static func reconcileAssets(
+        noteID: UUID,
+        previousAssets: [BlockDocumentAssetEntity],
+        orderedPersistedAssets: [PersistedBlockAsset],
+        context: ModelContext,
+        encodeJSON: ([String]) throws -> Data
+    ) throws {
+        let prevByID = Dictionary(uniqueKeysWithValues: previousAssets.map { ($0.assetID, $0) })
+        var keptAssetIDs = Set<String>()
+
+        for persistedAsset in orderedPersistedAssets {
+            let assetID = persistedAsset.reference.id
+            keptAssetIDs.insert(assetID)
+
+            let sidecarPathsPayload = try encodeJSON(persistedAsset.sidecarRelativePaths)
+
+            if let existing = prevByID[assetID] {
+                if existing.kind != persistedAsset.reference.kind
+                    || existing.sourceKind != persistedAsset.reference.kind
+                    || existing.filename != persistedAsset.reference.filename
+                    || existing.mimeType != persistedAsset.reference.mimeType
+                    || existing.width != persistedAsset.reference.width
+                    || existing.height != persistedAsset.reference.height
+                    || existing.duration != persistedAsset.reference.duration
+                    || existing.createdAt != persistedAsset.reference.createdAt
+                    || existing.relativeFilePath != persistedAsset.relativeFilePath
+                    || existing.sidecarPathsPayload != sidecarPathsPayload
+                {
+                    existing.kind = persistedAsset.reference.kind
+                    existing.sourceKind = persistedAsset.reference.kind
+                    existing.filename = persistedAsset.reference.filename
+                    existing.mimeType = persistedAsset.reference.mimeType
+                    existing.width = persistedAsset.reference.width
+                    existing.height = persistedAsset.reference.height
+                    existing.duration = persistedAsset.reference.duration
+                    existing.createdAt = persistedAsset.reference.createdAt
+                    existing.relativeFilePath = persistedAsset.relativeFilePath
+                    existing.sidecarPathsPayload = sidecarPathsPayload
                 }
+                continue
             }
-            hasher.combine(block.level)
-            hasher.combine(block.listStyle)
-            hasher.combine(block.order)
-            hasher.combine(block.checked)
-            hasher.combine(block.indent)
-            if let asset = block.asset {
-                hasher.combine(asset.id)
-                hasher.combine(asset.kind)
-                hasher.combine(asset.filename)
-            }
-            if let table = block.table {
-                hasher.combine(table.rows)
-                hasher.combine(table.columnWidths)
-                hasher.combine(table.rowHeights)
+
+            // 新增
+            context.insert(
+                BlockDocumentAssetEntity(
+                    noteID: noteID,
+                    assetID: assetID,
+                    kind: persistedAsset.reference.kind,
+                    sourceKind: persistedAsset.reference.kind,
+                    filename: persistedAsset.reference.filename,
+                    mimeType: persistedAsset.reference.mimeType,
+                    width: persistedAsset.reference.width,
+                    height: persistedAsset.reference.height,
+                    duration: persistedAsset.reference.duration,
+                    createdAt: persistedAsset.reference.createdAt,
+                    relativeFilePath: persistedAsset.relativeFilePath,
+                    sidecarPathsPayload: sidecarPathsPayload
+                )
+            )
+        }
+
+        // 删除已不存在的 asset
+        for (assetID, entity) in prevByID where !keptAssetIDs.contains(assetID) {
+            context.delete(entity)
+        }
+    }
+
+    // MARK: — 增量更新: Block 实体（按 blockID diff，避免全删全插）
+
+    private static func reconcileBlocks(
+        noteID: UUID,
+        previousBlocks: [BlockDocumentBlockEntity],
+        newBlocks: [MigratedDocumentBlock],
+        context: ModelContext,
+        encodeText: ([MigratedInlineText]) throws -> Data?,
+        encodeTable: (MigratedTable?) throws -> Data?
+    ) throws {
+        let prevByID = Dictionary(uniqueKeysWithValues: previousBlocks.map { ($0.blockID, $0) })
+        var keptBlockIDs = Set<String>()
+
+        for newPosition in newBlocks.indices {
+            let block = newBlocks[newPosition]
+            keptBlockIDs.insert(block.id)
+
+            if let existing = prevByID[block.id] {
+                // 更新已有 block 的可变字段（位置、文本、状态）
+                let textPayload = try encodeText(block.text ?? [])
+                let tablePayload = try encodeTable(block.table)
+
+                if existing.position != newPosition
+                    || existing.kind != block.type
+                    || existing.textPayload != textPayload
+                    || existing.level != block.level
+                    || existing.listStyle != block.listStyle
+                    || existing.order != block.order
+                    || existing.checked != block.checked
+                    || existing.indent != block.indent
+                    || existing.assetID != block.asset?.id
+                    || existing.tablePayload != tablePayload
+                {
+                    existing.position = newPosition
+                    existing.kind = block.type
+                    existing.sourceType = block.type
+                    existing.textPayload = textPayload
+                    existing.level = block.level
+                    existing.listStyle = block.listStyle
+                    existing.order = block.order
+                    existing.checked = block.checked
+                    existing.indent = block.indent
+                    existing.assetID = block.asset?.id
+                    existing.tablePayload = tablePayload
+                }
+            } else {
+                // 新增 block
+                context.insert(
+                    BlockDocumentBlockEntity(
+                        noteID: noteID,
+                        position: newPosition,
+                        blockID: block.id,
+                        kind: block.type,
+                        sourceType: block.type,
+                        textPayload: try encodeText(block.text ?? []),
+                        level: block.level,
+                        listStyle: block.listStyle,
+                        order: block.order,
+                        checked: block.checked,
+                        indent: block.indent,
+                        assetID: block.asset?.id,
+                        tablePayload: try encodeTable(block.table)
+                    )
+                )
             }
         }
-        return String(hasher.finalize())
+
+        // 删除已不存在的 block
+        for (blockID, entity) in prevByID where !keptBlockIDs.contains(blockID) {
+            context.delete(entity)
+        }
     }
 
     /// 等待并重试保存
@@ -891,13 +1009,13 @@ final class NoteSaveManager {
     private func validateData(_ data: Data) -> Bool {
         // 检查数据是否为空
         guard !data.isEmpty else {
-            print("[SaveManager] Validation failed: empty data")
+            DebugLog.save("Validation failed: empty data", level: .warn)
             return false
         }
 
         // 检查数据大小（至少要有基本的 RTFD 头）
         guard data.count > 100 else {
-            print("[SaveManager] Validation failed: data too small (\(data.count) bytes)")
+            DebugLog.save("Validation failed: data too small (\(data.count) bytes)", level: .warn)
             return false
         }
 
@@ -921,6 +1039,15 @@ private struct PersistedBlockAsset {
     let reference: MigratedAssetReference
     let relativeFilePath: String
     let sidecarRelativePaths: [String]
+}
+
+private struct DirtyCheckHashPayload: Codable {
+    let title: String
+    let folderID: String?
+    let folderName: String
+    let reminderAtTimestamp: TimeInterval?
+    let recurrenceRule: String
+    let document: MigratedDocument
 }
 
 // MARK: - 便捷方法
@@ -967,6 +1094,7 @@ extension NoteSaveManager {
             reminderAt: reminderAt,
             recurrenceRule: recurrenceRule,
             rtfdData: rtfdData,
+            decodedContent: cleaned,
             reason: reason,
             timestamp: Date()
         )

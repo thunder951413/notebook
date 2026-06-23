@@ -147,7 +147,7 @@ struct RadialMenuWindowContent: View {
                     .shadow(color: .black.opacity(0.2), radius: 15 * scale, x: 0, y: 8 * scale)
                     .onTapGesture {
                         // 只有点击背景圆但不在按钮上时才关闭
-                        print("[RadialMenu] Background tapped, closing menu")
+                        DebugLog.app("Background tapped, closing menu", level: .debug)
                         onDismiss()
                     }
                 
@@ -210,19 +210,19 @@ struct RadialMenuWindowContent: View {
         let dy = location.y - center.y
         let distance = hypot(dx, dy)
         
-        print("[RadialMenu] Mouse at (\(Int(location.x)), \(Int(location.y)), center at (\(Int(center.x)), \(Int(center.y)))")
-        print("[RadialMenu] dx=\(Int(dx)), dy=\(Int(dy)), distance=\(Int(distance)), inner=\(Int(innerRadius)), outer=\(Int(outerRadius))")
+        DebugLog.app("Mouse at (\(Int(location.x)), \(Int(location.y)), center at (\(Int(center.x)), \(Int(center.y)))", level: .debug)
+        DebugLog.app("dx=\(Int(dx)), dy=\(Int(dy)), distance=\(Int(distance)), inner=\(Int(innerRadius)), outer=\(Int(outerRadius))", level: .debug)
         
         // 如果在中心圆内，不悬停任何扇形
         if distance < innerRadius {
-            print("[RadialMenu] In center, no hover")
+            DebugLog.app("In center, no hover", level: .debug)
             hoveredPosition = nil
             return
         }
         
         // 如果在外圆外，不悬停
         if distance > outerRadius {
-            print("[RadialMenu] Outside ring, no hover")
+            DebugLog.app("Outside ring, no hover", level: .debug)
             hoveredPosition = nil
             return
         }
@@ -231,7 +231,7 @@ struct RadialMenuWindowContent: View {
         // SwiftUI坐标系：Y轴向下为正
         // atan2期望：Y轴向上为正，所以dy要取反
         var angle = atan2(-dy, dx) * 180 / .pi
-        print("[RadialMenu] Raw angle (after Y-flip): \(angle)")
+        DebugLog.app("Raw angle (after Y-flip): \(angle)", level: .debug)
         
         // atan2 返回：右0，上90，左180/-180，下-90
         // 转换为：上0，右90，下180，左270（顺时针）
@@ -243,16 +243,16 @@ struct RadialMenuWindowContent: View {
             angle -= 360
         }
         
-        print("[RadialMenu] Converted angle: \(angle)")
+        DebugLog.app("Converted angle: \(angle)", level: .debug)
         
         // 找到对应的扇形 (每个45度)
         // 扇形0: -22.5 to 22.5 (顶部)
         let sectorIndex = Int((angle + 22.5) / 45.0) % 8
         
-        print("[RadialMenu] Sector index: \(sectorIndex)")
+        DebugLog.app("Sector index: \(sectorIndex)", level: .debug)
         
         if hoveredPosition != sectorIndex {
-            print("[RadialMenu] Hover changed to sector \(sectorIndex)")
+            DebugLog.app("Hover changed to sector \(sectorIndex)", level: .debug)
             hoveredPosition = sectorIndex
         }
     }
@@ -326,7 +326,7 @@ struct SectorView: View {
             // 图标
             if let action = action {
                 Button(action: {
-                    print("[RadialMenu] Button clicked for action: \(action)")
+                    DebugLog.app("Button clicked for action: \(action)", level: .debug)
                     onSelect()
                 }) {
                     Image(systemName: action.icon)

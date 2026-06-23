@@ -37,21 +37,21 @@ final class AttachmentTextAttachment: NSTextAttachment {
     }
 
     required init?(coder: NSCoder) {
-        print("[AttachmentTextAttachment] Decoding started...")
+        DebugLog.attachment("Decoding started...", level: .debug)
 
         if let raw = coder.decodeObject(of: NSString.self, forKey: "NotebookAttachmentKind") as String? {
             self.kind = AttachmentKind(rawValue: raw) ?? .image
-            print("[AttachmentTextAttachment] Kind decoded: \(self.kind)")
+            DebugLog.attachment("Kind decoded: \(self.kind)", level: .debug)
         } else {
             self.kind = .image
-            print("[AttachmentTextAttachment] No kind found, defaulting to image")
+            DebugLog.attachment("No kind found, defaulting to image", level: .debug)
         }
 
         let decodedFilename = coder.decodeObject(of: NSString.self, forKey: "NotebookAttachmentFilename") as String?
         let fallbackFilename = decodedFilename.flatMap { $0.isEmpty ? nil : String($0) } ?? Self.defaultFilename(for: kind)
         
         let decodedWrapper = coder.decodeObject(of: FileWrapper.self, forKey: "NSFileWrapper")
-        print("[AttachmentTextAttachment] Decoded wrapper: \(decodedWrapper != nil)")
+        DebugLog.attachment("Decoded wrapper: \(decodedWrapper != nil)", level: .debug)
 
         if let wrapper = decodedWrapper {
             let filename = wrapper.preferredFilename?.isEmpty == false ? wrapper.preferredFilename! : fallbackFilename
@@ -60,16 +60,16 @@ final class AttachmentTextAttachment: NSTextAttachment {
             try? wrapper.write(to: out, options: .atomic, originalContentsURL: nil)
             self.attachmentFileURL = out
             self.embeddedFileData = wrapper.regularFileContents
-            print("[AttachmentTextAttachment] File URL set to: \(out.path)")
+            DebugLog.attachment("File URL set to: \(out.path)", level: .debug)
         } else {
             self.attachmentFilename = fallbackFilename
             self.attachmentFileURL = Self.uniqueTemporaryFileURL(directoryName: "NotebookExtracted", preferredFilename: fallbackFilename)
             self.embeddedFileData = nil
-            print("[AttachmentTextAttachment] No wrapper found, using temp file path")
+            DebugLog.attachment("No wrapper found, using temp file path", level: .debug)
         }
 
         super.init(coder: coder)
-        print("[AttachmentTextAttachment] super.init completed")
+        DebugLog.attachment("super.init completed", level: .debug)
 
         // 关键：清掉运行时 fileWrapper，避免被 NSTextView 识别为“文件附件”并出现系统浮层
         self.fileWrapper = nil
@@ -81,7 +81,7 @@ final class AttachmentTextAttachment: NSTextAttachment {
             applyImagePresentationIfNeeded()
         }
         
-        print("[AttachmentTextAttachment] Decoding completed")
+        DebugLog.attachment("Decoding completed", level: .debug)
     }
 
     override func encode(with coder: NSCoder) {

@@ -104,7 +104,7 @@ class AIService: ObservableObject {
         
         guard httpResponse.statusCode == 200 else {
             let responseString = String(data: data, encoding: .utf8) ?? "无法读取响应"
-            print("[AI Error] HTTP \(httpResponse.statusCode): \(responseString)")
+            DebugLog.app("HTTP \(httpResponse.statusCode): \(responseString)", level: .debug)
             
             // 尝试解析错误响应
             if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
@@ -130,7 +130,7 @@ class AIService: ObservableObject {
         
         // 解析非流式响应
         let responseString = String(data: data, encoding: .utf8) ?? ""
-        print("[AI Response]: \(responseString.prefix(500))")
+        DebugLog.app(": \(responseString.prefix(500))", level: .debug)
         
         let responseBody = try JSONDecoder().decode(ResponseBody.self, from: data)
         

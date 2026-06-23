@@ -80,11 +80,11 @@ class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput {
             isRecording = true
             recordedURL = fileURL
             
-            print("[SystemAudioRecorder] 开始录制系统音频: \(fileURL.path)")
+            DebugLog.attachment("开始录制系统音频: \(fileURL.path)", level: .debug)
             
         } catch {
             errorMessage = "启动录制失败: \(error.localizedDescription)"
-            print("[SystemAudioRecorder] 启动失败: \(error)")
+            DebugLog.attachment("启动失败: \(error)", level: .warn)
         }
     }
     
@@ -105,11 +105,11 @@ class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput {
             isRecording = false
             hasStartedSession = false
             
-            print("[SystemAudioRecorder] 录制完成: \(currentFileURL?.path ?? "unknown")")
+            DebugLog.attachment("录制完成: \(currentFileURL?.path ?? "unknown")", level: .debug)
             
         } catch {
             errorMessage = "停止录制失败: \(error.localizedDescription)"
-            print("[SystemAudioRecorder] 停止失败: \(error)")
+            DebugLog.attachment("停止失败: \(error)", level: .warn)
         }
     }
     

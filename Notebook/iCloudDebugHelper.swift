@@ -30,7 +30,7 @@ final class iCloudDebugHelper {
     func enableLocalSimulationMode() {
         #if DEBUG
         UserDefaults.standard.set(true, forKey: "icloud_simulation_mode")
-        print("[iCloudDebugHelper] ✅ Local simulation mode enabled")
+        DebugLog.storage("✅ Local simulation mode enabled", level: .debug)
         #endif
     }
     
@@ -38,14 +38,14 @@ final class iCloudDebugHelper {
     func disableLocalSimulationMode() {
         #if DEBUG
         UserDefaults.standard.set(false, forKey: "icloud_simulation_mode")
-        print("[iCloudDebugHelper] Local simulation mode disabled")
+        DebugLog.storage("Local simulation mode disabled", level: .debug)
         #endif
     }
     
     /// 模拟设置值
     func setValue(_ data: Data, forKey key: String) {
         localSimulationStore[key] = data
-        print("[iCloudDebugHelper] Set value for key: \(key)")
+        DebugLog.storage("Set value for key: \(key)", level: .debug)
     }
     
     /// 模拟获取值

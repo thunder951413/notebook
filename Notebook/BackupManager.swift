@@ -70,9 +70,9 @@ final class BackupManager {
         do {
             try saveBackup(backup)
             try cleanupOldBackups(for: noteID)
-            print("[BackupManager] Backup created: \(backup.id) for note \(noteID)")
+            DebugLog.storage("Backup created: \(backup.id) for note \(noteID)", level: .debug)
         } catch {
-            print("[BackupManager] Failed to create backup: \(error)")
+            DebugLog.storage("Failed to create backup: \(error)", level: .warn)
         }
     }
 
@@ -83,7 +83,7 @@ final class BackupManager {
             return files.compactMap { try? loadBackup(from: $0) }
                 .sorted { $0.timestamp > $1.timestamp }
         } catch {
-            print("[BackupManager] Failed to list backups: \(error)")
+            DebugLog.storage("Failed to list backups: \(error)", level: .warn)
             return []
         }
     }
@@ -129,11 +129,11 @@ final class BackupManager {
                     return false
                 }
 
-                print("[BackupManager] Restored backup: \(backup.id)")
+                DebugLog.storage("Restored backup: \(backup.id)", level: .debug)
                 return true
             }
         } catch {
-            print("[BackupManager] Failed to restore backup: \(error)")
+            DebugLog.storage("Failed to restore backup: \(error)", level: .warn)
         }
         return false
     }
@@ -202,9 +202,9 @@ final class BackupManager {
             for file in files {
                 try? FileManager.default.removeItem(at: file)
             }
-            print("[BackupManager] All backups cleared")
+            DebugLog.storage("All backups cleared", level: .debug)
         } catch {
-            print("[BackupManager] Failed to clear backups: \(error)")
+            DebugLog.storage("Failed to clear backups: \(error)", level: .warn)
         }
     }
 
@@ -214,7 +214,7 @@ final class BackupManager {
         do {
             try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
         } catch {
-            print("[BackupManager] Failed to create backup directory: \(error)")
+            DebugLog.storage("Failed to create backup directory: \(error)", level: .warn)
         }
     }
 

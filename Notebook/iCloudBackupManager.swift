@@ -59,7 +59,7 @@ final class iCloudBackupManager {
     private func setupCloudKit() {
         // 检查是否有 iCloud 容器配置
         guard FileManager.default.ubiquityIdentityToken != nil else {
-            print("[iCloudBackupManager] iCloud not available (no ubiquityIdentityToken)")
+            DebugLog.storage("iCloud not available (no ubiquityIdentityToken)", level: .debug)
             self.container = nil
             self.privateDatabase = nil
             return
@@ -67,7 +67,7 @@ final class iCloudBackupManager {
 
         // 检查是否能获取 iCloud 容器 URL
         guard FileManager.default.url(forUbiquityContainerIdentifier: nil) != nil else {
-            print("[iCloudBackupManager] iCloud not available (no container URL)")
+            DebugLog.storage("iCloud not available (no container URL)", level: .debug)
             self.container = nil
             self.privateDatabase = nil
             return
@@ -77,7 +77,7 @@ final class iCloudBackupManager {
         let ckContainer = CKContainer.default()
         self.container = ckContainer
         self.privateDatabase = ckContainer.privateCloudDatabase
-        print("[iCloudBackupManager] CloudKit initialized successfully")
+        DebugLog.storage("CloudKit initialized successfully", level: .debug)
     }
 
     // MARK: - 公共 API
@@ -110,10 +110,10 @@ final class iCloudBackupManager {
 
             lastSyncDate = Date()
             syncError = nil
-            print("[iCloudBackupManager] Sync to iCloud completed: \(localBackups.count) backups")
+            DebugLog.storage("Sync to iCloud completed: \(localBackups.count) backups", level: .debug)
         } catch {
             syncError = error.localizedDescription
-            print("[iCloudBackupManager] Sync to iCloud failed: \(error)")
+            DebugLog.storage("Sync to iCloud failed: \(error)", level: .warn)
         }
     }
 
@@ -137,10 +137,10 @@ final class iCloudBackupManager {
 
             lastSyncDate = Date()
             syncError = nil
-            print("[iCloudBackupManager] Sync from iCloud completed: \(iCloudBackups.count) backups")
+            DebugLog.storage("Sync from iCloud completed: \(iCloudBackups.count) backups", level: .debug)
         } catch {
             syncError = error.localizedDescription
-            print("[iCloudBackupManager] Sync from iCloud failed: \(error)")
+            DebugLog.storage("Sync from iCloud failed: \(error)", level: .warn)
         }
     }
 
@@ -152,7 +152,7 @@ final class iCloudBackupManager {
             let backups = try await downloadBackupsFromiCloud()
             return backups.sorted { $0.timestamp > $1.timestamp }
         } catch {
-            print("[iCloudBackupManager] Failed to list iCloud backups: \(error)")
+            DebugLog.storage("Failed to list iCloud backups: \(error)", level: .warn)
             return []
         }
     }
@@ -166,17 +166,17 @@ final class iCloudBackupManager {
             if let iCloudDir = iCloudBackupDirectory {
                 let fileURL = iCloudDir.appendingPathComponent(fileName)
                 try FileManager.default.removeItem(at: fileURL)
-                print("[iCloudBackupManager] Deleted iCloud backup: \(backup.id)")
+                DebugLog.storage("Deleted iCloud backup: \(backup.id)", level: .debug)
             }
         } catch {
-            print("[iCloudBackupManager] Failed to delete iCloud backup: \(error)")
+            DebugLog.storage("Failed to delete iCloud backup: \(error)", level: .warn)
         }
     }
 
     // MARK: - 私有方法
 
     @objc private func icloudAccountChanged() {
-        print("[iCloudBackupManager] iCloud account changed")
+        DebugLog.storage("iCloud account changed", level: .debug)
         Task {
             if isiCloudAvailable {
                 await syncToiCloud()
@@ -234,7 +234,7 @@ final class iCloudBackupManager {
         }
         try FileManager.default.copyItem(at: backupURL, to: destinationURL)
 
-        print("[iCloudBackupManager] Uploaded backup: \(fileName)")
+        DebugLog.storage("Uploaded backup: \(fileName)", level: .debug)
     }
 
     private func downloadBackupsFromiCloud() async throws -> [BackupItem] {

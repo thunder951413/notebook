@@ -66,7 +66,7 @@ final class RadialMenuEventMonitor: ObservableObject {
         }
 
         isMonitoring = true
-        print("[RadialMenuEventMonitor] Started monitoring for: \(trigger.displayName)")
+        DebugLog.app("Started monitoring for: \(trigger.displayName)", level: .debug)
     }
 
     func stopMonitoring() {
@@ -78,7 +78,7 @@ final class RadialMenuEventMonitor: ObservableObject {
         }
 
         isMonitoring = false
-        print("[RadialMenuEventMonitor] Stopped monitoring")
+        DebugLog.app("Stopped monitoring", level: .debug)
     }
 
     func restartMonitoring() {

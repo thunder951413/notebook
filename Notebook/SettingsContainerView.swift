@@ -2003,7 +2003,7 @@ private enum PersistedBlockDocumentLibraryLoader {
                 reminderAt: noteEntity.reminderAt,
                 recurrenceRule: noteEntity.recurrenceRule,
                 version: noteEntity.version,
-                tagIDs: decodeUUIDList(noteEntity.tagIDs),
+                tagIDs: UUIDListCoding.decode(noteEntity.tagIDs),
                 viewMode: noteEntity.viewMode,
                 deletedAt: noteEntity.deletedAt,
                 originalFolderID: noteEntity.originalFolderID,
@@ -2141,11 +2141,6 @@ private enum PersistedBlockDocumentLibraryLoader {
         return try decoder.decode([String].self, from: data)
     }
 
-    private static func decodeUUIDList(_ rawValue: String) -> [UUID] {
-        rawValue
-            .split(separator: ",")
-            .compactMap { UUID(uuidString: String($0)) }
-    }
 }
 
 // MARK: - SyncResult 扩展

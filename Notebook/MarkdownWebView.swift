@@ -59,8 +59,8 @@ struct MarkdownWebView: NSViewRepresentable {
 
         // 调试：打印生成的 HTML 内容
         if markdown.contains("```mermaid") {
-            print("[Mermaid Debug] Generated HTML preview:")
-            print(String(html.prefix(2000)))
+            DebugLog.editor("Generated HTML preview:", level: .debug)
+            DebugLog.editor(String(html.prefix(2000)), level: .debug)
         }
 
         context.coordinator.reloadWorkItem?.cancel()
@@ -146,7 +146,7 @@ struct MarkdownWebView: NSViewRepresentable {
             guard let userInfo = notification.userInfo,
                   let anchor = userInfo["anchor"] as? String else { return }
 
-            print("[ScrollToHeading] Received for noteID: \(parent.noteID), anchor: \(anchor)")
+            DebugLog.editor("Received for noteID: \(parent.noteID), anchor: \(anchor)", level: .debug)
             navigationState.queueAnchor(anchor)
             applyPendingNavigationIfNeeded()
         }
@@ -216,9 +216,9 @@ struct MarkdownWebView: NSViewRepresentable {
             DispatchQueue.main.async {
                 webView.evaluateJavaScript(script) { result, error in
                     if let error = error {
-                        print("[MarkdownPreviewNavigation] Error: \(error)")
+                        DebugLog.editor("Error: \(error)", level: .warn)
                     } else if let result = result {
-                        print("[MarkdownPreviewNavigation] Result: \(result)")
+                        DebugLog.editor("Result: \(result)", level: .debug)
                     }
                 }
             }

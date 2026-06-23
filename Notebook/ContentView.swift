@@ -433,7 +433,7 @@ struct ContentView: View {
             // 保存当前选择的文件夹和笔记
             AppSettings.shared.lastSelectedFolder = selectedFolder
             AppSettings.shared.lastSelectedNoteID = selection
-            print("[AppBlur] Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")")
+            DebugLog.app("Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")", level: .debug)
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
             saveCurrentEditorContent(reason: "terminate")
@@ -441,7 +441,7 @@ struct ContentView: View {
             // 保存当前选择的文件夹和笔记
             AppSettings.shared.lastSelectedFolder = selectedFolder
             AppSettings.shared.lastSelectedNoteID = selection
-            print("[Terminate] Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")")
+            DebugLog.app("Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")", level: .debug)
         }
         .onReceive(NotificationCenter.default.publisher(for: .insertTextAtCursor)) { notification in
             if let text = notification.userInfo?["text"] as? String {
@@ -600,15 +600,15 @@ struct ContentView: View {
 
                 if folderExists {
                     selectedFolder = lastFolder
-                    print("[Launch] Restored last selected folder: \(lastFolder)")
+                    DebugLog.app("Restored last selected folder: \(lastFolder)", level: .debug)
                 } else {
                     // Fallback 到全部笔记
                     selectedFolder = allNotesTitle
-                    print("[Launch] Last folder '\(lastFolder)' not found, fallback to all notes")
+                    DebugLog.app("Last folder '\(lastFolder)' not found, fallback to all notes", level: .debug)
                 }
             } else {
                 selectedFolder = l10n(L10nKeys.Folder.allNotes)
-                print("[Launch] No last folder saved, defaulting to all notes")
+                DebugLog.app("No last folder saved, defaulting to all notes", level: .debug)
             }
 
             // 恢复笔记选择
@@ -620,33 +620,33 @@ struct ContentView: View {
 
                     if noteInCurrentFolder {
                         updateSelection(lastID, reason: "launchRestore")
-                        print("[Launch] Restored last selected note: \(lastID)")
+                        DebugLog.app("Restored last selected note: \(lastID)", level: .debug)
                     } else {
                         // 笔记不在当前文件夹中，选择当前文件夹的第一个笔记
                         updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchFallback")
-                        print("[Launch] Last note not in current folder, selecting first note in folder")
+                        DebugLog.app("Last note not in current folder, selecting first note in folder", level: .debug)
                     }
                 } else {
                     // 笔记不存在，选择当前文件夹的第一个笔记
                     updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchMissingLastNote")
-                    print("[Launch] Last note not found, selecting first note in folder")
+                    DebugLog.app("Last note not found, selecting first note in folder", level: .debug)
                 }
             } else {
                 updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchNoLastNote")
-                print("[Launch] No last note saved, selecting first note")
+                DebugLog.app("No last note saved, selecting first note", level: .debug)
             }
 
         case .selectNone:
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
             updateSelection(nil, reason: "launchSelectNone")
-            print("[Launch] Selecting none as per settings")
+            DebugLog.app("Selecting none as per settings", level: .debug)
 
         case .showAllNotes:
             selectedFolder = l10n(L10nKeys.Folder.allNotes)
             selectedTagID = nil
             updateSelection(store.activeNotes.first?.id, reason: "launchShowAllNotes")
-            print("[Launch] Showing all notes")
+            DebugLog.app("Showing all notes", level: .debug)
         }
     }
 }
@@ -2891,9 +2891,9 @@ private struct AIPanelView: View {
         }
         
         // 解析 @ 引用并构建发送内容
-        print("[AI Debug] Input text: \(trimmedText)")
+        DebugLog.app("Input text: \(trimmedText)", level: .debug)
         let (displayContent, sendContent, extractedImages) = parseMentionsAndBuildContent(trimmedText)
-        print("[AI Debug] Parsed - display: \(displayContent.prefix(50)), send: \(sendContent.prefix(50)), images: \(extractedImages.count)")
+        DebugLog.app("Parsed - display: \(displayContent.prefix(50)), send: \(sendContent.prefix(50)), images: \(extractedImages.count)", level: .debug)
         
         let userMessage = AIMessage(content: displayContent, isUser: true)
         messages.append(userMessage)
@@ -2956,11 +2956,11 @@ private struct AIPanelView: View {
         let nsRange = NSRange(text.startIndex..., in: text)
         let matches = regex.matches(in: text, options: [], range: nsRange)
         
-        print("[AI Debug] Found \(matches.count) @ mentions in text")
+        DebugLog.app("Found \(matches.count) @ mentions in text", level: .debug)
         
         // 如果没有匹配，直接返回原文
         guard !matches.isEmpty else {
-            print("[AI Debug] No @ mentions found, returning original text")
+            DebugLog.app("No @ mentions found, returning original text", level: .debug)
             return (text, text, [])
         }
         
@@ -2981,7 +2981,7 @@ private struct AIPanelView: View {
             if let noteID = store.notes.first(where: { $0.id.uuidString.hasPrefix(shortID) })?.id {
                 store.ensureNoteContentLoaded(id: noteID, pruneAfterLoad: false)
                 guard let note = store.notes.first(where: { $0.id == noteID }) else { continue }
-                print("[AI Debug] Found note: \(note.title), content length: \(note.content.length)")
+                DebugLog.app("Found note: \(note.title), content length: \(note.content.length)", level: .debug)
                 
                 // 提取笔记纯文本内容
                 let plainContent = note.content.string
@@ -2990,7 +2990,7 @@ private struct AIPanelView: View {
                 let images = extractImages(from: note.content)
                 allImages.append(contentsOf: images)
                 
-                print("[AI Debug] Extracted \(images.count) images from note")
+                DebugLog.app("Extracted \(images.count) images from note", level: .debug)
                 
                 // 添加到引用列表
                 referencedNotes.append((title: note.title.isEmpty ? "无标题" : note.title, content: plainContent, images: images))
@@ -3030,50 +3030,50 @@ private struct AIPanelView: View {
         var images: [AIImageAttachment] = []
         let length = attributedString.length
         
-        print("[AI Image] Starting extraction from attributed string of length: \(length)")
+        DebugLog.app("Starting extraction from attributed string of length: \(length)", level: .debug)
         
         // 首先检查字符串内容，看看是否有附件字符
         let string = attributedString.string
-        print("[AI Image] String content: \(string.prefix(200))")
+        DebugLog.app("String content: \(string.prefix(200))", level: .debug)
         
         // 检查所有属性
         attributedString.enumerateAttributes(in: NSRange(location: 0, length: length), options: []) { attrs, range, _ in
             if !attrs.isEmpty {
-                print("[AI Image] Attributes at range \(range): \(attrs.keys.map { String(describing: $0) })")
+                DebugLog.app("Attributes at range \(range): \(attrs.keys.map { String(describing: $0) })", level: .debug)
             }
         }
         
         attributedString.enumerateAttribute(.attachment, in: NSRange(location: 0, length: length), options: []) { value, range, stop in
             guard let attachment = value else {
-                print("[AI Image] No attachment value found at range: \(range)")
+                DebugLog.app("No attachment value found at range: \(range)", level: .debug)
                 return
             }
             
-            print("[AI Image] Found attachment of type: \(type(of: attachment))")
-            print("[AI Image] Attachment class hierarchy: \(String(reflecting: type(of: attachment)))")
+            DebugLog.app("Found attachment of type: \(type(of: attachment))", level: .debug)
+            DebugLog.app("Attachment class hierarchy: \(String(reflecting: type(of: attachment)))", level: .debug)
             
             // 处理 AttachmentTextAttachment
             if let textAttachment = attachment as? AttachmentTextAttachment {
                 guard textAttachment.kind == .image else {
-                    print("[AI Image] Attachment is not an image, kind: \(textAttachment.kind)")
+                    DebugLog.app("Attachment is not an image, kind: \(textAttachment.kind)", level: .debug)
                     return
                 }
                 
-                print("[AI Image] Processing image attachment at: \(textAttachment.attachmentFileURL)")
+                DebugLog.app("Processing image attachment at: \(textAttachment.attachmentFileURL)", level: .debug)
 
                 if let imageData = textAttachment.attachmentData() {
                     let base64String = imageData.base64EncodedString()
                     let mimeType = mimeTypeForPath(path: textAttachment.attachmentFilename)
                     let aiImage = AIImageAttachment(base64Data: base64String, mimeType: mimeType)
                     images.append(aiImage)
-                    print("[AI Image] Successfully extracted image: \(textAttachment.attachmentFilename), size: \(imageData.count) bytes, base64 length: \(base64String.count)")
+                    DebugLog.app("Successfully extracted image: \(textAttachment.attachmentFilename), size: \(imageData.count) bytes, base64 length: \(base64String.count)", level: .debug)
                 } else {
-                    print("[AI Image] Failed to read image data from attachment or embedded payload")
+                    DebugLog.app("Failed to read image data from attachment or embedded payload", level: .warn)
                 }
             }
             // 处理普通的 NSTextAttachment（可能包含图片）
             else if let nsAttachment = attachment as? NSTextAttachment {
-                print("[AI Image] Found NSTextAttachment, checking for image...")
+                DebugLog.app("Found NSTextAttachment, checking for image...", level: .debug)
                 
                 // 尝试从 fileWrapper 获取数据
                 if let fileWrapper = nsAttachment.fileWrapper,
@@ -3082,7 +3082,7 @@ private struct AIPanelView: View {
                     let mimeType = "image/png" // 默认类型
                     let aiImage = AIImageAttachment(base64Data: base64String, mimeType: mimeType)
                     images.append(aiImage)
-                    print("[AI Image] Extracted image from NSTextAttachment, size: \(data.count) bytes")
+                    DebugLog.app("Extracted image from NSTextAttachment, size: \(data.count) bytes", level: .debug)
                 }
                 // 尝试从 image 属性获取
                 else if let image = nsAttachment.image,
@@ -3092,17 +3092,17 @@ private struct AIPanelView: View {
                         let base64String = data.base64EncodedString()
                         let aiImage = AIImageAttachment(base64Data: base64String, mimeType: "image/png")
                         images.append(aiImage)
-                        print("[AI Image] Extracted image from NSTextAttachment.image, size: \(data.count) bytes")
+                        DebugLog.app("Extracted image from NSTextAttachment.image, size: \(data.count) bytes", level: .debug)
                     }
                 } else {
-                    print("[AI Image] Could not extract image data from NSTextAttachment")
+                    DebugLog.app("Could not extract image data from NSTextAttachment", level: .debug)
                 }
             } else {
-                print("[AI Image] Unknown attachment type: \(type(of: attachment))")
+                DebugLog.app("Unknown attachment type: \(type(of: attachment))", level: .debug)
             }
         }
         
-        print("[AI Image] Total images extracted: \(images.count)")
+        DebugLog.app("Total images extracted: \(images.count)", level: .debug)
         return images
     }
     
@@ -3488,7 +3488,7 @@ private struct AIInputField: View {
         ZStack(alignment: .bottomLeading) {
             // 文本输入框 - 使用自定义的 NSTextView 包装器支持 ⌘+Enter
             AIInputTextView(text: $text, onSend: {
-                print("[AIInput] onSend callback triggered")
+                DebugLog.app("onSend callback triggered", level: .debug)
                 onSend()
             })
                 .font(.body)
@@ -3589,13 +3589,13 @@ private class AIInputNSTextView: NSTextView {
     var onCmdEnter: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        print("[AIInput] keyDown - keyCode: \(event.keyCode), modifiers: \(event.modifierFlags)")
+        DebugLog.app("keyDown - keyCode: \(event.keyCode), modifiers: \(event.modifierFlags)", level: .debug)
         // 检查是否是 ⌘+Enter (keyCode 36 = Return, keyCode 76 = Enter)
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let hasCommand = event.modifierFlags.contains(.command)
-        print("[AIInput] isReturn: \(isReturn), hasCommand: \(hasCommand)")
+        DebugLog.app("isReturn: \(isReturn), hasCommand: \(hasCommand)", level: .debug)
         if isReturn && hasCommand {
-            print("[AIInput] ⌘+Enter detected, calling onCmdEnter")
+            DebugLog.app("⌘+Enter detected, calling onCmdEnter", level: .debug)
             onCmdEnter?()
             return
         }
@@ -3608,15 +3608,15 @@ private struct AIInputTextView: NSViewRepresentable {
     let onSend: () -> Void
     
     func makeNSView(context: Context) -> NSScrollView {
-        print("[AIInput] makeNSView called")
+        DebugLog.app("makeNSView called", level: .debug)
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.autoresizingMask = [.width, .height]
 
         let textView = AIInputNSTextView()
-        print("[AIInput] Setting onCmdEnter callback")
+        DebugLog.app("Setting onCmdEnter callback", level: .debug)
         textView.onCmdEnter = {
-            print("[AIInput] onCmdEnter closure executed")
+            DebugLog.app("onCmdEnter closure executed", level: .debug)
             self.onSend()
         }
         textView.delegate = context.coordinator
@@ -3643,9 +3643,9 @@ private struct AIInputTextView: NSViewRepresentable {
             textView.string = text
         }
         // 更新回调
-        print("[AIInput] updateNSView - updating onCmdEnter callback")
+        DebugLog.app("updateNSView - updating onCmdEnter callback", level: .debug)
         textView.onCmdEnter = {
-            print("[AIInput] onCmdEnter closure executed (from update)")
+            DebugLog.app("onCmdEnter closure executed (from update)", level: .debug)
             self.onSend()
         }
     }

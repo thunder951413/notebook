@@ -261,18 +261,18 @@ struct iCloudSettingsView: View {
                     let pushed = try await syncManager.syncAllNotesToiCloud(context: context)
                     syncManager.syncProgress = 1.0
                     syncManager.syncStatus = .completed
-                    print("[iCloudSettingsView] 推送完成 \(pushed.count) 条")
+                    DebugLog.storage("推送完成 \(pushed.count) 条", level: .debug)
                 case .fromiCloud:
                     let pulled = try await syncManager.syncAllNotesFromiCloud(context: context)
                     let conflicts = pulled.filter(\.detectedConflict).count
                     syncManager.syncProgress = 1.0
                     syncManager.syncStatus = .completed
-                    print("[iCloudSettingsView] 拉取完成 \(pulled.count) 条，冲突 \(conflicts) 条")
+                    DebugLog.storage("拉取完成 \(pulled.count) 条，冲突 \(conflicts) 条", level: .debug)
                 case .bidirectional:
                     let summary = try await syncManager.syncBidirectional(context: context)
                     syncManager.syncProgress = 1.0
                     syncManager.syncStatus = .completed
-                    print("[iCloudSettingsView] 双向完成，拉取 \(summary.pulled) 条，推送 \(summary.pushed) 条，冲突 \(summary.conflicts) 条")
+                    DebugLog.storage("双向完成，拉取 \(summary.pulled) 条，推送 \(summary.pushed) 条，冲突 \(summary.conflicts) 条", level: .debug)
                 }
             } catch {
                 syncManager.syncStatus = .failed(error.localizedDescription)

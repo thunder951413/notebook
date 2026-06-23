@@ -168,7 +168,7 @@ struct AudioPlayerPopoverContent: View {
             duration = audioPlayer?.duration ?? 0
             currentTime = 0
         } catch {
-            print("[AudioPlayerPopoverContent] 无法加载音频: \(error)")
+            DebugLog.attachment("无法加载音频: \(error)", level: .warn)
         }
     }
 
@@ -234,7 +234,7 @@ struct AudioPlayerPopoverContent: View {
             self.systemNode = systemNode
             self.playbackStartedAt = Date()
         } catch {
-            print("[AudioPlayerPopoverContent] 实时混音播放失败: \(error)")
+            DebugLog.attachment("实时混音播放失败: \(error)", level: .warn)
         }
     }
 
@@ -294,7 +294,7 @@ struct AudioPlayerPopoverContent: View {
             let duration = try await asset.load(.duration)
             return CMTimeGetSeconds(duration)
         } catch {
-            print("[AudioPlayerPopoverContent] 无法加载时长: \(error)")
+            DebugLog.attachment("无法加载时长: \(error)", level: .warn)
             return 0
         }
     }

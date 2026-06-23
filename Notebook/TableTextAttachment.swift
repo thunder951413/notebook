@@ -62,7 +62,7 @@ final class TableTextAttachment: NSTextAttachment {
     private static let isTableDebugEnabled = false
     private static func log(_ message: String) {
         if isTableDebugEnabled {
-            print(message)
+            DebugLog.table(message, level: .debug)
         }
     }
     
@@ -224,8 +224,8 @@ final class TableTextAttachment: NSTextAttachment {
     
     /// 保存时确保图像数据被正确序列化
     func prepareForSaving() {
-        print("[TableTrace] prepareForSaving start rows=\(tableData.rowCount) cols=\(tableData.columnCount)")
-        print("[TableTrace] prepareForSaving data=\(tableData.rows)")
+        DebugLog.table("prepareForSaving start rows=\(tableData.rowCount) cols=\(tableData.columnCount)", level: .debug)
+        DebugLog.table("prepareForSaving data=\(tableData.rows)", level: .debug)
         Self.log("[TableDebug] prepareForSaving called, tableData rows: \(tableData.rowCount), cols: \(tableData.columnCount)")
         
         // 保存前强制修正 UTI 与 fileWrapper（使用 PNG 形式，避免文件图标）
@@ -312,7 +312,7 @@ final class TableTextAttachment: NSTextAttachment {
             dirWrapper.preferredFilename = "table.ntable"
             self.fileWrapper = dirWrapper
             lastSerializedTableDataJSON = tableDataJSON
-            print("[TableTrace] prepareForSaving wrote wrapper png=\(finalPngData.count) json=\(tableDataJSON.count)")
+            DebugLog.table("prepareForSaving wrote wrapper png=\(finalPngData.count) json=\(tableDataJSON.count)", level: .debug)
             Self.log("[TableDebug] prepareForSaving: SUCCESS, PNG=\(finalPngData.count) bytes, JSON=\(tableDataJSON.count) bytes")
         } catch {
             Self.log("[TableDebug] prepareForSaving: FAILED to encode tableData: \(error)")

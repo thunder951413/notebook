@@ -112,6 +112,15 @@ enum SyncPhase: String {
 }
 
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
+///
+/// ## 并发安全
+/// 本类标记为 `@unchecked Sendable` 以手动管理跨线程安全性。
+/// 以下可变状态均通过 `NSLock` 保护，保证线程安全：
+/// - `activeControlMasterPaths` (Set<String>) → `controlMasterLock`
+/// - `activeSyncOperationName` (String?) → `syncOperationLock`
+///
+/// 所有 public 方法均为 `async` 并在内部调度到串行队列，确保不会并发执行同步操作。
+/// 不可变属性（`noteDownloadConcurrencyLimit` / `assetDownloadConcurrencyLimit`）天然 Sendable。
 final class SSHSyncManager: @unchecked Sendable {
     static let shared = SSHSyncManager()
 
@@ -1669,7 +1678,7 @@ final class SSHSyncManager: @unchecked Sendable {
             }
         }
         try? BlockDocumentNoteVersionStore.cleanupDeletedTombstones(noteIDs: deletedNoteIDs, context: context)
-        try? context.save()
+        context.saveLogging("AssetDownloadJob.cleanupDeletedSyncStates")
     }
 
     private func healRemoteIndex(
@@ -2339,7 +2348,7 @@ final class SSHSyncManager: @unchecked Sendable {
             sourceExportedAt: Date()
         )
         context.insert(library)
-        try? context.save()
+        context.saveLogging("AssetDownloadJob.ensureLocalLibraryID")
         return library.id
     }
 

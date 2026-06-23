@@ -2,529 +2,6 @@ import SwiftUI
 import SwiftData
 import Combine
 
-/// 调试开关
-private let isCheckboxDebugEnabled = false
-
-/// 颜色系统：支持浅色/深色并随系统自动切换（默认）。
-struct AppColors {
-    static func sidebarBackground(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 30/255, green: 30/255, blue: 30/255) : Color(red: 247/255, green: 245/255, blue: 240/255)
-    }
-    static func listBackground(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 40/255, green: 40/255, blue: 40/255) : Color(red: 250/255, green: 248/255, blue: 244/255)
-    }
-    static func editorBackground(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 45/255, green: 45/255, blue: 45/255) : Color(red: 252/255, green: 250/255, blue: 246/255)
-    }
-    static func cardBackground(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(white: 0.22) : Color.white.opacity(0.86)
-    }
-    static func cardBorder(_ scheme: ColorScheme, isSelected: Bool) -> Color {
-        isSelected ? accentYellow.opacity(0.9) : (scheme == .dark ? .white.opacity(0.06) : .black.opacity(0.06))
-    }
-    static func selectedFill(_ scheme: ColorScheme) -> Color {
-        accentYellow.opacity(scheme == .dark ? 0.12 : 0.18)
-    }
-    static func textSecondary(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(white: 0.65) : Color.black.opacity(0.55)
-    }
-    static let accentYellow = Color(red: 243/255, green: 186/255, blue: 0/255)
-    static func divider(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
-    }
-}
-
-struct AttachmentAppearance {
-    static var primaryTextColor: NSColor { .textColor }
-    static var secondaryTextColor: NSColor { .secondaryLabelColor }
-    static var backgroundColor: NSColor { .textBackgroundColor }
-    static var secondaryBackgroundColor: NSColor { .controlBackgroundColor }
-    static var borderColor: NSColor { .separatorColor }
-    static var selectionColor: NSColor { .selectedContentBackgroundColor.withAlphaComponent(0.3) }
-    static var uncheckedStrokeColor: NSColor { .tertiaryLabelColor }
-}
-
-struct Folder: Identifiable, Hashable {
-    let id: UUID
-    var name: String
-    var sortOrder: Int
-    var createdAt: Date
-    var isSystem: Bool
-}
-
-struct Tag: Identifiable, Hashable {
-    let id: UUID
-    var name: String
-    var color: String
-    var sortOrder: Int
-    var createdAt: Date
-    
-    init(id: UUID = UUID(), name: String, color: String = "gray", sortOrder: Int = 0, createdAt: Date = Date()) {
-        self.id = id
-        self.name = name
-        self.color = color
-        self.sortOrder = sortOrder
-        self.createdAt = createdAt
-    }
-    
-    var swiftUIColor: Color {
-        switch color {
-        case "red": return .red
-        case "orange": return .orange
-        case "yellow": return .yellow
-        case "green": return .green
-        case "blue": return .blue
-        case "purple": return .purple
-        default: return .gray
-        }
-    }
-}
-
-struct BlockDocumentAttributedStringBuilder {
-    private let attachmentsRoot: URL?
-    private let decoder = JSONDecoder()
-
-    init(attachmentsRoot: URL?) {
-        self.attachmentsRoot = attachmentsRoot
-    }
-
-    func build(
-        blocks: [BlockDocumentBlockEntity],
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        var index = 0
-        var emittedBlockCount = 0
-
-        while index < blocks.count {
-            if emittedBlockCount > 0 {
-                result.append(NSAttributedString(string: "\n"))
-            }
-
-            if let recoveredTodo = recoveredLegacyTodoBlock(
-                at: index,
-                blocks: blocks,
-                assetsByID: assetsByID
-            ) {
-                result.append(recoveredTodo)
-                index += 2
-            } else {
-                result.append(attributedBlock(for: blocks[index], assetsByID: assetsByID))
-                index += 1
-            }
-            emittedBlockCount += 1
-        }
-
-        return result
-    }
-
-    private func attributedBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> NSAttributedString {
-        switch block.kind {
-        case "heading":
-            return headingBlock(for: block)
-        case "list_item":
-            return listItemBlock(for: block)
-        case "todo_item":
-            return todoItemBlock(for: block)
-        case "image":
-            return imageBlock(for: block, assetsByID: assetsByID)
-        case "audio":
-            return audioBlock(for: block, assetsByID: assetsByID)
-        case "table":
-            return tableBlock(for: block)
-        default:
-            let content = inlineAttributedText(from: block.textPayload)
-            return content.length == 0 ? NSAttributedString(string: "") : content
-        }
-    }
-
-    private func headingBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        let content = NSMutableAttributedString(attributedString: inlineAttributedText(from: block.textPayload))
-        let fontSize = headingFontSize(level: block.level ?? 1)
-        let range = NSRange(location: 0, length: content.length)
-        if range.length > 0 {
-            content.enumerateAttributes(in: range) { attributes, subrange, _ in
-                let font = resolvedFont(
-                    family: fontFamily(from: attributes[.font]),
-                    size: fontSize,
-                    bold: true,
-                    italic: isItalicFont(attributes[.font] as? NSFont)
-                )
-                content.addAttribute(.font, value: font, range: subrange)
-            }
-            content.addAttribute(.notebookHeadingLevel, value: block.level ?? 1, range: range)
-        }
-        return content
-    }
-
-    private func listItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
-        result.append(NSAttributedString(string: listMarker(for: block)))
-        result.append(sanitizedListInlineText(from: block.textPayload))
-        return result
-    }
-
-    private func todoItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
-        let attachment = CheckboxTextAttachment(checked: block.checked ?? false)
-        result.append(NSAttributedString(attachment: attachment))
-        result.append(NSAttributedString(string: " "))
-        result.append(sanitizedTodoInlineText(from: block.textPayload))
-        return result
-    }
-
-    private func recoveredLegacyTodoBlock(
-        at index: Int,
-        blocks: [BlockDocumentBlockEntity],
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> NSAttributedString? {
-        guard index + 1 < blocks.count else { return nil }
-        let imageBlock = blocks[index]
-        let textBlock = blocks[index + 1]
-        guard imageBlock.kind == "image", textBlock.kind == "paragraph" else { return nil }
-        guard isLikelyLegacyCheckboxImageBlock(imageBlock, assetsByID: assetsByID) else { return nil }
-
-        let checked = recoveredLegacyCheckboxState(from: imageBlock, assetsByID: assetsByID) ?? false
-        let result = NSMutableAttributedString(string: indentationPrefix(level: textBlock.indent))
-        result.append(NSAttributedString(attachment: CheckboxTextAttachment(checked: checked)))
-        result.append(NSAttributedString(string: " "))
-        result.append(sanitizedTodoInlineText(from: textBlock.textPayload))
-        return result
-    }
-
-    private func isLikelyLegacyCheckboxImageBlock(
-        _ block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> Bool {
-        guard let asset = block.assetID.flatMap({ assetsByID[$0] }) else { return false }
-        guard asset.kind == "image" else { return false }
-        let size = resolvedLegacyAssetImageSize(asset)
-        guard size.width > 0, size.height > 0 else { return false }
-        let width = size.width
-        let height = size.height
-        guard width >= 10, height >= 10, width <= 36, height <= 36 else { return false }
-
-        let minEdge = min(width, height)
-        let maxEdge = max(width, height)
-        return minEdge > 0 && (maxEdge / minEdge) <= 1.25
-    }
-
-    private func recoveredLegacyCheckboxState(
-        from block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> Bool? {
-        guard
-            let asset = block.assetID.flatMap({ assetsByID[$0] }),
-            let fileURL = assetFileURL(for: asset),
-            FileManager.default.fileExists(atPath: fileURL.path),
-            let image = NSImage(contentsOf: fileURL)
-        else {
-            return nil
-        }
-
-        let attachment = NSTextAttachment()
-        attachment.image = image
-        return CheckboxTextAttachment.inferCheckedState(from: attachment)
-    }
-
-    private func resolvedLegacyAssetImageSize(_ asset: BlockDocumentAssetEntity) -> CGSize {
-        if let width = asset.width, let height = asset.height, width > 0, height > 0 {
-            return CGSize(width: width, height: height)
-        }
-        guard
-            let fileURL = assetFileURL(for: asset),
-            FileManager.default.fileExists(atPath: fileURL.path),
-            let image = NSImage(contentsOf: fileURL)
-        else {
-            return .zero
-        }
-        return image.size
-    }
-
-    private func imageBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> NSAttributedString {
-        guard
-            let asset = block.assetID.flatMap({ assetsByID[$0] }),
-            let fileURL = assetFileURL(for: asset),
-            FileManager.default.fileExists(atPath: fileURL.path)
-        else {
-            return NSAttributedString(string: "[图片]")
-        }
-
-        let attachment = AttachmentTextAttachment(fileURL: fileURL, kind: .image)
-        let width = CGFloat(asset.width ?? 0)
-        let height = CGFloat(asset.height ?? 0)
-        if width > 1, height > 1 {
-            attachment.bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        }
-
-        let result = NSMutableAttributedString(attachment: attachment)
-        let range = NSRange(location: 0, length: result.length)
-        if width > 1, height > 1 {
-            result.addAttribute(.notebookImageWidth, value: width, range: range)
-            result.addAttribute(.notebookImageHeight, value: height, range: range)
-            let link = "notebook-image://\(fileURL.absoluteString)#w=\(Int(width.rounded()))&h=\(Int(height.rounded()))"
-            result.addAttribute(.link, value: link, range: range)
-        }
-        return result
-    }
-
-    private func audioBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
-    ) -> NSAttributedString {
-        guard
-            let asset = block.assetID.flatMap({ assetsByID[$0] }),
-            let fileURL = assetFileURL(for: asset),
-            FileManager.default.fileExists(atPath: fileURL.path)
-        else {
-            return NSAttributedString(string: "[音频]")
-        }
-
-        let attachment = AudioBlockAttachment(
-            fileURL: fileURL,
-            duration: asset.duration ?? 0,
-            createDate: asset.createdAt ?? Date()
-        )
-        let result = NSMutableAttributedString(attachment: attachment)
-        result.addAttribute(.link, value: fileURL, range: NSRange(location: 0, length: result.length))
-        return result
-    }
-
-    private func tableBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
-        guard
-            let payloadData = block.tablePayload,
-            let payload = try? decoder.decode(BlockDocumentTablePayload.self, from: payloadData)
-        else {
-            return NSAttributedString(string: "[表格]")
-        }
-
-        let rowCount = max(1, payload.rows.count)
-        let columnCount = max(1, payload.rows.first?.count ?? 1)
-        var tableData = TableData(rows: rowCount, columns: columnCount)
-        if !payload.rows.isEmpty {
-            tableData.rows = payload.rows
-        }
-        if payload.columnWidths.count == columnCount {
-            tableData.columnWidths = payload.columnWidths.map { CGFloat($0) }
-        }
-        if payload.rowHeights.count == rowCount {
-            tableData.rowHeights = payload.rowHeights.map { CGFloat($0) }
-        }
-
-        let attachment = TableTextAttachment(rows: rowCount, columns: columnCount)
-        attachment.tableData = tableData
-        attachment.updateImage()
-        let result = NSMutableAttributedString(attachment: attachment)
-        if let encoded = try? JSONEncoder().encode(tableData) {
-            result.addAttribute(.notebookTableData, value: encoded, range: NSRange(location: 0, length: result.length))
-        }
-        return result
-    }
-
-    private func inlineAttributedText(from payload: Data?) -> NSAttributedString {
-        guard
-            let payload,
-            let spans = try? decoder.decode([BlockDocumentTextSpanPayload].self, from: payload)
-        else {
-            return NSAttributedString(string: "")
-        }
-
-        let result = NSMutableAttributedString()
-        for span in spans {
-            result.append(NSAttributedString(string: span.text, attributes: attributes(for: span)))
-        }
-        return result
-    }
-
-    private func sanitizedTodoInlineText(from payload: Data?) -> NSAttributedString {
-        let text = NSMutableAttributedString(attributedString: inlineAttributedText(from: payload))
-        guard text.length > 0 else { return text }
-
-        while text.length > 0 {
-            let char = (text.string as NSString).character(at: 0)
-            if char == 32 || char == 9 || char == 10 || char == 13 || char == 0x2028 || char == 0x2029 {
-                text.deleteCharacters(in: NSRange(location: 0, length: 1))
-                continue
-            }
-            break
-        }
-
-        return text
-    }
-
-    private func sanitizedListInlineText(from payload: Data?) -> NSAttributedString {
-        let text = NSMutableAttributedString(attributedString: inlineAttributedText(from: payload))
-        guard text.length > 0 else { return text }
-
-        while text.length > 0 {
-            let char = (text.string as NSString).character(at: 0)
-            if char == 10 || char == 13 || char == 0x2028 || char == 0x2029 {
-                text.deleteCharacters(in: NSRange(location: 0, length: 1))
-                continue
-            }
-            break
-        }
-
-        return text
-    }
-
-    private func attributes(for span: BlockDocumentTextSpanPayload) -> [NSAttributedString.Key: Any] {
-        var attributes: [NSAttributedString.Key: Any] = [:]
-        let fontSize = CGFloat(span.fontSize ?? 16)
-        attributes[.font] = resolvedFont(
-            family: span.fontFamily,
-            size: fontSize,
-            bold: span.bold,
-            italic: span.italic
-        )
-        if span.underline {
-            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-        }
-        if span.strikethrough {
-            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-        }
-        if let color = nsColor(from: span.textColor) {
-            attributes[.foregroundColor] = color
-        }
-        if let color = nsColor(from: span.backgroundColor) {
-            attributes[.backgroundColor] = color
-        }
-        if let link = span.link, !link.isEmpty {
-            attributes[.link] = URL(string: link) ?? link
-        }
-        if let kern = span.kern {
-            attributes[.kern] = kern
-        }
-        if let baselineOffset = span.baselineOffset {
-            attributes[.baselineOffset] = baselineOffset
-        }
-        if let paragraphStyle = nsParagraphStyle(from: span.paragraphStyle) {
-            attributes[.paragraphStyle] = paragraphStyle
-        }
-        return attributes
-    }
-
-    private func resolvedFont(
-        family: String?,
-        size: CGFloat,
-        bold: Bool,
-        italic: Bool
-    ) -> NSFont {
-        let baseFont = family.flatMap {
-            NSFont(name: $0, size: size)
-        } ?? NSFont.systemFont(ofSize: size)
-
-        var traits: NSFontTraitMask = []
-        if bold {
-            traits.insert(.boldFontMask)
-        }
-        if italic {
-            traits.insert(.italicFontMask)
-        }
-
-        return NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
-    }
-
-    private func fontFamily(from value: Any?) -> String? {
-        (value as? NSFont)?.familyName
-    }
-
-    private func isItalicFont(_ font: NSFont?) -> Bool {
-        guard let font else { return false }
-        return NSFontManager.shared.traits(of: font).contains(.italicFontMask)
-    }
-
-    private func headingFontSize(level: Int) -> CGFloat {
-        switch max(1, min(level, 6)) {
-        case 1: return 22
-        case 2: return 18
-        case 3: return 16
-        case 4: return 15
-        case 5: return 14
-        default: return 13
-        }
-    }
-
-    private func nsParagraphStyle(from payload: BlockDocumentParagraphStylePayload?) -> NSParagraphStyle? {
-        guard let payload else { return nil }
-        let style = NSMutableParagraphStyle()
-        if let alignment = payload.alignment,
-           let textAlignment = NSTextAlignment(rawValue: alignment) {
-            style.alignment = textAlignment
-        }
-        if let lineSpacing = payload.lineSpacing {
-            style.lineSpacing = lineSpacing
-        }
-        if let paragraphSpacing = payload.paragraphSpacing {
-            style.paragraphSpacing = paragraphSpacing
-        }
-        if let paragraphSpacingBefore = payload.paragraphSpacingBefore {
-            style.paragraphSpacingBefore = paragraphSpacingBefore
-        }
-        if let firstLineHeadIndent = payload.firstLineHeadIndent {
-            style.firstLineHeadIndent = firstLineHeadIndent
-        }
-        if let headIndent = payload.headIndent {
-            style.headIndent = headIndent
-        }
-        if let tailIndent = payload.tailIndent {
-            style.tailIndent = tailIndent
-        }
-        return style
-    }
-
-    private func indentationPrefix(level: Int?) -> String {
-        String(repeating: "    ", count: max(0, level ?? 0))
-    }
-
-    private func listMarker(for block: BlockDocumentBlockEntity) -> String {
-        switch block.listStyle {
-        case "ordered":
-            return "\(block.order ?? 1). "
-        case "dash":
-            return "- "
-        default:
-            return "• "
-        }
-    }
-
-    private func assetFileURL(for asset: BlockDocumentAssetEntity) -> URL? {
-        attachmentsRoot?.appendingPathComponent(asset.relativeFilePath)
-    }
-
-    private func nsColor(from hex: String?) -> NSColor? {
-        guard let hex else { return nil }
-        let raw = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        guard raw.count == 6 || raw.count == 8 else { return nil }
-
-        var value: UInt64 = 0
-        guard Scanner(string: raw).scanHexInt64(&value) else { return nil }
-
-        if raw.count == 6 {
-            return NSColor(
-                red: CGFloat((value & 0xFF0000) >> 16) / 255,
-                green: CGFloat((value & 0x00FF00) >> 8) / 255,
-                blue: CGFloat(value & 0x0000FF) / 255,
-                alpha: 1
-            )
-        }
-
-        return NSColor(
-            red: CGFloat((value & 0xFF000000) >> 24) / 255,
-            green: CGFloat((value & 0x00FF0000) >> 16) / 255,
-            blue: CGFloat((value & 0x0000FF00) >> 8) / 255,
-            alpha: CGFloat(value & 0x000000FF) / 255
-        )
-    }
-}
-
-@MainActor
 class NoteStore: ObservableObject {
     @Published var notes: [Note] = []
     @Published var folders: [Folder] = []
@@ -551,10 +28,15 @@ class NoteStore: ObservableObject {
     private let plainTextDecoder = JSONDecoder()
     
     private let encryptedFoldersKey = "encrypted_folders"
+    private let persistenceController: PersistenceController
+    private let storageLocationManager: StorageLocationManager
+    private let noteSaveManager: NoteSaveManager
+    private let autoSyncCoordinator: AutoSyncCoordinator
+    private let encryptedFolderManager: EncryptedFolderManager
     
     /// 获取所有加密笔记
     var encryptedNotes: [Note] {
-        return activeNotes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
+        return activeNotes.filter { encryptedFolderManager.isEncrypted(note: $0) }
     }
 
     var isUsingBlockDocumentLibrary: Bool {
@@ -581,11 +63,22 @@ class NoteStore: ObservableObject {
             tagCount: 0
         )
         context.insert(library)
-        try? context.save()
+        context.saveLogging("NoteStore.ensureBlockDocumentLibrary")
         return library
     }
     
-    init() {
+    init(
+        persistenceController: PersistenceController = .shared,
+        storageLocationManager: StorageLocationManager = .shared,
+        noteSaveManager: NoteSaveManager = .shared,
+        autoSyncCoordinator: AutoSyncCoordinator = .shared,
+        encryptedFolderManager: EncryptedFolderManager = .shared
+    ) {
+        self.persistenceController = persistenceController
+        self.storageLocationManager = storageLocationManager
+        self.noteSaveManager = noteSaveManager
+        self.autoSyncCoordinator = autoSyncCoordinator
+        self.encryptedFolderManager = encryptedFolderManager
         setupModelContext()
     }
 
@@ -601,38 +94,36 @@ class NoteStore: ObservableObject {
 
     private func setupModelContext() {
         // 如果 PersistenceController 已经配置了容器，使用它的容器
-        if let container = PersistenceController.shared.modelContainer {
+        if let container = persistenceController.modelContainer {
             self.modelContext = ModelContext(container)
             fetchData()
             return
         }
         
         // 如果没有配置，尝试从 StorageLocationManager 获取存储位置并创建容器
-        let location = StorageLocationManager.shared
+        let location = storageLocationManager
         guard location.isConfigured,
               let _ = location.baseDirectoryURL else {
-            print("NoteStore: Storage not configured yet, skipping fetch")
+            Logger.shared.log(.storage, .debug, "NoteStore: Storage not configured yet, skipping fetch")
             return
         }
         
         do {
-            try location.ensureDirectoryStructureExists()
-            let storeURL = try location.databaseDirectoryURL().appendingPathComponent("notebook.store")
-            
-            let schema = PersistenceController.appSchema
-            let config = ModelConfiguration(schema: schema, url: storeURL)
-            let container = try ModelContainer(for: schema, configurations: [config])
+            let container = try PersistenceController.makeModelContainer(
+                storageLocationManager: location,
+                migrationReason: "NoteStore.setupModelContext"
+            )
             
             self.modelContext = ModelContext(container)
             fetchData()
         } catch {
-            print("NoteStore: Failed to setup ModelContext: \(error)")
+            Logger.shared.log(.storage, .error, "NoteStore: Failed to setup ModelContext: \(error.localizedDescription)")
         }
     }
     
     func fetchData() {
         guard let context = modelContext else {
-            print("NoteStore: modelContext is nil, skipping fetch")
+            Logger.shared.log(.storage, .debug, "NoteStore: modelContext is nil, skipping fetch")
             return
         }
         
@@ -641,20 +132,29 @@ class NoteStore: ObservableObject {
             try loadBlockDocumentData(context: context, library: library)
             loadEncryptedFolders()
         } catch {
-            print("Fetch failed: \(error)")
+            Logger.shared.log(.storage, .error, "Fetch failed: \(error.localizedDescription)")
         }
     }
 
     private func loadBlockDocumentData(context: ModelContext, library: BlockDocumentLibraryEntity) throws {
-        let folderEntities = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
-            .filter { $0.libraryID == library.id }
-            .sorted { $0.sortOrder < $1.sortOrder }
-        let tagEntities = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
-            .filter { $0.libraryID == library.id }
-            .sorted { $0.createdAt < $1.createdAt }
-        let noteEntities = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
-            .filter { $0.libraryID == library.id }
-            .sorted { $0.updatedAt > $1.updatedAt }
+        let libraryID = library.id
+        // 把 libraryID 过滤下推到 SwiftData 的 predicate，避免 fetch 后内存全表扫描。
+        let folderDescriptor = FetchDescriptor<BlockDocumentFolderEntity>(
+            predicate: #Predicate<BlockDocumentFolderEntity> { $0.libraryID == libraryID },
+            sortBy: [SortDescriptor(\.sortOrder)]
+        )
+        let tagDescriptor = FetchDescriptor<BlockDocumentTagEntity>(
+            predicate: #Predicate<BlockDocumentTagEntity> { $0.libraryID == libraryID },
+            sortBy: [SortDescriptor(\.createdAt)]
+        )
+        let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.libraryID == libraryID },
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        )
+
+        let folderEntities = try context.fetch(folderDescriptor)
+        let tagEntities = try context.fetch(tagDescriptor)
+        let noteEntities = try context.fetch(noteDescriptor)
 
         let loadedContentIDs = recentNoteContentIDs(from: noteEntities)
         searchableTextCache.removeAll()
@@ -662,11 +162,25 @@ class NoteStore: ObservableObject {
         self.notes = try noteEntities.map { entity in
             let isContentLoaded = loadedContentIDs.contains(entity.id)
             let content = isContentLoaded
-                ? try loadFullBlockContent(noteID: entity.id, context: context)
+                ? try loadFullBlockContent(
+                    noteID: entity.id,
+                    context: context,
+                    // 已迁移过的笔记无需做旧版复选框图片像素检测启发式
+                    skipLegacyCheckboxHeuristic: entity.hasLegacyCheckboxMigrated
+                )
                 : NSAttributedString(string: "")
-            let contentPreview = isContentLoaded
-                ? Self.previewText(from: content.string)
-                : try loadPlainTextPreview(noteID: entity.id, context: context)
+            // 优先用 entity 上持久化的 previewText（写入时一次性算好），
+            // 避免对每条笔记额外做一次 blocks fetch（N+1 查询）。
+            let contentPreview: String
+            if isContentLoaded {
+                contentPreview = Self.previewText(from: content.string)
+            } else if !entity.previewText.isEmpty {
+                contentPreview = entity.previewText
+            } else {
+                // 兜底：仅对旧数据（无缓存预览）做一次按需 fetch；
+                // 下次保存会自动把 previewText 写回 entity。
+                contentPreview = (try? loadPlainTextPreview(noteID: entity.id, context: context)) ?? ""
+            }
 
             return Note(
                 id: entity.id,
@@ -681,7 +195,7 @@ class NoteStore: ObservableObject {
                 reminderAt: entity.reminderAt,
                 recurrenceRule: entity.recurrenceRule,
                 version: entity.version,
-                tagIDs: decodeUUIDList(entity.tagIDs),
+                tagIDs: UUIDListCoding.decode(entity.tagIDs),
                 viewMode: NoteViewMode(rawValue: entity.viewMode) ?? .text,
                 deletedAt: entity.deletedAt,
                 originalFolderID: entity.originalFolderID,
@@ -716,27 +230,21 @@ class NoteStore: ObservableObject {
                 documentAttributes: nil
             )
         } catch {
-            print("[Fetch] Failed to decode RTFD, error: \(error)")
+            Logger.shared.log(.storage, .error, "Failed to decode RTFD: \(error.localizedDescription)")
             return NSAttributedString(string: "")
         }
-    }
-
-    private func decodeUUIDList(_ rawValue: String?) -> [UUID] {
-        Array(Set(
-            rawValue?
-                .split(separator: ",")
-                .map { String($0).trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .compactMap { UUID(uuidString: $0) } ?? []
-        ))
     }
 
     private func loadBlockBackedContent(
         blocks: [BlockDocumentBlockEntity],
         assetsByID: [String: BlockDocumentAssetEntity],
-        attachmentsRoot: URL?
+        attachmentsRoot: URL?,
+        skipLegacyCheckboxHeuristic: Bool = false
     ) -> NSAttributedString {
-        BlockDocumentAttributedStringBuilder(attachmentsRoot: attachmentsRoot)
+        BlockDocumentAttributedStringBuilder(
+            attachmentsRoot: attachmentsRoot,
+            skipLegacyCheckboxHeuristic: skipLegacyCheckboxHeuristic
+        )
             .build(blocks: blocks, assetsByID: assetsByID)
     }
 
@@ -789,16 +297,26 @@ class NoteStore: ObservableObject {
         return try context.fetch(descriptor)
     }
 
-    private func loadFullBlockContent(noteID: UUID, context: ModelContext) throws -> NSAttributedString {
+    /// 查找笔记属性元数据（如 hasLegacyCheckboxMigrated 标记）
+    private func fetchNoteEntity(id: UUID, context: ModelContext) throws -> BlockDocumentNoteEntity? {
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        return try context.fetch(descriptor).first
+    }
+
+    private func loadFullBlockContent(noteID: UUID, context: ModelContext, skipLegacyCheckboxHeuristic: Bool = false) throws -> NSAttributedString {
         let blocks = try fetchBlocks(noteID: noteID, context: context)
         let assets = Dictionary(uniqueKeysWithValues: try fetchAssets(noteID: noteID, context: context).map { ($0.assetID, $0) })
-        let attachmentsRoot = try? StorageLocationManager.shared.attachmentsDirectoryURL()
+        let attachmentsRoot = try? storageLocationManager.attachmentsDirectoryURL()
 
         return Self.fixCheckboxAttachments(
             in: loadBlockBackedContent(
                 blocks: blocks,
                 assetsByID: assets,
-                attachmentsRoot: attachmentsRoot
+                attachmentsRoot: attachmentsRoot,
+                skipLegacyCheckboxHeuristic: skipLegacyCheckboxHeuristic
             )
         )
     }
@@ -896,12 +414,18 @@ class NoteStore: ObservableObject {
 
         if !notes[index].isContentLoaded {
             do {
-                let content = try loadFullBlockContent(noteID: id, context: context)
+                // 查询 entity 上的迁移标记：已迁移过则跳过开销巨大的像素检测启发式
+                let skipHeuristic = try fetchNoteEntity(id: id, context: context)?.hasLegacyCheckboxMigrated == true
+                let content = try loadFullBlockContent(
+                    noteID: id,
+                    context: context,
+                    skipLegacyCheckboxHeuristic: skipHeuristic
+                )
                 notes[index].content = content
                 notes[index].contentPreview = Self.previewText(from: content.string)
                 notes[index].isContentLoaded = true
             } catch {
-                print("[NoteStore] Failed to load note content for \(id): \(error)")
+                DebugLog.storage("Failed to load note content for \(id): \(error)", level: .warn)
             }
         }
 
@@ -940,7 +464,7 @@ class NoteStore: ObservableObject {
             return try loadSearchableText(noteID: note.id, context: context)
                 .localizedCaseInsensitiveContains(q)
         } catch {
-            print("[Search] Failed to load searchable text for \(note.id): \(error)")
+            DebugLog.storage("Failed to load searchable text for \(note.id): \(error)", level: .warn)
             return note.contentPreview.localizedCaseInsensitiveContains(q)
         }
     }
@@ -980,10 +504,10 @@ class NoteStore: ObservableObject {
                 }
             }
             if changed {
-                try? context.save()
+                context.saveLogging("NoteStore.cleanupExpiredOneTimeReminders")
             }
         } catch {
-            print("Cleanup expired reminders failed: \(error)")
+            DebugLog.storage("Cleanup expired reminders failed: \(error)", level: .warn)
         }
     }
     
@@ -1012,7 +536,7 @@ class NoteStore: ObservableObject {
             if image == nil, let contents = attachment.contents {
                 image = NSImage(data: contents)
                 imageSource = "contents"
-                if isCheckboxDebugEnabled { print("[CheckboxDebug] Restored image from contents at pos=\(location), size=\(image?.size ?? .zero)") }
+                if isCheckboxDebugEnabled { DebugLog.attachment("Restored image from contents at pos=\(location), size=\(image?.size ?? .zero)", level: .debug) }
             }
 
             // 如果仍然没有图像，尝试通过 fileWrapper 恢复
@@ -1020,7 +544,7 @@ class NoteStore: ObservableObject {
                 if let data = fileWrapper.regularFileContents {
                     image = NSImage(data: data)
                     imageSource = "fileWrapper"
-                    if isCheckboxDebugEnabled { print("[CheckboxDebug] Restored image from fileWrapper at pos=\(location), size=\(image?.size ?? .zero)") }
+                    if isCheckboxDebugEnabled { DebugLog.attachment("Restored image from fileWrapper at pos=\(location), size=\(image?.size ?? .zero)", level: .debug) }
                 }
             }
 
@@ -1052,11 +576,11 @@ class NoteStore: ObservableObject {
         
         // 打印调试信息
         if isCheckboxDebugEnabled && !debugInfo.isEmpty {
-            print("[CheckboxDebug] Found \(debugInfo.count) attachments:")
+            DebugLog.storage("Found \(debugInfo.count) attachments:", level: .debug)
             for (location, type, isChecked) in debugInfo {
-                print("  [CheckboxDebug] pos=\(location), type=\(type), checked=\(isChecked)")
+                DebugLog.storage("  [CheckboxDebug] pos=\(location), type=\(type), checked=\(isChecked)", level: .debug)
             }
-            print("[CheckboxDebug] Replacing \(replacements.count) attachments")
+            DebugLog.storage("Replacing \(replacements.count) attachments", level: .debug)
         }
         
         for (replaceRange, newAttachment) in replacements.reversed() {
@@ -1077,7 +601,7 @@ class NoteStore: ObservableObject {
         // 未选中的复选框中心是白色/透明
         
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] Failed to get CGImage") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("Failed to get CGImage", level: .warn) }
             return false
         }
         
@@ -1099,7 +623,7 @@ class NoteStore: ObservableObject {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] Failed to create CGContext") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("Failed to create CGContext", level: .warn) }
             return false
         }
         
@@ -1114,7 +638,7 @@ class NoteStore: ObservableObject {
         let b = CGFloat(pixelData[2]) / 255.0
         let a = CGFloat(pixelData[3]) / 255.0
         
-        if isCheckboxDebugEnabled { print("[CheckboxDebug] Center pixel: R=\(String(format: "%.2f", r)), G=\(String(format: "%.2f", g)), B=\(String(format: "%.2f", b)), A=\(String(format: "%.2f", a))") }
+        if isCheckboxDebugEnabled { DebugLog.attachment("Center pixel: R=\(String(format: "%.2f", r)), G=\(String(format: "%.2f", g)), B=\(String(format: "%.2f", b)), A=\(String(format: "%.2f", a))", level: .debug) }
         
         // 判断逻辑：
         // - 已选中：中心有黄色（R高，G高，B低）或深色
@@ -1122,17 +646,17 @@ class NoteStore: ObservableObject {
         
         // 如果透明度很低，认为是未选中
         if a < 0.5 {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] Low alpha, assuming unchecked") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("Low alpha, assuming unchecked", level: .debug) }
             return false
         }
         
         // 计算亮度
         let brightness = (r + g + b) / 3.0
-        if isCheckboxDebugEnabled { print("[CheckboxDebug] Brightness: \(String(format: "%.2f", brightness))") }
+        if isCheckboxDebugEnabled { DebugLog.attachment("Brightness: \(String(format: "%.2f", brightness))", level: .debug) }
         
         // 如果亮度很高（接近白色），认为是未选中
         if brightness > 0.9 {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] High brightness, assuming unchecked") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("High brightness, assuming unchecked", level: .debug) }
             return false
         }
         
@@ -1140,17 +664,17 @@ class NoteStore: ObservableObject {
         // 黄色：R和G都很高，B很低
         let isYellow = r > 0.7 && g > 0.7 && b < 0.5
         if isYellow {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] Yellow detected, assuming checked") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("Yellow detected, assuming checked", level: .debug) }
             return true
         }
         
         // 如果亮度中等偏低，可能是填充色（选中）
         if brightness < 0.7 {
-            if isCheckboxDebugEnabled { print("[CheckboxDebug] Medium brightness, assuming checked") }
+            if isCheckboxDebugEnabled { DebugLog.attachment("Medium brightness, assuming checked", level: .debug) }
             return true
         }
         
-        if isCheckboxDebugEnabled { print("[CheckboxDebug] Uncertain, defaulting to unchecked") }
+        if isCheckboxDebugEnabled { DebugLog.attachment("Uncertain, defaulting to unchecked", level: .debug) }
         return false
     }
     
@@ -1182,7 +706,7 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.noteCount += 1
-        try? context.save()
+        context.saveLogging("NoteStore.addNote")
         fetchData()
         return activeNotes.first(where: { $0.id == entity.id })
     }
@@ -1204,7 +728,7 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.folderCount += 1
-        try? context.save()
+        context.saveLogging("NoteStore.addFolder")
         fetchData()
     }
     
@@ -1220,7 +744,7 @@ class NoteStore: ObservableObject {
                 note.folderName = name
             }
 
-            try? context.save()
+            context.saveLogging("NoteStore.updateFolder")
             fetchData()
         }
     }
@@ -1231,7 +755,7 @@ class NoteStore: ObservableObject {
         let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
             if entity.isSystem {
-                print("Cannot delete system folder: \(entity.name)")
+                DebugLog.storage("Cannot delete system folder: \(entity.name)", level: .debug)
                 return
             }
 
@@ -1246,7 +770,7 @@ class NoteStore: ObservableObject {
             }
 
             context.delete(entity)
-            try? context.save()
+            context.saveLogging("NoteStore.deleteFolder")
             fetchData()
         }
     }
@@ -1262,7 +786,7 @@ class NoteStore: ObservableObject {
                 entity.sortOrder = index
             }
         }
-        try? context.save()
+        context.saveLogging("NoteStore.reorderFolders")
         fetchData()
     }
     
@@ -1280,7 +804,7 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.tagCount += 1
-        try? context.save()
+        context.saveLogging("NoteStore.addTag")
         fetchData()
     }
     
@@ -1291,7 +815,7 @@ class NoteStore: ObservableObject {
         if let entity = try? context.fetch(descriptor).first {
             if let name { entity.name = name }
             if let color { entity.color = color }
-            try? context.save()
+            context.saveLogging("NoteStore.updateTag")
             fetchData()
         }
     }
@@ -1311,7 +835,7 @@ class NoteStore: ObservableObject {
             }
 
             context.delete(entity)
-            try? context.save()
+            context.saveLogging("NoteStore.deleteTag")
             fetchData()
         }
     }
@@ -1328,7 +852,7 @@ class NoteStore: ObservableObject {
                 entity.createdAt = baseDate.addingTimeInterval(TimeInterval(index))
             }
         }
-        try? context.save()
+        context.saveLogging("NoteStore.reorderTags")
         fetchData()
     }
     
@@ -1339,17 +863,11 @@ class NoteStore: ObservableObject {
         let idToMatch = noteID
         let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
-            var currentTagIDs = Array(Set(
-                entity.tagIDs
-                    .split(separator: ",")
-                    .map { String($0).trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                    .compactMap { UUID(uuidString: $0) }
-            ))
+            var currentTagIDs = UUIDListCoding.decode(entity.tagIDs)
             if !currentTagIDs.contains(tagID) {
                 currentTagIDs.append(tagID)
-                entity.tagIDs = currentTagIDs.map { $0.uuidString }.joined(separator: ",")
-                try? context.save()
+                entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
+                context.saveLogging("NoteStore.addTagToNote")
                 fetchData()
             }
         }
@@ -1360,17 +878,11 @@ class NoteStore: ObservableObject {
         let idToMatch = noteID
         let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
-            var currentTagIDs = Array(Set(
-                entity.tagIDs
-                    .split(separator: ",")
-                    .map { String($0).trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                    .compactMap { UUID(uuidString: $0) }
-            ))
+            var currentTagIDs = UUIDListCoding.decode(entity.tagIDs)
             currentTagIDs.removeAll { $0 == tagID }
-            entity.tagIDs = currentTagIDs.map { $0.uuidString }.joined(separator: ",")
+            entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
             entity.updatedAt = Date()
-            try? context.save()
+            context.saveLogging("NoteStore.removeTagFromNote")
             if let idx = notes.firstIndex(where: { $0.id == noteID }) {
                 notes[idx].tagIDs = currentTagIDs
                 notes[idx].updatedAt = entity.updatedAt
@@ -1398,12 +910,12 @@ class NoteStore: ObservableObject {
         reason: String = "unknown"
     ) {
         guard modelContext != nil else {
-            print("[Save] modelContext is nil, skip save for id=\(id)")
+            DebugLog.storage("modelContext is nil, skip save for id=\(id)", level: .debug)
             return
         }
         let folderID = folders.first { $0.name == folder }?.id
         let decodedContent = decodeRTFDContent(rtfdData)
-        guard let request = NoteSaveManager.shared.createRequest(
+        guard let request = noteSaveManager.createRequest(
             noteID: id,
             title: title,
             folderID: folderID,
@@ -1416,7 +928,7 @@ class NoteStore: ObservableObject {
             return
         }
 
-        _ = NoteSaveManager.shared.saveImmediately(request: request)
+        _ = noteSaveManager.saveImmediately(request: request)
         searchableTextCache.removeValue(forKey: id)
 
         if let idx = notes.firstIndex(where: { $0.id == id }) {
@@ -1463,7 +975,7 @@ class NoteStore: ObservableObject {
     }
     
     func updateNote(_ note: Note) {
-        guard let request = NoteSaveManager.shared.createRequest(
+        guard let request = noteSaveManager.createRequest(
             noteID: note.id,
             title: note.title,
             folderID: note.folderID,
@@ -1476,7 +988,7 @@ class NoteStore: ObservableObject {
             return
         }
 
-        _ = NoteSaveManager.shared.saveImmediately(request: request)
+        _ = noteSaveManager.saveImmediately(request: request)
         searchableTextCache.removeValue(forKey: note.id)
 
         if let idx = notes.firstIndex(where: { $0.id == note.id }) {
@@ -1491,7 +1003,7 @@ class NoteStore: ObservableObject {
     /// 保存笔记的视图模式
     func saveNoteViewMode(id: UUID, viewMode: NoteViewMode) {
         guard let context = modelContext else {
-            print("[SaveViewMode] modelContext is nil, skip save for id=\(id)")
+            DebugLog.storage("modelContext is nil, skip save for id=\(id)", level: .debug)
             return
         }
         
@@ -1503,18 +1015,18 @@ class NoteStore: ObservableObject {
                 )
                 
                 guard let entities = try? context.fetch(descriptor), let entity = entities.first else {
-                    print("[SaveViewMode] entity not found for id=\(id)")
+                    DebugLog.storage("entity not found for id=\(id)", level: .debug)
                     return
                 }
                 
                 entity.viewMode = viewMode.rawValue
                 entity.updatedAt = Date()
-                try? context.save()
+                context.saveLogging("NoteStore.saveNoteViewMode")
                 if let idx = self.notes.firstIndex(where: { $0.id == id }) {
                     self.notes[idx].viewMode = viewMode
                     self.notes[idx].updatedAt = entity.updatedAt
                 }
-                print("[SaveViewMode] saved viewMode '\(viewMode.rawValue)' for note id=\(id)")
+                DebugLog.storage("saved viewMode '\(viewMode.rawValue)' for note id=\(id)", level: .debug)
             }
         }
     }
@@ -1540,7 +1052,7 @@ class NoteStore: ObservableObject {
             entity.updatedAt = deletedAt
             entity.version = max(entity.version + 1, 1)
             _ = try? BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: id, context: context)
-            try? context.save()
+            context.saveLogging("NoteStore.moveNoteToRecycleBin")
             if let idx = notes.firstIndex(where: { $0.id == id }) {
                 notes[idx].deletedAt = deletedAt
                 notes[idx].originalFolderID = entity.originalFolderID
@@ -1548,7 +1060,7 @@ class NoteStore: ObservableObject {
                 notes[idx].updatedAt = deletedAt
                 notes[idx].version = entity.version
             }
-            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "moveToRecycleBin")
+            autoSyncCoordinator.noteDidSave(noteID: id, reason: "moveToRecycleBin")
         }
     }
 
@@ -1585,7 +1097,7 @@ class NoteStore: ObservableObject {
             entity.version = max(entity.version + 1, 1)
             try? BlockDocumentNoteVersionStore.cleanupDeletedTombstones(noteIDs: [id], context: context)
             _ = try? BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: id, context: context)
-            try? context.save()
+            context.saveLogging("NoteStore.restoreNote")
             if let idx = notes.firstIndex(where: { $0.id == id }) {
                 notes[idx].deletedAt = nil
                 notes[idx].folderID = restoredFolderID
@@ -1595,7 +1107,7 @@ class NoteStore: ObservableObject {
                 notes[idx].updatedAt = entity.updatedAt
                 notes[idx].version = entity.version
             }
-            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "restoreFromRecycleBin")
+            autoSyncCoordinator.noteDidSave(noteID: id, reason: "restoreFromRecycleBin")
         }
     }
 
@@ -1652,9 +1164,9 @@ class NoteStore: ObservableObject {
             }
 
             try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
-            try? context.save()
+            context.saveLogging("NoteStore.deleteNotePermanently")
             notes.removeAll { $0.id == id }
-            AutoSyncCoordinator.shared.noteDidSave(noteID: id, reason: "deletePermanently")
+            autoSyncCoordinator.noteDidSave(noteID: id, reason: "deletePermanently")
         }
     }
 
@@ -1671,7 +1183,7 @@ class NoteStore: ObservableObject {
         noteID: UUID,
         assets: [BlockDocumentAssetEntity]
     ) {
-        let storage = StorageLocationManager.shared
+        let storage = storageLocationManager
         guard let base = storage.baseDirectoryURL else { return }
 
         try? storage.withSecurityScopedAccess(base) {
@@ -1748,7 +1260,7 @@ class NoteStore: ObservableObject {
             entity.folderID = toFolderID
             entity.folderName = toFolderName
             entity.updatedAt = Date()
-            try? context.save()
+            context.saveLogging("NoteStore.moveNote")
             fetchData()
         }
     }
@@ -1786,7 +1298,7 @@ class NoteStore: ObservableObject {
     func deleteEncryptedFolder(id: UUID) {
         // 将该文件夹中的笔记移出加密状态
         let notesInFolder = notes.filter { 
-            EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == id 
+            encryptedFolderManager.getEncryptedFolderID(for: $0) == id
         }
         for note in notesInFolder {
             moveNote(id: note.id, toFolderID: nil, toFolderName: "未分类")
@@ -1813,11 +1325,11 @@ class NoteStore: ObservableObject {
         
         // 更新该文件夹中所有笔记的 folder 名称
         let notesInFolder = notes.filter { 
-            EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == id 
+            encryptedFolderManager.getEncryptedFolderID(for: $0) == id
         }
         for var note in notesInFolder {
             // 使用 encryptNote 来更新笔记信息
-            EncryptedFolderManager.shared.encryptNote(&note, to: id)
+            encryptedFolderManager.encryptNote(&note, to: id)
             // 更新 folder 名称
             note.folder = "🔒 " + newName
             // 保存到数据库
@@ -1887,12 +1399,12 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.noteCount += 1
-        try? context.save()
+        context.saveLogging("NoteStore.createEncryptedNote")
         
         fetchData()
         
         if var note = notes.first(where: { $0.id == entity.id }) {
-            EncryptedFolderManager.shared.encryptNote(&note, to: targetFolderID)
+            encryptedFolderManager.encryptNote(&note, to: targetFolderID)
             
             let idToMatch = note.id
             let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
@@ -1902,7 +1414,7 @@ class NoteStore: ObservableObject {
                 entityToUpdate.folderID = note.folderID
                 entityToUpdate.folderName = note.folder
                 entityToUpdate.updatedAt = Date()
-                try? context.save()
+                context.saveLogging("NoteStore.createEncryptedNote")
             }
             
             fetchData()
@@ -1910,231 +1422,5 @@ class NoteStore: ObservableObject {
         }
         
         return nil
-    }
-}
-
-extension NSAttributedString.Key {
-    static let notebookImageWidth = NSAttributedString.Key("NotebookImageWidth")
-    static let notebookImageHeight = NSAttributedString.Key("NotebookImageHeight")
-    static let notebookTableData = NSAttributedString.Key("NotebookTableData")
-    static let notebookHeadingLevel = NSAttributedString.Key("NotebookHeadingLevel")
-    static let notebookExplicitBold = NSAttributedString.Key("NotebookExplicitBold")
-    static let notebookExplicitItalic = NSAttributedString.Key("NotebookExplicitItalic")
-    static let notebookExplicitFontFamily = NSAttributedString.Key("NotebookExplicitFontFamily")
-    static let notebookExplicitFontSize = NSAttributedString.Key("NotebookExplicitFontSize")
-    static let notebookExplicitForegroundColor = NSAttributedString.Key("NotebookExplicitForegroundColor")
-}
-
-extension NSAttributedString {
-    func cleanedForStorage() -> NSAttributedString {
-        let range = NSRange(location: 0, length: self.length)
-        let mutable = NSMutableAttributedString(attributedString: self)
-
-        let allowedKeys: [NSAttributedString.Key] = [
-            .font,
-            .foregroundColor,
-            .backgroundColor,
-            .underlineStyle,
-            .underlineColor,
-            .strikethroughStyle,
-            .paragraphStyle,
-            .attachment,
-            .link,
-            .kern,
-            .baselineOffset,
-            .notebookImageWidth,
-            .notebookImageHeight,
-            .notebookTableData,
-            .notebookHeadingLevel,
-            .notebookExplicitBold,
-            .notebookExplicitItalic,
-            .notebookExplicitFontFamily,
-            .notebookExplicitFontSize,
-            .notebookExplicitForegroundColor
-        ]
-
-        // 先确保所有复选框附件和表格附件的图像已生成
-        print("[StorageDebug] cleanedForStorage: checking attachments...")
-        mutable.enumerateAttribute(.attachment, in: range, options: []) { value, attrRange, _ in
-            if let checkbox = value as? CheckboxTextAttachment {
-                print("[StorageDebug] Found CheckboxTextAttachment, calling prepareForSaving")
-                checkbox.prepareForSaving()
-            }
-            if let tableAttachment = value as? TableTextAttachment {
-                print("[StorageDebug] Found TableTextAttachment, calling prepareForSaving")
-                tableAttachment.prepareForSaving()
-                if let data = try? JSONEncoder().encode(tableAttachment.tableData) {
-                    print("[TableTrace] cleanedForStorage write notebookTableData bytes=\(data.count) rows=\(tableAttachment.tableData.rowCount)")
-                    mutable.addAttribute(.notebookTableData, value: data, range: attrRange)
-                } else {
-                    print("[TableTrace] cleanedForStorage failed to encode tableData")
-                }
-            }
-        }
-
-        mutable.enumerateAttributes(in: range, options: []) { attributes, subRange, _ in
-            for key in attributes.keys {
-                if !allowedKeys.contains(key) {
-                    mutable.removeAttribute(key, range: subRange)
-                }
-            }
-        }
-
-        return NSAttributedString(attributedString: mutable)
-    }
-}
-
-enum NoteViewMode: String, Codable, CaseIterable {
-    case text = "text"
-    case preview = "preview"
-    case split = "split"
-
-    var displayName: String {
-        switch self {
-        case .text: return "文本编辑"
-        case .preview: return "Markdown 预览"
-        case .split: return "分屏预览"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .text: return "doc.plaintext"
-        case .preview: return "doc.text.image"
-        case .split: return "rectangle.split.2x1"
-        }
-    }
-}
-
-// MARK: - 目录项
-
-struct TableOfContentsItem: Identifiable {
-    let id = UUID()
-    let level: Int
-    let title: String
-    let anchor: String
-}
-
-/// 从 Markdown 内容中提取目录
-func extractTableOfContents(from content: String) -> [TableOfContentsItem] {
-    var items: [TableOfContentsItem] = []
-    let lines = content.components(separatedBy: .newlines)
-
-    // 正则表达式匹配标题
-    let headingPattern = "^(#{1,6})\\s+(.+)$"
-    guard let regex = try? NSRegularExpression(pattern: headingPattern, options: [.anchorsMatchLines]) else {
-        return items
-    }
-
-    for line in lines {
-        let range = NSRange(line.startIndex..., in: line)
-        if let match = regex.firstMatch(in: line, options: [], range: range) {
-            let levelRange = match.range(at: 1)
-            let titleRange = match.range(at: 2)
-
-            if let levelSwiftRange = Range(levelRange, in: line),
-               let titleSwiftRange = Range(titleRange, in: line) {
-                let level = line[levelSwiftRange].count
-                let title = String(line[titleSwiftRange]).trimmingCharacters(in: .whitespaces)
-                let anchor = "heading-\(items.count)"
-                items.append(TableOfContentsItem(level: level, title: title, anchor: anchor))
-            }
-        }
-    }
-
-    return items
-}
-
-struct Note: Identifiable, Hashable {
-    let id: UUID
-    var title: String
-    var content: NSAttributedString
-    var contentPreview: String
-    var isContentLoaded: Bool
-    var createdAt: Date
-    var updatedAt: Date
-    
-    /// 文件夹ID（用于关联，优先使用）
-    var folderID: UUID?
-    
-    /// 文件夹名称（用于显示，不用于关联）
-    var folder: String
-    
-    var reminderAt: Date?
-    var recurrenceRule: String
-    var version: Int64
-    var tagIDs: [UUID]
-    var viewMode: NoteViewMode
-
-    /// 回收站：删除时间（非空表示在回收站）
-    var deletedAt: Date?
-    /// 原始文件夹ID（用于恢复）
-    var originalFolderID: UUID?
-    /// 原始文件夹名称（用于恢复）
-    var originalFolderName: String?
-
-    /// 同步冲突标记
-    var hasConflict: Bool
-
-    var hasReminder: Bool {
-        return reminderAt != nil
-    }
-
-    var isInRecycleBin: Bool {
-        return deletedAt != nil
-    }
-
-    init(
-        id: UUID = UUID(),
-        title: String,
-        content: NSAttributedString,
-        contentPreview: String? = nil,
-        isContentLoaded: Bool = true,
-        createdAt: Date = Date(),
-        updatedAt: Date = Date(),
-        folderID: UUID? = nil,
-        folder: String = "未分类",
-        reminderAt: Date? = nil,
-        recurrenceRule: String = "none",
-        version: Int64 = 0,
-        tagIDs: [UUID] = [],
-        viewMode: NoteViewMode = .text,
-        deletedAt: Date? = nil,
-        originalFolderID: UUID? = nil,
-        originalFolderName: String? = nil,
-        hasConflict: Bool = false
-    ) {
-        self.id = id
-        self.title = title
-        self.content = content
-        self.contentPreview = contentPreview ?? Note.previewText(from: content.string)
-        self.isContentLoaded = isContentLoaded
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
-        self.folderID = folderID
-        self.folder = folder
-        self.reminderAt = reminderAt
-        self.recurrenceRule = recurrenceRule
-        self.version = version
-        self.tagIDs = tagIDs
-        self.viewMode = viewMode
-        self.deletedAt = deletedAt
-        self.originalFolderID = originalFolderID
-        self.originalFolderName = originalFolderName
-        self.hasConflict = hasConflict
-    }
-    
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
-    
-    static func == (lhs: Note, rhs: Note) -> Bool {
-        lhs.id == rhs.id
-    }
-
-    private static func previewText(from text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = trimmed.components(separatedBy: .newlines)
-        return lines.prefix(2).joined(separator: " ")
     }
 }

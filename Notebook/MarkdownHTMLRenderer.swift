@@ -376,14 +376,14 @@ struct MarkdownHTMLRenderer {
                             let resolvedH = textAttachment.bounds.height > 1 ? textAttachment.bounds.height : (storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? 0))
                             let width = Int(resolvedW.rounded())
                             let height = Int(resolvedH.rounded())
-                            print("[Markdown Image] note=\(noteID) AttachmentTextAttachment bounds=\(textAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                            DebugLog.editor("note=\(noteID) AttachmentTextAttachment bounds=\(textAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)", level: .debug)
                             if width > 1 && height > 1 {
                                 appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
                             } else {
                                 appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image note-image-auto\" />")
                             }
                         } else {
-                            print("[Markdown Preview] Failed to read image attachment data (all sources empty)")
+                            DebugLog.editor("Failed to read image attachment data (all sources empty)", level: .warn)
                         }
                     case .audio:
                         if let data = textAttachment.attachmentData() {
@@ -392,7 +392,7 @@ struct MarkdownHTMLRenderer {
                             let filename = textAttachment.attachmentFilename
                             appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename)</div>")
                         } else {
-                            print("[Markdown Preview] Failed to read audio attachment data (all sources empty)")
+                            DebugLog.editor("Failed to read audio attachment data (all sources empty)", level: .warn)
                         }
                     }
                     return
@@ -406,7 +406,7 @@ struct MarkdownHTMLRenderer {
                         let filename = htmlTextEscaped(audioAttachment.attachmentFilename)
                         appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(filename) · \(max(1, duration))秒</div>")
                     } else {
-                        print("[Markdown Preview] Failed to read audio attachment (all sources empty)")
+                        DebugLog.editor("Failed to read audio attachment (all sources empty)", level: .warn)
                     }
                     return
                 }
@@ -446,7 +446,7 @@ struct MarkdownHTMLRenderer {
                         let resolvedH = storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? nsAttachment.bounds.height)
                         let width = Int(resolvedW.rounded())
                         let height = Int(resolvedH.rounded())
-                        print("[Markdown Image] note=\(noteID) NSTextAttachment(image) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                        DebugLog.editor("note=\(noteID) NSTextAttachment(image) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)", level: .debug)
                         if width > 1 && height > 1 {
                             appendBlock("<img src=\"data:image/png;base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
                         } else {
@@ -489,7 +489,7 @@ struct MarkdownHTMLRenderer {
                             let resolvedH = storedHeight > 1 ? storedHeight : (linkedSize?.1 ?? nsAttachment.bounds.height)
                             let width = Int(resolvedW.rounded())
                             let height = Int(resolvedH.rounded())
-                            print("[Markdown Image] note=\(noteID) NSTextAttachment(fileWrapper) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)")
+                            DebugLog.editor("note=\(noteID) NSTextAttachment(fileWrapper) bounds=\(nsAttachment.bounds.size) stored=\(storedWidth)x\(storedHeight) linked=\(linkedSize?.0 ?? 0)x\(linkedSize?.1 ?? 0) resolved=\(width)x\(height)", level: .debug)
                             if width > 1 && height > 1 {
                                 appendBlock("<img src=\"data:\(mimeType);base64,\(base64)\" alt=\"image\" class=\"note-image\" style=\"width:\(width)px !important;height:\(height)px !important;max-width:none !important;\" />")
                             } else {
@@ -525,7 +525,7 @@ struct MarkdownHTMLRenderer {
                                     let safeFilename = htmlTextEscaped(url.lastPathComponent)
                                     appendBlock("<audio controls preload=\"metadata\" src=\"data:\(mimeType);base64,\(base64)\"></audio><div class=\"audio-caption\">\(safeFilename)</div>")
                                 } catch {
-                                    print("[Markdown Preview] Failed to read linked audio: \(error)")
+                                    DebugLog.editor("Failed to read linked audio: \(error)", level: .warn)
                                 }
                                 return
                             }

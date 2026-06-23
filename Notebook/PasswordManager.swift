@@ -1,7 +1,7 @@
 import Foundation
-import Security
 import CryptoKit
 import Combine
+import CommonCrypto
 
 /// 密码管理器 - 用于设置、修改和验证应用密码
 class PasswordManager: ObservableObject {
@@ -9,6 +9,11 @@ class PasswordManager: ObservableObject {
     
     private let passwordKey = "app_password_hash"
     private let saltKey = "app_password_salt"
+    private let keychainService = "com.notebook.app"
+    private let pbkdf2Algorithm = "pbkdf2_sha256"
+    private let pbkdf2Iterations = 120_000
+    private let saltByteCount = 32
+    private let derivedKeyByteCount = 32
     
     @Published var hasPassword: Bool = false
     
@@ -23,15 +28,14 @@ class PasswordManager: ObservableObject {
     func setPassword(_ password: String) -> Bool {
         guard !password.isEmpty else { return false }
         
-        // 生成随机盐值
-        let salt = generateSalt()
-        
-        // 使用盐值哈希密码
-        let hash = hashPassword(password, salt: salt)
+        guard let hash = makePBKDF2PasswordRecord(password) else {
+            return false
+        }
         
         // 保存到 Keychain
-        if saveToKeychain(hash, key: passwordKey) && saveToKeychain(salt, key: saltKey) {
-            DispatchQueue.main.async {
+        if saveToKeychain(hash, key: passwordKey) {
+            _ = deleteFromKeychain(key: saltKey)
+            Task { @MainActor in
                 self.hasPassword = true
             }
             return true
@@ -43,13 +47,24 @@ class PasswordManager: ObservableObject {
     /// - Parameter password: 要验证的密码
     /// - Returns: 密码是否正确
     func verifyPassword(_ password: String) -> Bool {
-        guard let storedHash = loadPasswordHash(),
-              let salt = loadSalt() else {
+        guard let storedHash = loadPasswordHash() else {
             return false
         }
-        
-        let inputHash = hashPassword(password, salt: salt)
-        return inputHash == storedHash
+
+        if verifyPBKDF2Password(password, record: storedHash) {
+            return true
+        }
+
+        guard let salt = loadSalt() else {
+            return false
+        }
+
+        let legacyHash = hashLegacyPassword(password, salt: salt)
+        let matchesLegacyHash = constantTimeCompare(legacyHash, storedHash)
+        if matchesLegacyHash {
+            _ = setPassword(password)
+        }
+        return matchesLegacyHash
     }
     
     /// 修改密码
@@ -76,7 +91,7 @@ class PasswordManager: ObservableObject {
         // 从 Keychain 删除
         let success = deleteFromKeychain(key: passwordKey) && deleteFromKeychain(key: saltKey)
         if success {
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self.hasPassword = false
             }
         }
@@ -87,7 +102,7 @@ class PasswordManager: ObservableObject {
     func forceClearPassword() {
         _ = deleteFromKeychain(key: passwordKey)
         _ = deleteFromKeychain(key: saltKey)
-        DispatchQueue.main.async {
+        Task { @MainActor in
             self.hasPassword = false
         }
     }
@@ -95,18 +110,92 @@ class PasswordManager: ObservableObject {
     // MARK: - Private Methods
     
     /// 生成随机盐值
-    private func generateSalt() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
+    private func generateSalt() -> Data? {
+        var bytes = [UInt8](repeating: 0, count: saltByteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            Logger.shared.log(.encryption, .error, "生成密码盐值失败: \(status)")
+            return nil
+        }
+        return Data(bytes)
     }
     
-    /// 使用 SHA-256 和盐值哈希密码
-    private func hashPassword(_ password: String, salt: String) -> String {
+    /// 使用 PBKDF2-HMAC-SHA256 哈希密码
+    private func makePBKDF2PasswordRecord(_ password: String) -> String? {
+        guard let salt = generateSalt(),
+              let derivedKey = derivePBKDF2Key(password: password, salt: salt, iterations: pbkdf2Iterations) else {
+            return nil
+        }
+        return [
+            pbkdf2Algorithm,
+            String(pbkdf2Iterations),
+            salt.base64EncodedString(),
+            derivedKey.base64EncodedString()
+        ].joined(separator: "$")
+    }
+
+    private func verifyPBKDF2Password(_ password: String, record: String) -> Bool {
+        let components = record.split(separator: "$", omittingEmptySubsequences: false).map(String.init)
+        guard components.count == 4,
+              components[0] == pbkdf2Algorithm,
+              let iterations = Int(components[1]),
+              let salt = Data(base64Encoded: components[2]),
+              let expectedKey = Data(base64Encoded: components[3]),
+              let derivedKey = derivePBKDF2Key(password: password, salt: salt, iterations: iterations) else {
+            return false
+        }
+
+        return constantTimeCompare(derivedKey, expectedKey)
+    }
+
+    private func derivePBKDF2Key(password: String, salt: Data, iterations: Int) -> Data? {
+        guard iterations > 0 else { return nil }
+
+        var derivedKey = [UInt8](repeating: 0, count: derivedKeyByteCount)
+        let status = password.withCString { passwordPointer in
+            salt.withUnsafeBytes { saltBuffer in
+                CCKeyDerivationPBKDF(
+                    CCPBKDFAlgorithm(kCCPBKDF2),
+                    passwordPointer,
+                    strlen(passwordPointer),
+                    saltBuffer.bindMemory(to: UInt8.self).baseAddress,
+                    salt.count,
+                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                    UInt32(iterations),
+                    &derivedKey,
+                    derivedKey.count
+                )
+            }
+        }
+
+        guard status == kCCSuccess else {
+            Logger.shared.log(.encryption, .error, "PBKDF2 派生失败: \(status)")
+            return nil
+        }
+
+        return Data(derivedKey)
+    }
+
+    /// 旧版 SHA-256 + 盐值哈希，仅用于验证后迁移
+    private func hashLegacyPassword(_ password: String, salt: String) -> String {
         let saltedPassword = password + salt
         let data = Data(saltedPassword.utf8)
         let hash = SHA256.hash(data: data)
         return hash.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    private func constantTimeCompare(_ lhs: String, _ rhs: String) -> Bool {
+        constantTimeCompare(Data(lhs.utf8), Data(rhs.utf8))
+    }
+
+    private func constantTimeCompare(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+
+        var difference: UInt8 = 0
+        for (left, right) in zip(lhs, rhs) {
+            difference |= left ^ right
+        }
+        return difference == 0
     }
     
     /// 从 Keychain 加载密码哈希
@@ -123,52 +212,28 @@ class PasswordManager: ObservableObject {
     
     private func saveToKeychain(_ value: String, key: String) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
-        
-        // 先删除已存在的
-        _ = deleteFromKeychain(key: key)
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key,
-            kSecValueData as String: data,
-            kSecAttrService as String: "com.notebook.app",
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-        
-        let status = SecItemAdd(query as CFDictionary, nil)
-        return status == errSecSuccess
+
+        do {
+            try KeychainHelper.save(data, service: keychainService, account: key)
+            return true
+        } catch {
+            Logger.shared.log(.encryption, .error, "保存密码配置到 Keychain 失败: \(error.localizedDescription)")
+            return false
+        }
     }
     
     private func loadFromKeychain(key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key,
-            kSecAttrService as String: "com.notebook.app",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        
-        return value
+        KeychainHelper.loadString(service: keychainService, account: key)
     }
     
     private func deleteFromKeychain(key: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key,
-            kSecAttrService as String: "com.notebook.app"
-        ]
-        
-        let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        do {
+            try KeychainHelper.delete(service: keychainService, account: key)
+            return true
+        } catch {
+            Logger.shared.log(.encryption, .error, "删除 Keychain 密码配置失败: \(error.localizedDescription)")
+            return false
+        }
     }
     
     // MARK: - Export/Import
@@ -176,14 +241,18 @@ class PasswordManager: ObservableObject {
     /// 导出密码配置（哈希和盐值）
     /// - Returns: 包含密码哈希和盐值的字典，如果没有设置密码则返回 nil
     func exportPasswordConfig() -> [String: String]? {
-        guard let hash = loadPasswordHash(),
-              let salt = loadSalt() else {
+        guard let hash = loadPasswordHash() else {
             return nil
         }
-        return [
+
+        var config = [
             "hash": hash,
-            "salt": salt
+            "algorithm": hash.hasPrefix("\(pbkdf2Algorithm)$") ? pbkdf2Algorithm : "sha256_legacy"
         ]
+        if let salt = loadSalt() {
+            config["salt"] = salt
+        }
+        return config
     }
     
     /// 导入密码配置
@@ -191,14 +260,21 @@ class PasswordManager: ObservableObject {
     /// - Returns: 是否成功导入
     @discardableResult
     func importPasswordConfig(_ config: [String: String]) -> Bool {
-        guard let hash = config["hash"],
-              let salt = config["salt"] else {
+        guard let hash = config["hash"] else {
             return false
         }
         
         // 保存到 Keychain
-        if saveToKeychain(hash, key: passwordKey) && saveToKeychain(salt, key: saltKey) {
-            DispatchQueue.main.async {
+        let savedHash = saveToKeychain(hash, key: passwordKey)
+        let savedSalt: Bool
+        if let salt = config["salt"], !hash.hasPrefix("\(pbkdf2Algorithm)$") {
+            savedSalt = saveToKeychain(salt, key: saltKey)
+        } else {
+            savedSalt = deleteFromKeychain(key: saltKey)
+        }
+
+        if savedHash && savedSalt {
+            Task { @MainActor in
                 self.hasPassword = true
             }
             return true

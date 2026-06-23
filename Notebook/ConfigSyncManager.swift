@@ -647,7 +647,7 @@ class ConfigSyncManager {
             command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
         )
 
-        print("配置同步完成：已上传到 \(remoteTargetPath)")
+        DebugLog.storage("配置同步完成：已上传到 \(remoteTargetPath)", level: .debug)
     }
 
     /// 从远程服务器同步配置
@@ -668,7 +668,7 @@ class ConfigSyncManager {
             )
         } catch {
             if isRemoteConfigFileMissing(error) {
-                print("远程配置文件不存在：\(remotePath)")
+                DebugLog.storage("远程配置文件不存在：\(remotePath)", level: .debug)
                 return ConfigSyncResult()
             }
             throw error
@@ -678,7 +678,7 @@ class ConfigSyncManager {
         let configEnvelope = try JSONDecoder().decode(ConfigSyncEnvelope.self, from: payload)
         let result = applyRemoteConfig(configEnvelope, mergeStrategy: mergeStrategy)
 
-        print("配置同步完成：从 \(configEnvelope.deviceID) 同步了 \(result.totalApplied) 项配置")
+        DebugLog.storage("配置同步完成：从 \(configEnvelope.deviceID) 同步了 \(result.totalApplied) 项配置", level: .debug)
         return result
     }
 
@@ -710,7 +710,7 @@ class ConfigSyncManager {
                 }
             }
         } catch {
-            print("which sshpass 失败: \(error)")
+            DebugLog.storage("which sshpass 失败: \(error)", level: .warn)
         }
 
         // 回退到硬编码路径

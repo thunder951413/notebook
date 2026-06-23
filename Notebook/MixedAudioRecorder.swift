@@ -79,11 +79,11 @@ class MixedAudioRecorder: NSObject, ObservableObject {
             try startMicrophoneRecording()
             
             isRecording = true
-            print("[MixedAudioRecorder] 开始混合录制")
+            DebugLog.attachment("开始混合录制", level: .debug)
             
         } catch {
             errorMessage = "启动录制失败: \(error.localizedDescription)"
-            print("[MixedAudioRecorder] 启动失败: \(error)")
+            DebugLog.attachment("启动失败: \(error)", level: .warn)
         }
     }
     
@@ -91,7 +91,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
     func stopRecording() async {
         guard isRecording else { return }
         
-        print("[MixedAudioRecorder] 停止录制")
+        DebugLog.attachment("停止录制", level: .debug)
         
         // 停止系统音频录制
         await systemRecorder?.stopRecording()
@@ -126,7 +126,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         microphoneRecorder?.prepareToRecord()
         let success = microphoneRecorder?.record() ?? false
         
-        print("[MixedAudioRecorder] 麦克风录制启动: \(success ? "成功" : "失败")")
+        DebugLog.attachment("麦克风录制启动: \(success ? "成功" : "失败")", level: .warn)
         if !success {
             throw NSError(domain: "MixedAudioRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "麦克风录制启动失败"])
         }
@@ -135,7 +135,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
     /// 混合系统音频和麦克风音频
     private func mixAudioFiles() async {
         guard let micURL = microphoneURL else {
-            print("[MixedAudioRecorder] 缺少麦克风音频文件")
+            DebugLog.attachment("缺少麦克风音频文件", level: .debug)
             errorMessage = "录制失败：麦克风音轨缺失"
             return
         }
@@ -145,7 +145,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         let systemAvailable = await isValidOptionalAudioFile(systemURL)
 
         guard micAvailable || systemAvailable else {
-            print("[MixedAudioRecorder] 麦克风与系统音轨都无效")
+            DebugLog.attachment("麦克风与系统音轨都无效", level: .debug)
             recordedURL = nil
             errorMessage = "录制失败：未捕获到有效音频"
             return
@@ -155,14 +155,14 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         if micAvailable && !systemAvailable {
             recordedURL = micURL
             statusMessage = "系统音频不可用，已保存麦克风录音"
-            print("[MixedAudioRecorder] 仅麦克风轨有效，直接回退")
+            DebugLog.attachment("仅麦克风轨有效，直接回退", level: .debug)
             Self.consecutiveSystemCaptureFailures += 1
             return
         }
         if systemAvailable && !micAvailable, let systemURL {
             recordedURL = systemURL
             statusMessage = "麦克风不可用，已保存系统音频"
-            print("[MixedAudioRecorder] 仅系统轨有效，直接回退")
+            DebugLog.attachment("仅系统轨有效，直接回退", level: .debug)
             return
         }
 
@@ -197,7 +197,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
             ) else {
-                print("[MixedAudioRecorder] 无法创建音频轨道")
+                DebugLog.attachment("无法创建音频轨道", level: .warn)
                 recordedURL = micURL
                 statusMessage = "混音失败，已回退到麦克风录音"
                 return
@@ -205,7 +205,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
 
             guard let systemSourceTrack = try? await systemAsset.loadTracks(withMediaType: .audio).first,
                   let micSourceTrack = try? await micAsset.loadTracks(withMediaType: .audio).first else {
-                print("[MixedAudioRecorder] 无法加载音频轨道")
+                DebugLog.attachment("无法加载音频轨道", level: .warn)
                 recordedURL = micURL
                 statusMessage = "系统音轨异常，已回退到麦克风录音"
                 return
@@ -216,7 +216,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
             let duration = min(systemDuration ?? .zero, micDuration ?? .zero)
 
             guard duration > .zero else {
-                print("[MixedAudioRecorder] 音频时长无效")
+                DebugLog.attachment("音频时长无效", level: .debug)
                 recordedURL = micURL
                 statusMessage = "系统音轨无效，已回退到麦克风录音"
                 return
@@ -238,7 +238,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                 asset: composition,
                 presetName: AVAssetExportPresetAppleM4A
             ) else {
-                print("[MixedAudioRecorder] 无法创建导出会话")
+                DebugLog.attachment("无法创建导出会话", level: .warn)
                 recordedURL = micURL
                 statusMessage = "混音失败，已回退到麦克风录音"
                 return
@@ -261,7 +261,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                 let attrs = try? FileManager.default.attributesOfItem(atPath: mixedURL.path)
                 let fileSize = attrs?[.size] as? Int64 ?? 0
                 if fileSize < 10 * 1024 {
-                    print("[MixedAudioRecorder] 混合文件体积过小(\(fileSize) bytes)，优先回退到有效轨")
+                    DebugLog.attachment("混合文件体积过小(\(fileSize) bytes)，优先回退到有效轨", level: .debug)
                     try? FileManager.default.removeItem(at: mixedURL)
 
                     if micAvailable {
@@ -278,10 +278,10 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                     if FileManager.default.fileExists(atPath: mixedURL.path) {
                         recordedURL = mixedURL
                         Self.consecutiveSystemCaptureFailures = 0
-                        print("[MixedAudioRecorder] 混合音频导出成功: \(mixedURL.path), 大小: \(fileSize) bytes")
+                        DebugLog.attachment("混合音频导出成功: \(mixedURL.path), 大小: \(fileSize) bytes", level: .debug)
                         writeTrackManifest(for: mixedURL, micURL: micURL, systemURL: systemURL)
                     } else {
-                        print("[MixedAudioRecorder] 混合导出标记成功但文件不存在，回退到有效轨")
+                        DebugLog.attachment("混合导出标记成功但文件不存在，回退到有效轨", level: .debug)
                         if micAvailable {
                             recordedURL = micURL
                             statusMessage = "混合文件缺失，已回退为麦克风录音"
@@ -299,7 +299,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                     let attrs = try? FileManager.default.attributesOfItem(atPath: mixedURL.path)
                     let fileSize = attrs?[.size] as? Int64 ?? 0
                     if fileSize < 10 * 1024 {
-                        print("[MixedAudioRecorder] 混合文件体积过小(\(fileSize) bytes)，优先回退到有效轨")
+                        DebugLog.attachment("混合文件体积过小(\(fileSize) bytes)，优先回退到有效轨", level: .debug)
                         try? FileManager.default.removeItem(at: mixedURL)
 
                         if micAvailable {
@@ -315,11 +315,11 @@ class MixedAudioRecorder: NSObject, ObservableObject {
                     } else {
                         recordedURL = mixedURL
                         Self.consecutiveSystemCaptureFailures = 0
-                        print("[MixedAudioRecorder] 混合音频导出成功: \(mixedURL.path), 大小: \(fileSize) bytes")
+                        DebugLog.attachment("混合音频导出成功: \(mixedURL.path), 大小: \(fileSize) bytes", level: .debug)
                         writeTrackManifest(for: mixedURL, micURL: micURL, systemURL: systemURL)
                     }
                 } else {
-                    print("[MixedAudioRecorder] 混合音频导出失败: \(exportSession.error?.localizedDescription ?? "未知错误")")
+                    DebugLog.attachment("混合音频导出失败: \(exportSession.error?.localizedDescription ?? "未知错误")", level: .warn)
                     if micAvailable {
                         recordedURL = micURL
                         statusMessage = "混合导出失败，已回退为麦克风录音"
@@ -334,7 +334,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
             }
 
         } catch {
-            print("[MixedAudioRecorder] 混合音频失败: \(error)")
+            DebugLog.attachment("混合音频失败: \(error)", level: .warn)
             if micAvailable {
                 recordedURL = micURL
                 statusMessage = "混音失败，已回退为麦克风录音"
@@ -361,9 +361,9 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         do {
             let data = try JSONEncoder().encode(manifest)
             try data.write(to: manifestURL, options: .atomic)
-            print("[MixedAudioRecorder] 轨道清单已写入: \(manifestURL.lastPathComponent)")
+            DebugLog.attachment("轨道清单已写入: \(manifestURL.lastPathComponent)", level: .debug)
         } catch {
-            print("[MixedAudioRecorder] 轨道清单写入失败: \(error)")
+            DebugLog.attachment("轨道清单写入失败: \(error)", level: .warn)
         }
     }
 
@@ -379,7 +379,7 @@ class MixedAudioRecorder: NSObject, ObservableObject {
         if durationSeconds.isFinite, durationSeconds > 0 {
             let bytesPerSecond = Double(fileSize) / durationSeconds
             if bytesPerSecond < 2_000 {
-                print("[MixedAudioRecorder] 音频文件疑似无效: \(url.lastPathComponent), bps=\(Int(bytesPerSecond))")
+                DebugLog.attachment("音频文件疑似无效: \(url.lastPathComponent), bps=\(Int(bytesPerSecond))", level: .debug)
                 return false
             }
         }

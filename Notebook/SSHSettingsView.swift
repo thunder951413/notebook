@@ -144,7 +144,7 @@ struct SSHSettingsView: View {
         host = config.host
         port = String(config.port)
         username = config.username
-        password = config.password
+        password = SSHConfigManager.shared.loadPassword() ?? config.password
         repositoryPath = config.repositoryPath
     }
     

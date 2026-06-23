@@ -46,7 +46,7 @@ final class AudioBlockAttachment: NSTextAttachment {
         // 创建卡片图像
         self.image = createCardImage()
         
-        print("[AudioBlockAttachment] 创建附件: \(fileURL.path)")
+        DebugLog.attachment("创建附件: \(fileURL.path)", level: .debug)
     }
 
     required init?(coder: NSCoder) {
@@ -75,16 +75,16 @@ final class AudioBlockAttachment: NSTextAttachment {
                 wrapper.preferredFilename = manifestFilename
                 try? wrapper.write(to: manifestURL, options: .atomic, originalContentsURL: nil)
             }
-            print("[AudioBlockAttachment] 从嵌入数据恢复: \(extractedURL.path)")
+            DebugLog.attachment("从嵌入数据恢复: \(extractedURL.path)", level: .debug)
         } else if let savedPath = coder.decodeObject(of: NSString.self, forKey: Self.fileURLKey) as String? {
             self.fileURL = URL(fileURLWithPath: savedPath)
-            print("[AudioBlockAttachment] 从保存路径恢复: \(savedPath)")
+            DebugLog.attachment("从保存路径恢复: \(savedPath)", level: .debug)
         } else if let resolved = Self.resolveAudioFileURL(fromFilename: attachmentFilename) {
             self.fileURL = resolved
-            print("[AudioBlockAttachment] 从文件名恢复: \(resolved.path)")
+            DebugLog.attachment("从文件名恢复: \(resolved.path)", level: .debug)
         } else {
             self.fileURL = Self.uniqueTemporaryFileURL(directoryName: "NotebookAudioExtracted", preferredFilename: attachmentFilename)
-            print("[AudioBlockAttachment] 未找到可恢复路径，使用临时文件")
+            DebugLog.attachment("未找到可恢复路径，使用临时文件", level: .debug)
         }
 
         self.duration = coder.decodeDouble(forKey: Self.durationKey)
@@ -124,7 +124,7 @@ final class AudioBlockAttachment: NSTextAttachment {
             wrapper.preferredFilename = manifestFilename
             coder.encode(wrapper, forKey: Self.manifestWrapperKey)
         }
-        print("[AudioBlockAttachment] 编码保存路径: \(fileURL.path)")
+        DebugLog.attachment("编码保存路径: \(fileURL.path)", level: .debug)
     }
 
     func audioData() -> Data? {

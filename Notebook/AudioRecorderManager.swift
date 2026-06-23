@@ -12,7 +12,7 @@ class AudioRecorderManager: NSObject, ObservableObject, AVAudioRecorderDelegate 
     func startRecording(noteID: UUID) async {
         let granted = await AVCaptureDevice.requestAccess(for: .audio)
         guard granted else {
-            print("麦克风权限被拒绝")
+            DebugLog.attachment("麦克风权限被拒绝", level: .debug)
             return
         }
 
@@ -42,7 +42,7 @@ class AudioRecorderManager: NSObject, ObservableObject, AVAudioRecorderDelegate 
                 isRecording = true
                 recordedURL = fileURL
             } catch {
-                print("开始录音失败: \(error)")
+                DebugLog.attachment("开始录音失败: \(error)", level: .warn)
             }
         }
     }

@@ -130,7 +130,7 @@ final class iCloudSyncManager: ObservableObject {
     
     private func setupCloudKit() {
         guard FileManager.default.ubiquityIdentityToken != nil else {
-            print("[iCloudSyncManager] iCloud not available")
+            DebugLog.storage("iCloud not available", level: .debug)
             return
         }
         
@@ -171,20 +171,20 @@ final class iCloudSyncManager: ObservableObject {
         let token = FileManager.default.ubiquityIdentityToken
         let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil)
         
-        print("[iCloudSyncManager] ubiquityIdentityToken: \(String(describing: token))")
-        print("[iCloudSyncManager] containerURL: \(String(describing: containerURL))")
+        DebugLog.storage("ubiquityIdentityToken: \(String(describing: token))", level: .debug)
+        DebugLog.storage("containerURL: \(String(describing: containerURL))", level: .debug)
         
         isiCloudAvailable = token != nil && containerURL != nil
         
         if isiCloudAvailable {
-            print("[iCloudSyncManager] ✅ iCloud is available")
+            DebugLog.storage("✅ iCloud is available", level: .debug)
         } else {
-            print("[iCloudSyncManager] ❌ iCloud is not available")
+            DebugLog.storage("❌ iCloud is not available", level: .debug)
             if token == nil {
-                print("[iCloudSyncManager]   - ubiquityIdentityToken is nil")
+                DebugLog.storage("- ubiquityIdentityToken is nil", level: .debug)
             }
             if containerURL == nil {
-                print("[iCloudSyncManager]   - containerURL is nil")
+                DebugLog.storage("- containerURL is nil", level: .debug)
             }
         }
     }
@@ -215,10 +215,10 @@ final class iCloudSyncManager: ObservableObject {
             lastSyncDate = Date()
             syncStatus = .completed
             
-            print("[iCloudSyncManager] Full sync completed")
+            DebugLog.storage("Full sync completed", level: .debug)
         } catch {
             syncStatus = .failed(error.localizedDescription)
-            print("[iCloudSyncManager] Full sync failed: \(error)")
+            DebugLog.storage("Full sync failed: \(error)", level: .warn)
         }
     }
     
@@ -313,7 +313,7 @@ extension iCloudSyncManager {
             keyValueStore.set(data, forKey: key)
             keyValueStore.synchronize()
         } catch {
-            print("[iCloudSyncManager] Failed to encode value for key \(key): \(error)")
+            DebugLog.storage("Failed to encode value for key \(key): \(error)", level: .warn)
         }
     }
     
@@ -324,7 +324,7 @@ extension iCloudSyncManager {
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
-            print("[iCloudSyncManager] Failed to decode value for key \(key): \(error)")
+            DebugLog.storage("Failed to decode value for key \(key): \(error)", level: .warn)
             return nil
         }
     }
@@ -341,7 +341,7 @@ extension iCloudSyncManager {
         keyValueStore.synchronize()
         
         // 这里可以添加配置冲突解决逻辑
-        print("[iCloudSyncManager] Configuration synced")
+        DebugLog.storage("Configuration synced", level: .debug)
     }
     
     // MARK: - 配置键名
@@ -401,7 +401,7 @@ extension iCloudSyncManager {
             throw iCloudSyncError.syncFailed("数据容器未配置")
         }
         _ = try await syncBidirectional(context: context)
-        print("[iCloudSyncManager] Notes data synced")
+        DebugLog.storage("Notes data synced", level: .debug)
     }
 
     private var notesDirectoryURL: URL? {
@@ -603,7 +603,7 @@ extension iCloudSyncManager {
         
         do {
             let (_, _) = try await privateDatabase!.modifyRecords(saving: [record], deleting: [])
-            print("[iCloudSyncManager] Note uploaded: \(note.id)")
+            DebugLog.storage("Note uploaded: \(note.id)", level: .debug)
         } catch {
             throw iCloudSyncError.syncFailed(error.localizedDescription)
         }
@@ -639,7 +639,7 @@ extension iCloudSyncManager {
         
         do {
             try await privateDatabase!.deleteRecord(withID: recordID)
-            print("[iCloudSyncManager] Note deleted from cloud: \(noteID)")
+            DebugLog.storage("Note deleted from cloud: \(noteID)", level: .debug)
         } catch {
             throw iCloudSyncError.syncFailed(error.localizedDescription)
         }
@@ -662,7 +662,7 @@ extension iCloudSyncManager {
 extension iCloudSyncManager {
     
     @objc private func icloudAccountChanged() {
-        print("[iCloudSyncManager] iCloud account changed")
+        DebugLog.storage("iCloud account changed", level: .debug)
         checkiCloudAvailability()
         
         if isiCloudAvailable {
@@ -671,7 +671,7 @@ extension iCloudSyncManager {
     }
     
     @objc private func keyValueStoreDidChange(_ notification: Notification) {
-        print("[iCloudSyncManager] KeyValueStore changed externally")
+        DebugLog.storage("KeyValueStore changed externally", level: .debug)
         
         // 处理外部配置变化
         if let userInfo = notification.userInfo,
@@ -679,11 +679,11 @@ extension iCloudSyncManager {
             
             switch reason {
             case NSUbiquitousKeyValueStoreServerChange:
-                print("[iCloudSyncManager] Server change detected")
+                DebugLog.storage("Server change detected", level: .debug)
                 // 从 iCloud 获取最新配置
                 handleExternalConfigChange()
             case NSUbiquitousKeyValueStoreInitialSyncChange:
-                print("[iCloudSyncManager] Initial sync change detected")
+                DebugLog.storage("Initial sync change detected", level: .debug)
                 handleExternalConfigChange()
             default:
                 break
@@ -751,7 +751,7 @@ extension Note {
             )
             record["rtfdData"] = rtfdData
         } catch {
-            print("[Note] Failed to convert content to RTFD: \(error)")
+            DebugLog.storage("Failed to convert content to RTFD: \(error)", level: .warn)
         }
         
         return record
@@ -805,7 +805,7 @@ extension Note {
                 ]
                 self.content = try NSAttributedString(data: rtfdData, options: options, documentAttributes: nil)
             } catch {
-                print("[Note] Failed to decode RTFD: \(error)")
+                DebugLog.storage("Failed to decode RTFD: \(error)", level: .warn)
                 self.content = NSAttributedString(string: "")
             }
         } else {

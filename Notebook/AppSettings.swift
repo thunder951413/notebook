@@ -461,7 +461,7 @@ final class AppSettings: ObservableObject {
         }
         
         keyValueStore.synchronize()
-        print("[AppSettings] Synced to iCloud")
+        DebugLog.app("Synced to iCloud", level: .debug)
     }
     
     /// 从 iCloud 恢复设置
@@ -491,7 +491,7 @@ final class AppSettings: ObservableObject {
             defaults.set(colorData, forKey: Keys.accentColor)
         }
         
-        print("[AppSettings] Restored from iCloud")
+        DebugLog.app("Restored from iCloud", level: .debug)
     }
     
     /// 清除 iCloud 设置
@@ -504,6 +504,6 @@ final class AppSettings: ObservableObject {
         keyValueStore.removeObject(forKey: iCloudKeys.accentColor)
         
         keyValueStore.synchronize()
-        print("[AppSettings] Cleared iCloud settings")
+        DebugLog.app("Cleared iCloud settings", level: .debug)
     }
 }

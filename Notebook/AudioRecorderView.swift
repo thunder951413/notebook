@@ -498,13 +498,13 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
             } else {
                 statusMessage = "自检通过：input=\(inputName), peak=\(levelText)"
             }
-            print("[MicSelfTest] input=\(inputName), format=\(format), peak=\(levelText)")
+            DebugLog.attachment("input=\(inputName), format=\(format), peak=\(levelText)", level: .debug)
         } catch {
             input.removeTap(onBus: 0)
             engine.stop()
             micSelfTestPeak = 0
             statusMessage = "自检失败：\(error.localizedDescription)"
-            print("[MicSelfTest] failed: \(error)")
+            DebugLog.attachment("failed: \(error)", level: .warn)
         }
     }
 
@@ -574,7 +574,7 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
             }
             
         } catch {
-            print("[AppleStyleAudioRecorder] 启动失败: \(error)")
+            DebugLog.attachment("启动失败: \(error)", level: .warn)
         }
     }
     
@@ -583,7 +583,7 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
     func stopRecording() async {
         guard isRecording else { return }
         
-        print("[AppleStyleAudioRecorder] 停止录制, 模式: \(currentMode)")
+        DebugLog.attachment("停止录制, 模式: \(currentMode)", level: .debug)
         
         isRecording = false
         
@@ -591,19 +591,19 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
         case .microphone:
             audioRecorder?.stop()
             audioRecorder = nil
-            print("[AppleStyleAudioRecorder] 麦克风录制已停止, 文件: \(recordedURL?.path ?? "nil")")
+            DebugLog.attachment("麦克风录制已停止, 文件: \(recordedURL?.path ?? "nil")", level: .debug)
             // 检查文件是否存在
             if let url = recordedURL {
                 let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
                 let fileSize = attrs?[.size] as? Int64 ?? 0
-                print("[AppleStyleAudioRecorder] 文件大小: \(fileSize) bytes")
+                DebugLog.attachment("文件大小: \(fileSize) bytes", level: .debug)
             }
         case .systemAudio:
             await systemRecorder?.stopRecording()
             if systemRecorder?.recordedURL != nil {
                 recordedURL = systemRecorder?.recordedURL
             }
-            print("[AppleStyleAudioRecorder] 系统音频录制已停止, 文件: \(recordedURL?.path ?? "nil")")
+            DebugLog.attachment("系统音频录制已停止, 文件: \(recordedURL?.path ?? "nil")", level: .debug)
         case .mixed:
             await mixedRecorder?.stopRecording()
             if let mixedURL = mixedRecorder?.recordedURL,
@@ -614,13 +614,13 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
             }
             if let mixedStatus = mixedRecorder?.statusMessage {
                 statusMessage = mixedStatus
-                print("[AppleStyleAudioRecorder] 混合录制状态: \(mixedStatus)")
+                DebugLog.attachment("混合录制状态: \(mixedStatus)", level: .debug)
             }
             if let mixedError = mixedRecorder?.errorMessage {
                 statusMessage = mixedError
-                print("[AppleStyleAudioRecorder] 混合录制提示: \(mixedError)")
+                DebugLog.attachment("混合录制提示: \(mixedError)", level: .warn)
             }
-            print("[AppleStyleAudioRecorder] 混合录制已停止, 文件: \(recordedURL?.path ?? "nil")")
+            DebugLog.attachment("混合录制已停止, 文件: \(recordedURL?.path ?? "nil")", level: .debug)
         }
         
         stopTimer()
@@ -665,20 +665,20 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
         audioRecorder = nil
 
         guard let url = recordedURL else {
-            print("[AppleStyleAudioRecorder] 播放失败: 没有录制文件")
+            DebugLog.attachment("播放失败: 没有录制文件", level: .warn)
             return
         }
         
         // 检查文件是否存在
         guard FileManager.default.fileExists(atPath: url.path) else {
-            print("[AppleStyleAudioRecorder] 播放失败: 文件不存在 \(url.path)")
+            DebugLog.attachment("播放失败: 文件不存在 \(url.path)", level: .warn)
             return
         }
         
         // 检查文件大小
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = attrs?[.size] as? Int64 ?? 0
-        print("[AppleStyleAudioRecorder] 播放文件: \(url.path), 大小: \(fileSize) bytes")
+        DebugLog.attachment("播放文件: \(url.path), 大小: \(fileSize) bytes", level: .debug)
         
         do {
             audioPlayer = try AVAudioPlayer(contentsOf: url)
@@ -686,22 +686,22 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
             audioPlayer?.volume = 1.0
             audioPlayer?.prepareToPlay()
             let duration = audioPlayer?.duration ?? 0
-            print("[AppleStyleAudioRecorder] 音频时长: \(duration) 秒, volume=\(audioPlayer?.volume ?? -1)")
+            DebugLog.attachment("音频时长: \(duration) 秒, volume=\(audioPlayer?.volume ?? -1)", level: .debug)
             let played = audioPlayer?.play() ?? false
-            print("[AppleStyleAudioRecorder] play() -> \(played)")
+            DebugLog.attachment("play() -> \(played)", level: .debug)
             isPlaying = played
 
             // 二次验证：若 AVAudioPlayer 播放失败，尝试 NSSound 回放定位问题
             if !played {
                 let fallbackSound = NSSound(contentsOf: url, byReference: false)
                 let fallbackPlayed = fallbackSound?.play() ?? false
-                print("[AppleStyleAudioRecorder] NSSound fallback play() -> \(fallbackPlayed)")
+                DebugLog.attachment("NSSound fallback play() -> \(fallbackPlayed)", level: .debug)
             }
             
             // 启动播放进度定时器
             startPlaybackTimer()
         } catch {
-            print("[AppleStyleAudioRecorder] 播放失败: \(error)")
+            DebugLog.attachment("播放失败: \(error)", level: .warn)
         }
     }
     
@@ -726,7 +726,7 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
     // MARK: - 私有方法
     
     private func startMicrophoneRecording(fileURL: URL) throws {
-        print("[AppleStyleAudioRecorder] 开始麦克风录制: \(fileURL.path)")
+        DebugLog.attachment("开始麦克风录制: \(fileURL.path)", level: .debug)
 
         // 使用 CAF + PCM，绕开当前设备上的 AAC 实时链路异常（reconfig pending）
         let settings: [String: Any] = [
@@ -746,7 +746,7 @@ class AppleStyleAudioRecorder: NSObject, ObservableObject {
 
         if success == true {
             let inputName = AVCaptureDevice.default(for: .audio)?.localizedName ?? "unknown"
-            print("[AppleStyleAudioRecorder] 麦克风录制启动: 成功, input=\(inputName)")
+            DebugLog.attachment("麦克风录制启动: 成功, input=\(inputName)", level: .debug)
             isRecording = true
             liveMicrophoneLevel = 0.05
         } else {
@@ -971,7 +971,7 @@ class LegacyAudioRecorder: ObservableObject {
                 recordedURL = fileURL
                 
             } catch {
-                print("[LegacyAudioRecorder] 启动失败: \(error)")
+                DebugLog.attachment("启动失败: \(error)", level: .warn)
             }
         }
     }

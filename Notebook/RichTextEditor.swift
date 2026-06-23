@@ -64,20 +64,20 @@ final class RichTextController: ObservableObject {
                     if self.lastSavedContentHash != currentHash {
                         self.lastSavedContentHash = currentHash
                         onSave()
-                        print("[RichTextController] Auto-save triggered")
+                        DebugLog.editor("Auto-save triggered", level: .debug)
                     }
                 }
             }
         }
 
-        print("[RichTextController] Auto-save started with interval: \(interval)s")
+        DebugLog.editor("Auto-save started with interval: \(interval)s", level: .debug)
     }
 
     /// 停止定期自动保存
     func stopAutoSave() {
         autoSaveTimer?.invalidate()
         autoSaveTimer = nil
-        print("[RichTextController] Auto-save stopped")
+        DebugLog.editor("Auto-save stopped", level: .debug)
     }
 
     /// 更新保存状态（在手动保存后调用）
@@ -139,7 +139,7 @@ final class RichTextController: ObservableObject {
     /// - Returns: 编辑器内容，如果 textView 不可用则返回 nil（调用者应使用内存中的内容）
     func snapshotAttributedString() -> NSAttributedString? {
         guard let tv = textView else {
-            print("[RichTextController] snapshot: textView is nil, returning nil to use memory content")
+            DebugLog.editor("snapshot: textView is nil, returning nil to use memory content", level: .debug)
             return nil
         }
 
@@ -162,7 +162,7 @@ final class RichTextController: ObservableObject {
         }
         
         let content = tv.attributedString()
-        print("[RichTextController] snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)")
+        DebugLog.editor("snapshot: boundNoteID=\(boundNoteID?.uuidString.prefix(8) ?? "nil"), textView length=\(content.length)", level: .debug)
         
         // 强制结束输入法会话（防止中文输入未提交时内容丢失）
         if let inputContext = tv.inputContext {
@@ -1011,19 +1011,19 @@ final class RichTextController: ObservableObject {
 
     func clearFormatting() {
         guard let tv = textView else {
-            print("[RichTextController] clearFormatting: textView is nil")
+            DebugLog.editor("clearFormatting: textView is nil", level: .debug)
             return
         }
         let range = tv.selectedRange()
         if range.length == 0 {
-            print("[RichTextController] clearFormatting: no selection")
+            DebugLog.editor("clearFormatting: no selection", level: .debug)
             return
         }
 
         // 检查范围是否有效
         let textLength = tv.string.utf16.count
         guard range.location >= 0, range.location + range.length <= textLength else {
-            print("[RichTextController] clearFormatting: invalid range \(range), text length \(textLength)")
+            DebugLog.editor("clearFormatting: invalid range \(range), text length \(textLength)", level: .debug)
             return
         }
 
@@ -1135,7 +1135,7 @@ final class RichTextController: ObservableObject {
                 tv.textStorage?.insert(mutableAttr, at: tv.selectedRange().location)
                 tv.didChangeText()
             } catch {
-                print("Failed to insert image: \(error)")
+                DebugLog.editor("Failed to insert image: \(error)", level: .warn)
             }
         }
     }
@@ -1155,7 +1155,7 @@ final class RichTextController: ObservableObject {
             let player = try AVAudioPlayer(contentsOf: fileURL)
             duration = player.duration
         } catch {
-            print("[RichTextEditor] 无法获取音频时长: \(error)")
+            DebugLog.editor("无法获取音频时长: \(error)", level: .warn)
         }
         
         let attachment = AudioBlockAttachment(fileURL: fileURL, duration: duration, createDate: Date())
@@ -1179,7 +1179,7 @@ final class RichTextController: ObservableObject {
                 let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: url, noteID: noteID, kind: .audio)
                 insertAudio(from: destURL)
             } catch {
-                print("Failed to insert audio: \(error)")
+                DebugLog.editor("Failed to insert audio: \(error)", level: .warn)
             }
         }
     }
@@ -1303,21 +1303,21 @@ class RichTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        print("[RichTextView] paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")")
+        DebugLog.editor("paste(_:) called, pasteCoordinator: \(pasteCoordinator != nil ? "set" : "nil")", level: .debug)
         // 首先尝试让 coordinator 处理图片粘贴
         if let coordinator = pasteCoordinator {
             if coordinator.handlePaste(in: self) {
                 // 图片粘贴成功，不调用父类方法
-                print("[RichTextView] Image paste handled by coordinator")
+                DebugLog.editor("Image paste handled by coordinator", level: .debug)
                 return
             }
         }
         if insertNormalizedPlainTextFromPasteboard() {
-            print("[RichTextView] Plain text paste normalized")
+            DebugLog.editor("Plain text paste normalized", level: .debug)
             return
         }
         // 如果不是图片，调用标准粘贴
-        print("[RichTextView] Falling back to super.paste")
+        DebugLog.editor("Falling back to super.paste", level: .debug)
         super.paste(sender)
     }
 
@@ -1455,13 +1455,13 @@ class RichTextView: NSTextView {
 
     // 处理拖放粘贴
     override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
-        print("[RichTextView] readSelection(from:type:) called, type: \(type)")
+        DebugLog.editor("readSelection(from:type:) called, type: \(type)", level: .debug)
         return super.readSelection(from: pboard, type: type)
     }
     
     // 处理拖放操作
     override func performDragOperation(_ draggingInfo: NSDraggingInfo) -> Bool {
-        print("[RichTextView] performDragOperation called")
+        DebugLog.editor("performDragOperation called", level: .debug)
         
         let pasteboard = draggingInfo.draggingPasteboard
         
@@ -1473,7 +1473,7 @@ class RichTextView: NSTextView {
             let ext = fileURL.pathExtension.lowercased()
             
             if imageExtensions.contains(ext) {
-                print("[RichTextView] Dropped image file: \(fileURL)")
+                DebugLog.editor("Dropped image file: \(fileURL)", level: .debug)
                 if let coordinator = pasteCoordinator as? RichTextEditor.Coordinator {
                     if coordinator.handleDroppedImage(fileURL: fileURL, in: self) {
                         return true
@@ -1489,7 +1489,7 @@ class RichTextView: NSTextView {
     // 处理 validateMenuItem 确保粘贴菜单可用
     override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(NSTextView.paste(_:)) {
-            print("[RichTextView] validateMenuItem for paste")
+            DebugLog.editor("validateMenuItem for paste", level: .debug)
             return true
         }
         return super.validateMenuItem(menuItem)
@@ -1597,7 +1597,7 @@ class RichTextView: NSTextView {
                 if let url = value as? URL, isAudioURL(url) {
                     let fallbackAttachment = AudioBlockAttachment(fileURL: url)
                     let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
-                    print("[RichTextEditor] 通过 link 打开音频播放器: \(url.lastPathComponent)")
+                    DebugLog.editor("通过 link 打开音频播放器: \(url.lastPathComponent)", level: .debug)
                     showAudioPlayerPopover(for: fallbackAttachment, at: rect)
                     return
                 }
@@ -1606,7 +1606,7 @@ class RichTextView: NSTextView {
                    isAudioURL(url) {
                     let fallbackAttachment = AudioBlockAttachment(fileURL: url)
                     let rect = CGRect(x: point.x - 150, y: point.y - 35, width: 300, height: 70)
-                    print("[RichTextEditor] 通过 link(字符串) 打开音频播放器: \(url.lastPathComponent)")
+                    DebugLog.editor("通过 link(字符串) 打开音频播放器: \(url.lastPathComponent)", level: .debug)
                     showAudioPlayerPopover(for: fallbackAttachment, at: rect)
                     return
                 }
@@ -1897,16 +1897,16 @@ class RichTextView: NSTextView {
         }
 
         guard let url = imageURL, FileManager.default.fileExists(atPath: url.path) else {
-            print("[RichTextEditor] 图片文件不存在")
+            DebugLog.editor("图片文件不存在", level: .debug)
             return false
         }
 
-        print("[RichTextEditor] 双击打开图片: \(url.lastPathComponent)")
+        DebugLog.editor("双击打开图片: \(url.lastPathComponent)", level: .debug)
 
         // 使用系统预览打开图片
         NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Preview.app"), configuration: NSWorkspace.OpenConfiguration()) { app, error in
             if let error = error {
-                print("[RichTextEditor] 打开预览失败: \(error)")
+                DebugLog.editor("打开预览失败: \(error)", level: .warn)
                 // 失败时使用默认方式打开
                 NSWorkspace.shared.open(url)
             }
@@ -1956,9 +1956,9 @@ class RichTextView: NSTextView {
         if let currentW = textStorage.attribute(.notebookImageWidth, at: state.range.location, effectiveRange: nil) as? CGFloat,
            let currentH = textStorage.attribute(.notebookImageHeight, at: state.range.location, effectiveRange: nil) as? CGFloat,
            let currentLink = textStorage.attribute(.link, at: state.range.location, effectiveRange: nil) {
-            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=\(currentW)x\(currentH), link=\(currentLink), freeResize=\(state.freeResize)")
+            DebugLog.editor("new bounds=\(attachment.bounds.size), attrs=\(currentW)x\(currentH), link=\(currentLink), freeResize=\(state.freeResize)", level: .debug)
         } else {
-            print("[Image Resize] new bounds=\(attachment.bounds.size), attrs=<missing>, freeResize=\(state.freeResize)")
+            DebugLog.editor("new bounds=\(attachment.bounds.size), attrs=<missing>, freeResize=\(state.freeResize)", level: .debug)
         }
         self.didChangeText()
         if let coordinator = self.delegate as? RichTextEditor.Coordinator {
@@ -2258,7 +2258,7 @@ class RichTextView: NSTextView {
             let attrString = NSAttributedString(attachment: attachment)
             textStorage.replaceCharacters(in: range, with: attrString)
             if let data = try? JSONEncoder().encode(attachment.tableData) {
-                print("[TableTrace] hideActiveTableEditor write notebookTableData bytes=\(data.count) rows=\(attachment.tableData.rowCount)")
+                DebugLog.editor("hideActiveTableEditor write notebookTableData bytes=\(data.count) rows=\(attachment.tableData.rowCount)", level: .debug)
                 textStorage.addAttribute(.notebookTableData, value: data, range: NSRange(location: range.location, length: 1))
             }
             textStorage.edited(.editedAttributes, range: range, changeInLength: 0)
@@ -2322,7 +2322,7 @@ class RichTextView: NSTextView {
             let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
             guard expandedRect.contains(clickPoint) else { return false }
 
-            print("[RichTextEditor] 打开音频播放器: \(audioAttachment.fileURL.lastPathComponent)")
+            DebugLog.editor("打开音频播放器: \(audioAttachment.fileURL.lastPathComponent)", level: .debug)
             showAudioPlayerPopover(for: audioAttachment, at: attachmentRect)
             return true
         }
@@ -2339,7 +2339,7 @@ class RichTextView: NSTextView {
             let expandedRect = attachmentRect.insetBy(dx: -24, dy: -12)
             guard expandedRect.contains(clickPoint) else { return false }
 
-            print("[RichTextEditor] 打开音频播放器(兼容模式): \(fallbackURL.lastPathComponent)")
+            DebugLog.editor("打开音频播放器(兼容模式): \(fallbackURL.lastPathComponent)", level: .debug)
             showAudioPlayerPopover(for: fallbackAttachment, at: attachmentRect)
             return true
         }
@@ -2356,7 +2356,7 @@ class RichTextView: NSTextView {
         guard let textStorage else { return }
         let fullRange = NSRange(location: 0, length: textStorage.length)
         
-        print("[LoadDebug] normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)")
+        DebugLog.editor("normalizeAttachmentsAfterLoad: textStorage length = \(textStorage.length)", level: .debug)
 
         var tableRangesNeedingLayoutRefresh: [NSRange] = []
 
@@ -2365,7 +2365,7 @@ class RichTextView: NSTextView {
         textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
             guard let attachment = value as? NSTextAttachment else { return }
             
-            print("[LoadDebug] Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))")
+            DebugLog.editor("Found attachment at range \(range.location)-\(range.location + range.length), type: \(type(of: attachment))", level: .debug)
 
             // 0) 先做附件自愈：把普通 NSTextAttachment 的图片/音频替换为自定义附件
             if !(attachment is AttachmentTextAttachment),
@@ -2405,7 +2405,7 @@ class RichTextView: NSTextView {
                     let savedHeight = textStorage.attribute(.notebookImageHeight, at: range.location, effectiveRange: nil) as? CGFloat
                     if let savedWidth, let savedHeight, savedWidth > 1, savedHeight > 1 {
                         textAttachment.bounds = NSRect(x: 0, y: 0, width: savedWidth, height: savedHeight)
-                        print("[Attachment Load] Restored image bounds from attrs: \(savedWidth)x\(savedHeight)")
+                        DebugLog.editor("Restored image bounds from attrs: \(savedWidth)x\(savedHeight)", level: .debug)
                         restored = true
                     }
 
@@ -2414,7 +2414,7 @@ class RichTextView: NSTextView {
                         textAttachment.bounds = NSRect(x: 0, y: 0, width: parsed.width, height: parsed.height)
                         textStorage.addAttribute(.notebookImageWidth, value: parsed.width, range: range)
                         textStorage.addAttribute(.notebookImageHeight, value: parsed.height, range: range)
-                        print("[Attachment Load] Restored image bounds from link: \(parsed.width)x\(parsed.height)")
+                        DebugLog.editor("Restored image bounds from link: \(parsed.width)x\(parsed.height)", level: .debug)
                     }
                 }
                 textAttachment.refreshPresentationIfNeeded()
@@ -2429,27 +2429,27 @@ class RichTextView: NSTextView {
 
             // 3) 表格附件：检查并刷新
             if let tableAttachment = attachment as? TableTextAttachment {
-                print("[LoadDebug] Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)")
+                DebugLog.editor("Found TableTextAttachment, rows: \(tableAttachment.tableData.rowCount), cols: \(tableAttachment.tableData.columnCount)", level: .debug)
                 if let rawData = textStorage.attribute(.notebookTableData, at: range.location, effectiveRange: nil) as? Data,
                    let decoded = try? JSONDecoder().decode(TableData.self, from: rawData) {
-                    print("[TableTrace] load notebookTableData bytes=\(rawData.count) rows=\(decoded.rowCount)")
+                    DebugLog.editor("load notebookTableData bytes=\(rawData.count) rows=\(decoded.rowCount)", level: .debug)
                     tableAttachment.tableData = decoded
                 } else if let (tableData, _) = TableTextAttachment.extractTableData(from: tableAttachment.contents) {
-                    print("[TableTrace] load from contents rows=\(tableData.rowCount)")
+                    DebugLog.editor("load from contents rows=\(tableData.rowCount)", level: .debug)
                     tableAttachment.tableData = tableData
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        DebugLog.editor("backfill notebookTableData bytes=\(encoded.count)", level: .debug)
                     }
                 } else if let wrapper = tableAttachment.fileWrapper,
                           wrapper.isDirectory,
                           let jsonData = wrapper.fileWrappers?["table.json"]?.regularFileContents,
                           let tableData = try? JSONDecoder().decode(TableData.self, from: jsonData) {
-                    print("[TableTrace] load from fileWrapper json bytes=\(jsonData.count) rows=\(tableData.rowCount)")
+                    DebugLog.editor("load from fileWrapper json bytes=\(jsonData.count) rows=\(tableData.rowCount)", level: .debug)
                     tableAttachment.tableData = tableData
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        DebugLog.editor("backfill notebookTableData bytes=\(encoded.count)", level: .debug)
                     }
                     if let pngData = wrapper.fileWrappers?["table.png"]?.regularFileContents, !pngData.isEmpty {
                         tableAttachment.contents = pngData
@@ -2458,15 +2458,15 @@ class RichTextView: NSTextView {
                           wrapper.isRegularFile,
                           let data = wrapper.regularFileContents,
                           let (tableData, _) = TableTextAttachment.extractTableData(from: data) {
-                    print("[TableTrace] load from fileWrapper bytes=\(data.count) rows=\(tableData.rowCount)")
+                    DebugLog.editor("load from fileWrapper bytes=\(data.count) rows=\(tableData.rowCount)", level: .debug)
                     tableAttachment.tableData = tableData
                     tableAttachment.contents = data
                     if let encoded = try? JSONEncoder().encode(tableData) {
                         textStorage.addAttribute(.notebookTableData, value: encoded, range: range)
-                        print("[TableTrace] backfill notebookTableData bytes=\(encoded.count)")
+                        DebugLog.editor("backfill notebookTableData bytes=\(encoded.count)", level: .debug)
                     }
                 } else {
-                    print("[TableTrace] load failed: no table data")
+                    DebugLog.editor("load failed: no table data", level: .warn)
                 }
                 if (tableAttachment.contents?.isEmpty ?? true),
                    let wrapper = tableAttachment.fileWrapper {
@@ -2483,9 +2483,9 @@ class RichTextView: NSTextView {
                 if tableAttachment.fileType == nil || tableAttachment.fileType?.hasPrefix("dyn.") == true {
                     tableAttachment.fileType = "public.png"
                 }
-                print("[LoadDebug] TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")")
+                DebugLog.editor("TableAttachment contents: \(tableAttachment.contents?.count ?? 0) bytes, fileType: \(tableAttachment.fileType ?? "nil")", level: .debug)
                 tableAttachment.updateImage()
-                print("[LoadDebug] TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")")
+                DebugLog.editor("TableAttachment image after update: \(tableAttachment.image != nil ? "exists" : "nil")", level: .debug)
                 tableRangesNeedingLayoutRefresh.append(range)
                 return
             }
@@ -2497,16 +2497,16 @@ class RichTextView: NSTextView {
                                    attachment is AudioBlockAttachment ||
                                    attachment is TableTextAttachment ||
                                    attachment is CheckboxTextAttachment
-            print("[LoadDebug] Attachment class: \(attachmentClassName), isKnownCustom: \(isKnownCustomType)")
+            DebugLog.editor("Attachment class: \(attachmentClassName), isKnownCustom: \(isKnownCustomType)", level: .debug)
             
             if !isKnownCustomType {
-                print("[LoadDebug] Unknown attachment type, checking if looks like table...")
-                print("[LoadDebug] Attachment bounds: \(attachment.bounds.width) x \(attachment.bounds.height)")
-                print("[LoadDebug] Attachment contents: \(attachment.contents?.count ?? 0) bytes")
-                print("[LoadDebug] Attachment image: \(attachment.image != nil ? "exists" : "nil")")
+                DebugLog.editor("Unknown attachment type, checking if looks like table...", level: .debug)
+                DebugLog.editor("Attachment bounds: \(attachment.bounds.width) x \(attachment.bounds.height)", level: .debug)
+                DebugLog.editor("Attachment contents: \(attachment.contents?.count ?? 0) bytes", level: .debug)
+                DebugLog.editor("Attachment image: \(attachment.image != nil ? "exists" : "nil")", level: .debug)
                 
                 if TableTextAttachment.looksLikeTable(attachment) {
-                    print("[LoadDebug] Found potential table attachment, attempting recovery...")
+                    DebugLog.editor("Found potential table attachment, attempting recovery...", level: .debug)
                     
                     // 尝试恢复表格附件
                     if let recovered = TableTextAttachment.recover(from: attachment) {
@@ -2516,11 +2516,11 @@ class RichTextView: NSTextView {
                             textStorage.addAttribute(.notebookTableData, value: tableDataAttr, range: range)
                         }
                         tableRangesNeedingLayoutRefresh.append(range)
-                        print("[LoadDebug] Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows")
+                        DebugLog.editor("Successfully recovered TableTextAttachment with \(recovered.tableData.rowCount) rows", level: .debug)
                         return
                     }
                 } else {
-                    print("[LoadDebug] Does not look like table")
+                    DebugLog.editor("Does not look like table", level: .debug)
                 }
             }
 
@@ -2580,7 +2580,7 @@ class RichTextView: NSTextView {
                     }
                     return newAttachment
                 } catch {
-                    print("[Attachment Migrate] Failed writing legacy image data: \(error)")
+                    DebugLog.editor("Failed writing legacy image data: \(error)", level: .warn)
                 }
             }
         }
@@ -2602,7 +2602,7 @@ class RichTextView: NSTextView {
                 }
                 return newAttachment
             } catch {
-                print("[Attachment Migrate] Failed exporting legacy image: \(error)")
+                DebugLog.editor("Failed exporting legacy image: \(error)", level: .warn)
             }
         }
 
@@ -2627,7 +2627,7 @@ class RichTextView: NSTextView {
                         attachmentFilename: filename
                     )
                 } catch {
-                    print("[Attachment Migrate] Failed writing legacy audio data: \(error)")
+                    DebugLog.editor("Failed writing legacy audio data: \(error)", level: .warn)
                 }
             }
         }
@@ -2740,7 +2740,7 @@ class RichTextView: NSTextView {
     /// 显示音频播放器弹窗
     private func showAudioPlayerPopover(for attachment: AudioBlockAttachment, at rect: CGRect) {
         guard FileManager.default.fileExists(atPath: attachment.fileURL.path) else {
-            print("[RichTextEditor] 音频文件不存在: \(attachment.fileURL.path)")
+            DebugLog.editor("音频文件不存在: \(attachment.fileURL.path)", level: .debug)
             return
         }
 
@@ -3782,24 +3782,24 @@ struct RichTextEditor: NSViewRepresentable {
         
         /// 处理粘贴操作，支持粘贴图片和文件
         func handlePaste(in textView: NSTextView) -> Bool {
-            print("[Coordinator] handlePaste called")
+            DebugLog.editor("handlePaste called", level: .debug)
             let pasteboard = NSPasteboard.general
 
             // 获取当前笔记ID
             guard let noteID = controller?.attachmentTargetNoteID() else {
-                print("[Coordinator] No noteID available")
+                DebugLog.editor("No noteID available", level: .debug)
                 return false
             }
-            print("[Coordinator] noteID: \(noteID.uuidString.prefix(8))")
+            DebugLog.editor("noteID: \(noteID.uuidString.prefix(8))", level: .debug)
 
             // 打印剪贴板类型信息
             let types = pasteboard.types ?? []
-            print("[Coordinator] Pasteboard types: \(types)")
+            DebugLog.editor("Pasteboard types: \(types)", level: .debug)
 
             // 1. 首先尝试读取文件URL（从Finder复制的文件）- 优先处理原文件
             if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
                !fileURLs.isEmpty {
-                print("[Coordinator] File URLs found: \(fileURLs)")
+                DebugLog.editor("File URLs found: \(fileURLs)", level: .debug)
                 // 只处理第一个文件
                 let fileURL = fileURLs[0]
 
@@ -3808,48 +3808,48 @@ struct RichTextEditor: NSViewRepresentable {
                 let ext = fileURL.pathExtension.lowercased()
 
                 if imageExtensions.contains(ext) {
-                    print("[Coordinator] Image file detected: \(ext)")
+                    DebugLog.editor("Image file detected: \(ext)", level: .debug)
                     // 是图片文件，复制到附件目录
                     do {
                         let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
                         insertAttachment(at: destURL, kind: .image, in: textView)
                         return true
                     } catch {
-                        print("[Coordinator] Failed to copy image file: \(error)")
+                        DebugLog.editor("Failed to copy image file: \(error)", level: .warn)
                         return false
                     }
                 }
-                print("[Coordinator] Not an image file: \(ext)")
+                DebugLog.editor("Not an image file: \(ext)", level: .debug)
                 // 其他类型文件不处理，返回false让系统处理
                 return false
             }
 
             // 2. 尝试读取图片数据（截图或复制的图片数据）
             if let image = readImageFromPasteboard(pasteboard) {
-                print("[Coordinator] Image data found in pasteboard")
+                DebugLog.editor("Image data found in pasteboard", level: .debug)
                 do {
                     let destURL = try savePastedImage(image: image, noteID: noteID)
                     insertAttachment(at: destURL, kind: .image, in: textView)
                     return true
                 } catch {
-                    print("[Coordinator] Failed to save pasted image: \(error)")
+                    DebugLog.editor("Failed to save pasted image: \(error)", level: .warn)
                     return false
                 }
             }
-            print("[Coordinator] No image found in pasteboard")
+            DebugLog.editor("No image found in pasteboard", level: .debug)
 
             // 3. 尝试读取HTML表格并转换为TableTextAttachment
             if let htmlString = pasteboard.string(forType: .html) ?? pasteboard.string(forType: NSPasteboard.PasteboardType("public.html")) {
-                print("[Coordinator] HTML content found, checking for table")
+                DebugLog.editor("HTML content found, checking for table", level: .debug)
                 if let tableData = parseHTMLTable(htmlString) {
-                    print("[Coordinator] Table detected in HTML, converting to TableTextAttachment")
+                    DebugLog.editor("Table detected in HTML, converting to TableTextAttachment", level: .debug)
                     insertTableAttachment(tableData: tableData, in: textView)
                     return true
                 }
             }
 
             // 如果不是图片或文件，返回false让系统处理其他粘贴类型
-            print("[Coordinator] No file URLs found, falling back to default paste")
+            DebugLog.editor("No file URLs found, falling back to default paste", level: .debug)
             return false
         }
 
@@ -3961,20 +3961,20 @@ struct RichTextEditor: NSViewRepresentable {
         
         /// 处理拖放的图片文件
         func handleDroppedImage(fileURL: URL, in textView: NSTextView) -> Bool {
-            print("[Coordinator] handleDroppedImage called: \(fileURL)")
+            DebugLog.editor("handleDroppedImage called: \(fileURL)", level: .debug)
             
             guard let noteID = controller?.attachmentTargetNoteID() else {
-                print("[Coordinator] No noteID available for drop")
+                DebugLog.editor("No noteID available for drop", level: .debug)
                 return false
             }
             
             do {
                 let destURL = try AttachmentManager.shared.copyAttachmentToStore(sourceURL: fileURL, noteID: noteID, kind: .image)
                 insertAttachment(at: destURL, kind: .image, in: textView)
-                print("[Coordinator] Dropped image handled successfully")
+                DebugLog.editor("Dropped image handled successfully", level: .debug)
                 return true
             } catch {
-                print("[Coordinator] Failed to handle dropped image: \(error)")
+                DebugLog.editor("Failed to handle dropped image: \(error)", level: .warn)
                 return false
             }
         }
