@@ -669,6 +669,7 @@ extension NotebookTests {
     }
 
 
+    @MainActor
     func testRichTextViewActiveTableEditorRelayoutsAfterDeletingColumn() throws {
         let attachment = TableTextAttachment(rows: 2, columns: 3)
         attachment.tableData.updateCell(row: 0, column: 2, value: "C1")

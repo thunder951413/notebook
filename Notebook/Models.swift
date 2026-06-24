@@ -23,8 +23,10 @@ class NoteStore: ObservableObject {
     /// 用于菜单栏 Popover 跳转的选中文件夹
     @Published var selectedFolderForNavigation: String?
     
-    private var modelContext: ModelContext?
+    var modelContext: ModelContext?
     private var searchableTextCache: [UUID: String] = [:]
+    /// 上一次 fetchData 拉取的 library ID，用于检测库切换并触发缓存全量清空
+    private var lastFetchedLibraryID: UUID?
     private let plainTextDecoder = JSONDecoder()
     
     private let encryptedFoldersKey = "encrypted_folders"
@@ -138,6 +140,15 @@ class NoteStore: ObservableObject {
 
     private func loadBlockDocumentData(context: ModelContext, library: BlockDocumentLibraryEntity) throws {
         let libraryID = library.id
+        // 库切换时一次性清空缓存（避免跨库缓存污染）；同库刷新保留缓存条目。
+        if lastFetchedLibraryID != libraryID {
+            searchableTextCache.removeAll()
+            lastFetchedLibraryID = libraryID
+        }
+        // 注意：同库刷新不再做 searchableTextCache.removeAll()。
+        // 单笔记粒度的失效已由 save/delete 路径的 removeValue(forKey:) 处理，
+        // 全量清空会让下一次搜索时所有缓存条目全部冷启动，造成不必要的 SQLite 重新拉取。
+
         // 把 libraryID 过滤下推到 SwiftData 的 predicate，避免 fetch 后内存全表扫描。
         let folderDescriptor = FetchDescriptor<BlockDocumentFolderEntity>(
             predicate: #Predicate<BlockDocumentFolderEntity> { $0.libraryID == libraryID },
@@ -155,9 +166,12 @@ class NoteStore: ObservableObject {
         let folderEntities = try context.fetch(folderDescriptor)
         let tagEntities = try context.fetch(tagDescriptor)
         let noteEntities = try context.fetch(noteDescriptor)
+        try ensureNoteTagLinksBackfilled(for: noteEntities, libraryID: libraryID, context: context)
 
         let loadedContentIDs = recentNoteContentIDs(from: noteEntities)
-        searchableTextCache.removeAll()
+        // 注意：不再做 searchableTextCache.removeAll()。
+        // 单笔记粒度的失效已由 save/delete 路径的 removeValue(forKey:) 处理，
+        // 全量清空会让下一次搜索时所有缓存条目全部冷启动，造成不必要的 SQLite 重新拉取。
 
         self.notes = try noteEntities.map { entity in
             let isContentLoaded = loadedContentIDs.contains(entity.id)
@@ -215,6 +229,41 @@ class NoteStore: ObservableObject {
         }
         self.tags = tagEntities.enumerated().map { index, entity in
             Tag(id: entity.id, name: entity.name, color: entity.color, sortOrder: index, createdAt: entity.createdAt)
+        }
+    }
+
+    private func ensureNoteTagLinksBackfilled(
+        for noteEntities: [BlockDocumentNoteEntity],
+        libraryID: UUID,
+        context: ModelContext
+    ) throws {
+        let libraryIDToMatch = libraryID
+        let descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+            predicate: #Predicate<BlockDocumentNoteTagEntity> { $0.libraryID == libraryIDToMatch }
+        )
+        let existingLinks = try context.fetch(descriptor)
+        let linkedNoteIDs = Set(existingLinks.map(\.noteID))
+        var didInsert = false
+
+        for noteEntity in noteEntities where !linkedNoteIDs.contains(noteEntity.id) {
+            let tagIDs = UUIDListCoding.decode(noteEntity.tagIDs)
+            guard !tagIDs.isEmpty else { continue }
+
+            for (sortOrder, tagID) in tagIDs.enumerated() {
+                context.insert(
+                    BlockDocumentNoteTagEntity(
+                        noteID: noteEntity.id,
+                        tagID: tagID,
+                        libraryID: libraryID,
+                        sortOrder: sortOrder
+                    )
+                )
+            }
+            didInsert = true
+        }
+
+        if didInsert {
+            context.saveLogging("NoteStore.ensureNoteTagLinksBackfilled")
         }
     }
 
@@ -326,7 +375,7 @@ class NoteStore: ObservableObject {
         return Self.previewText(from: plainText(from: blocks, maxCharacters: 300))
     }
 
-    private func loadSearchableText(noteID: UUID, context: ModelContext) throws -> String {
+    func loadSearchableText(noteID: UUID, context: ModelContext) throws -> String {
         if let cached = searchableTextCache[noteID] {
             return cached
         }
@@ -825,7 +874,10 @@ class NoteStore: ObservableObject {
         let idToMatch = id
         let descriptor = FetchDescriptor<BlockDocumentTagEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
-            let notesWithTag = notes.filter { $0.tagIDs.contains(id) }
+            // 优先走关联表索引查询，避免扫描全部内存笔记
+            let affectedNoteIDs = noteIDs(forTagID: id)
+            let affectedNoteIDSet = Set(affectedNoteIDs)
+            let notesWithTag = notes.filter { affectedNoteIDSet.contains($0.id) }
             for note in notesWithTag {
                 removeTagFromNote(tagID: id, noteID: note.id)
             }
@@ -867,6 +919,14 @@ class NoteStore: ObservableObject {
             if !currentTagIDs.contains(tagID) {
                 currentTagIDs.append(tagID)
                 entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
+                // 同步更新关联表（派生索引），保证按标签筛选可走 SQLite 索引
+                Self.upsertNoteTagLink(
+                    noteID: noteID,
+                    tagID: tagID,
+                    libraryID: entity.libraryID,
+                    sortOrder: currentTagIDs.count - 1,
+                    context: context
+                )
                 context.saveLogging("NoteStore.addTagToNote")
                 fetchData()
             }
@@ -882,6 +942,8 @@ class NoteStore: ObservableObject {
             currentTagIDs.removeAll { $0 == tagID }
             entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
             entity.updatedAt = Date()
+            // 同步删除关联表记录
+            Self.deleteNoteTagLink(noteID: noteID, tagID: tagID, context: context)
             context.saveLogging("NoteStore.removeTagFromNote")
             if let idx = notes.firstIndex(where: { $0.id == noteID }) {
                 notes[idx].tagIDs = currentTagIDs
@@ -890,6 +952,112 @@ class NoteStore: ObservableObject {
         }
     }
     
+    // MARK: - Note Tag Link Helpers（关联表同步）
+
+    /// 插入或更新笔记-标签关联记录（幂等）
+    private static func upsertNoteTagLink(
+        noteID: UUID,
+        tagID: UUID,
+        libraryID: UUID,
+        sortOrder: Int,
+        context: ModelContext
+    ) {
+        let noteIDToMatch = noteID
+        let tagIDToMatch = tagID
+        let descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+            predicate: #Predicate {
+                $0.noteID == noteIDToMatch && $0.tagID == tagIDToMatch
+            }
+        )
+        if let existing = try? context.fetch(descriptor).first {
+            existing.sortOrder = sortOrder
+            return
+        }
+        context.insert(
+            BlockDocumentNoteTagEntity(
+                noteID: noteID,
+                tagID: tagID,
+                libraryID: libraryID,
+                sortOrder: sortOrder
+            )
+        )
+    }
+
+    /// 删除笔记-标签关联记录
+    private static func deleteNoteTagLink(noteID: UUID, tagID: UUID, context: ModelContext) {
+        let noteIDToMatch = noteID
+        let tagIDToMatch = tagID
+        let descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+            predicate: #Predicate {
+                $0.noteID == noteIDToMatch && $0.tagID == tagIDToMatch
+            }
+        )
+        if let links = try? context.fetch(descriptor) {
+            for link in links {
+                context.delete(link)
+            }
+        }
+    }
+
+    /// 笔记保存时全量同步关联表（以 tagIDs 字符串为权威源）
+    static func reconcileNoteTagLinks(
+        noteID: UUID,
+        libraryID: UUID,
+        tagIDs: [UUID],
+        context: ModelContext
+    ) {
+        let noteIDToMatch = noteID
+        // 删除旧关联
+        let oldDescriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+            predicate: #Predicate { $0.noteID == noteIDToMatch }
+        )
+        if let oldLinks = try? context.fetch(oldDescriptor) {
+            for link in oldLinks {
+                context.delete(link)
+            }
+        }
+        // 插入新关联
+        for (sortOrder, tagID) in tagIDs.enumerated() {
+            context.insert(
+                BlockDocumentNoteTagEntity(
+                    noteID: noteID,
+                    tagID: tagID,
+                    libraryID: libraryID,
+                    sortOrder: sortOrder
+                )
+            )
+        }
+    }
+
+    /// 按标签 ID 查询笔记 ID（走 SQLite 索引，避免全表扫描 + 字符串匹配）
+    func noteIDs(forTagID tagID: UUID) -> [UUID] {
+        guard let context = modelContext else { return [] }
+        let tagIDToMatch = tagID
+
+        let descriptor: FetchDescriptor<BlockDocumentNoteTagEntity>
+        if let library = latestBlockDocumentLibrary(in: context) {
+            let libraryIDToMatch = library.id
+            descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+                predicate: #Predicate {
+                    $0.tagID == tagIDToMatch && $0.libraryID == libraryIDToMatch
+                },
+                sortBy: [SortDescriptor(\.sortOrder)]
+            )
+        } else {
+            descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+                predicate: #Predicate { $0.tagID == tagIDToMatch },
+                sortBy: [SortDescriptor(\.sortOrder)]
+            )
+        }
+
+        guard let links = try? context.fetch(descriptor) else { return [] }
+        return links.map(\.noteID)
+    }
+
+    func noteIDSet(forTagID tagID: UUID) -> Set<UUID> {
+        Set(noteIDs(forTagID: tagID))
+    }
+
     // MARK: - Note Save Operations
 
     func updateNoteTitleInMemory(id: UUID, title: String) {

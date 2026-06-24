@@ -173,6 +173,7 @@ extension NotebookTests {
         XCTAssertEqual(result, [secondID])
     }
 
+    @MainActor
     func testStaleRelativePathsIncludesAssetsAndSidecars() throws {
         let sidecarPaths = ["BlockDocuments/note/audio/tracks.json", "BlockDocuments/note/audio/waveform.json"]
         let asset = BlockDocumentAssetEntity(

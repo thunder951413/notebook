@@ -294,6 +294,7 @@ final class NoteSaveManager {
         // ========================================
         try Self.reconcileAssets(
             noteID: noteID,
+            noteEntity: entity,
             previousAssets: previousAssets,
             orderedPersistedAssets: orderedPersistedAssets,
             context: context,
@@ -305,11 +306,23 @@ final class NoteSaveManager {
         // ========================================
         try Self.reconcileBlocks(
             noteID: noteID,
+            noteEntity: entity,
             previousBlocks: previousBlocks,
             newBlocks: conversion.document.blocks,
             context: context,
             encodeText: encodeTextPayload(_:),
             encodeTable: encodeTablePayload(_:)
+        )
+
+        // 同步关联表：以当前 tagIDs 字符串为权威源全量重建关联记录，
+        // 保证按标签筛选可走 SQLite 索引。
+        // 注意：tagIDs 字段在 reconcileBlocks 之前已通过 entity.tagIDs 赋值，
+        // 这里读取的是 entity 上的最新值。
+        NoteStore.reconcileNoteTagLinks(
+            noteID: request.noteID,
+            libraryID: entity.libraryID,
+            tagIDs: UUIDListCoding.decode(entity.tagIDs),
+            context: context
         )
 
         _ = try BlockDocumentNoteVersionStore.ensureHistoryRecorded(noteID: request.noteID, context: context)
@@ -843,6 +856,7 @@ final class NoteSaveManager {
 
     private static func reconcileAssets(
         noteID: UUID,
+        noteEntity: BlockDocumentNoteEntity,
         previousAssets: [BlockDocumentAssetEntity],
         orderedPersistedAssets: [PersistedBlockAsset],
         context: ModelContext,
@@ -880,26 +894,30 @@ final class NoteSaveManager {
                     existing.relativeFilePath = persistedAsset.relativeFilePath
                     existing.sidecarPathsPayload = sidecarPathsPayload
                 }
+                // 确保反向关系已建立（旧数据可能为 nil）
+                if existing.note == nil {
+                    existing.note = noteEntity
+                }
                 continue
             }
 
-            // 新增
-            context.insert(
-                BlockDocumentAssetEntity(
-                    noteID: noteID,
-                    assetID: assetID,
-                    kind: persistedAsset.reference.kind,
-                    sourceKind: persistedAsset.reference.kind,
-                    filename: persistedAsset.reference.filename,
-                    mimeType: persistedAsset.reference.mimeType,
-                    width: persistedAsset.reference.width,
-                    height: persistedAsset.reference.height,
-                    duration: persistedAsset.reference.duration,
-                    createdAt: persistedAsset.reference.createdAt,
-                    relativeFilePath: persistedAsset.relativeFilePath,
-                    sidecarPathsPayload: sidecarPathsPayload
-                )
+            // 新增：同步设置 noteID（predicate 查询用）与 note 关系（级联删除用）
+            let newAsset = BlockDocumentAssetEntity(
+                noteID: noteID,
+                assetID: assetID,
+                kind: persistedAsset.reference.kind,
+                sourceKind: persistedAsset.reference.kind,
+                filename: persistedAsset.reference.filename,
+                mimeType: persistedAsset.reference.mimeType,
+                width: persistedAsset.reference.width,
+                height: persistedAsset.reference.height,
+                duration: persistedAsset.reference.duration,
+                createdAt: persistedAsset.reference.createdAt,
+                relativeFilePath: persistedAsset.relativeFilePath,
+                sidecarPathsPayload: sidecarPathsPayload
             )
+            newAsset.note = noteEntity
+            context.insert(newAsset)
         }
 
         // 删除已不存在的 asset
@@ -912,6 +930,7 @@ final class NoteSaveManager {
 
     private static func reconcileBlocks(
         noteID: UUID,
+        noteEntity: BlockDocumentNoteEntity,
         previousBlocks: [BlockDocumentBlockEntity],
         newBlocks: [MigratedDocumentBlock],
         context: ModelContext,
@@ -953,25 +972,29 @@ final class NoteSaveManager {
                     existing.assetID = block.asset?.id
                     existing.tablePayload = tablePayload
                 }
+                // 确保反向关系已建立（旧数据可能为 nil）
+                if existing.note == nil {
+                    existing.note = noteEntity
+                }
             } else {
-                // 新增 block
-                context.insert(
-                    BlockDocumentBlockEntity(
-                        noteID: noteID,
-                        position: newPosition,
-                        blockID: block.id,
-                        kind: block.type,
-                        sourceType: block.type,
-                        textPayload: try encodeText(block.text ?? []),
-                        level: block.level,
-                        listStyle: block.listStyle,
-                        order: block.order,
-                        checked: block.checked,
-                        indent: block.indent,
-                        assetID: block.asset?.id,
-                        tablePayload: try encodeTable(block.table)
-                    )
+                // 新增 block：同步设置 noteID（predicate 查询用）与 note 关系（级联删除用）
+                let newBlock = BlockDocumentBlockEntity(
+                    noteID: noteID,
+                    position: newPosition,
+                    blockID: block.id,
+                    kind: block.type,
+                    sourceType: block.type,
+                    textPayload: try encodeText(block.text ?? []),
+                    level: block.level,
+                    listStyle: block.listStyle,
+                    order: block.order,
+                    checked: block.checked,
+                    indent: block.indent,
+                    assetID: block.asset?.id,
+                    tablePayload: try encodeTable(block.table)
                 )
+                newBlock.note = noteEntity
+                context.insert(newBlock)
             }
         }
 

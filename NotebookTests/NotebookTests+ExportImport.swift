@@ -265,6 +265,7 @@ extension NotebookTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: extractDir.appendingPathComponent("Database").path))
     }
 
+    @MainActor
     func testExportedMigrationPackageImportsIntoFreshBlockLibrary() async throws {
         let baseDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)

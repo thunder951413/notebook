@@ -7,6 +7,7 @@ import SwiftUI
 
 extension NotebookTests {
 
+    @MainActor
     func testBlockDocumentNoteMovesToRecycleBinAndRestores() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

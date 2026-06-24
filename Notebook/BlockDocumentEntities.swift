@@ -141,6 +141,17 @@ final class BlockDocumentNoteEntity {
     var hasConflict: Bool = false
     @Attribute(.externalStorage) var conflictRemoteSnapshotData: Data?
 
+    // MARK: — Relationships（与 UUID 字段并存）
+    // 设计说明：保留 noteID: UUID 字段以维持现有基于 predicate 的查询兼容性
+    // （SwiftData @Relationship 在 #Predicate 里语法不同，且 macOS 14 早期有 bug）。
+    // 此处的 @Relationship 仅承担"删除时自动级联"职责，写入路径仍用 noteID 显式赋值，
+    // 实现渐进式过渡：cascade 删除立即可用，predicate 查询零改动。
+    @Relationship(deleteRule: .cascade, inverse: \BlockDocumentBlockEntity.note)
+    var blocks: [BlockDocumentBlockEntity] = []
+
+    @Relationship(deleteRule: .cascade, inverse: \BlockDocumentAssetEntity.note)
+    var assets: [BlockDocumentAssetEntity] = []
+
     init(
         id: UUID,
         libraryID: UUID,
@@ -202,6 +213,9 @@ final class BlockDocumentBlockEntity {
     var indent: Int?
     var assetID: String?
     var tablePayload: Data?
+    /// 反向关系：指向所属笔记。由 SwiftData 自动维护，删除笔记时级联删除本 block。
+    /// noteID 字段仍保留用于 predicate 查询；两者由写入路径同步赋值。
+    var note: BlockDocumentNoteEntity?
 
     init(
         internalID: UUID = UUID(),
@@ -251,6 +265,9 @@ final class BlockDocumentAssetEntity {
     var createdAt: Date?
     var relativeFilePath: String
     var sidecarPathsPayload: Data?
+    /// 反向关系：指向所属笔记。由 SwiftData 自动维护，删除笔记时级联删除本 asset。
+    /// noteID 字段仍保留用于 predicate 查询；两者由写入路径同步赋值。
+    var note: BlockDocumentNoteEntity?
 
     init(
         internalID: UUID = UUID(),
@@ -370,5 +387,35 @@ final class BlockDocumentDeletedNoteTombstoneEntity {
         self.deletedAt = deletedAt
         self.deletedByDeviceID = deletedByDeviceID
         self.createdAt = createdAt
+    }
+}
+
+/// 笔记-标签关联表（V4 引入）。
+///
+/// 设计目标：为"按标签筛选笔记"提供 SQLite 索引查询，避免扫描全表 + 字符串 LIKE。
+/// 与 `BlockDocumentNoteEntity.tagIDs: String` 并存：
+/// - `tagIDs` 字符串仍是权威序列化格式（同步/导出/历史快照依赖它）
+/// - 本表是派生查找索引，由 `addTagToNote` / `removeTagFromNote` / 保存路径同步维护
+/// - 一次性迁移在 V3→V4 stage 中执行
+@Model
+final class BlockDocumentNoteTagEntity {
+    @Attribute(.unique) var id: UUID
+    var noteID: UUID
+    var tagID: UUID
+    var libraryID: UUID
+    var sortOrder: Int
+
+    init(
+        id: UUID = UUID(),
+        noteID: UUID,
+        tagID: UUID,
+        libraryID: UUID,
+        sortOrder: Int = 0
+    ) {
+        self.id = id
+        self.noteID = noteID
+        self.tagID = tagID
+        self.libraryID = libraryID
+        self.sortOrder = sortOrder
     }
 }

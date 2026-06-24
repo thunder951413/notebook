@@ -87,6 +87,7 @@ struct SettingsGeneralView: View {
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
     @State private var recentNoteLoadLimit = AppSettings.shared.recentNoteLoadLimit
+    @State private var aiKnowledgeBaseTopK = AppSettings.shared.aiKnowledgeBaseTopK
     @State private var githubTokenInput = ""
     @State private var githubTokenStatusMessage = ""
 
@@ -166,6 +167,36 @@ struct SettingsGeneralView: View {
                     }
 
                     Text("列表和搜索仍覆盖全部笔记；这里只限制富文本正文和附件在内存中的常驻数量。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider()
+
+                // AI 全库问答设置
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("AI 全库问答")
+                        .font(.title2)
+                        .bold()
+
+                    Stepper(
+                        value: $aiKnowledgeBaseTopK,
+                        in: AppSettings.minAIKnowledgeBaseTopK...AppSettings.maxAIKnowledgeBaseTopK
+                    ) {
+                        HStack {
+                            Text("每次问答检索笔记数量")
+                            Spacer()
+                            Text("\(aiKnowledgeBaseTopK) 篇")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .frame(maxWidth: 360)
+                    }
+                    .onChange(of: aiKnowledgeBaseTopK) { _, newValue in
+                        AppSettings.shared.aiKnowledgeBaseTopK = newValue
+                    }
+
+                    Text("AI 面板开启全库问答时，每次提问自动检索最相关的 N 篇笔记作为上下文。数值越大覆盖越广但消耗 token 越多。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

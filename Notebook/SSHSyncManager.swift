@@ -111,17 +111,65 @@ enum SyncPhase: String {
     case checkMissingAssets = "检查缺失附件"
 }
 
+/// SSH 同步管理器内部的可变同步状态。
+///
+/// 使用 actor 自动串行化所有访问，无需手工 NSLock。
+/// 仅承载两类状态：
+/// - `activeControlMasterPaths`: 当前已建立的 SSH ControlMaster 路径集合
+/// - `activeSyncOperationName`: 当前正在执行的同步操作名（用于互斥）
+private actor SSHSyncState {
+    private(set) var activeControlMasterPaths: Set<String> = []
+    private(set) var activeSyncOperationName: String?
+
+    /// 查询当前是否有同步任务运行
+    func isSyncOperationRunning() -> Bool {
+        activeSyncOperationName != nil
+    }
+
+    /// 尝试开启同步操作；若已有任务在跑，返回当前任务名（用于抛错）
+    func beginSyncOperation(named operationName: String) -> String? {
+        if let activeSyncOperationName {
+            return activeSyncOperationName
+        }
+        activeSyncOperationName = operationName
+        return nil
+    }
+
+    /// 结束同步操作
+    func endSyncOperation() {
+        activeSyncOperationName = nil
+    }
+
+    /// 查询某 ControlMaster 路径是否已激活
+    func containsControlMasterPath(_ path: String) -> Bool {
+        activeControlMasterPaths.contains(path)
+    }
+
+    /// 插入 ControlMaster 路径（幂等）
+    func insertControlMasterPath(_ path: String) {
+        activeControlMasterPaths.insert(path)
+    }
+
+    /// 移除 ControlMaster 路径，返回是否实际移除
+    func removeControlMasterPath(_ path: String) -> Bool {
+        guard activeControlMasterPaths.contains(path) else { return false }
+        activeControlMasterPaths.remove(path)
+        return true
+    }
+
+    /// 快照所有活跃的 ControlMaster 路径
+    func snapshotControlMasterPaths() -> [String] {
+        Array(activeControlMasterPaths)
+    }
+}
+
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 ///
 /// ## 并发安全
-/// 本类标记为 `@unchecked Sendable` 以手动管理跨线程安全性。
-/// 以下可变状态均通过 `NSLock` 保护，保证线程安全：
-/// - `activeControlMasterPaths` (Set<String>) → `controlMasterLock`
-/// - `activeSyncOperationName` (String?) → `syncOperationLock`
-///
-/// 所有 public 方法均为 `async` 并在内部调度到串行队列，确保不会并发执行同步操作。
+/// 可变状态全部封装在内部 `SSHSyncState` actor 中，由 actor 模型自动串行化访问。
 /// 不可变属性（`noteDownloadConcurrencyLimit` / `assetDownloadConcurrencyLimit`）天然 Sendable。
-final class SSHSyncManager: @unchecked Sendable {
+/// 因此本类不再需要 `@unchecked Sendable` 标记。
+final class SSHSyncManager: Sendable {
     static let shared = SSHSyncManager()
 
     private struct ProcessExecutionResult {
@@ -170,27 +218,19 @@ final class SSHSyncManager: @unchecked Sendable {
     private let assetDownloadConcurrencyLimit = 4
 
     // SSH 连接复用相关
-    private var activeControlMasterPaths: Set<String> = []
-    private let controlMasterLock = NSLock()
-    private var activeSyncOperationName: String?
-    private let syncOperationLock = NSLock()
+    /// 内部同步状态 actor，自动串行化所有可变状态访问
+    private let state = SSHSyncState()
 
     private init() {}
 
     var isSyncOperationRunning: Bool {
-        syncOperationLock.withLock {
-            activeSyncOperationName != nil
+        get async {
+            await state.isSyncOperationRunning()
         }
     }
 
-    private func beginSyncOperation(named operationName: String) throws {
-        let runningOperation = syncOperationLock.withLock { () -> String? in
-            if let activeSyncOperationName {
-                return activeSyncOperationName
-            }
-            activeSyncOperationName = operationName
-            return nil
-        }
+    private func beginSyncOperation(named operationName: String) async throws {
+        let runningOperation = await state.beginSyncOperation(named: operationName)
 
         if let runningOperation {
             throw NSError(
@@ -201,9 +241,26 @@ final class SSHSyncManager: @unchecked Sendable {
         }
     }
 
-    private func endSyncOperation() {
-        _ = syncOperationLock.withLock {
-            activeSyncOperationName = nil
+    private func endSyncOperation() async {
+        await state.endSyncOperation()
+    }
+
+    /// 包裹一个同步操作体，保证 begin/end 配对且无竞态。
+    ///
+    /// 相比 `defer { Task { await endSyncOperation() } }`，此 helper 在 body 抛错或返回前
+    /// 同步 await 完清理，避免清理 Task 排在下一个调用者的 beginSyncOperation 之后执行。
+    private func withSyncOperation<T>(
+        named operationName: String,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        try await beginSyncOperation(named: operationName)
+        do {
+            let result = try await body()
+            await endSyncOperation()
+            return result
+        } catch {
+            await endSyncOperation()
+            throw error
         }
     }
 
@@ -221,9 +278,7 @@ final class SSHSyncManager: @unchecked Sendable {
         let controlPath = sshControlPath(for: config)
 
         // 检查是否已经建立了主连接
-        let alreadyActive = controlMasterLock.withLock {
-            activeControlMasterPaths.contains(controlPath)
-        }
+        let alreadyActive = await state.containsControlMasterPath(controlPath)
         if alreadyActive {
             return
         }
@@ -248,9 +303,7 @@ final class SSHSyncManager: @unchecked Sendable {
                 timeout: 10
             )
             if checkResult.terminationStatus == 0 && checkResult.standardOutput.contains("CONNECTED") {
-                _ = controlMasterLock.withLock {
-                    activeControlMasterPaths.insert(controlPath)
-                }
+                await state.insertControlMasterPath(controlPath)
                 return
             } else {
                 // 旧连接已失效，清理
@@ -292,22 +345,16 @@ final class SSHSyncManager: @unchecked Sendable {
             )
         }
 
-        _ = controlMasterLock.withLock {
-            activeControlMasterPaths.insert(controlPath)
-        }
+        await state.insertControlMasterPath(controlPath)
 
         Logger.shared.log(.storage, .info, "[SSHSync] SSH 主连接已建立: \(config.username)@\(config.host):\(config.port)")
     }
 
     /// 关闭 SSH 主连接
-    private func closeControlMasterConnection(config: SSHConfig) {
+    private func closeControlMasterConnection(config: SSHConfig) async {
         let controlPath = sshControlPath(for: config)
 
-        let didRemove = controlMasterLock.withLock { () -> Bool in
-            guard activeControlMasterPaths.contains(controlPath) else { return false }
-            activeControlMasterPaths.remove(controlPath)
-            return true
-        }
+        let didRemove = await state.removeControlMasterPath(controlPath)
         guard didRemove else { return }
 
         // 发送退出信号给 ControlMaster
@@ -333,14 +380,12 @@ final class SSHSyncManager: @unchecked Sendable {
     }
 
     /// 关闭所有活跃的 SSH 主连接
-    func closeAllControlMasterConnections() {
-        let paths = controlMasterLock.withLock {
-            Array(activeControlMasterPaths)
-        }
+    func closeAllControlMasterConnections() async {
+        let paths = await state.snapshotControlMasterPaths()
 
         for path in paths {
             if let config = extractConfigFromControlPath(path) {
-                closeControlMasterConnection(config: config)
+                await closeControlMasterConnection(config: config)
             }
         }
     }
@@ -586,136 +631,137 @@ final class SSHSyncManager: @unchecked Sendable {
         config: SSHConfig,
         progressHandler: SSHSyncProgressHandler? = nil
     ) async throws -> [UUID] {
-        try beginSyncOperation(named: "推送笔记")
-        defer { endSyncOperation() }
+        try await withSyncOperation(named: "推送笔记") {
+            let sshpassPath = try checkSshpassAvailable()
+            let controlPath = sshControlPath(for: config)
 
-        let sshpassPath = try checkSshpassAvailable()
-        let controlPath = sshControlPath(for: config)
-        
-        // 建立 SSH 主连接
-        try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
-        
-        defer {
-            // 同步完成后关闭主连接
-            closeControlMasterConnection(config: config)
-        }
-        
-        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
-            .sorted { $0.updatedAt > $1.updatedAt }
-        let existingNoteIDs = Set(notes.map { $0.id })
-        let tombstonedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
-        var syncedNoteIDs: [UUID] = []
-        var indexEntries: [RemoteNoteIndexEntry] = []
-        var allAssetEntries: [AssetsManifestEntry] = []
-        let totalNotes = max(notes.count, 1)
+            // 建立 SSH 主连接
+            try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
 
-        await reportProgress(
-            progressHandler,
-            phase: .pushNotes,
-            current: notes.isEmpty ? 1 : 0,
-            total: totalNotes,
-            message: notes.isEmpty ? "没有需要推送的笔记，正在整理远程索引..." : "正在推送笔记 0/\(notes.count)"
-        )
+            // 注意：control master 关闭仍走 defer + Task，
+            // 因为它不参与互斥锁的 begin/end 状态，仅是 socket 资源清理，
+            // 排在后面执行只会延后释放 socket，不影响下一次同步语义。
+            defer {
+                Task { await closeControlMasterConnection(config: config) }
+            }
 
-        for (index, note) in notes.enumerated() {
-            guard !tombstonedNoteIDs.contains(note.id) else {
+            let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+                .sorted { $0.updatedAt > $1.updatedAt }
+            let existingNoteIDs = Set(notes.map { $0.id })
+            let tombstonedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
+            var syncedNoteIDs: [UUID] = []
+            var indexEntries: [RemoteNoteIndexEntry] = []
+            var allAssetEntries: [AssetsManifestEntry] = []
+            let totalNotes = max(notes.count, 1)
+
+            await reportProgress(
+                progressHandler,
+                phase: .pushNotes,
+                current: notes.isEmpty ? 1 : 0,
+                total: totalNotes,
+                message: notes.isEmpty ? "没有需要推送的笔记，正在整理远程索引..." : "正在推送笔记 0/\(notes.count)"
+            )
+
+            for (index, note) in notes.enumerated() {
+                guard !tombstonedNoteIDs.contains(note.id) else {
+                    await reportProgress(
+                        progressHandler,
+                        phase: .pushNotes,
+                        current: index + 1,
+                        total: totalNotes,
+                        message: "跳过已永久删除笔记 \(index + 1)/\(notes.count)"
+                    )
+                    continue
+                }
+
+                let syncState = try fetchSyncState(noteID: note.id, context: context)
+                let hasUnresolvedConflict = note.hasConflict
+                let shouldSync = !hasUnresolvedConflict && (
+                    syncState == nil ||
+                    syncState!.lastSyncedVersion < note.version ||
+                    syncState!.pendingHistoryCount > 0
+                )
+                if shouldSync {
+                    try await syncNoteToRemote(
+                        noteID: note.id,
+                        context: context,
+                        config: config,
+                        controlPath: controlPath,
+                        updateRemoteCatalog: false
+                    )
+                    syncedNoteIDs.append(note.id)
+                }
+                if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                    indexEntries.append(entry)
+                }
+
+                // 收集附件清单
+                if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
+                    allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
+                }
+
                 await reportProgress(
                     progressHandler,
                     phase: .pushNotes,
                     current: index + 1,
                     total: totalNotes,
-                    message: "跳过已永久删除笔记 \(index + 1)/\(notes.count)"
+                    message: "正在处理笔记 \(index + 1)/\(notes.count)"
                 )
-                continue
             }
 
-            let syncState = try fetchSyncState(noteID: note.id, context: context)
-            let hasUnresolvedConflict = note.hasConflict
-            let shouldSync = !hasUnresolvedConflict && (
-                syncState == nil ||
-                syncState!.lastSyncedVersion < note.version ||
-                syncState!.pendingHistoryCount > 0
+            // 收集本地已永久删除的笔记记录
+            let deletedEntries = try collectLocallyDeletedEntries(
+                existingNoteIDs: existingNoteIDs,
+                context: context
             )
-            if shouldSync {
-                try await syncNoteToRemote(
-                    noteID: note.id,
-                    context: context,
-                    config: config,
-                    controlPath: controlPath,
-                    updateRemoteCatalog: false
-                )
-                syncedNoteIDs.append(note.id)
-            }
-            if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
-                indexEntries.append(entry)
-            }
-
-            // 收集附件清单
-            if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
-                allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
-            }
 
             await reportProgress(
                 progressHandler,
-                phase: .pushNotes,
-                current: index + 1,
-                total: totalNotes,
-                message: "正在处理笔记 \(index + 1)/\(notes.count)"
+                phase: .pushConfig,
+                current: 0,
+                total: 1,
+                message: "正在更新远程索引..."
             )
+            try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config, controlPath: controlPath)
+
+            // 清理已同步删除记录的 SyncState，避免下次推送重复收集
+            cleanupDeletedSyncStates(
+                deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
+                context: context
+            )
+            try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
+            await reportProgress(
+                progressHandler,
+                phase: .pushLibrary,
+                current: 0,
+                total: 1,
+                message: "正在同步文件夹和标签..."
+            )
+            try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
+            await reportProgress(
+                progressHandler,
+                phase: .pushLibrary,
+                current: 1,
+                total: 1,
+                message: "文件夹和标签同步完成"
+            )
+
+            // 清理远程孤儿文件（已删除笔记的 .json 和附件）
+            let activeNoteIDs = Set(indexEntries.map { $0.noteID })
+            try await cleanupRemoteOrphanFiles(
+                activeNoteIDs: activeNoteIDs,
+                deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
+                config: config,
+                controlPath: controlPath
+            )
+
+            // 裁剪历史版本，避免无限增长
+            for note in notes {
+                try? BlockDocumentNoteVersionStore.pruneHistory(noteID: note.id, context: context)
+            }
+
+            return syncedNoteIDs
         }
-
-        // 收集本地已永久删除的笔记记录
-        let deletedEntries = try collectLocallyDeletedEntries(
-            existingNoteIDs: existingNoteIDs,
-            context: context
-        )
-
-        await reportProgress(
-            progressHandler,
-            phase: .pushConfig,
-            current: 0,
-            total: 1,
-            message: "正在更新远程索引..."
-        )
-        try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config, controlPath: controlPath)
-
-        // 清理已同步删除记录的 SyncState，避免下次推送重复收集
-        cleanupDeletedSyncStates(
-            deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
-            context: context
-        )
-        try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
-        await reportProgress(
-            progressHandler,
-            phase: .pushLibrary,
-            current: 0,
-            total: 1,
-            message: "正在同步文件夹和标签..."
-        )
-        try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
-        await reportProgress(
-            progressHandler,
-            phase: .pushLibrary,
-            current: 1,
-            total: 1,
-            message: "文件夹和标签同步完成"
-        )
-
-        // 清理远程孤儿文件（已删除笔记的 .json 和附件）
-        let activeNoteIDs = Set(indexEntries.map { $0.noteID })
-        try await cleanupRemoteOrphanFiles(
-            activeNoteIDs: activeNoteIDs,
-            deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
-            config: config,
-            controlPath: controlPath
-        )
-
-        // 裁剪历史版本，避免无限增长
-        for note in notes {
-            try? BlockDocumentNoteVersionStore.pruneHistory(noteID: note.id, context: context)
-        }
-
-        return syncedNoteIDs
     }
 
     func syncNoteFromRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws -> NoteSyncMergeResult {
@@ -740,66 +786,163 @@ final class SSHSyncManager: @unchecked Sendable {
         config: SSHConfig,
         progressHandler: SSHSyncProgressHandler? = nil
     ) async throws -> [NoteSyncMergeResult] {
-        try beginSyncOperation(named: "拉取笔记")
-        defer { endSyncOperation() }
+        try await withSyncOperation(named: "拉取笔记") {
+            let sshpassPath = try checkSshpassAvailable()
+            let controlPath = sshControlPath(for: config)
 
-        let sshpassPath = try checkSshpassAvailable()
-        let controlPath = sshControlPath(for: config)
-        
-        // 建立 SSH 主连接
-        try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
-        
-        defer {
-            // 同步完成后关闭主连接
-            closeControlMasterConnection(config: config)
-        }
-        
-        // 先拉取文件夹和标签
-        await reportProgress(
-            progressHandler,
-            phase: .pullLibrary,
-            current: 0,
-            total: 1,
-            message: "正在拉取文件夹和标签..."
-        )
-        try await syncLibraryFromRemote(context: context, config: config, controlPath: controlPath)
-        await reportProgress(
-            progressHandler,
-            phase: .pullLibrary,
-            current: 1,
-            total: 1,
-            message: "文件夹和标签拉取完成"
-        )
+            // 建立 SSH 主连接
+            try await establishControlMasterConnection(sshpassPath: sshpassPath, config: config)
 
-        let cachedSyncState = loadRemoteSyncCacheState(config: config)
-        let remoteIndexBundle = try await resolveRemoteIndexBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
-        let remoteManifestBundle = try await resolveAssetsManifestBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
-        let remoteAssetMap = remoteManifestBundle.manifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
-            $0[$1.relativePath] = $1
-        } ?? [:]
-        var finalNoteIndexHash = remoteIndexBundle.payloadHash
-        var finalNoteIndexPayload = remoteIndexBundle.payload
-        let finalAssetsManifestHash = remoteManifestBundle.payloadHash
-        let finalAssetsManifestPayload = remoteManifestBundle.payload
+            // control master 关闭不参与 begin/end 互斥，延后释放 socket 即可
+            defer {
+                Task { await closeControlMasterConnection(config: config) }
+            }
 
-        guard let remoteIndex = remoteIndexBundle.index else {
-            // index.json 不存在视为空仓库，不做任何拉取
-            // 但仍需处理本地已有笔记的补充附件下载
-            Logger.shared.log(.storage, .info, "[SSHSync] 远程 index.json 不存在，视为空仓库")
+            // 先拉取文件夹和标签
+            await reportProgress(
+                progressHandler,
+                phase: .pullLibrary,
+                current: 0,
+                total: 1,
+                message: "正在拉取文件夹和标签..."
+            )
+            try await syncLibraryFromRemote(context: context, config: config, controlPath: controlPath)
+            await reportProgress(
+                progressHandler,
+                phase: .pullLibrary,
+                current: 1,
+                total: 1,
+                message: "文件夹和标签拉取完成"
+            )
+
+            let cachedSyncState = loadRemoteSyncCacheState(config: config)
+            let remoteIndexBundle = try await resolveRemoteIndexBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
+            let remoteManifestBundle = try await resolveAssetsManifestBundle(config: config, cachedState: cachedSyncState, controlPath: controlPath)
+            let remoteAssetMap = remoteManifestBundle.manifest?.entries.reduce(into: [String: AssetsManifestEntry]()) {
+                $0[$1.relativePath] = $1
+            } ?? [:]
+            var finalNoteIndexHash = remoteIndexBundle.payloadHash
+            var finalNoteIndexPayload = remoteIndexBundle.payload
+            let finalAssetsManifestHash = remoteManifestBundle.payloadHash
+            let finalAssetsManifestPayload = remoteManifestBundle.payload
+
+            guard let remoteIndex = remoteIndexBundle.index else {
+                // index.json 不存在视为空仓库，不做任何拉取
+                // 但仍需处理本地已有笔记的补充附件下载
+                Logger.shared.log(.storage, .info, "[SSHSync] 远程 index.json 不存在，视为空仓库")
+                await reportProgress(
+                    progressHandler,
+                    phase: .pullNotes,
+                    current: 1,
+                    total: 1,
+                    message: "远程暂无可拉取的笔记"
+                )
+                _ = try await downloadMissingAssetsForExistingNotes(
+                    context: context,
+                    config: config,
+                    remoteManifest: remoteManifestBundle.manifest,
+                    progressHandler: progressHandler,
+                    controlPath: controlPath
+                )
+                saveRemoteSyncCacheState(
+                    RemoteSyncCacheState(
+                        noteIndexHash: finalNoteIndexHash,
+                        noteIndexPayload: finalNoteIndexPayload,
+                        assetsManifestHash: finalAssetsManifestHash,
+                        assetsManifestPayload: finalAssetsManifestPayload,
+                        updatedAt: Date()
+                    ),
+                    config: config
+                )
+                return []
+            }
+
+            let didRemoteIndexChange = remoteIndexBundle.payloadHash == nil || remoteIndexBundle.payloadHash != cachedSyncState?.noteIndexHash
+
+            // 处理远程已删除的笔记：对本地存在的笔记执行软删除
+            if didRemoteIndexChange {
+                try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
+            }
+
+            // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
+            let noteIDs: [UUID]
+            if didRemoteIndexChange {
+                let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
+                noteIDs = remoteIndex.entries
+                    .filter { entry in
+                        // 跳过已删除的笔记
+                        guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
+                        guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
+                            return true
+                        }
+                        if entry.version > syncState.lastRemoteVersion {
+                            return true
+                        }
+                        return entry.contentHash != syncState.remoteFingerprint
+                    }
+                    .map(\.noteID)
+                    .sorted { $0.uuidString < $1.uuidString }
+            } else {
+                noteIDs = []
+            }
+            let totalNotes = max(noteIDs.count, 1)
+
             await reportProgress(
                 progressHandler,
                 phase: .pullNotes,
-                current: 1,
-                total: 1,
-                message: "远程暂无可拉取的笔记"
+                current: noteIDs.isEmpty ? 1 : 0,
+                total: totalNotes,
+                message: didRemoteIndexChange
+                    ? (noteIDs.isEmpty ? "远程笔记清单有更新，但没有需要拉取的笔记" : "正在拉取笔记 0/\(noteIDs.count)")
+                    : "远程笔记清单未变化，跳过笔记下载"
             )
-            _ = try await downloadMissingAssetsForExistingNotes(
+
+            let syncOutcome = try await syncRemoteNotesInBatches(
+                noteIDs: noteIDs,
                 context: context,
                 config: config,
-                remoteManifest: remoteManifestBundle.manifest,
+                remoteAssetMap: remoteAssetMap,
+                hasRemoteAssetsManifest: remoteManifestBundle.manifest != nil,
                 progressHandler: progressHandler,
                 controlPath: controlPath
             )
+            let results = syncOutcome.results
+            let missingRemoteNoteIDs = syncOutcome.missingRemoteNoteIDs
+
+            if !missingRemoteNoteIDs.isEmpty {
+                do {
+                    let healedIndex = try await healRemoteIndex(
+                        remoteIndex,
+                        removingMissingNoteIDs: Set(missingRemoteNoteIDs),
+                        config: config,
+                        controlPath: controlPath
+                    )
+                    finalNoteIndexPayload = try encodeRemoteNoteIndex(healedIndex)
+                    if let finalNoteIndexPayload {
+                        finalNoteIndexHash = Self.payloadDigest(for: finalNoteIndexPayload)
+                    }
+                    Logger.shared.log(.storage, .info, "[SSHSync] 远程索引自愈完成，移除 \(missingRemoteNoteIDs.count) 条缺失笔记引用")
+                } catch {
+                    Logger.shared.log(.storage, .error, "[SSHSync] 远程索引自愈失败：\(error.localizedDescription)")
+                }
+            }
+
+            // 补充下载：检查所有已有笔记中缺失的附件文件
+            do {
+                _ = try await downloadMissingAssetsForExistingNotes(
+                    context: context,
+                    config: config,
+                    remoteManifest: remoteManifestBundle.manifest,
+                    progressHandler: progressHandler,
+                    controlPath: controlPath
+                )
+            } catch {
+                if !isRemoteFileMissing(error) {
+                    throw error
+                }
+                Logger.shared.log(.storage, .warn, "[SSHSync] 补充下载附件时远程文件缺失，跳过：\(error.localizedDescription)")
+            }
+
             saveRemoteSyncCacheState(
                 RemoteSyncCacheState(
                     noteIndexHash: finalNoteIndexHash,
@@ -810,112 +953,14 @@ final class SSHSyncManager: @unchecked Sendable {
                 ),
                 config: config
             )
-            return []
-        }
 
-        let didRemoteIndexChange = remoteIndexBundle.payloadHash == nil || remoteIndexBundle.payloadHash != cachedSyncState?.noteIndexHash
-
-        // 处理远程已删除的笔记：对本地存在的笔记执行软删除
-        if didRemoteIndexChange {
-            try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
-        }
-
-        // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
-        let noteIDs: [UUID]
-        if didRemoteIndexChange {
-            let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
-            noteIDs = remoteIndex.entries
-                .filter { entry in
-                    // 跳过已删除的笔记
-                    guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
-                    guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
-                        return true
-                    }
-                    if entry.version > syncState.lastRemoteVersion {
-                        return true
-                    }
-                    return entry.contentHash != syncState.remoteFingerprint
-                }
-                .map(\.noteID)
-                .sorted { $0.uuidString < $1.uuidString }
-        } else {
-            noteIDs = []
-        }
-        let totalNotes = max(noteIDs.count, 1)
-
-        await reportProgress(
-            progressHandler,
-            phase: .pullNotes,
-            current: noteIDs.isEmpty ? 1 : 0,
-            total: totalNotes,
-            message: didRemoteIndexChange
-                ? (noteIDs.isEmpty ? "远程笔记清单有更新，但没有需要拉取的笔记" : "正在拉取笔记 0/\(noteIDs.count)")
-                : "远程笔记清单未变化，跳过笔记下载"
-        )
-
-        let syncOutcome = try await syncRemoteNotesInBatches(
-            noteIDs: noteIDs,
-            context: context,
-            config: config,
-            remoteAssetMap: remoteAssetMap,
-            hasRemoteAssetsManifest: remoteManifestBundle.manifest != nil,
-            progressHandler: progressHandler,
-            controlPath: controlPath
-        )
-        let results = syncOutcome.results
-        let missingRemoteNoteIDs = syncOutcome.missingRemoteNoteIDs
-
-        if !missingRemoteNoteIDs.isEmpty {
-            do {
-                let healedIndex = try await healRemoteIndex(
-                    remoteIndex,
-                    removingMissingNoteIDs: Set(missingRemoteNoteIDs),
-                    config: config,
-                    controlPath: controlPath
-                )
-                finalNoteIndexPayload = try encodeRemoteNoteIndex(healedIndex)
-                if let finalNoteIndexPayload {
-                    finalNoteIndexHash = Self.payloadDigest(for: finalNoteIndexPayload)
-                }
-                Logger.shared.log(.storage, .info, "[SSHSync] 远程索引自愈完成，移除 \(missingRemoteNoteIDs.count) 条缺失笔记引用")
-            } catch {
-                Logger.shared.log(.storage, .error, "[SSHSync] 远程索引自愈失败：\(error.localizedDescription)")
+            // 裁剪历史版本，避免远程导入后本地历史无限增长
+            for result in results {
+                try? BlockDocumentNoteVersionStore.pruneHistory(noteID: result.noteID, context: context)
             }
+
+            return results
         }
-
-        // 补充下载：检查所有已有笔记中缺失的附件文件
-        do {
-            _ = try await downloadMissingAssetsForExistingNotes(
-                context: context,
-                config: config,
-                remoteManifest: remoteManifestBundle.manifest,
-                progressHandler: progressHandler,
-                controlPath: controlPath
-            )
-        } catch {
-            if !isRemoteFileMissing(error) {
-                throw error
-            }
-            Logger.shared.log(.storage, .warn, "[SSHSync] 补充下载附件时远程文件缺失，跳过：\(error.localizedDescription)")
-        }
-
-        saveRemoteSyncCacheState(
-            RemoteSyncCacheState(
-                noteIndexHash: finalNoteIndexHash,
-                noteIndexPayload: finalNoteIndexPayload,
-                assetsManifestHash: finalAssetsManifestHash,
-                assetsManifestPayload: finalAssetsManifestPayload,
-                updatedAt: Date()
-            ),
-            config: config
-        )
-
-        // 裁剪历史版本，避免远程导入后本地历史无限增长
-        for result in results {
-            try? BlockDocumentNoteVersionStore.pruneHistory(noteID: result.noteID, context: context)
-        }
-
-        return results
     }
 
     private func syncRemoteNotesInBatches(

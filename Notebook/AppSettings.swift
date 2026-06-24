@@ -37,11 +37,16 @@ final class AppSettings: ObservableObject {
         static let githubRepositoryURL = "update.github_repository_url"
         static let recentNoteLoadLimit = "notes.recent_load_limit"
         static let recentSelectedNoteIDs = "notes.recent_selected_ids"
+        static let aiKnowledgeBaseTopK = "ai.knowledge_base_top_k"
     }
 
     static let defaultRecentNoteLoadLimit = 5
     static let minRecentNoteLoadLimit = 1
     static let maxRecentNoteLoadLimit = 50
+
+    static let defaultAIKnowledgeBaseTopK = 5
+    static let minAIKnowledgeBaseTopK = 1
+    static let maxAIKnowledgeBaseTopK = 20
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
     private enum iCloudKeys {
@@ -89,6 +94,22 @@ final class AppSettings: ObservableObject {
         set {
             defaults.set(Self.clampedRecentNoteLoadLimit(newValue), forKey: Keys.recentNoteLoadLimit)
         }
+    }
+
+    // MARK: - AI 全库问答 Top-K 数量
+
+    var aiKnowledgeBaseTopK: Int {
+        get {
+            let storedValue = defaults.object(forKey: Keys.aiKnowledgeBaseTopK) as? Int
+            return Self.clampedAIKnowledgeBaseTopK(storedValue ?? Self.defaultAIKnowledgeBaseTopK)
+        }
+        set {
+            defaults.set(Self.clampedAIKnowledgeBaseTopK(newValue), forKey: Keys.aiKnowledgeBaseTopK)
+        }
+    }
+
+    private static func clampedAIKnowledgeBaseTopK(_ value: Int) -> Int {
+        min(max(value, minAIKnowledgeBaseTopK), maxAIKnowledgeBaseTopK)
     }
 
     var recentSelectedNoteIDs: [UUID] {

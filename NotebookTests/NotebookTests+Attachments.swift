@@ -200,6 +200,7 @@ extension NotebookTests {
         XCTAssertEqual(attachment.attachmentFilename, "sample-audio.mp3")
     }
 
+    @MainActor
     func testSerializedAttachmentsRecoverPresentationAfterRTFDRoundTrip() throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)

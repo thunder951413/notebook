@@ -146,42 +146,42 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
         modelContext.insert(noteEntity)
 
         for asset in persistedAssets {
-            modelContext.insert(
-                BlockDocumentAssetEntity(
-                    noteID: note.metadata.id,
-                    assetID: asset.reference.id,
-                    kind: asset.reference.kind,
-                    sourceKind: asset.reference.kind,
-                    filename: asset.reference.filename,
-                    mimeType: asset.reference.mimeType,
-                    width: asset.reference.width,
-                    height: asset.reference.height,
-                    duration: asset.reference.duration,
-                    createdAt: asset.reference.createdAt,
-                    relativeFilePath: asset.relativeFilePath,
-                    sidecarPathsPayload: try encodeJSON(asset.sidecarRelativePaths)
-                )
+            let assetEntity = BlockDocumentAssetEntity(
+                noteID: note.metadata.id,
+                assetID: asset.reference.id,
+                kind: asset.reference.kind,
+                sourceKind: asset.reference.kind,
+                filename: asset.reference.filename,
+                mimeType: asset.reference.mimeType,
+                width: asset.reference.width,
+                height: asset.reference.height,
+                duration: asset.reference.duration,
+                createdAt: asset.reference.createdAt,
+                relativeFilePath: asset.relativeFilePath,
+                sidecarPathsPayload: try encodeJSON(asset.sidecarRelativePaths)
             )
+            assetEntity.note = noteEntity
+            modelContext.insert(assetEntity)
         }
 
         for (position, block) in note.document.blocks.enumerated() {
-            modelContext.insert(
-                BlockDocumentBlockEntity(
-                    noteID: note.metadata.id,
-                    position: position,
-                    blockID: block.id,
-                    kind: block.type,
-                    sourceType: block.type,
-                    textPayload: try encodeTextPayload(block.text ?? []),
-                    level: block.level,
-                    listStyle: block.listStyle,
-                    order: block.order,
-                    checked: block.checked,
-                    indent: block.indent,
-                    assetID: block.asset?.id,
-                    tablePayload: try encodeTablePayload(block.table)
-                )
+            let blockEntity = BlockDocumentBlockEntity(
+                noteID: note.metadata.id,
+                position: position,
+                blockID: block.id,
+                kind: block.type,
+                sourceType: block.type,
+                textPayload: try encodeTextPayload(block.text ?? []),
+                level: block.level,
+                listStyle: block.listStyle,
+                order: block.order,
+                checked: block.checked,
+                indent: block.indent,
+                assetID: block.asset?.id,
+                tablePayload: try encodeTablePayload(block.table)
             )
+            blockEntity.note = noteEntity
+            modelContext.insert(blockEntity)
         }
 
         try modelContext.save()

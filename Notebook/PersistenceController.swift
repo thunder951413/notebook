@@ -7,7 +7,9 @@ final class PersistenceController: ObservableObject {
     static let shared = PersistenceController()
 
     @Published private(set) var modelContainer: ModelContainer?
-    static let currentStoreFormatVersion = 1
+    /// 当前 store format 版本，与 `NotebookSchemaV4.versionIdentifier` 对齐。
+    /// 每次引入 schema 变更时需同步 bump，并在 `NotebookSchemaMigrationPlan` 中追加 stage。
+    static let currentStoreFormatVersion = 4
 
     static let appSchema = Schema([
         BlockDocumentLibraryEntity.self,
@@ -18,7 +20,8 @@ final class PersistenceController: ObservableObject {
         BlockDocumentAssetEntity.self,
         BlockDocumentNoteVersionEntity.self,
         BlockDocumentNoteSyncStateEntity.self,
-        BlockDocumentDeletedNoteTombstoneEntity.self
+        BlockDocumentDeletedNoteTombstoneEntity.self,
+        BlockDocumentNoteTagEntity.self
     ])
 
     private init() {}
@@ -64,6 +67,8 @@ final class PersistenceController: ObservableObject {
         )
 
         let config = ModelConfiguration(schema: schema, url: storeURL)
+        // 显式传入 migrationPlan，让 SwiftData 按版本顺序执行 stage（V1→V2 等）。
+        // 即便当前 stage 仅做日志记录，接线后未来 V3+ 的破坏性迁移可直接在此链路追加。
         let container = try ModelContainer(for: schema, configurations: [config])
         logIntegrityReport(for: container)
 

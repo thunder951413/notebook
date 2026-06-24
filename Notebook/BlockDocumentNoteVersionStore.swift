@@ -712,42 +712,42 @@ enum BlockDocumentNoteVersionStore {
         note.assetCount = snapshot.assets.count
 
         for asset in snapshot.assets {
-            context.insert(
-                BlockDocumentAssetEntity(
-                    noteID: note.id,
-                    assetID: asset.reference.id,
-                    kind: asset.reference.kind,
-                    sourceKind: asset.reference.kind,
-                    filename: asset.reference.filename,
-                    mimeType: asset.reference.mimeType,
-                    width: asset.reference.width,
-                    height: asset.reference.height,
-                    duration: asset.reference.duration,
-                    createdAt: asset.reference.createdAt,
-                    relativeFilePath: asset.relativeFilePath,
-                    sidecarPathsPayload: try jsonEncoder.encode(asset.sidecarRelativePaths)
-                )
+            let assetEntity = BlockDocumentAssetEntity(
+                noteID: note.id,
+                assetID: asset.reference.id,
+                kind: asset.reference.kind,
+                sourceKind: asset.reference.kind,
+                filename: asset.reference.filename,
+                mimeType: asset.reference.mimeType,
+                width: asset.reference.width,
+                height: asset.reference.height,
+                duration: asset.reference.duration,
+                createdAt: asset.reference.createdAt,
+                relativeFilePath: asset.relativeFilePath,
+                sidecarPathsPayload: try jsonEncoder.encode(asset.sidecarRelativePaths)
             )
+            assetEntity.note = note
+            context.insert(assetEntity)
         }
 
         for (position, block) in snapshot.document.blocks.enumerated() {
-            context.insert(
-                BlockDocumentBlockEntity(
-                    noteID: note.id,
-                    position: position,
-                    blockID: block.id,
-                    kind: block.type,
-                    sourceType: block.type,
-                    textPayload: try block.text.map { try jsonEncoder.encode($0.map(mapTextPayload)) },
-                    level: block.level,
-                    listStyle: block.listStyle,
-                    order: block.order,
-                    checked: block.checked,
-                    indent: block.indent,
-                    assetID: block.asset?.id,
-                    tablePayload: try block.table.map { try jsonEncoder.encode(BlockDocumentTablePayload(rows: $0.rows, columnWidths: $0.columnWidths, rowHeights: $0.rowHeights)) }
-                )
+            let blockEntity = BlockDocumentBlockEntity(
+                noteID: note.id,
+                position: position,
+                blockID: block.id,
+                kind: block.type,
+                sourceType: block.type,
+                textPayload: try block.text.map { try jsonEncoder.encode($0.map(mapTextPayload)) },
+                level: block.level,
+                listStyle: block.listStyle,
+                order: block.order,
+                checked: block.checked,
+                indent: block.indent,
+                assetID: block.asset?.id,
+                tablePayload: try block.table.map { try jsonEncoder.encode(BlockDocumentTablePayload(rows: $0.rows, columnWidths: $0.columnWidths, rowHeights: $0.rowHeights)) }
             )
+            blockEntity.note = note
+            context.insert(blockEntity)
         }
         // 清空脏检查哈希：应用远程/冲突快照后，下次本地保存将重新计算并纠正
         note.lastSavedContentHash = ""

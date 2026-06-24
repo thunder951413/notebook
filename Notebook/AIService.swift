@@ -37,7 +37,7 @@ class AIService: ObservableObject {
         
         let body = RequestBody(
             model: model,
-            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", text: $0.content, images: $0.images) },
+            messages: messages.map { Message(role: $0.resolvedRole, text: $0.content, images: $0.images) },
             temperature: temperature,
             max_tokens: maxTokens
         )
@@ -88,7 +88,7 @@ class AIService: ObservableObject {
         // 使用非流式模式，简化处理
         let body = RequestBody(
             model: model,
-            messages: messages.map { Message(role: $0.isUser ? "user" : "assistant", text: $0.content, images: $0.images) },
+            messages: messages.map { Message(role: $0.resolvedRole, text: $0.content, images: $0.images) },
             temperature: temperature,
             max_tokens: maxTokens,
             stream: false
@@ -155,12 +155,20 @@ struct AIMessageDTO: Identifiable {
     let content: String
     let isUser: Bool
     let images: [AIImageAttachment]
-    
-    init(id: UUID = UUID(), content: String, isUser: Bool, images: [AIImageAttachment] = []) {
+    /// 显式指定 role（如 "system"）。为 nil 时按 isUser 推导 "user"/"assistant"。
+    let role: String?
+
+    init(id: UUID = UUID(), content: String, isUser: Bool, images: [AIImageAttachment] = [], role: String? = nil) {
         self.id = id
         self.content = content
         self.isUser = isUser
         self.images = images
+        self.role = role
+    }
+
+    /// 解析最终 role：显式 role 优先，否则按 isUser 推导
+    var resolvedRole: String {
+        role ?? (isUser ? "user" : "assistant")
     }
 }
 
