@@ -70,6 +70,7 @@ final class BlockDocumentFolderEntity {
     var sortOrder: Int
     var isSystem: Bool
     var createdAt: Date?
+    var folderType: String = FolderType.noteFolder.rawValue
 
     init(
         id: UUID,
@@ -77,7 +78,8 @@ final class BlockDocumentFolderEntity {
         name: String,
         sortOrder: Int,
         isSystem: Bool,
-        createdAt: Date?
+        createdAt: Date?,
+        folderType: String = FolderType.noteFolder.rawValue
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -85,6 +87,7 @@ final class BlockDocumentFolderEntity {
         self.sortOrder = sortOrder
         self.isSystem = isSystem
         self.createdAt = createdAt
+        self.folderType = folderType
     }
 }
 
@@ -140,6 +143,12 @@ final class BlockDocumentNoteEntity {
     var lastSavedContentHash: String = ""
     var hasConflict: Bool = false
     @Attribute(.externalStorage) var conflictRemoteSnapshotData: Data?
+    var itemType: String = "note"
+    var todoDueAt: Date?
+    var todoCompletedAt: Date?
+    var todoIsImportant: Bool = false
+    var todoOrder: Int = 0
+    var linkedNoteIDs: String = ""
 
     // MARK: — Relationships（与 UUID 字段并存）
     // 设计说明：保留 noteID: UUID 字段以维持现有基于 predicate 的查询兼容性
@@ -172,7 +181,13 @@ final class BlockDocumentNoteEntity {
         documentSource: String,
         blockCount: Int,
         assetCount: Int,
-        lastSavedContentHash: String = ""
+        lastSavedContentHash: String = "",
+        itemType: String = "note",
+        todoDueAt: Date? = nil,
+        todoCompletedAt: Date? = nil,
+        todoIsImportant: Bool = false,
+        todoOrder: Int = 0,
+        linkedNoteIDs: String = ""
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -194,6 +209,12 @@ final class BlockDocumentNoteEntity {
         self.blockCount = blockCount
         self.assetCount = assetCount
         self.lastSavedContentHash = lastSavedContentHash
+        self.itemType = itemType
+        self.todoDueAt = todoDueAt
+        self.todoCompletedAt = todoCompletedAt
+        self.todoIsImportant = todoIsImportant
+        self.todoOrder = todoOrder
+        self.linkedNoteIDs = linkedNoteIDs
     }
 }
 
@@ -417,5 +438,34 @@ final class BlockDocumentNoteTagEntity {
         self.tagID = tagID
         self.libraryID = libraryID
         self.sortOrder = sortOrder
+    }
+}
+
+@Model
+final class TodoStepEntity {
+    @Attribute(.unique) var id: UUID
+    var noteID: UUID
+    var libraryID: UUID
+    var text: String
+    var checked: Bool
+    var order: Int
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        noteID: UUID,
+        libraryID: UUID,
+        text: String,
+        checked: Bool = false,
+        order: Int = 0,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.noteID = noteID
+        self.libraryID = libraryID
+        self.text = text
+        self.checked = checked
+        self.order = order
+        self.createdAt = createdAt
     }
 }

@@ -28,7 +28,7 @@ struct PasswordVerificationView: View {
                 .font(.title3)
                 .bold()
             
-            Text("请输入密码以查看加密内容")
+            Text("请输入密码以查看锁定内容")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             

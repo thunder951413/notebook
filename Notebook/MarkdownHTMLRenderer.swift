@@ -133,11 +133,12 @@ struct MarkdownHTMLRenderer {
             html = html.replacingOccurrences(of: block.placeholder, with: block.html)
         }
 
+        let scriptNonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let mermaidScripts: String
         if markdownSource.contains("```mermaid") {
             mermaidScripts = """
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-            <script>
+            <script nonce="\(scriptNonce)" src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script nonce="\(scriptNonce)">
                 mermaid.initialize({
                     startOnLoad: true,
                     theme: '\(colorScheme == .dark ? "dark" : "default")',
@@ -154,6 +155,7 @@ struct MarkdownHTMLRenderer {
         <html>
         <head>
             <meta charset="UTF-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src data: file: blob:; media-src data: file: blob:; style-src 'unsafe-inline'; script-src 'nonce-\(scriptNonce)' https://cdn.jsdelivr.net; connect-src 'none'">
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;

@@ -93,7 +93,8 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
                     name: folder.name,
                     sortOrder: folder.sortOrder,
                     isSystem: folder.isSystem,
-                    createdAt: folder.createdAt
+                    createdAt: folder.createdAt,
+                    folderType: folder.folderType ?? FolderType.noteFolder.rawValue
                 )
             )
         }
@@ -141,7 +142,13 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
             documentSchemaVersion: note.document.schemaVersion,
             documentSource: note.document.source,
             blockCount: note.document.blocks.count,
-            assetCount: persistedAssets.count
+            assetCount: persistedAssets.count,
+            itemType: note.metadata.itemType ?? "note",
+            todoDueAt: note.metadata.todoDueAt,
+            todoCompletedAt: note.metadata.todoCompletedAt,
+            todoIsImportant: note.metadata.todoIsImportant ?? false,
+            todoOrder: note.metadata.todoOrder ?? 0,
+            linkedNoteIDs: UUIDListCoding.encode(note.metadata.linkedNoteIDs ?? [])
         )
         modelContext.insert(noteEntity)
 
@@ -195,6 +202,21 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
         libraryEntity.folderCount = package.manifest.folders.count
         libraryEntity.tagCount = package.manifest.tags.count
         libraryEntity.importedAt = Date()
+
+        for step in package.manifest.todoSteps ?? [] {
+            modelContext.insert(
+                TodoStepEntity(
+                    id: step.id,
+                    noteID: step.noteID,
+                    libraryID: libraryEntity.id,
+                    text: step.text,
+                    checked: step.checked,
+                    order: step.order,
+                    createdAt: step.createdAt
+                )
+            )
+        }
+
         try modelContext.save()
     }
 

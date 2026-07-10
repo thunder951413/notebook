@@ -164,6 +164,35 @@ struct L10nKeys {
         static let monthly = "note.recurrence.monthly"
     }
 
+    struct Todo {
+        static let title = "todo.title"
+        static let today = "todo.today"
+        static let important = "todo.important"
+        static let untitled = "todo.untitled"
+        static let titlePlaceholder = "todo.title.placeholder"
+        static let steps = "todo.steps"
+        static let newStep = "todo.step.new"
+        static let notes = "todo.notes"
+        static let dueDate = "todo.dueDate"
+        static let due = "todo.due"
+        static let reminder = "todo.reminder"
+        static let reminderAt = "todo.reminderAt"
+        static let recurrence = "todo.recurrence"
+        static let list = "todo.list"
+        static let noList = "todo.list.none"
+        static let linkedNotes = "todo.linkedNotes"
+        static let noLinkedNotes = "todo.linkedNotes.none"
+        static let select = "todo.select"
+        static let reminderTitle = "todo.reminder.title"
+        static let deletedNote = "todo.linkedNote.deleted"
+        static let listManagement = "todo.list.management"
+        static let newList = "todo.list.new"
+        static let newListTitle = "todo.list.new.title"
+        static let listName = "todo.list.name"
+        static let listNamePrompt = "todo.list.name.prompt"
+        static let manageLists = "todo.list.manage"
+    }
+
     // MARK: - 文件夹
     struct Folder {
         static let allNotes = "folder.all"

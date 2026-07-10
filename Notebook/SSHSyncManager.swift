@@ -68,6 +68,7 @@ struct FolderSyncEntry: Codable {
     let sortOrder: Int
     let isSystem: Bool
     let createdAt: Date?
+    let folderType: String?
 }
 
 struct TagSyncEntry: Codable {
@@ -2269,7 +2270,7 @@ final class SSHSyncManager: Sendable {
             exportedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
             folders: folders.map {
-                FolderSyncEntry(id: $0.id, name: $0.name, sortOrder: $0.sortOrder, isSystem: $0.isSystem, createdAt: $0.createdAt)
+                FolderSyncEntry(id: $0.id, name: $0.name, sortOrder: $0.sortOrder, isSystem: $0.isSystem, createdAt: $0.createdAt, folderType: $0.folderType)
             },
             tags: tags.map {
                 TagSyncEntry(id: $0.id, name: $0.name, color: $0.color, createdAt: $0.createdAt)
@@ -2338,6 +2339,7 @@ final class SSHSyncManager: Sendable {
             if let existing = try context.fetch(descriptor).first {
                 existing.name = remoteFolder.name
                 existing.sortOrder = remoteFolder.sortOrder
+                existing.folderType = remoteFolder.folderType ?? FolderType.noteFolder.rawValue
             } else {
                 let entity = BlockDocumentFolderEntity(
                     id: remoteFolder.id,
@@ -2345,7 +2347,8 @@ final class SSHSyncManager: Sendable {
                     name: remoteFolder.name,
                     sortOrder: remoteFolder.sortOrder,
                     isSystem: remoteFolder.isSystem,
-                    createdAt: remoteFolder.createdAt
+                    createdAt: remoteFolder.createdAt,
+                    folderType: remoteFolder.folderType ?? FolderType.noteFolder.rawValue
                 )
                 context.insert(entity)
             }

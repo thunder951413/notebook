@@ -124,7 +124,7 @@ extension NotebookTests {
     @MainActor
     func testImportConfigurationUsesPlistRadialSettingsAndSkipsStorageBookmark() async throws {
         let defaults = UserDefaults.standard
-        let keysToClear = [
+        let keysToRestore = [
             "radialMenuEnabled",
             "radialMenuTrigger",
             "radialMenuRadius",
@@ -133,11 +133,22 @@ extension NotebookTests {
             "startup_behavior",
             "storageDirectoryBookmark"
         ]
+        let previousValues: [String: Any] = Dictionary(
+            uniqueKeysWithValues: keysToRestore.compactMap { key in
+                defaults.object(forKey: key).map { (key, $0) }
+            }
+        )
         defer {
-            for key in keysToClear {
-                defaults.removeObject(forKey: key)
+            for key in keysToRestore {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
             }
         }
+
+        let bookmarkBeforeImport = defaults.data(forKey: "storageDirectoryBookmark")
 
         let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
@@ -171,7 +182,7 @@ extension NotebookTests {
         XCTAssertEqual(defaults.double(forKey: "radialMenuRadius"), 160.0, accuracy: 0.001)
         XCTAssertEqual(defaults.double(forKey: "radialMenuItemSize"), 52.0, accuracy: 0.001)
         XCTAssertEqual(defaults.double(forKey: "radialMenuScale"), 1.2, accuracy: 0.001)
-        XCTAssertNil(defaults.object(forKey: "storageDirectoryBookmark"))
+        XCTAssertEqual(defaults.data(forKey: "storageDirectoryBookmark"), bookmarkBeforeImport)
     }
 
     @MainActor
@@ -233,10 +244,16 @@ extension NotebookTests {
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
 
         let storage = StorageLocationManager.shared
+        let previousBaseURL = storage.baseDirectoryURL
+        let previousBookmark = UserDefaults.standard.data(forKey: "storageDirectoryBookmark")
         storage.setBaseDirectoryForTesting(baseDirectory)
         defer {
-            storage.setBaseDirectoryForTesting(nil)
-            UserDefaults.standard.removeObject(forKey: "storageDirectoryBookmark")
+            storage.setBaseDirectoryForTesting(previousBaseURL)
+            if let previousBookmark {
+                UserDefaults.standard.set(previousBookmark, forKey: "storageDirectoryBookmark")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "storageDirectoryBookmark")
+            }
             try? FileManager.default.removeItem(at: baseDirectory)
         }
 

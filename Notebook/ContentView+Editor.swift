@@ -97,6 +97,31 @@ struct NoteEditorView: View {
                         Divider()
                             .padding(.horizontal, 16)
 
+                        let linkedTodos = store.activeTodoItems.filter { $0.linkedNoteIDs.contains(note.id) }
+                        if !linkedTodos.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    Text("关联 Todo")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    ForEach(linkedTodos) { todo in
+                                        Button {
+                                            store.selectedTodoId = todo.id
+                                        } label: {
+                                            Label(todo.title.isEmpty ? "无标题任务" : todo.title, systemImage: todo.isCompleted ? "checkmark.circle.fill" : "circle")
+                                                .lineLimit(1)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                            }
+                            Divider()
+                                .padding(.horizontal, 16)
+                        }
+
                         switch note.viewMode {
                         case .text:
                             // 富文本编辑模式
@@ -502,9 +527,9 @@ struct EditorTopBarView: View {
                     if isEncryptedFolderUnlocked {
                         Divider()
 
-                        Menu("🔒 加密文件夹") {
+                        Menu("🔒 锁定文件夹") {
                             if store.encryptedFolders.isEmpty {
-                                Text("无加密文件夹")
+                                Text("无锁定文件夹")
                             } else {
                                 ForEach(store.encryptedFolders) { folder in
                                     Button(folder.name) {
@@ -901,4 +926,3 @@ struct EditorTopBarView: View {
 }
 
 // MARK: - 颜色选择器弹窗
-

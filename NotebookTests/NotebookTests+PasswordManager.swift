@@ -7,7 +7,7 @@ extension NotebookTests {
     /// setPassword → verifyPassword 往返：验证 PBKDF2 哈希正确性
     @MainActor
     func testPasswordManagerSetAndVerifyPassword() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         let testPassword = "test-password-\(UUID().uuidString)"
 
         // 清理可能的残留
@@ -31,7 +31,7 @@ extension NotebookTests {
     /// setPassword 空密码应失败
     @MainActor
     func testPasswordManagerRejectsEmptyPassword() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         manager.forceClearPassword()
 
         XCTAssertFalse(manager.setPassword(""), "空密码应被拒绝")
@@ -41,7 +41,7 @@ extension NotebookTests {
     /// changePassword：旧密码验证 + 新密码设置
     @MainActor
     func testPasswordManagerChangePassword() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         let oldPassword = "old-pass-\(UUID().uuidString)"
         let newPassword = "new-pass-\(UUID().uuidString)"
 
@@ -62,7 +62,7 @@ extension NotebookTests {
     /// clearPassword 错误密码应失败
     @MainActor
     func testPasswordManagerClearPasswordWithWrongPasswordFails() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         let password = "test-pass-\(UUID().uuidString)"
 
         manager.forceClearPassword()
@@ -77,7 +77,7 @@ extension NotebookTests {
     /// forceClearPassword 不需要验证
     @MainActor
     func testPasswordManagerForceClearPassword() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         XCTAssertTrue(manager.setPassword("temp-pass"))
 
         manager.forceClearPassword()
@@ -87,7 +87,7 @@ extension NotebookTests {
     /// verifyPassword 无密码时应返回 false
     @MainActor
     func testPasswordManagerVerifyWithNoPasswordReturnsFalse() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         manager.forceClearPassword()
 
         XCTAssertFalse(manager.verifyPassword("any-password"), "无密码时 verifyPassword 应返回 false")
@@ -96,7 +96,7 @@ extension NotebookTests {
     /// PBKDF2 记录格式：验证生成的哈希字符串包含算法标识、迭代次数、盐、派生密钥四段
     @MainActor
     func testPasswordManagerPBKDF2RecordFormat() {
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         manager.forceClearPassword()
         XCTAssertTrue(manager.setPassword("format-test"))
 
@@ -110,7 +110,7 @@ extension NotebookTests {
     @MainActor
     func testPasswordManagerConstantTimeCompareDifferentValues() {
         // constantTimeCompare 是 private，通过 verifyPassword 间接测试
-        let manager = PasswordManager.shared
+        let manager = isolatedPasswordManager()
         manager.forceClearPassword()
         XCTAssertTrue(manager.setPassword("abcdef"))
 
@@ -119,5 +119,10 @@ extension NotebookTests {
         XCTAssertFalse(manager.verifyPassword("abcdefX"), "多一位的密码应被拒绝")
 
         manager.forceClearPassword()
+    }
+
+    @MainActor
+    private func isolatedPasswordManager() -> PasswordManager {
+        PasswordManager(keychainService: "yy.NotebookTests.password.\(UUID().uuidString)")
     }
 }

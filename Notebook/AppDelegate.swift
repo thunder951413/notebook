@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SwiftData
+import UserNotifications
 
 extension Notification.Name {
     static let openMainWindow = Notification.Name("openMainWindow")
@@ -16,7 +17,7 @@ extension Notification.Name {
     static let toggleTableOfContents = Notification.Name("toggleTableOfContents")
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
     var aboutWindow: NSWindow?
@@ -25,9 +26,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor let store = NoteStore()
     @MainActor let storage = StorageLocationManager.shared
     @MainActor let persistence = PersistenceController.shared
+
+    private var isRunningUITests: Bool {
+        ProcessInfo.processInfo.environment["NOTEBOOK_UI_TEST_DATA_DIR"] != nil
+    }
+
+    private var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil && !isRunningUITests
+    }
+
+    private var isRunningTests: Bool { isRunningUITests || isRunningUnitTests }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.shared.log(.app, .info, "[AppDelegate] applicationDidFinishLaunching - 程序启动")
+        UNUserNotificationCenter.current().delegate = self
 
         // 注册表格视图提供器（TextKit 2）
         if #available(macOS 12.0, *) {
@@ -44,13 +56,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task { @MainActor in
             _ = storage.startAccessIfPossible()
             try? persistence.configureIfPossible()
-            AutoSyncCoordinator.shared.configure(store: store)
+            if !isRunningTests {
+                AutoSyncCoordinator.shared.configure(store: store)
+            }
             if let container = persistence.modelContainer {
                 store.setContext(container.mainContext)
                 // 同时设置 NoteSaveManager 的 context
                 NoteSaveManager.shared.setContext(container.mainContext)
-                AutoSyncCoordinator.shared.handleApplicationLaunched()
+                if !isRunningTests {
+                    AutoSyncCoordinator.shared.handleApplicationLaunched()
+                }
             }
+        }
+
+        // 单元测试只需要隔离的数据层，不创建窗口、菜单栏入口或任何外部副作用。
+        if isRunningUnitTests {
+            return
         }
 
         setupMenu()
@@ -63,11 +84,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // 启动鼠标中键监控
-        RadialMenuEventMonitor.shared.startMonitoring()
+        if !isRunningUITests {
+            RadialMenuEventMonitor.shared.startMonitoring()
+        }
 
-        Task { @MainActor in
-            if let release = await UpdateChecker.shared.checkForUpdates(silently: true) {
-                presentUpdateAlert(for: release)
+        if !isRunningUITests && AppSettings.shared.automaticUpdateChecksEnabled {
+            Task { @MainActor in
+                if let release = await UpdateChecker.shared.checkForUpdates(silently: true) {
+                    presentUpdateAlert(for: release)
+                }
             }
         }
     }
@@ -77,9 +102,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !isRunningTests else { return }
         Task { @MainActor in
             AutoSyncCoordinator.shared.handleApplicationDidBecomeActive()
         }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let userInfo = response.notification.request.content.userInfo
+        let itemIDString = (userInfo["itemID"] as? String) ?? (userInfo["noteID"] as? String)
+        let itemType = (userInfo["itemType"] as? String) ?? "note"
+
+        Task { @MainActor in
+            if let itemIDString, let id = UUID(uuidString: itemIDString) {
+                MainWindowController.shared.show(with: store, storage: storage, persistence: persistence)
+                if itemType == "todo" {
+                    store.selectedTodoId = id
+                } else {
+                    store.selectedNoteId = id
+                }
+            }
+            completionHandler()
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
     
     /// 应用即将退出时调用 - 返回 .terminateLater 以延迟退出，确保保存完成
@@ -91,6 +147,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         // 刷新所有待保存内容
         NoteSaveManager.shared.flushAllPending()
+
+        if isRunningTests {
+            return .terminateNow
+        }
 
         Task { @MainActor in
             await withTaskGroup(of: Void.self) { group in

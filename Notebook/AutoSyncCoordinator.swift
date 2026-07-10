@@ -212,10 +212,11 @@ final class AutoSyncCoordinator: ObservableObject {
         indicatorDismissTask?.cancel()
         sidebarIndicatorState = .success
         indicatorDismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: successIndicatorDurationNanoseconds)
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.successIndicatorDurationNanoseconds)
             guard !Task.isCancelled else { return }
-            self?.sidebarIndicatorState = .idle
-            self?.indicatorDismissTask = nil
+            self.sidebarIndicatorState = .idle
+            self.indicatorDismissTask = nil
         }
     }
 

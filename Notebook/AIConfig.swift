@@ -4,7 +4,7 @@ import Combine
 
 // MARK: - AI 服务配置
 
-struct AIServiceConfig: Identifiable, Codable, Equatable {
+nonisolated struct AIServiceConfig: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
     var baseURL: String
@@ -13,6 +13,12 @@ struct AIServiceConfig: Identifiable, Codable, Equatable {
     var temperature: Double
     var maxTokens: Int
     var isDefault: Bool
+
+    /// `apiKey` 只在内存中存在；持久化由 `AIConfigKeychainStore` 负责。
+    /// 自定义 Codable 会读取旧版 JSON 中的 apiKey 以完成无损迁移，但永远不会再写出它。
+    private enum CodingKeys: String, CodingKey {
+        case id, name, baseURL, apiKey, model, temperature, maxTokens, isDefault
+    }
     
     init(
         id: UUID = UUID(),
@@ -32,6 +38,30 @@ struct AIServiceConfig: Identifiable, Codable, Equatable {
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.isDefault = isDefault
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        baseURL = try container.decode(String.self, forKey: .baseURL)
+        // 兼容读取历史明文配置；loadConfigs/import 会立即迁移到 Keychain。
+        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        model = try container.decode(String.self, forKey: .model)
+        temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.7
+        maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens) ?? 2_000
+        isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(model, forKey: .model)
+        try container.encode(temperature, forKey: .temperature)
+        try container.encode(maxTokens, forKey: .maxTokens)
+        try container.encode(isDefault, forKey: .isDefault)
     }
     
     // 预设配置
@@ -76,6 +106,30 @@ struct AIServiceConfig: Identifiable, Codable, Equatable {
     )
 }
 
+enum AIConfigKeychainStore {
+    private static let service = "yy.Notebook.ai-api-key"
+
+    static func load(configID: UUID) -> String? {
+        KeychainHelper.loadString(service: service, account: configID.uuidString)
+    }
+
+    static func save(_ apiKey: String, configID: UUID) throws {
+        if apiKey.isEmpty {
+            try delete(configID: configID)
+        } else {
+            try KeychainHelper.save(
+                Data(apiKey.utf8),
+                service: service,
+                account: configID.uuidString
+            )
+        }
+    }
+
+    static func delete(configID: UUID) throws {
+        try KeychainHelper.delete(service: service, account: configID.uuidString)
+    }
+}
+
 // MARK: - AI 配置管理器
 
 @MainActor
@@ -100,7 +154,29 @@ class AIConfigManager: ObservableObject {
     func loadConfigs() {
         if let data = UserDefaults.standard.data(forKey: configsKey),
            let decoded = try? JSONDecoder().decode([AIServiceConfig].self, from: data) {
-            configs = decoded
+            configs = decoded.map { decodedConfig in
+                var config = decodedConfig
+                if !config.apiKey.isEmpty {
+                    // 旧版本把密钥明文放在 UserDefaults。先写入 Keychain；成功后再由
+                    // saveConfigs() 覆盖旧 JSON，避免任何迁移失败造成密钥丢失。
+                    do {
+                        try AIConfigKeychainStore.save(config.apiKey, configID: config.id)
+                    } catch {
+                        Logger.shared.log(.app, .error, "迁移 AI API Key 到 Keychain 失败: \(error.localizedDescription)")
+                    }
+                }
+                if let keychainValue = AIConfigKeychainStore.load(configID: config.id) {
+                    config.apiKey = keychainValue
+                }
+                return config
+            }
+            // 自定义编码不包含 apiKey；只有确认每个非空密钥都已进入 Keychain 后才清理旧明文。
+            let migrationSucceeded = configs.allSatisfy { config in
+                config.apiKey.isEmpty || AIConfigKeychainStore.load(configID: config.id) == config.apiKey
+            }
+            if migrationSucceeded {
+                saveConfigs()
+            }
         } else {
             // 默认配置
             configs = [
@@ -124,12 +200,37 @@ class AIConfigManager: ObservableObject {
     }
     
     func saveConfigs() {
+        for config in configs {
+            do {
+                try AIConfigKeychainStore.save(config.apiKey, configID: config.id)
+            } catch {
+                Logger.shared.log(.app, .error, "保存 AI API Key 到 Keychain 失败: \(error.localizedDescription)")
+            }
+        }
         if let encoded = try? JSONEncoder().encode(configs) {
             UserDefaults.standard.set(encoded, forKey: configsKey)
         }
         if let selectedConfigID = selectedConfigID {
             UserDefaults.standard.set(selectedConfigID.uuidString, forKey: selectedConfigKey)
         }
+    }
+
+    /// 导入公开配置。旧导出文件若仍含明文 apiKey，会先安全迁移到 Keychain；
+    /// 新导出文件不含密钥，因此不会覆盖本机已有 Keychain 值。
+    func importConfigs(_ imported: [AIServiceConfig]) {
+        configs = imported.map { importedConfig in
+            var config = importedConfig
+            if !config.apiKey.isEmpty {
+                do {
+                    try AIConfigKeychainStore.save(config.apiKey, configID: config.id)
+                } catch {
+                    Logger.shared.log(.app, .error, "导入 AI API Key 到 Keychain 失败: \(error.localizedDescription)")
+                }
+            }
+            config.apiKey = AIConfigKeychainStore.load(configID: config.id) ?? ""
+            return config
+        }
+        saveConfigs()
     }
     
     func addConfig(_ config: AIServiceConfig) {
@@ -148,6 +249,11 @@ class AIConfigManager: ObservableObject {
     }
     
     func deleteConfig(id: UUID) {
+        do {
+            try AIConfigKeychainStore.delete(configID: id)
+        } catch {
+            Logger.shared.log(.app, .warn, "删除 AI API Key 失败: \(error.localizedDescription)")
+        }
         configs.removeAll { $0.id == id }
         if selectedConfigID == id {
             selectedConfigID = configs.first?.id

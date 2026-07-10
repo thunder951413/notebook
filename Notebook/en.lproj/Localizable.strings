@@ -48,6 +48,34 @@
 "note.recurrence.weekly" = "Weekly";
 "note.recurrence.monthly" = "Monthly";
 
+/* Todo */
+"todo.title" = "Todo";
+"todo.today" = "Today";
+"todo.important" = "Important";
+"todo.untitled" = "Untitled task";
+"todo.title.placeholder" = "Task title";
+"todo.steps" = "Steps";
+"todo.step.new" = "Add step";
+"todo.notes" = "Notes";
+"todo.dueDate" = "Due date";
+"todo.due" = "Due";
+"todo.reminder" = "Reminder";
+"todo.reminderAt" = "Reminder time";
+"todo.recurrence" = "Repeat";
+"todo.list" = "List";
+"todo.list.none" = "No list";
+"todo.linkedNotes" = "Linked notes";
+"todo.linkedNotes.none" = "No linked notes";
+"todo.select" = "Select a Todo";
+"todo.reminder.title" = "Todo reminder";
+"todo.linkedNote.deleted" = "Deleted note";
+"todo.list.management" = "Todo List Management";
+"todo.list.new" = "New List";
+"todo.list.new.title" = "New Todo List";
+"todo.list.name" = "List Name";
+"todo.list.name.prompt" = "Enter a Todo list name";
+"todo.list.manage" = "Manage Todo lists";
+
 /* Folders */
 "folder.all" = "All Notes";
 "folder.uncategorized" = "Uncategorized";

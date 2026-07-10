@@ -32,12 +32,24 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var isTestingToken = false
     @Published private(set) var tokenTestMessage = "尚未测试 Token"
 
+    private let automaticCheckInterval: TimeInterval = 24 * 60 * 60
+    private let lastAutomaticCheckKey = "update.last_automatic_check_at"
+
     private init() {}
 
     func checkForUpdates(silently: Bool) async -> GitHubReleaseInfo? {
         guard !isChecking else { return nil }
+        if silently,
+           let lastCheck = UserDefaults.standard.object(forKey: lastAutomaticCheckKey) as? Date,
+           Date().timeIntervalSince(lastCheck) < automaticCheckInterval {
+            return nil
+        }
         isChecking = true
         defer { isChecking = false }
+        if silently {
+            // 无论服务器结果如何都限频，避免仓库不可访问时每次启动重复联网。
+            UserDefaults.standard.set(Date(), forKey: lastAutomaticCheckKey)
+        }
 
         do {
             let release = try await fetchLatestRelease()

@@ -105,20 +105,18 @@ struct SidebarView: View {
     @StateObject private var themeManager = ThemeManager.shared
     @ObservedObject private var autoSyncCoordinator = AutoSyncCoordinator.shared
 
-    @Binding var selectedFolder: String
-    @Binding var selectedTagID: UUID?
+    @Binding var selectedDestination: SidebarDestination
     @Binding var selection: Note.ID?
-    @Binding var selectedEncryptedFolderID: UUID?
     @Binding var isEncryptedFolderUnlocked: Bool
-    @Binding var isRecycleBinSelected: Bool
-    @Binding var isConflictSelected: Bool
     let onCreateNote: () -> Void
 
     @State private var showingFolderManagement = false
+    @State private var showingTodoListManagement = false
     @State private var showingTagManagement = false
     @State private var showingEncryptedFolderManagement = false
     @State private var showingEncryptedFolder = false
     @State private var isFoldersExpanded: Bool = AppSettings.shared.isFoldersExpanded
+    @State private var isTodoExpanded: Bool = AppSettings.shared.isTodoExpanded
     @State private var isEncryptedFolderExpanded: Bool = false
     @State private var shouldOpenManagementAfterUnlock: Bool = false
     @State private var isTagsExpanded: Bool = AppSettings.shared.isTagsExpanded
@@ -151,6 +149,7 @@ struct SidebarView: View {
                 // 主内容区域：全部笔记 + 未分类 + 文件夹 + 加密文件夹（可滚动）
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        todoSection
                         allNotesRow
                         uncategorizedNotesRow
                         conflictNotesRow
@@ -178,6 +177,10 @@ struct SidebarView: View {
             FolderManagementView()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $showingTodoListManagement) {
+            TodoListManagementView()
+                .environmentObject(store)
+        }
         .sheet(isPresented: $showingTagManagement) {
             TagManagementView()
                 .environmentObject(store)
@@ -187,7 +190,7 @@ struct SidebarView: View {
     private var allNotesRow: some View {
         // 全部笔记（排除加密文件夹的笔记）
         let allNotesCount = store.activeNotes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }.count
-        let isSelected = selectedFolder == l10n(L10nKeys.Folder.allNotes) && selectedTagID == nil && !isRecycleBinSelected
+        let isSelected = selectedDestination == .allNotes
         return HStack {
             Image(systemName: "tray.fill")
                 .foregroundStyle(isSelected ? .white : .orange)
@@ -204,19 +207,123 @@ struct SidebarView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedFolder = l10n(L10nKeys.Folder.allNotes)
-            selectedTagID = nil
-            isRecycleBinSelected = false
-            isConflictSelected = false
+            selectedDestination = .allNotes
         }
-        .onChange(of: isRecycleBinSelected) { _, newValue in
-            if newValue {
+        .onChange(of: selectedDestination) { _, newValue in
+            if newValue == .recycleBin {
                 selection = nil
             }
         }
         .padding(.horizontal, 8)
         .padding(.top, 8)
         .animation(.easeInOut(duration: 0.2), value: autoSyncCoordinator.sidebarIndicatorState)
+    }
+
+    private var todoSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isTodoExpanded.toggle()
+                    AppSettings.shared.isTodoExpanded = isTodoExpanded
+                }
+            } label: {
+                HStack {
+                    Image(systemName: isTodoExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Todo")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        showingTodoListManagement = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(l10n(L10nKeys.Todo.manageLists))
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+
+            if isTodoExpanded {
+                todoSmartRow(
+                    title: l10n(L10nKeys.Todo.today),
+                    icon: "sun.max.fill",
+                    tint: .orange,
+                    destination: .todoToday,
+                    count: store.todoItemsForToday().count
+                )
+                todoSmartRow(
+                    title: l10n(L10nKeys.Todo.important),
+                    icon: "star.fill",
+                    tint: .yellow,
+                    destination: .todoImportant,
+                    count: store.importantTodoItems().count
+                )
+                ForEach(store.todoLists) { list in
+                    todoListRow(list)
+                }
+            }
+        }
+    }
+
+    private func todoSmartRow(
+        title: String,
+        icon: String,
+        tint: Color,
+        destination: SidebarDestination,
+        count: Int
+    ) -> some View {
+        let isSelected = selectedDestination == destination
+        return HStack {
+            Image(systemName: icon)
+                .foregroundStyle(isSelected ? .white : tint)
+            Text(title)
+                .lineLimit(1)
+            Spacer()
+            Text("\(count)")
+                .font(.caption)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedDestination = destination
+            selection = nil
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func todoListRow(_ list: TodoList) -> some View {
+        let isSelected = selectedDestination == .todoList(list.id)
+        let count = store.todoItems(in: list.id).filter { !$0.isCompleted }.count
+        return HStack {
+            Image(systemName: "checklist")
+                .foregroundStyle(isSelected ? .white : themeManager.accentColor)
+            Text(list.name)
+                .lineLimit(1)
+            Spacer()
+            Text("\(count)")
+                .font(.caption)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedDestination = .todoList(list.id)
+            selection = nil
+        }
+        .padding(.horizontal, 8)
     }
 
     @ViewBuilder
@@ -263,23 +370,20 @@ struct SidebarView: View {
         }.count
         return HStack {
             Image(systemName: "tray")
-                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? .white : .secondary)
+                .foregroundStyle(selectedDestination == .unfiled ? .white : .secondary)
             Text("未分类")
             Spacer()
             Text("\(uncategorizedCount)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedDestination == .unfiled ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(selectedFolder == "未分类" && selectedTagID == nil && !isRecycleBinSelected ? themeManager.accentColor : Color.clear)
+        .background(selectedDestination == .unfiled ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedFolder = "未分类"
-            selectedTagID = nil
-            isRecycleBinSelected = false
-            isConflictSelected = false
+            selectedDestination = .unfiled
         }
         .padding(.horizontal, 8)
     }
@@ -290,23 +394,20 @@ struct SidebarView: View {
         if conflictCount > 0 {
             HStack {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(isConflictSelected ? .white : .yellow)
+                    .foregroundStyle(selectedDestination == .conflicts ? .white : .yellow)
                 Text("有冲突")
                 Spacer()
                 Text("\(conflictCount)")
                     .font(.caption)
-                    .foregroundStyle(isConflictSelected ? .white.opacity(0.7) : .secondary)
+                    .foregroundStyle(selectedDestination == .conflicts ? .white.opacity(0.7) : .secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(isConflictSelected ? themeManager.accentColor : Color.clear)
+            .background(selectedDestination == .conflicts ? themeManager.accentColor : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .contentShape(Rectangle())
             .onTapGesture {
-                isConflictSelected = true
-                selectedFolder = l10n(L10nKeys.Folder.allNotes)
-                selectedTagID = nil
-                isRecycleBinSelected = false
+                selectedDestination = .conflicts
             }
             .padding(.horizontal, 8)
         }
@@ -316,24 +417,21 @@ struct SidebarView: View {
         let recycleCount = store.recycledNotes.count
         return HStack {
             Image(systemName: "trash")
-                .foregroundStyle(isRecycleBinSelected ? .white : .secondary)
+                .foregroundStyle(selectedDestination == .recycleBin ? .white : .secondary)
             Text("回收站")
             Spacer()
             Text("\(recycleCount)")
                 .font(.caption)
-                .foregroundStyle(isRecycleBinSelected ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(selectedDestination == .recycleBin ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(isRecycleBinSelected ? themeManager.accentColor : Color.clear)
+        .background(selectedDestination == .recycleBin ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedTagID = nil
-            selectedEncryptedFolderID = nil
             isEncryptedFolderUnlocked = false
-            isRecycleBinSelected = true
-            isConflictSelected = false
+            selectedDestination = .recycleBin
             selection = nil
         }
         .padding(.horizontal, 8)
@@ -394,24 +492,23 @@ struct SidebarView: View {
         // 获取当前文件夹下的所有笔记（不考虑标签筛选，且排除加密笔记）
         let notesInCurrentFolder: [Note]
         
-        if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
+        switch selectedDestination {
+        case .allNotes, .conflicts, .recycleBin, .tag, .todoToday, .todoImportant, .todoList:
             // 全部笔记：只显示非加密笔记的标签
             let tagIDsInNonEncryptedNotes = Set(nonEncryptedNotes.flatMap { $0.tagIDs })
             return store.tags.filter { tagIDsInNonEncryptedNotes.contains($0.id) }
-        } else if selectedFolder == "未分类" {
+        case .unfiled:
             // 未分类：显示未分类笔记中的标签（排除加密笔记）
             let existingFolderIDs = Set(store.folders.map { $0.id })
             notesInCurrentFolder = nonEncryptedNotes.filter { note in
                 guard let folderID = note.folderID else { return true }
                 return !existingFolderIDs.contains(folderID)
             }
-        } else {
+        case .noteFolder(let folderID):
             // 特定文件夹：显示该文件夹下的笔记标签
-            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
-                notesInCurrentFolder = nonEncryptedNotes.filter { $0.folderID == folder.id }
-            } else {
-                notesInCurrentFolder = []
-            }
+            notesInCurrentFolder = nonEncryptedNotes.filter { $0.folderID == folderID }
+        case .encryptedFolder:
+            notesInCurrentFolder = []
         }
         
         // 收集这些笔记拥有的所有标签ID
@@ -487,10 +584,11 @@ struct SidebarView: View {
         let notesWithTag: Int
         let taggedNoteIDs = store.noteIDSet(forTagID: tag.id)
         
-        if selectedFolder == l10n(L10nKeys.Folder.allNotes) {
+        switch selectedDestination {
+        case .allNotes, .conflicts, .recycleBin, .tag, .todoToday, .todoImportant, .todoList:
             // 全部笔记：统计所有包含该标签的笔记
             notesWithTag = store.activeNotes.filter { taggedNoteIDs.contains($0.id) }.count
-        } else if selectedFolder == "未分类" {
+        case .unfiled:
             // 未分类：统计未分类笔记中包含该标签的笔记
             let existingFolderIDs = Set(store.folders.map { $0.id })
             notesWithTag = store.activeNotes.filter { note in
@@ -500,14 +598,13 @@ struct SidebarView: View {
                 }()
                 return isUncategorized && taggedNoteIDs.contains(note.id)
             }.count
-        } else {
+        case .noteFolder(let folderID):
             // 特定文件夹：统计该文件夹下包含该标签的笔记
-            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
-                notesWithTag = store.activeNotes.filter { $0.folderID == folder.id && taggedNoteIDs.contains($0.id) }.count
-            } else {
-                notesWithTag = 0
-            }
+            notesWithTag = store.activeNotes.filter { $0.folderID == folderID && taggedNoteIDs.contains($0.id) }.count
+        case .encryptedFolder:
+            notesWithTag = 0
         }
+        let isSelected = selectedDestination == .tag(tag.id)
         
         return HStack {
             Circle()
@@ -518,11 +615,11 @@ struct SidebarView: View {
             Spacer()
             Text("\(notesWithTag)")
                 .font(.caption)
-                .foregroundStyle(selectedTagID == tag.id ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(selectedTagID == tag.id ? themeManager.accentColor : Color.clear)
+        .background(isSelected ? themeManager.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -536,28 +633,26 @@ struct SidebarView: View {
                     AppSettings.shared.lastSelectedNoteID = nil
                 }
             }
-            selectedTagID = tag.id
-            selectedFolder = l10n(L10nKeys.Folder.allNotes)
-            isRecycleBinSelected = false
-            isConflictSelected = false
+            selectedDestination = .tag(tag.id)
         }
         .padding(.horizontal, 8)
     }
 
     private func folderRow(_ folder: Folder) -> some View {
-        HStack {
+        let isSelected = selectedDestination == .noteFolder(folder.id)
+        return HStack {
             Image(systemName: folder.isSystem ? "folder.fill" : "folder")
-                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white : (folder.isSystem ? .orange : themeManager.accentColor))
+                .foregroundStyle(isSelected ? .white : (folder.isSystem ? .orange : themeManager.accentColor))
             Text(folder.name)
                 .lineLimit(1)
             Spacer()
             Text("\(store.activeNotes.filter { $0.folderID == folder.id }.count)")
                 .font(.caption)
-                .foregroundStyle(selectedFolder == folder.name && selectedTagID == nil ? .white.opacity(0.7) : .secondary)
+                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(selectedFolder == folder.name && selectedTagID == nil ? ThemeManager.shared.accentColor : Color.clear)
+        .background(isSelected ? ThemeManager.shared.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -571,10 +666,7 @@ struct SidebarView: View {
                     AppSettings.shared.lastSelectedNoteID = nil
                 }
             }
-            selectedFolder = folder.name
-            selectedTagID = nil
-            isRecycleBinSelected = false
-            isConflictSelected = false
+            selectedDestination = .noteFolder(folder.id)
         }
         .padding(.horizontal, 8)
     }
@@ -589,11 +681,10 @@ struct SidebarView: View {
                         // 折叠时直接折叠，并重置解锁状态
                         isEncryptedFolderExpanded = false
                         isEncryptedFolderUnlocked = false
-                        selectedEncryptedFolderID = nil
                         
                         // 如果当前正在查看加密笔记，清除选中状态并切换到全部笔记
-                        if selectedFolder == EncryptedFolderView.folderName {
-                            selectedFolder = l10n(L10nKeys.Folder.allNotes)
+                        if selectedDestination.isEncryptedFolder {
+                            selectedDestination = .allNotes
                             // 如果当前选中的笔记是加密笔记，清除选中状态
                             if let currentSelection = selection,
                                let selectedNote = store.activeNotes.first(where: { $0.id == currentSelection }),
@@ -617,7 +708,7 @@ struct SidebarView: View {
                     Image(systemName: isEncryptedFolderExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("🔒 加密")
+                    Text("🔒 锁定")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -638,7 +729,7 @@ struct SidebarView: View {
             // 展开后显示加密文件夹列表
             if isEncryptedFolderExpanded && isEncryptedFolderUnlocked {
                 if store.encryptedFolders.isEmpty {
-                    Text("无加密文件夹")
+                    Text("无锁定文件夹")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 16)
@@ -674,11 +765,6 @@ struct SidebarView: View {
             EncryptedFolderManagementView()
                 .environmentObject(store)
         }
-        .onChange(of: selectedFolder) { _, newValue in
-            if newValue != EncryptedFolderView.folderName {
-                selectedEncryptedFolderID = nil
-            }
-        }
     }
 
     // MARK: - 打开加密文件夹管理
@@ -695,7 +781,7 @@ struct SidebarView: View {
 
     // MARK: - 加密文件夹项行
     private func encryptedFolderItemRow(_ folder: EncryptedFolder) -> some View {
-        let isSelected = selectedEncryptedFolderID == folder.id
+        let isSelected = selectedDestination == .encryptedFolder(folder.id)
         let notesInFolder = store.encryptedNotes.filter { 
             EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == folder.id 
         }
@@ -716,12 +802,8 @@ struct SidebarView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            selectedEncryptedFolderID = folder.id
             // 切换到加密文件夹视图
-            selectedFolder = EncryptedFolderManager.folderName
-            selectedTagID = nil
-            isRecycleBinSelected = false
-            isConflictSelected = false
+            selectedDestination = .encryptedFolder(folder.id)
         }
         .padding(.horizontal, 8)
     }

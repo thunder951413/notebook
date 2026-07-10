@@ -8,10 +8,20 @@ struct VersionedNoteAssetSnapshot: Codable {
     let sidecarRelativePaths: [String]
 }
 
+struct VersionedTodoStepSnapshot: Codable {
+    let id: UUID
+    let noteID: UUID
+    let text: String
+    let checked: Bool
+    let order: Int
+    let createdAt: Date
+}
+
 struct VersionedNoteSnapshot: Codable {
     let metadata: DocumentMigrationPackage.NoteItem
     let document: MigratedDocument
     let assets: [VersionedNoteAssetSnapshot]
+    let todoSteps: [VersionedTodoStepSnapshot]?
 }
 
 struct VersionedNoteHistoryEnvelope: Codable {
@@ -133,7 +143,7 @@ enum BlockDocumentNoteVersionStore {
             return existing
         }
 
-        let snapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets)
+        let snapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets, context: context)
         let contentHash = try snapshotFingerprint(snapshot)
         let snapshotData = try jsonEncoder.encode(snapshot)
         let entry = BlockDocumentNoteVersionEntity(
@@ -207,7 +217,13 @@ enum BlockDocumentNoteVersionStore {
             left.metadata.viewMode != right.metadata.viewMode ||
             left.metadata.deletedAt != right.metadata.deletedAt ||
             left.metadata.originalFolderID != right.metadata.originalFolderID ||
-            left.metadata.originalFolderName != right.metadata.originalFolderName
+            left.metadata.originalFolderName != right.metadata.originalFolderName ||
+            left.metadata.itemType != right.metadata.itemType ||
+            left.metadata.todoDueAt != right.metadata.todoDueAt ||
+            left.metadata.todoCompletedAt != right.metadata.todoCompletedAt ||
+            left.metadata.todoIsImportant != right.metadata.todoIsImportant ||
+            left.metadata.todoOrder != right.metadata.todoOrder ||
+            left.metadata.linkedNoteIDs != right.metadata.linkedNoteIDs
 
         return NoteVersionComparison(
             noteID: noteID,
@@ -262,7 +278,7 @@ enum BlockDocumentNoteVersionStore {
                 predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == noteID }
             )
         )
-        let currentSnapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets)
+        let currentSnapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets, context: context)
         let historyEntries = try history(for: noteID, context: context)
         let historyPayload = try historyEntries.map {
             VersionedNoteHistoryEnvelope(
@@ -429,7 +445,13 @@ enum BlockDocumentNoteVersionStore {
             documentSchemaVersion: envelope.currentSnapshot.document.schemaVersion,
             documentSource: envelope.currentSnapshot.document.source,
             blockCount: envelope.currentSnapshot.document.blocks.count,
-            assetCount: envelope.currentSnapshot.assets.count
+            assetCount: envelope.currentSnapshot.assets.count,
+            itemType: envelope.currentSnapshot.metadata.itemType ?? "note",
+            todoDueAt: envelope.currentSnapshot.metadata.todoDueAt,
+            todoCompletedAt: envelope.currentSnapshot.metadata.todoCompletedAt,
+            todoIsImportant: envelope.currentSnapshot.metadata.todoIsImportant ?? false,
+            todoOrder: envelope.currentSnapshot.metadata.todoOrder ?? 0,
+            linkedNoteIDs: UUIDListCoding.encode(envelope.currentSnapshot.metadata.linkedNoteIDs ?? [])
         )
         context.insert(note)
         library.noteCount += 1
@@ -706,6 +728,12 @@ enum BlockDocumentNoteVersionStore {
         note.deletedAt = snapshot.metadata.deletedAt
         note.originalFolderID = snapshot.metadata.originalFolderID
         note.originalFolderName = snapshot.metadata.originalFolderName
+        note.itemType = snapshot.metadata.itemType ?? "note"
+        note.todoDueAt = snapshot.metadata.todoDueAt
+        note.todoCompletedAt = snapshot.metadata.todoCompletedAt
+        note.todoIsImportant = snapshot.metadata.todoIsImportant ?? false
+        note.todoOrder = snapshot.metadata.todoOrder ?? 0
+        note.linkedNoteIDs = UUIDListCoding.encode(snapshot.metadata.linkedNoteIDs ?? [])
         note.documentSchemaVersion = snapshot.document.schemaVersion
         note.documentSource = snapshot.document.source
         note.blockCount = snapshot.document.blocks.count
@@ -737,7 +765,9 @@ enum BlockDocumentNoteVersionStore {
                 blockID: block.id,
                 kind: block.type,
                 sourceType: block.type,
-                textPayload: try block.text.map { try jsonEncoder.encode($0.map(mapTextPayload)) },
+                textPayload: try block.text.map { spans in
+                    try jsonEncoder.encode(spans.map { mapTextPayload($0) })
+                },
                 level: block.level,
                 listStyle: block.listStyle,
                 order: block.order,
@@ -749,6 +779,26 @@ enum BlockDocumentNoteVersionStore {
             blockEntity.note = note
             context.insert(blockEntity)
         }
+
+        let stepDescriptor = FetchDescriptor<TodoStepEntity>(
+            predicate: #Predicate<TodoStepEntity> { $0.noteID == noteID }
+        )
+        for existingStep in try context.fetch(stepDescriptor) {
+            context.delete(existingStep)
+        }
+        for step in snapshot.todoSteps ?? [] {
+            context.insert(
+                TodoStepEntity(
+                    id: step.id,
+                    noteID: note.id,
+                    libraryID: note.libraryID,
+                    text: step.text,
+                    checked: step.checked,
+                    order: step.order,
+                    createdAt: step.createdAt
+                )
+            )
+        }
         // 清空脏检查哈希：应用远程/冲突快照后，下次本地保存将重新计算并纠正
         note.lastSavedContentHash = ""
     }
@@ -756,11 +806,30 @@ enum BlockDocumentNoteVersionStore {
     private static func makeSnapshot(
         note: BlockDocumentNoteEntity,
         blocks: [BlockDocumentBlockEntity],
-        assets: [BlockDocumentAssetEntity]
+        assets: [BlockDocumentAssetEntity],
+        context: ModelContext
     ) throws -> VersionedNoteSnapshot {
-        let assetSnapshots = try assets.map(makeAssetSnapshot).sorted { $0.reference.id < $1.reference.id }
+        let assetSnapshots = try assets.map { try makeAssetSnapshot(from: $0) }
+            .sorted { $0.reference.id < $1.reference.id }
         let assetByID = Dictionary(uniqueKeysWithValues: assetSnapshots.map { ($0.reference.id, $0.reference) })
         let documentBlocks = try blocks.map { try makeDocumentBlock(from: $0, assetByID: assetByID) }
+        let noteID = note.id
+        let stepEntities = try context.fetch(
+            FetchDescriptor<TodoStepEntity>(
+                predicate: #Predicate<TodoStepEntity> { $0.noteID == noteID },
+                sortBy: [SortDescriptor(\.order)]
+            )
+        )
+        let stepSnapshots = stepEntities.map {
+            VersionedTodoStepSnapshot(
+                id: $0.id,
+                noteID: $0.noteID,
+                text: $0.text,
+                checked: $0.checked,
+                order: $0.order,
+                createdAt: $0.createdAt
+            )
+        }
         return VersionedNoteSnapshot(
             metadata: DocumentMigrationPackage.NoteItem(
                 id: note.id,
@@ -779,14 +848,21 @@ enum BlockDocumentNoteVersionStore {
                 originalFolderName: note.originalFolderName,
                 blockCount: blocks.count,
                 assetCount: assets.count,
-                documentPath: "Notes/\(note.id.uuidString)/document.json"
+                documentPath: "Notes/\(note.id.uuidString)/document.json",
+                itemType: note.itemType,
+                todoDueAt: note.todoDueAt,
+                todoCompletedAt: note.todoCompletedAt,
+                todoIsImportant: note.todoIsImportant,
+                todoOrder: note.todoOrder,
+                linkedNoteIDs: UUIDListCoding.decode(note.linkedNoteIDs)
             ),
             document: MigratedDocument(
                 schemaVersion: note.documentSchemaVersion,
                 source: note.documentSource,
                 blocks: documentBlocks
             ),
-            assets: assetSnapshots
+            assets: assetSnapshots,
+            todoSteps: stepSnapshots
         )
     }
 

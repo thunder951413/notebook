@@ -43,9 +43,9 @@ struct PasswordSettingsView: View {
             Divider()
             
             // 说明文字
-            Text(passwordManager.hasPassword 
-                 ? "已设置密码保护。您可以修改或清除密码。"
-                 : "设置密码以保护您的笔记数据。设置后启动应用需要输入密码。")
+            Text(passwordManager.hasPassword
+                 ? "已设置应用内访问密码。您可以修改或清除密码。"
+                 : "设置密码可限制应用内访问，但不会加密磁盘上的笔记数据库与附件。")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
@@ -173,7 +173,7 @@ struct PasswordSettingsView: View {
                 clearPassword()
             }
         } message: {
-            Text("清除密码后将不再保护您的笔记数据。确定要清除吗？")
+            Text("清除后将取消应用内访问限制。磁盘数据本来就未由此密码加密。确定要清除吗？")
         }
     }
     

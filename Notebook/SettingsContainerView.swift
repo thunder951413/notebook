@@ -86,6 +86,7 @@ struct SettingsGeneralView: View {
     @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
+    @State private var automaticUpdateChecksEnabled = AppSettings.shared.automaticUpdateChecksEnabled
     @State private var recentNoteLoadLimit = AppSettings.shared.recentNoteLoadLimit
     @State private var aiKnowledgeBaseTopK = AppSettings.shared.aiKnowledgeBaseTopK
     @State private var githubTokenInput = ""
@@ -320,9 +321,14 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Text("启动时会自动检查 GitHub Release，也可以在这里手动检查。支持 private 仓库；若仓库私有，请配置 GitHub Token。")
+                    Text("可选择每天最多自动检查一次 GitHub Release，也可以手动检查。支持 private 仓库；若仓库私有，请配置 GitHub Token。")
                         .font(.caption)
                         .foregroundColor(.secondary)
+
+                    Toggle("自动检查更新", isOn: $automaticUpdateChecksEnabled)
+                        .onChange(of: automaticUpdateChecksEnabled) { _, enabled in
+                            AppSettings.shared.automaticUpdateChecksEnabled = enabled
+                        }
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("当前版本: \(AppVersion.current.shortVersion) (\(AppVersion.current.buildVersion))")

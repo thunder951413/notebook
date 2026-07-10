@@ -14,7 +14,7 @@ class ConfigSyncManager {
     struct ConfigSyncEnvelope: Codable {
         let exportedAt: Date
         let deviceID: String
-        let version: String = "1.0"
+        var version: String = "1.0"
 
         // 应用设置
         let appSettings: AppSettingsData?
@@ -40,6 +40,7 @@ class ConfigSyncManager {
     struct AppSettingsData: Codable {
         let isFoldersExpanded: Bool?
         let isTagsExpanded: Bool?
+        let isTodoExpanded: Bool?
         let lastSelectedNoteID: String?
         let lastSelectedFolder: String?
         let startupBehavior: String?
@@ -134,6 +135,7 @@ class ConfigSyncManager {
         return AppSettingsData(
             isFoldersExpanded: settings.isFoldersExpanded,
             isTagsExpanded: settings.isTagsExpanded,
+            isTodoExpanded: settings.isTodoExpanded,
             lastSelectedNoteID: settings.lastSelectedNoteID?.uuidString,
             lastSelectedFolder: settings.lastSelectedFolder,
             startupBehavior: settings.startupBehavior.rawValue,
@@ -149,40 +151,22 @@ class ConfigSyncManager {
 
     /// 收集AI配置
     private func collectAIConfigs() -> [AIConfigData]? {
-        guard let configs = UserDefaults.standard.object(forKey: "ai.serviceConfigs") as? [[String: Any]] else {
-            return nil
-        }
-
-        return configs.compactMap { dict in
-            guard let id = dict["id"] as? String,
-                  let serviceType = dict["serviceType"] as? String,
-                  let name = dict["name"] as? String else {
-                return nil
-            }
-
-            let apiKey = dict["apiKey"] as? String
-            let baseURL = dict["baseURL"] as? String
-            let model = dict["model"] as? String
-            let temperature = dict["temperature"] as? Double
-            let maxTokens = dict["maxTokens"] as? Int
-            let systemPrompt = dict["systemPrompt"] as? String
-
-            // 日期处理
-            let createdAt = (dict["createdAt"] as? Date) ?? Date()
-            let updatedAt = dict["updatedAt"] as? Date
-
+        let configs = AIConfigManager.shared.configs
+        guard !configs.isEmpty else { return nil }
+        return configs.map { config in
             return AIConfigData(
-                id: id,
-                serviceType: serviceType,
-                name: name,
-                apiKey: apiKey,
-                baseURL: baseURL,
-                model: model,
-                temperature: temperature,
-                maxTokens: maxTokens,
-                systemPrompt: systemPrompt,
-                createdAt: createdAt,
-                updatedAt: updatedAt
+                id: config.id.uuidString,
+                serviceType: "openai-compatible",
+                name: config.name,
+                // 凭据永不进入配置同步信封；每台设备从本机 Keychain 获取。
+                apiKey: nil,
+                baseURL: config.baseURL,
+                model: config.model,
+                temperature: config.temperature,
+                maxTokens: config.maxTokens,
+                systemPrompt: nil,
+                createdAt: nil,
+                updatedAt: nil
             )
         }
     }
@@ -405,6 +389,10 @@ class ConfigSyncManager {
             appSettings.isTagsExpanded = isTagsExpanded
         }
 
+        if let isTodoExpanded = settings.isTodoExpanded {
+            appSettings.isTodoExpanded = isTodoExpanded
+        }
+
         if let lastSelectedNoteID = settings.lastSelectedNoteID {
             appSettings.lastSelectedNoteID = UUID(uuidString: lastSelectedNoteID)
         }
@@ -458,61 +446,40 @@ class ConfigSyncManager {
 
     /// 应用AI配置
     private func applyAIConfigs(_ configs: [AIConfigData], _ selectedConfigID: String?, mergeStrategy: ConfigMergeStrategy) -> Int {
-        let defaults = UserDefaults.standard
+        let manager = AIConfigManager.shared
         var appliedCount = 0
-
-        // 获取现有配置
-        var existingConfigs = defaults.array(forKey: "ai.serviceConfigs") as? [[String: Any]] ?? []
+        var mergedByID = Dictionary(uniqueKeysWithValues: manager.configs.map { ($0.id, $0) })
 
         for config in configs {
-            // 检查是否已存在相同ID的配置
-            if let existingIndex = existingConfigs.firstIndex(where: { ($0["id"] as? String) == config.id }) {
-                // 根据策略决定是否更新
-                switch mergeStrategy {
-                case .preferLocal:
-                    continue // 跳过，保留本地配置
-                case .preferRemote, .preferNewer:
-                    // 总是更新或比较时间戳
-                    existingConfigs[existingIndex] = convertAIConfigToDict(config)
-                    appliedCount += 1
-                }
-            } else {
-                // 新增配置
-                existingConfigs.append(convertAIConfigToDict(config))
-                appliedCount += 1
+            guard let id = UUID(uuidString: config.id),
+                  let baseURL = config.baseURL,
+                  let model = config.model else { continue }
+            if mergedByID[id] != nil {
+                if case .preferLocal = mergeStrategy { continue }
             }
+
+            // API Key 保留本机 Keychain 中同 ID 的值，不接受远程凭据。
+            let localKey = AIConfigKeychainStore.load(configID: id) ?? ""
+            mergedByID[id] = AIServiceConfig(
+                id: id,
+                name: config.name,
+                baseURL: baseURL,
+                apiKey: localKey,
+                model: model,
+                temperature: config.temperature ?? 0.7,
+                maxTokens: config.maxTokens ?? 2_000
+            )
+            appliedCount += 1
         }
 
-        // 保存配置
-        defaults.set(existingConfigs, forKey: "ai.serviceConfigs")
-
-        // 更新选中的配置ID
-        if let selectedConfigID = selectedConfigID,
-           existingConfigs.contains(where: { ($0["id"] as? String) == selectedConfigID }) {
-            defaults.set(selectedConfigID, forKey: "ai.selectedConfigID")
+        manager.importConfigs(Array(mergedByID.values).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
+        if let selectedConfigID,
+           let selectedID = UUID(uuidString: selectedConfigID),
+           mergedByID[selectedID] != nil {
+            manager.selectConfig(id: selectedID)
         }
 
         return appliedCount
-    }
-
-    /// 转换AI配置为字典
-    private func convertAIConfigToDict(_ config: AIConfigData) -> [String: Any] {
-        var dict: [String: Any] = [
-            "id": config.id,
-            "serviceType": config.serviceType,
-            "name": config.name
-        ]
-
-        if let apiKey = config.apiKey { dict["apiKey"] = apiKey }
-        if let baseURL = config.baseURL { dict["baseURL"] = baseURL }
-        if let model = config.model { dict["model"] = model }
-        if let temperature = config.temperature { dict["temperature"] = temperature }
-        if let maxTokens = config.maxTokens { dict["maxTokens"] = maxTokens }
-        if let systemPrompt = config.systemPrompt { dict["systemPrompt"] = systemPrompt }
-        if let createdAt = config.createdAt { dict["createdAt"] = createdAt }
-        if let updatedAt = config.updatedAt { dict["updatedAt"] = updatedAt }
-
-        return dict
     }
 
     /// 应用环形菜单设置

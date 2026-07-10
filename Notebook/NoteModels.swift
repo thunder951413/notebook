@@ -1,12 +1,18 @@
 import SwiftUI
 import AppKit
 
+enum FolderType: String, Codable, Hashable {
+    case noteFolder
+    case todoList
+}
+
 struct Folder: Identifiable, Hashable {
     let id: UUID
     var name: String
     var sortOrder: Int
     var createdAt: Date
     var isSystem: Bool
+    var folderType: FolderType = .noteFolder
 }
 
 struct Tag: Identifiable, Hashable {
@@ -189,5 +195,38 @@ struct Note: Identifiable, Hashable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = trimmed.components(separatedBy: .newlines)
         return lines.prefix(2).joined(separator: " ")
+    }
+}
+
+struct TodoList: Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var sortOrder: Int
+    var createdAt: Date
+    var isSystem: Bool
+}
+
+struct TodoItem: Identifiable, Hashable {
+    let id: UUID
+    var title: String
+    var contentPreview: String
+    var createdAt: Date
+    var updatedAt: Date
+    var folderID: UUID?
+    var reminderAt: Date?
+    var recurrenceRule: String
+    var dueAt: Date?
+    var completedAt: Date?
+    var isImportant: Bool
+    var order: Int
+    var linkedNoteIDs: [UUID]
+    var deletedAt: Date?
+
+    var isCompleted: Bool {
+        completedAt != nil
+    }
+
+    var isInRecycleBin: Bool {
+        deletedAt != nil
     }
 }

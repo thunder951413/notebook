@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 加密文件夹管理视图
+/// 应用内锁定文件夹管理视图
 struct EncryptedFolderManagementView: View {
     @EnvironmentObject private var store: NoteStore
     @Environment(\.colorScheme) private var colorScheme
@@ -14,7 +14,7 @@ struct EncryptedFolderManagementView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("加密文件夹管理")
+                Text("锁定文件夹管理")
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
@@ -97,7 +97,7 @@ struct EncryptedFolderManagementView: View {
                 }
             }
         } message: {
-            Text("请输入加密文件夹的名称")
+            Text("请输入锁定文件夹的名称")
         }
         .alert("重命名文件夹", isPresented: .constant(editingFolder != nil)) {
             TextField("文件夹名称", text: $editName)
@@ -118,7 +118,7 @@ struct EncryptedFolderManagementView: View {
     }
 }
 
-/// 加密文件夹模型
+/// 锁定文件夹模型（保留旧类型名以兼容已有数据）
 struct EncryptedFolder: Identifiable, Equatable, Codable {
     let id: UUID
     var name: String

@@ -48,6 +48,34 @@
 "note.recurrence.weekly" = "每周";
 "note.recurrence.monthly" = "每月";
 
+/* Todo */
+"todo.title" = "Todo";
+"todo.today" = "今天";
+"todo.important" = "重要";
+"todo.untitled" = "无标题任务";
+"todo.title.placeholder" = "任务标题";
+"todo.steps" = "步骤";
+"todo.step.new" = "新增步骤";
+"todo.notes" = "备注";
+"todo.dueDate" = "截止时间";
+"todo.due" = "截止";
+"todo.reminder" = "提醒";
+"todo.reminderAt" = "提醒时间";
+"todo.recurrence" = "重复";
+"todo.list" = "列表";
+"todo.list.none" = "无列表";
+"todo.linkedNotes" = "关联笔记";
+"todo.linkedNotes.none" = "无关联笔记";
+"todo.select" = "选择一个 Todo";
+"todo.reminder.title" = "Todo 提醒";
+"todo.linkedNote.deleted" = "已删除笔记";
+"todo.list.management" = "Todo 列表管理";
+"todo.list.new" = "新建列表";
+"todo.list.new.title" = "新建 Todo 列表";
+"todo.list.name" = "列表名称";
+"todo.list.name.prompt" = "输入 Todo 列表名称";
+"todo.list.manage" = "管理 Todo 列表";
+
 /* Folders */
 "folder.all" = "全部笔记";
 "folder.uncategorized" = "未分类";

@@ -87,10 +87,9 @@ final class DataExportManager {
         // 导出 AI 配置
         try ConfigurationTransferHelper.exportAIConfig(to: configDir)
 
-        // 导出密码配置
-        try ConfigurationTransferHelper.exportPasswordConfig(to: configDir)
+        // 密码验证记录属于设备凭据，禁止随数据包导出。旧包仍保持兼容导入。
 
-        // 导出加密文件夹配置
+        // 导出锁定文件夹配置（仅应用内访问控制元数据，不代表磁盘加密）
         try ConfigurationTransferHelper.exportEncryptedFolders(to: configDir)
 
         // 导出加密相关数据
@@ -161,6 +160,14 @@ final class DataExportManager {
             .sorted { $0.createdAt < $1.createdAt }
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
             .filter { $0.libraryID == library.id }
+        let todoSteps = try context.fetch(FetchDescriptor<TodoStepEntity>())
+            .filter { $0.libraryID == library.id }
+            .sorted { lhs, rhs in
+                if lhs.noteID != rhs.noteID {
+                    return lhs.noteID.uuidString < rhs.noteID.uuidString
+                }
+                return lhs.order < rhs.order
+            }
         let blocks = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
         let assets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
         let attachmentsRoot = try persistentAttachmentsRootDirectory()
@@ -202,7 +209,13 @@ final class DataExportManager {
                     originalFolderName: note.originalFolderName,
                     blockCount: document.blocks.count,
                     assetCount: migratedAssets.count,
-                    documentPath: "Notes/\(note.id.uuidString)/document.json"
+                    documentPath: "Notes/\(note.id.uuidString)/document.json",
+                    itemType: note.itemType,
+                    todoDueAt: note.todoDueAt,
+                    todoCompletedAt: note.todoCompletedAt,
+                    todoIsImportant: note.todoIsImportant,
+                    todoOrder: note.todoOrder,
+                    linkedNoteIDs: UUIDListCoding.decode(note.linkedNoteIDs)
                 )
             )
         }
@@ -217,7 +230,8 @@ final class DataExportManager {
                     name: $0.name,
                     sortOrder: $0.sortOrder,
                     isSystem: $0.isSystem,
-                    createdAt: $0.createdAt
+                    createdAt: $0.createdAt,
+                    folderType: $0.folderType
                 )
             },
             tags: tags.map {
@@ -225,6 +239,16 @@ final class DataExportManager {
                     id: $0.id,
                     name: $0.name,
                     color: $0.color,
+                    createdAt: $0.createdAt
+                )
+            },
+            todoSteps: todoSteps.map {
+                .init(
+                    id: $0.id,
+                    noteID: $0.noteID,
+                    text: $0.text,
+                    checked: $0.checked,
+                    order: $0.order,
                     createdAt: $0.createdAt
                 )
             }
@@ -468,7 +492,7 @@ final class DataExportManager {
             try ConfigurationTransferHelper.importRadialMenuSettings(from: configDir)
             try ConfigurationTransferHelper.importAppSettings(from: configDir)
             try ConfigurationTransferHelper.importAIConfig(from: configDir)
-            try ConfigurationTransferHelper.importPasswordConfig(from: configDir)
+            // 设备访问密码不随数据包迁移，避免旧备份覆盖当前 Keychain 并锁定用户。
             try ConfigurationTransferHelper.importEncryptedFolders(from: configDir)
             try ConfigurationTransferHelper.importEncryptedData(from: configDir)
         }

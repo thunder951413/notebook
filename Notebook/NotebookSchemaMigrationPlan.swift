@@ -58,20 +58,40 @@ enum NotebookSchemaV4: VersionedSchema {
     }
 }
 
-/// 数据库迁移计划。
+/// Schema 版本 5 —— 在 V4 基础上为 Todo 功能增加轻量字段和步骤实体。
 ///
-/// 当前 stages：
+/// - `BlockDocumentNoteEntity.itemType` 等 Todo 元数据字段
+/// - `BlockDocumentFolderEntity.folderType`
+/// - `TodoStepEntity`
+enum NotebookSchemaV5: VersionedSchema {
+    static var versionIdentifier = Schema.Version(5, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        NotebookSchemaV4.models + [TodoStepEntity.self]
+    }
+}
+
+/// Schema 演进清单（当前不连接到生产 ModelContainer）。
+///
+/// 重要：V1...V5 目前复用当前实体类型，因此这里只能用于记录版本序列和测试新增模型，
+/// 不能安全表示真实历史 schema。生产环境使用迁移前完整数据库快照 + SwiftData 自动
+/// lightweight migration。未来若出现删除/重命名/类型变更，必须把每个版本改成独立实体
+/// 定义，并用真实旧 store fixture 验证后才能把本计划连接到 ModelContainer。
+///
+/// 当前记录：
 /// - V1 → V2：字段新增（previewText / hasLegacyCheckboxMigrated），由 SwiftData 自动 lightweight migration 完成
 /// - V2 → V3：@Relationship 引入，作为 lightweight migration 记录版本
 /// - V3 → V4：tagIDs 关联表引入，作为 lightweight migration 记录版本；
 ///   关联表历史数据由 NoteStore.fetchData() 的 backfill 兜底补齐
+/// - V4 → V5：Todo 轻量字段和 TodoStepEntity 引入，作为 lightweight migration 记录版本
 enum NotebookSchemaMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
         [
             NotebookSchemaV1.self,
             NotebookSchemaV2.self,
             NotebookSchemaV3.self,
-            NotebookSchemaV4.self
+            NotebookSchemaV4.self,
+            NotebookSchemaV5.self
         ]
     }
 
@@ -88,6 +108,10 @@ enum NotebookSchemaMigrationPlan: SchemaMigrationPlan {
             MigrationStage.lightweight(
                 fromVersion: NotebookSchemaV3.self,
                 toVersion: NotebookSchemaV4.self
+            ),
+            MigrationStage.lightweight(
+                fromVersion: NotebookSchemaV4.self,
+                toVersion: NotebookSchemaV5.self
             )
         ]
     }

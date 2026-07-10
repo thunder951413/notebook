@@ -22,16 +22,29 @@ final class NotificationManager {
     }
 
     func schedule(noteID: UUID, title: String, body: String, reminderAt: Date, recurrence: String = "none") async {
+        await schedule(itemID: noteID, itemType: "note", title: title, body: body, reminderAt: reminderAt, recurrence: recurrence)
+    }
+
+    func schedule(todoID: UUID, title: String, body: String, reminderAt: Date, recurrence: String = "none") async {
+        await schedule(itemID: todoID, itemType: "todo", title: title, body: body, reminderAt: reminderAt, recurrence: recurrence)
+    }
+
+    private func schedule(itemID: UUID, itemType: String, title: String, body: String, reminderAt: Date, recurrence: String) async {
         await requestAuthorizationIfNeeded()
 
-        let id = noteID.uuidString
+        let id = itemID.uuidString
         center.removePendingNotificationRequests(withIdentifiers: [id])
 
         let content = UNMutableNotificationContent()
         content.title = title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : title
         content.body = body
         content.sound = .default
-        content.userInfo = ["noteID": id]
+        content.userInfo = [
+            "itemID": id,
+            "itemType": itemType,
+            // Compatibility for notifications scheduled before Todo support.
+            "noteID": id
+        ]
 
         let trigger: UNNotificationTrigger
         if recurrence == "none" {

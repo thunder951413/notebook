@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// 加密文件夹管理器
+/// 应用内锁定文件夹管理器。
+/// 兼容性说明：历史类型名和 UserDefaults key 保持不变，避免破坏既有分类数据。
+/// 此功能只提供应用界面内的访问控制，不对数据库或附件执行磁盘加密。
 class EncryptedFolderManager {
     static let shared = EncryptedFolderManager()
     
-    /// 加密文件夹的显示名称
-    static let folderName = "🔒 加密"
+    /// 锁定文件夹的显示名称
+    static let folderName = "🔒 锁定"
     
     /// UserDefaults key for encrypted note IDs
     private let encryptedNoteIDsKey = "encrypted_note_ids"
@@ -82,7 +84,7 @@ class EncryptedFolderManager {
             saveNoteToEncryptedFolder(noteID: note.id.uuidString, folderID: folderID.uuidString)
         } else {
             // 默认放入第一个加密文件夹或创建一个默认的
-            note.folder = "🔒 加密笔记"
+            note.folder = "🔒 锁定笔记"
         }
         // 清空标签，加密笔记不显示在标签中
         note.tagIDs = []
@@ -111,7 +113,7 @@ class EncryptedFolderManager {
     private func getEncryptedFolderName(id: UUID) -> String {
         // 从 UserDefaults 或其他存储中获取文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        return UserDefaults.standard.string(forKey: key) ?? "加密笔记"
+        return UserDefaults.standard.string(forKey: key) ?? "锁定笔记"
     }
     
     // MARK: - Export/Import
@@ -149,7 +151,7 @@ class EncryptedFolderManager {
     }
 }
 
-/// 加密文件夹视图 - 需要密码验证后才能查看内容
+/// 锁定文件夹视图 - 需要密码验证后才能在应用内查看内容
 struct EncryptedFolderView: View {
     @EnvironmentObject private var store: NoteStore
     @EnvironmentObject private var themeManager: ThemeManager
@@ -194,13 +196,18 @@ struct EncryptedFolderView: View {
                 .foregroundStyle(themeManager.accentColor)
             
             // 标题
-            Text("加密文件夹")
+            Text("锁定文件夹")
                 .font(.title2)
                 .bold()
             
-            Text("请输入密码以查看加密内容")
+            Text("请输入密码以查看锁定内容")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Text("仅限制应用内访问，不加密磁盘上的数据库与附件")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
             
             // 密码输入框
             VStack(spacing: 12) {
@@ -279,7 +286,7 @@ struct EncryptedFolderView: View {
             HStack {
                 Image(systemName: "lock.open.fill")
                     .foregroundStyle(themeManager.accentColor)
-                Text("🔒 加密文件夹")
+                Text("🔒 锁定文件夹")
                     .font(.headline)
                 Spacer()
                 
@@ -316,9 +323,9 @@ struct EncryptedFolderView: View {
                     Image(systemName: "doc.text")
                         .font(.system(size: 48))
                         .foregroundStyle(.secondary.opacity(0.5))
-                    Text("暂无加密笔记")
+                    Text("暂无锁定笔记")
                         .foregroundStyle(.secondary)
-                    Text("将笔记移入此文件夹即可加密")
+                    Text("将笔记移入此处可限制应用内访问")
                         .font(.caption)
                         .foregroundStyle(.secondary.opacity(0.7))
                     Spacer()
@@ -386,7 +393,7 @@ struct EncryptedFolderRow: View {
         HStack {
             Image(systemName: "lock.shield")
                 .foregroundStyle(isSelected ? .white : .red)
-            Text("🔒 加密")
+            Text("🔒 锁定")
                 .lineLimit(1)
             Spacer()
         }

@@ -17,6 +17,7 @@ enum ConfigurationTransferHelper {
             "radialMenuItems",
             "sidebar_folders_expanded",
             "sidebar_tags_expanded",
+            "sidebar_todo_expanded",
             "last_selected_note_id",
             "last_selected_folder",
             "startup_behavior",
@@ -24,7 +25,8 @@ enum ConfigurationTransferHelper {
             "icloud_sync_enabled",
             "logger.file_logging_enabled",
             "logger.keep_historical_files",
-            "update.github_repository_url"
+            "update.github_repository_url",
+            "update.automatic_checks_enabled"
         ]
 
         for key in keys {
@@ -78,6 +80,7 @@ enum ConfigurationTransferHelper {
         let config: [String: Any] = [
             "foldersExpanded": settings.isFoldersExpanded,
             "tagsExpanded": settings.isTagsExpanded,
+            "todoExpanded": settings.isTodoExpanded,
             "startupBehavior": settings.startupBehavior.rawValue
         ]
 
@@ -105,18 +108,6 @@ enum ConfigurationTransferHelper {
             .write(to: selectedConfigURL)
 
         DebugLog.storage("已导出 \(aiManager.configs.count) 个 AI 配置", level: .debug)
-    }
-
-    static func exportPasswordConfig(to directory: URL) throws {
-        // 导出密码配置（哈希和盐值）
-        if let passwordConfig = PasswordManager.shared.exportPasswordConfig() {
-            let passwordURL = directory.appendingPathComponent("PasswordConfig.plist")
-            try PropertyListSerialization.data(fromPropertyList: passwordConfig, format: .xml, options: 0)
-                .write(to: passwordURL)
-            DebugLog.storage("已导出密码配置", level: .debug)
-        } else {
-            DebugLog.storage("没有设置密码，跳过导出", level: .debug)
-        }
     }
 
     static func exportEncryptedFolders(to directory: URL) throws {
@@ -240,10 +231,7 @@ enum ConfigurationTransferHelper {
         if FileManager.default.fileExists(atPath: configsURL.path) {
             let configsData = try Data(contentsOf: configsURL)
             if let configs = try? JSONDecoder().decode([AIServiceConfig].self, from: configsData) {
-                // 保存到 UserDefaults
-                if let encoded = try? JSONEncoder().encode(configs) {
-                    UserDefaults.standard.set(encoded, forKey: "ai.serviceConfigs")
-                }
+                AIConfigManager.shared.importConfigs(configs)
                 DebugLog.storage("已导入 \(configs.count) 个 AI 配置", level: .debug)
             }
         }
