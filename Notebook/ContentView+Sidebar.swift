@@ -231,7 +231,7 @@ struct SidebarView: View {
                     Image(systemName: isTodoExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("Todo")
+                    Text(l10n(L10nKeys.Todo.title))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -541,11 +541,13 @@ struct SidebarView: View {
                             AppSettings.shared.tagsFilterMode = tagsFilterMode
                         }
                     } label: {
-                        Text(tagsFilterMode == .allTags ? "All" : "Cur")
-                            .font(.caption)
+                        Image(systemName: tagsFilterMode == .allTags ? "tag.fill" : "folder")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
+                    .help(tagsFilterMode == .allTags ? l10n("tags.filter.all") : l10n("tags.filter.currentFolder"))
+                    .accessibilityLabel(tagsFilterMode == .allTags ? l10n("tags.filter.all") : l10n("tags.filter.currentFolder"))
                     Button {
                         showingTagManagement = true
                     } label: {
@@ -708,7 +710,10 @@ struct SidebarView: View {
                     Image(systemName: isEncryptedFolderExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("🔒 锁定")
+                    Image(systemName: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(l10n("lockedFolders.title"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -729,7 +734,7 @@ struct SidebarView: View {
             // 展开后显示加密文件夹列表
             if isEncryptedFolderExpanded && isEncryptedFolderUnlocked {
                 if store.encryptedFolders.isEmpty {
-                    Text("无锁定文件夹")
+                    Text(l10n("lockedFolders.empty"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 16)

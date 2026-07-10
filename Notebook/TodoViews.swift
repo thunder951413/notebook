@@ -24,7 +24,15 @@ struct TodoListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List(selection: $selection) {
+            if sortedTodos.isEmpty {
+                ContentUnavailableView(
+                    l10n("todo.empty.title"),
+                    systemImage: "checklist",
+                    description: Text(l10n("todo.empty.description"))
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $selection) {
                 Section {
                     ForEach(sortedTodos) { todo in
                         TodoRowView(
@@ -47,7 +55,7 @@ struct TodoListView: View {
                     }
                 } header: {
                     HStack {
-                        Text("Todo")
+                        Text(l10n(L10nKeys.Todo.title))
                         Spacer()
                         Button {
                             onCreateTodo()
@@ -58,8 +66,9 @@ struct TodoListView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                }
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
         }
         .frame(minWidth: 240, maxWidth: 320)
         .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))

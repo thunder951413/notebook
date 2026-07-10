@@ -49,7 +49,7 @@
 "note.recurrence.monthly" = "每月";
 
 /* Todo */
-"todo.title" = "Todo";
+"todo.title" = "任务";
 "todo.today" = "今天";
 "todo.important" = "重要";
 "todo.untitled" = "无标题任务";
@@ -66,7 +66,7 @@
 "todo.list.none" = "无列表";
 "todo.linkedNotes" = "关联笔记";
 "todo.linkedNotes.none" = "无关联笔记";
-"todo.select" = "选择一个 Todo";
+"todo.select" = "选择一个任务";
 "todo.reminder.title" = "Todo 提醒";
 "todo.linkedNote.deleted" = "已删除笔记";
 "todo.list.management" = "Todo 列表管理";
@@ -312,3 +312,11 @@
 "data.reset.action" = "重置";
 "data.reset.success" = "重置成功，应用将退出。请重新启动应用。";
 "data.reset.failure" = "重置失败：%@";
+"tags.filter.all" = "显示所有标签";
+"tags.filter.currentFolder" = "仅显示当前文件夹的标签";
+"notes.empty.title" = "暂无笔记";
+"notes.empty.description" = "点击工具栏中的 + 按钮创建笔记。";
+"todo.empty.title" = "暂无任务";
+"todo.empty.description" = "点击工具栏中的 + 按钮创建任务。";
+"lockedFolders.title" = "锁定";
+"lockedFolders.empty" = "无锁定文件夹";

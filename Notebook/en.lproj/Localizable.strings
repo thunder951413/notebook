@@ -49,7 +49,7 @@
 "note.recurrence.monthly" = "Monthly";
 
 /* Todo */
-"todo.title" = "Todo";
+"todo.title" = "Tasks";
 "todo.today" = "Today";
 "todo.important" = "Important";
 "todo.untitled" = "Untitled task";
@@ -66,7 +66,7 @@
 "todo.list.none" = "No list";
 "todo.linkedNotes" = "Linked notes";
 "todo.linkedNotes.none" = "No linked notes";
-"todo.select" = "Select a Todo";
+"todo.select" = "Select a task";
 "todo.reminder.title" = "Todo reminder";
 "todo.linkedNote.deleted" = "Deleted note";
 "todo.list.management" = "Todo List Management";
@@ -312,3 +312,11 @@
 "data.reset.action" = "Reset";
 "data.reset.success" = "Reset completed. The app will quit; restart it to continue.";
 "data.reset.failure" = "Reset failed: %@";
+"tags.filter.all" = "Show all tags";
+"tags.filter.currentFolder" = "Show tags in the current folder only";
+"notes.empty.title" = "No Notes";
+"notes.empty.description" = "Create a note with the + button in the toolbar.";
+"todo.empty.title" = "No Tasks";
+"todo.empty.description" = "Create a task with the + button in the toolbar.";
+"lockedFolders.title" = "Locked";
+"lockedFolders.empty" = "No locked folders";

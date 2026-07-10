@@ -140,10 +140,9 @@ final class AutoSyncCoordinator: ObservableObject {
         setSidebarIndicatorSyncing()
         Logger.shared.log(.app, .debug, "[AutoSync] 开始自动拉取: \(reason)")
 
-        // 确保自动拉取前，编辑器中的待保存内容已经落盘。
-        NoteSaveManager.shared.flushAllPending()
-
         do {
+            // 先抓取当前编辑器快照；保存失败时绝不能让远端内容进入本地。
+            try NoteSaveManager.shared.prepareForSync()
             _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: context,
                 config: SSHConfigManager.shared.config
@@ -174,10 +173,9 @@ final class AutoSyncCoordinator: ObservableObject {
         setSidebarIndicatorSyncing()
         Logger.shared.log(.app, .debug, "[AutoSync] 开始自动推送: \(reason)")
 
-        // 推送前再冲刷一次待保存内容，确保远端拿到的是最新数据。
-        NoteSaveManager.shared.flushAllPending()
-
         do {
+            // 推送流程会先拉取，必须先保存当前编辑器，避免未落盘内容被旧数据替换。
+            try NoteSaveManager.shared.prepareForSync()
             _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
                 context: context,
                 config: SSHConfigManager.shared.config

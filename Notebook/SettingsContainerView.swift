@@ -247,7 +247,7 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 8) {
                         Text(l10n(L10nKeys.Settings.storageCurrentPath))
                             .font(.headline)
 
@@ -492,7 +492,7 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 8) {
                         HStack {
                             Text(l10n(L10nKeys.About.appName))
                                 .foregroundColor(.secondary)
@@ -1369,6 +1369,7 @@ struct DataManagementView: View {
             }
 
             do {
+                try NoteSaveManager.shared.prepareForSync()
                 let message = try await operation()
 
                 // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据

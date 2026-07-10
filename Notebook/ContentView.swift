@@ -44,6 +44,7 @@ struct ContentView: View {
     @State private var pendingDeleteTodoID: UUID?
     @State private var isEncryptedFolderUnlocked: Bool = false
     @StateObject private var richTextController = RichTextController()
+    @State private var editorSaveHandlerID: UUID?
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -171,7 +172,8 @@ struct ContentView: View {
     }
     
     /// 保存当前编辑器中的笔记（用于 appBlur/terminate）
-    private func saveCurrentEditorContent(reason: String) {
+    @discardableResult
+    private func saveCurrentEditorContent(reason: String) -> Bool {
         // 安全机制：检查 boundNoteID 和 selection 是否一致
         let boundIDStr = richTextController.boundNoteID?.uuidString.prefix(8) ?? "nil"
         let selIDStr = selection?.uuidString.prefix(8) ?? "nil"
@@ -179,18 +181,18 @@ struct ContentView: View {
         Logger.shared.log(.save, .debug, "reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
         
         let targetNoteID: UUID
-        if let boundID = richTextController.boundNoteID,
-           let selID = selection,
-           boundID == selID {
+        if let boundID = richTextController.boundNoteID {
+            if let selID = selection, boundID != selID {
+                // 快照属于编辑器实际绑定的笔记，绝不能写进刚切换到的 selection。
+                Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using bound editor note: \(boundID)")
+            }
             targetNoteID = boundID
         } else if let selID = selection {
-            Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using selection: \(selID)")
             targetNoteID = selID
-        } else if let boundID = richTextController.boundNoteID {
-            targetNoteID = boundID
         } else {
-            Logger.shared.log(.save, .error, "No target note ID available")
-            return
+            // 没有打开笔记时没有编辑器内容需要保存。
+            Logger.shared.log(.save, .debug, "No target note ID available; nothing to save")
+            return true
         }
         
         // 从编辑器获取内容；若快照异常为空，回退到内存，避免误清空笔记
@@ -198,9 +200,9 @@ struct ContentView: View {
             Logger.shared.log(.save, .warn, "Editor content is nil, fallback to in-memory content")
             if let index = store.notes.firstIndex(where: { $0.id == targetNoteID }) {
                 let memoryContent = store.notes[index].content
-                saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
+                return saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
             }
-            return
+            return false
         }
         Logger.shared.log(.save, .debug, "Editor content length: \(editorContent.length)")
 
@@ -210,12 +212,11 @@ struct ContentView: View {
            store.notes[index].content.length > 0 {
             let memoryContent = store.notes[index].content
             Logger.shared.log(.save, .warn, "Editor snapshot is empty, fallback to memory content length=\(memoryContent.length)")
-            saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
-            return
+            return saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
         }
         
         // 执行保存
-        saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
+        return saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
     }
 
     private func updateSelection(_ newSelection: UUID?, reason: String) {
@@ -400,6 +401,12 @@ struct ContentView: View {
         .toolbarBackground(.hidden, for: .windowToolbar)
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索所有笔记...")
         .onAppear {
+            if let editorSaveHandlerID {
+                NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
+            }
+            editorSaveHandlerID = NoteSaveManager.shared.registerEditorSaveHandler {
+                saveCurrentEditorContent(reason: "beforeSync")
+            }
             store.fetchData()
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 updateSelection(pending, reason: "initialExternalNavigation")
@@ -425,6 +432,12 @@ struct ContentView: View {
                         richTextController.markAsSaved()
                     }
                 }
+            }
+        }
+        .onDisappear {
+            if let editorSaveHandlerID {
+                NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
+                self.editorSaveHandlerID = nil
             }
         }
         .onChange(of: store.selectedNoteId) { _, newValue in

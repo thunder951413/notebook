@@ -21,6 +21,20 @@ enum SaveResult {
     case failure(Error)
 }
 
+enum SyncPreparationError: LocalizedError {
+    case editorSaveFailed
+    case pendingSaveFailed(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .editorSaveFailed:
+            return "当前笔记保存失败，已取消同步以防止覆盖未保存内容"
+        case .pendingSaveFailed(let error):
+            return "待保存内容写入失败，已取消同步：\(error.localizedDescription)"
+        }
+    }
+}
+
 /// 保存请求
 struct SaveRequest {
     let noteID: UUID
@@ -57,6 +71,10 @@ final class NoteSaveManager {
     // 待保存的队列（用于自动保存去抖）
     private var pendingSaves: [UUID: SaveRequest] = [:]
     private var pendingTimers: [UUID: Timer] = [:]
+
+    // 当前主编辑器的同步前保存回调。同步必须先抓取编辑器快照，而不只是冲刷已排队的保存请求。
+    private var editorSaveHandler: (() -> Bool)?
+    private var editorSaveHandlerID: UUID?
     
     private init() {}
     
@@ -72,6 +90,8 @@ final class NoteSaveManager {
             timer.invalidate()
         }
         pendingTimers.removeAll()
+        editorSaveHandler = nil
+        editorSaveHandlerID = nil
     }
     
     // MARK: - 公共 API
@@ -120,8 +140,41 @@ final class NoteSaveManager {
         }
     }
     
-    /// 强制刷新所有待保存内容
-    func flushAllPending() {
+    /// 注册当前主编辑器的同步前保存回调。
+    @discardableResult
+    func registerEditorSaveHandler(_ handler: @escaping () -> Bool) -> UUID {
+        let id = UUID()
+        editorSaveHandler = handler
+        editorSaveHandlerID = id
+        return id
+    }
+
+    /// 仅清理由对应视图注册的回调，避免旧视图移除较新的编辑器回调。
+    func unregisterEditorSaveHandler(id: UUID) {
+        guard editorSaveHandlerID == id else { return }
+        editorSaveHandler = nil
+        editorSaveHandlerID = nil
+    }
+
+    /// 在任何远端读写前保存当前编辑器并冲刷待保存队列。任一步失败都必须阻止同步。
+    func prepareForSync() throws {
+        if let editorSaveHandler, !editorSaveHandler() {
+            Logger.shared.log(.save, .error, "同步前保存当前编辑器失败，已阻止同步")
+            throw SyncPreparationError.editorSaveFailed
+        }
+
+        switch flushAllPending() {
+        case .success:
+            return
+        case .failure(let error):
+            Logger.shared.log(.save, .error, "同步前冲刷待保存队列失败，已阻止同步：\(error.localizedDescription)")
+            throw SyncPreparationError.pendingSaveFailed(error)
+        }
+    }
+
+    /// 强制刷新所有待保存内容，并向调用方报告失败。
+    @discardableResult
+    func flushAllPending() -> SaveResult {
         let pending = pendingSaves
         pendingSaves.removeAll()
         
@@ -130,9 +183,14 @@ final class NoteSaveManager {
         }
         pendingTimers.removeAll()
         
+        var firstError: Error?
         for request in pending.values {
-            _ = performSave(request: request)
+            if case .failure(let error) = performSave(request: request), firstError == nil {
+                firstError = error
+            }
         }
+
+        return firstError.map(SaveResult.failure) ?? .success
     }
     
     // MARK: - 私有方法

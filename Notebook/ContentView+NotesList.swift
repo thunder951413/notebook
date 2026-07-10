@@ -35,7 +35,15 @@ struct NotesListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List(selection: $selection) {
+            if sortedNotes.isEmpty {
+                ContentUnavailableView(
+                    l10n("notes.empty.title"),
+                    systemImage: "note.text",
+                    description: Text(l10n("notes.empty.description"))
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $selection) {
                 Section {
                     ForEach(sortedNotes) { note in
                         NoteRowView(note: note, isSelected: selection == note.id)
@@ -98,8 +106,9 @@ struct NotesListView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                }
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
         }
         .frame(minWidth: 220, maxWidth: 280)
         .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
@@ -107,7 +116,6 @@ struct NotesListView: View {
 
     private func pushNoteToRemote(_ noteID: UUID) {
         runSingleNoteSync(noteID: noteID, successMessage: "本笔记已推送到远程") { context in
-            NoteSaveManager.shared.flushAllPending()
             try await SSHSyncManager.shared.syncNoteToRemote(
                 noteID: noteID,
                 context: context,
@@ -152,6 +160,7 @@ struct NotesListView: View {
             }
 
             do {
+                try NoteSaveManager.shared.prepareForSync()
                 try await operation(context)
                 showSyncAlert(message: successMessage)
             } catch {
@@ -218,4 +227,3 @@ struct NoteRowView: View {
         return lines.prefix(2).joined(separator: " ")
     }
 }
-
