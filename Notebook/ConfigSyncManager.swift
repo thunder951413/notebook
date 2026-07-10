@@ -128,7 +128,7 @@ class ConfigSyncManager {
         let settings = AppSettings.shared
 
         // 获取颜色数据
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         let accentColorData = defaults.data(forKey: "accent_color")
         let editorFontColorData = defaults.data(forKey: "editor_font_color")
 
@@ -173,12 +173,12 @@ class ConfigSyncManager {
 
     /// 收集选中的AI配置ID
     private func collectSelectedAIConfigID() -> String? {
-        return UserDefaults.standard.string(forKey: "ai.selectedConfigID")
+        return NotebookDefaults.shared.string(forKey: "ai.selectedConfigID")
     }
 
     /// 收集环形菜单设置
     private func collectRadialMenuSettings() -> RadialMenuSettingsData? {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         guard defaults.object(forKey: "radialMenuEnabled") != nil else {
             return nil
@@ -205,7 +205,7 @@ class ConfigSyncManager {
 
     /// 收集环形菜单项
     private func collectRadialMenuItems() -> [RadialMenuItemData]? {
-        guard let itemsArray = UserDefaults.standard.array(forKey: "radialMenuItems") as? [[String: Any]] else {
+        guard let itemsArray = NotebookDefaults.shared.array(forKey: "radialMenuItems") as? [[String: Any]] else {
             return nil
         }
 
@@ -237,7 +237,7 @@ class ConfigSyncManager {
 
     /// 收集键盘快捷键
     private func collectKeyboardShortcuts() -> [String: KeyboardShortcutData]? {
-        guard let shortcutsDict = UserDefaults.standard.dictionary(forKey: "keyboardShortcuts") as? [String: [String: Any]] else {
+        guard let shortcutsDict = NotebookDefaults.shared.dictionary(forKey: "keyboardShortcuts") as? [String: [String: Any]] else {
             return nil
         }
 
@@ -258,7 +258,7 @@ class ConfigSyncManager {
     /// 收集笔记数量
     private func collectNoteCount() -> Int? {
         // 尝试从UserDefaults获取
-        if let noteCount = UserDefaults.standard.object(forKey: "notebook_note_count") as? Int {
+        if let noteCount = NotebookDefaults.shared.object(forKey: "notebook_note_count") as? Int {
             return noteCount
         }
         return nil
@@ -266,7 +266,7 @@ class ConfigSyncManager {
 
     /// 收集文件夹数量
     private func collectFolderCount() -> Int? {
-        if let folderCount = UserDefaults.standard.object(forKey: "notebook_folder_count") as? Int {
+        if let folderCount = NotebookDefaults.shared.object(forKey: "notebook_folder_count") as? Int {
             return folderCount
         }
         return nil
@@ -274,7 +274,7 @@ class ConfigSyncManager {
 
     /// 收集标签数量
     private func collectTagCount() -> Int? {
-        if let tagCount = UserDefaults.standard.object(forKey: "notebook_tag_count") as? Int {
+        if let tagCount = NotebookDefaults.shared.object(forKey: "notebook_tag_count") as? Int {
             return tagCount
         }
         return nil
@@ -282,7 +282,7 @@ class ConfigSyncManager {
 
     /// 收集加密文件夹数量
     private func collectEncryptedFolderCount() -> Int? {
-        if let data = UserDefaults.standard.data(forKey: "encrypted_folders"),
+        if let data = NotebookDefaults.shared.data(forKey: "encrypted_folders"),
            let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: data) {
             return folders.count
         }
@@ -297,7 +297,7 @@ class ConfigSyncManager {
         }
 
         // 使用UserDefaults存储的设备ID
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         if let deviceID = defaults.string(forKey: "device_identifier") {
             return deviceID
         }
@@ -362,7 +362,7 @@ class ConfigSyncManager {
     /// 应用应用设置
     private func applyAppSettings(_ settings: AppSettingsData, envelopeExportedAt: Date, mergeStrategy: ConfigMergeStrategy) -> Bool {
         let appSettings = AppSettings.shared
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 检查时间戳，如果本地设置更新，根据策略决定是否覆盖
         let lastModifiedKey = "app_settings_last_modified"
@@ -484,7 +484,7 @@ class ConfigSyncManager {
 
     /// 应用环形菜单设置
     private func applyRadialMenuSettings(_ settings: RadialMenuSettingsData, envelopeExportedAt: Date, mergeStrategy: ConfigMergeStrategy) -> Bool {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 检查时间戳
         let lastModifiedKey = "radial_menu_last_modified"
@@ -538,7 +538,7 @@ class ConfigSyncManager {
 
     /// 应用键盘快捷键
     private func applyKeyboardShortcuts(_ shortcuts: [String: KeyboardShortcutData], mergeStrategy: ConfigMergeStrategy) -> Int {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 获取现有快捷键
         var existingShortcuts = defaults.dictionary(forKey: "keyboardShortcuts") as? [String: [String: Any]] ?? [:]

@@ -3,7 +3,7 @@ import SwiftUI
 
 enum ConfigurationTransferHelper {
     static func exportUserDefaults(to directory: URL) throws {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         var config: [String: Any] = [:]
 
         // 收集所有相关的 UserDefaults 键
@@ -118,12 +118,12 @@ enum ConfigurationTransferHelper {
         var config: [String: Any] = [:]
         
         // 导出加密文件夹列表
-        if let foldersData = UserDefaults.standard.data(forKey: foldersKey) {
+        if let foldersData = NotebookDefaults.shared.data(forKey: foldersKey) {
             config["foldersData"] = foldersData.base64EncodedString()
         }
         
         // 导出文件夹名称映射
-        if let folderNames = UserDefaults.standard.dictionary(forKey: folderNamesKey) {
+        if let folderNames = NotebookDefaults.shared.dictionary(forKey: folderNamesKey) {
             config["folderNames"] = folderNames
         }
         
@@ -153,7 +153,7 @@ enum ConfigurationTransferHelper {
         }
 
         let skippedKeys: Set<String> = ["storageDirectoryBookmark"]
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         for (key, value) in config {
             if skippedKeys.contains(key) {
                 continue
@@ -188,7 +188,7 @@ enum ConfigurationTransferHelper {
     static func importRadialMenuSettings(from directory: URL) throws {
         guard let settings = try loadRadialMenuSettings(from: directory) else { return }
 
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         if let isEnabled = settings["isEnabled"] as? Bool {
             defaults.set(isEnabled, forKey: "radialMenuEnabled")
         }
@@ -219,7 +219,7 @@ enum ConfigurationTransferHelper {
             return
         }
 
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         for (key, value) in settings {
             defaults.set(value, forKey: key)
         }
@@ -243,9 +243,9 @@ enum ConfigurationTransferHelper {
                 return
             }
             if let selectedID = selectedConfig["selectedConfigID"] as? String {
-                UserDefaults.standard.set(selectedID, forKey: "ai.selectedConfigID")
+                NotebookDefaults.shared.set(selectedID, forKey: "ai.selectedConfigID")
             } else {
-                UserDefaults.standard.removeObject(forKey: "ai.selectedConfigID")
+                NotebookDefaults.shared.removeObject(forKey: "ai.selectedConfigID")
             }
         }
     }
@@ -284,12 +284,12 @@ enum ConfigurationTransferHelper {
         // 导入加密文件夹列表
         if let foldersDataString = config["foldersData"] as? String,
            let foldersData = Data(base64Encoded: foldersDataString) {
-            UserDefaults.standard.set(foldersData, forKey: "encryptedFolders")
+            NotebookDefaults.shared.set(foldersData, forKey: "encryptedFolders")
         }
 
         // 导入文件夹名称映射
         if let folderNames = config["folderNames"] as? [String: String] {
-            UserDefaults.standard.set(folderNames, forKey: "encrypted_folder_names")
+            NotebookDefaults.shared.set(folderNames, forKey: "encrypted_folder_names")
         }
 
         DebugLog.storage("已导入加密文件夹配置", level: .debug)

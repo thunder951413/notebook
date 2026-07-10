@@ -136,11 +136,11 @@ final class StorageLocationManager: ObservableObject {
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
-        UserDefaults.standard.set(data, forKey: bookmarkKey)
+        NotebookDefaults.shared.set(data, forKey: bookmarkKey)
     }
 
     private func resolveBaseDirectoryURL() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
+        guard let data = NotebookDefaults.shared.data(forKey: bookmarkKey) else { return nil }
         var isStale = false
         do {
             let url = try URL(

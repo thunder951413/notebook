@@ -26,6 +26,14 @@ jobs:
             -destination 'platform=macOS,arch=arm64' \
             -only-testing:NotebookTests \
             test
+      - name: Run isolated UI smoke test
+        run: |
+          xcodebuild \
+            -scheme Notebook \
+            -project Notebook.xcodeproj \
+            -destination 'platform=macOS,arch=arm64' \
+            -only-testing:NotebookUITests/NotebookUITests/testAppLaunchesWithIsolatedEmptyLibrary \
+            test
       - name: Build Release configuration
         run: |
           xcodebuild \

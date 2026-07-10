@@ -15,7 +15,7 @@ final class iCloudDebugHelper {
     /// 是否启用本地模拟模式（用于测试）
     var isLocalSimulationMode: Bool {
         #if DEBUG
-        return UserDefaults.standard.bool(forKey: "icloud_simulation_mode")
+        return NotebookDefaults.shared.bool(forKey: "icloud_simulation_mode")
         #else
         return false
         #endif
@@ -29,7 +29,7 @@ final class iCloudDebugHelper {
     /// 启用本地模拟模式
     func enableLocalSimulationMode() {
         #if DEBUG
-        UserDefaults.standard.set(true, forKey: "icloud_simulation_mode")
+        NotebookDefaults.shared.set(true, forKey: "icloud_simulation_mode")
         DebugLog.storage("✅ Local simulation mode enabled", level: .debug)
         #endif
     }
@@ -37,7 +37,7 @@ final class iCloudDebugHelper {
     /// 禁用本地模拟模式
     func disableLocalSimulationMode() {
         #if DEBUG
-        UserDefaults.standard.set(false, forKey: "icloud_simulation_mode")
+        NotebookDefaults.shared.set(false, forKey: "icloud_simulation_mode")
         DebugLog.storage("Local simulation mode disabled", level: .debug)
         #endif
     }

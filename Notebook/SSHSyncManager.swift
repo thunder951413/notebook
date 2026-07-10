@@ -3,167 +3,6 @@ import SwiftData
 import CryptoKit
 import Dispatch
 
-struct RemoteNoteIndex: Codable {
-    let generatedAt: Date
-    let deviceID: String
-    let entries: [RemoteNoteIndexEntry]
-    /// 已永久删除的笔记记录，用于多端同步删除状态
-    let deletedEntries: [RemoteDeletedEntry]
-
-    init(generatedAt: Date, deviceID: String, entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = []) {
-        self.generatedAt = generatedAt
-        self.deviceID = deviceID
-        self.entries = entries
-        self.deletedEntries = deletedEntries
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
-        deviceID = try container.decode(String.self, forKey: .deviceID)
-        entries = try container.decode([RemoteNoteIndexEntry].self, forKey: .entries)
-        deletedEntries = try container.decodeIfPresent([RemoteDeletedEntry].self, forKey: .deletedEntries) ?? []
-    }
-}
-
-struct RemoteNoteIndexEntry: Codable {
-    let noteID: UUID
-    let version: Int64
-    let contentHash: String
-    let historyCount: Int
-}
-
-/// 远程已删除笔记记录
-struct RemoteDeletedEntry: Codable {
-    let noteID: UUID
-    let deletedAt: Date
-    let deletedByDeviceID: String
-}
-
-/// 附件清单 - 记录远程已同步附件的哈希，用于增量同步
-struct AssetsManifest: Codable {
-    let generatedAt: Date
-    let deviceID: String
-    let entries: [AssetsManifestEntry]
-}
-
-struct AssetsManifestEntry: Codable {
-    let relativePath: String
-    let contentHash: String
-    let size: Int
-}
-
-/// 文件夹和标签同步信封
-struct LibrarySyncEnvelope: Codable {
-    let exportedAt: Date
-    let deviceID: String
-    let folders: [FolderSyncEntry]
-    let tags: [TagSyncEntry]
-    let encryptedData: EncryptedFolderSyncData?
-}
-
-struct FolderSyncEntry: Codable {
-    let id: UUID
-    let name: String
-    let sortOrder: Int
-    let isSystem: Bool
-    let createdAt: Date?
-    let folderType: String?
-}
-
-struct TagSyncEntry: Codable {
-    let id: UUID
-    let name: String
-    let color: String
-    let createdAt: Date
-}
-
-/// 加密文件夹同步数据
-struct EncryptedFolderSyncData: Codable {
-    let encryptedFolders: [EncryptedFolder]
-    let encryptedNoteIDs: [String]
-    let noteToFolderMapping: [String: String]
-}
-
-/// 同步进度
-struct SSHSyncProgress {
-    let phase: SyncPhase
-    let current: Int
-    let total: Int
-    let message: String
-
-    var fraction: Double {
-        guard total > 0 else { return 0 }
-        return Double(current) / Double(total)
-    }
-}
-
-typealias SSHSyncProgressHandler = @Sendable (SSHSyncProgress) async -> Void
-
-enum SyncPhase: String {
-    case pushLibrary = "推送文件夹/标签"
-    case pushNotes = "推送笔记"
-    case pushAssets = "推送附件"
-    case pushConfig = "推送配置"
-    case pullLibrary = "拉取文件夹/标签"
-    case pullNotes = "拉取笔记"
-    case pullAssets = "拉取附件"
-    case pullConfig = "拉取配置"
-    case checkMissingAssets = "检查缺失附件"
-}
-
-/// SSH 同步管理器内部的可变同步状态。
-///
-/// 使用 actor 自动串行化所有访问，无需手工 NSLock。
-/// 仅承载两类状态：
-/// - `activeControlMasterPaths`: 当前已建立的 SSH ControlMaster 路径集合
-/// - `activeSyncOperationName`: 当前正在执行的同步操作名（用于互斥）
-private actor SSHSyncState {
-    private(set) var activeControlMasterPaths: Set<String> = []
-    private(set) var activeSyncOperationName: String?
-
-    /// 查询当前是否有同步任务运行
-    func isSyncOperationRunning() -> Bool {
-        activeSyncOperationName != nil
-    }
-
-    /// 尝试开启同步操作；若已有任务在跑，返回当前任务名（用于抛错）
-    func beginSyncOperation(named operationName: String) -> String? {
-        if let activeSyncOperationName {
-            return activeSyncOperationName
-        }
-        activeSyncOperationName = operationName
-        return nil
-    }
-
-    /// 结束同步操作
-    func endSyncOperation() {
-        activeSyncOperationName = nil
-    }
-
-    /// 查询某 ControlMaster 路径是否已激活
-    func containsControlMasterPath(_ path: String) -> Bool {
-        activeControlMasterPaths.contains(path)
-    }
-
-    /// 插入 ControlMaster 路径（幂等）
-    func insertControlMasterPath(_ path: String) {
-        activeControlMasterPaths.insert(path)
-    }
-
-    /// 移除 ControlMaster 路径，返回是否实际移除
-    func removeControlMasterPath(_ path: String) -> Bool {
-        guard activeControlMasterPaths.contains(path) else { return false }
-        activeControlMasterPaths.remove(path)
-        return true
-    }
-
-    /// 快照所有活跃的 ControlMaster 路径
-    func snapshotControlMasterPaths() -> [String] {
-        Array(activeControlMasterPaths)
-    }
-}
-
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 ///
 /// ## 并发安全
@@ -2139,14 +1978,14 @@ final class SSHSyncManager: Sendable {
 
     private func loadRemoteSyncCacheState(config: SSHConfig) -> RemoteSyncCacheState? {
         let key = remoteSyncCacheKey(for: config)
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        guard let data = NotebookDefaults.shared.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(RemoteSyncCacheState.self, from: data)
     }
 
     private func saveRemoteSyncCacheState(_ state: RemoteSyncCacheState, config: SSHConfig) {
         let key = remoteSyncCacheKey(for: config)
         guard let data = try? JSONEncoder().encode(state) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        NotebookDefaults.shared.set(data, forKey: key)
     }
 
     private func remoteSyncCacheKey(for config: SSHConfig) -> String {
@@ -2403,7 +2242,7 @@ final class SSHSyncManager: Sendable {
     // MARK: - Encrypted Folder Sync
 
     private func collectEncryptedFolderSyncData() -> EncryptedFolderSyncData {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 加密文件夹列表
         let encryptedFoldersKey = "encrypted_folders"
@@ -2427,7 +2266,7 @@ final class SSHSyncManager: Sendable {
     }
 
     private func importEncryptedFolderSyncData(_ data: EncryptedFolderSyncData) {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 合并加密文件夹列表（以远程为准，添加本地不存在的）
         let encryptedFoldersKey = "encrypted_folders"

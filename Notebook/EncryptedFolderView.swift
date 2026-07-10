@@ -22,12 +22,12 @@ class EncryptedFolderManager {
     /// 迁移旧格式的加密笔记
     private func migrateOldEncryptedNotes() {
         // 检查是否已迁移
-        if UserDefaults.standard.bool(forKey: "encrypted_notes_migrated") {
+        if NotebookDefaults.shared.bool(forKey: "encrypted_notes_migrated") {
             return
         }
         
         // 标记为已迁移
-        UserDefaults.standard.set(true, forKey: "encrypted_notes_migrated")
+        NotebookDefaults.shared.set(true, forKey: "encrypted_notes_migrated")
     }
     
     /// 检查笔记是否在加密文件夹中
@@ -38,7 +38,7 @@ class EncryptedFolderManager {
     
     /// 获取所有加密笔记的ID集合
     private func getEncryptedNoteIDs() -> Set<String> {
-        let ids = UserDefaults.standard.stringArray(forKey: encryptedNoteIDsKey) ?? []
+        let ids = NotebookDefaults.shared.stringArray(forKey: encryptedNoteIDsKey) ?? []
         return Set(ids)
     }
     
@@ -46,30 +46,30 @@ class EncryptedFolderManager {
     private func saveEncryptedNoteID(_ noteID: String) {
         var ids = getEncryptedNoteIDs()
         ids.insert(noteID)
-        UserDefaults.standard.set(Array(ids), forKey: encryptedNoteIDsKey)
+        NotebookDefaults.shared.set(Array(ids), forKey: encryptedNoteIDsKey)
     }
     
     /// 移除加密笔记ID
     private func removeEncryptedNoteID(_ noteID: String) {
         var ids = getEncryptedNoteIDs()
         ids.remove(noteID)
-        UserDefaults.standard.set(Array(ids), forKey: encryptedNoteIDsKey)
+        NotebookDefaults.shared.set(Array(ids), forKey: encryptedNoteIDsKey)
     }
     
     /// 获取笔记所属的加密文件夹ID
     func getEncryptedFolderID(for note: Note) -> UUID? {
         guard isEncrypted(note: note) else { return nil }
         
-        let mapping = UserDefaults.standard.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
+        let mapping = NotebookDefaults.shared.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
         guard let folderIDString = mapping[note.id.uuidString] else { return nil }
         return UUID(uuidString: folderIDString)
     }
     
     /// 保存笔记到加密文件夹的映射
     private func saveNoteToEncryptedFolder(noteID: String, folderID: String) {
-        var mapping = UserDefaults.standard.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
+        var mapping = NotebookDefaults.shared.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
         mapping[noteID] = folderID
-        UserDefaults.standard.set(mapping, forKey: noteToEncryptedFolderKey)
+        NotebookDefaults.shared.set(mapping, forKey: noteToEncryptedFolderKey)
     }
     
     /// 将笔记移入加密文件夹
@@ -96,9 +96,9 @@ class EncryptedFolderManager {
         removeEncryptedNoteID(note.id.uuidString)
         
         // 清除映射关系
-        var mapping = UserDefaults.standard.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
+        var mapping = NotebookDefaults.shared.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
         mapping.removeValue(forKey: note.id.uuidString)
-        UserDefaults.standard.set(mapping, forKey: noteToEncryptedFolderKey)
+        NotebookDefaults.shared.set(mapping, forKey: noteToEncryptedFolderKey)
         
         if let folder = folder {
             note.folderID = folder.id
@@ -113,7 +113,7 @@ class EncryptedFolderManager {
     private func getEncryptedFolderName(id: UUID) -> String {
         // 从 UserDefaults 或其他存储中获取文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        return UserDefaults.standard.string(forKey: key) ?? "锁定笔记"
+        return NotebookDefaults.shared.string(forKey: key) ?? "锁定笔记"
     }
     
     // MARK: - Export/Import
@@ -122,7 +122,7 @@ class EncryptedFolderManager {
     /// - Returns: 包含加密笔记ID列表和映射关系的字典
     func exportEncryptedData() -> [String: Any] {
         let encryptedIDs = Array(getEncryptedNoteIDs())
-        let mapping = UserDefaults.standard.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
+        let mapping = NotebookDefaults.shared.dictionary(forKey: noteToEncryptedFolderKey) as? [String: String] ?? [:]
         
         return [
             "encryptedNoteIDs": encryptedIDs,
@@ -135,19 +135,19 @@ class EncryptedFolderManager {
     func importEncryptedData(_ data: [String: Any]) {
         // 导入加密笔记ID列表
         if let encryptedIDs = data["encryptedNoteIDs"] as? [String] {
-            UserDefaults.standard.set(encryptedIDs, forKey: encryptedNoteIDsKey)
+            NotebookDefaults.shared.set(encryptedIDs, forKey: encryptedNoteIDsKey)
         }
         
         // 导入映射关系
         if let mapping = data["noteToFolderMapping"] as? [String: String] {
-            UserDefaults.standard.set(mapping, forKey: noteToEncryptedFolderKey)
+            NotebookDefaults.shared.set(mapping, forKey: noteToEncryptedFolderKey)
         }
     }
     
     /// 清除所有加密数据（用于重置）
     func clearAllEncryptedData() {
-        UserDefaults.standard.removeObject(forKey: encryptedNoteIDsKey)
-        UserDefaults.standard.removeObject(forKey: noteToEncryptedFolderKey)
+        NotebookDefaults.shared.removeObject(forKey: encryptedNoteIDsKey)
+        NotebookDefaults.shared.removeObject(forKey: noteToEncryptedFolderKey)
     }
 }
 

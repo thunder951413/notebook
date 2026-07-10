@@ -6,7 +6,7 @@ import Combine
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    private let defaults = NotebookDefaults.shared
     private var cancellables = Set<AnyCancellable>()
     
     /// 是否启用 iCloud 同步设置

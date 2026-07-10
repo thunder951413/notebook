@@ -174,21 +174,21 @@ final class BackupManager {
 
     /// 标记保存开始（用于崩溃检测）
     func markSaveStart(noteID: UUID) {
-        UserDefaults.standard.set(noteID.uuidString, forKey: crashMarkerKey)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastSaveKey)
+        NotebookDefaults.shared.set(noteID.uuidString, forKey: crashMarkerKey)
+        NotebookDefaults.shared.set(Date().timeIntervalSince1970, forKey: lastSaveKey)
     }
 
     /// 标记保存完成
     func markSaveComplete() {
-        UserDefaults.standard.removeObject(forKey: crashMarkerKey)
-        UserDefaults.standard.removeObject(forKey: lastSaveKey)
+        NotebookDefaults.shared.removeObject(forKey: crashMarkerKey)
+        NotebookDefaults.shared.removeObject(forKey: lastSaveKey)
     }
 
     /// 检查是否有未完成的保存（崩溃检测）
     func checkForIncompleteSave() -> (noteID: UUID, timestamp: Date)? {
-        guard let noteIDString = UserDefaults.standard.string(forKey: crashMarkerKey),
+        guard let noteIDString = NotebookDefaults.shared.string(forKey: crashMarkerKey),
               let noteID = UUID(uuidString: noteIDString),
-              let timestamp = UserDefaults.standard.object(forKey: lastSaveKey) as? TimeInterval else {
+              let timestamp = NotebookDefaults.shared.object(forKey: lastSaveKey) as? TimeInterval else {
             return nil
         }
 

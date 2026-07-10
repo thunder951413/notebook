@@ -49,11 +49,19 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
     private let modelContext: ModelContext
     private let fileManager = FileManager.default
     private let jsonEncoder = JSONEncoder()
+    private let savesIncrementally: Bool
+    private let attachmentsRootOverride: URL?
     private var libraryEntity: BlockDocumentLibraryEntity?
     private var attachmentsRootDirectory: URL?
 
-    init(modelContext: ModelContext) {
+    init(
+        modelContext: ModelContext,
+        savesIncrementally: Bool = true,
+        attachmentsRootOverride: URL? = nil
+    ) {
         self.modelContext = modelContext
+        self.savesIncrementally = savesIncrementally
+        self.attachmentsRootOverride = attachmentsRootOverride
     }
 
     convenience init(container: ModelContainer) {
@@ -63,6 +71,11 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
     func prepareImport(manifest: DocumentMigrationPackage) throws {
         try deleteAll(BlockDocumentBlockEntity.self)
         try deleteAll(BlockDocumentAssetEntity.self)
+        try deleteAll(TodoStepEntity.self)
+        try deleteAll(BlockDocumentNoteTagEntity.self)
+        try deleteAll(BlockDocumentNoteVersionEntity.self)
+        try deleteAll(BlockDocumentNoteSyncStateEntity.self)
+        try deleteAll(BlockDocumentDeletedNoteTombstoneEntity.self)
         try deleteAll(BlockDocumentNoteEntity.self)
         try deleteAll(BlockDocumentTagEntity.self)
         try deleteAll(BlockDocumentFolderEntity.self)
@@ -111,7 +124,9 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
             )
         }
 
-        try modelContext.save()
+        if savesIncrementally {
+            try modelContext.save()
+        }
         self.libraryEntity = libraryEntity
         attachmentsRootDirectory = attachmentsRoot
     }
@@ -191,7 +206,9 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
             modelContext.insert(blockEntity)
         }
 
-        try modelContext.save()
+        if savesIncrementally {
+            try modelContext.save()
+        }
     }
 
     func finishImport(package: LoadedDocumentMigrationPackage) throws {
@@ -217,10 +234,17 @@ final class SwiftDataDocumentMigrationImportHandler: DocumentMigrationImportHand
             )
         }
 
-        try modelContext.save()
+        if savesIncrementally {
+            try modelContext.save()
+        }
     }
 
     private func persistentAttachmentsRootDirectory() throws -> URL {
+        if let attachmentsRootOverride {
+            try fileManager.createDirectory(at: attachmentsRootOverride, withIntermediateDirectories: true)
+            return attachmentsRootOverride
+        }
+
         let storage = StorageLocationManager.shared
         guard let base = storage.baseDirectoryURL else {
             throw DocumentMigrationPersistenceError.storageNotConfigured

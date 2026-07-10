@@ -1865,7 +1865,7 @@ final class NoteStore: ObservableObject {
     
     /// 加载加密文件夹
     func loadEncryptedFolders() {
-        if let data = UserDefaults.standard.data(forKey: encryptedFoldersKey),
+        if let data = NotebookDefaults.shared.data(forKey: encryptedFoldersKey),
            let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: data) {
             self.encryptedFolders = folders.sorted { $0.order < $1.order }
         }
@@ -1874,7 +1874,7 @@ final class NoteStore: ObservableObject {
     /// 保存加密文件夹
     private func saveEncryptedFolders() {
         if let data = try? JSONEncoder().encode(encryptedFolders) {
-            UserDefaults.standard.set(data, forKey: encryptedFoldersKey)
+            NotebookDefaults.shared.set(data, forKey: encryptedFoldersKey)
         }
     }
     
@@ -1887,7 +1887,7 @@ final class NoteStore: ObservableObject {
         
         // 保存文件夹名称到 UserDefaults 以便查找
         let key = "encrypted_folder_name_\(newFolder.id.uuidString)"
-        UserDefaults.standard.set(name, forKey: key)
+        NotebookDefaults.shared.set(name, forKey: key)
     }
     
     /// 删除加密文件夹
@@ -1905,7 +1905,7 @@ final class NoteStore: ObservableObject {
         
         // 删除文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        UserDefaults.standard.removeObject(forKey: key)
+        NotebookDefaults.shared.removeObject(forKey: key)
     }
     
     /// 重命名加密文件夹
@@ -1917,7 +1917,7 @@ final class NoteStore: ObservableObject {
         
         // 更新文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        UserDefaults.standard.set(newName, forKey: key)
+        NotebookDefaults.shared.set(newName, forKey: key)
         
         // 更新该文件夹中所有笔记的 folder 名称
         let notesInFolder = notes.filter { 
@@ -1967,7 +1967,7 @@ final class NoteStore: ObservableObject {
                 targetFolderID = defaultFolderID
                 encryptedFolderName = "🔒 锁定笔记"
                 let key = "encrypted_folder_name_\(defaultFolderID.uuidString)"
-                UserDefaults.standard.set("锁定笔记", forKey: key)
+                NotebookDefaults.shared.set("锁定笔记", forKey: key)
             }
         }
         

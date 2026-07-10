@@ -2,6 +2,15 @@ import XCTest
 @testable import Notebook
 
 extension NotebookTests {
+    func testNotebookDefaultsUsesIsolatedSuiteDuringTests() {
+        let key = "NotebookTests.defaults-isolation.\(UUID().uuidString)"
+        NotebookDefaults.shared.set("isolated", forKey: key)
+        defer { NotebookDefaults.shared.removeObject(forKey: key) }
+
+        XCTAssertEqual(NotebookDefaults.shared.string(forKey: key), "isolated")
+        XCTAssertNil(UserDefaults.standard.object(forKey: key))
+    }
+
     func testAIConfigEncodingNeverExportsAPIKey() throws {
         let config = AIServiceConfig(
             name: "Private",

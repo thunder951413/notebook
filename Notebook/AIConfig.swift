@@ -152,7 +152,7 @@ class AIConfigManager: ObservableObject {
     }
     
     func loadConfigs() {
-        if let data = UserDefaults.standard.data(forKey: configsKey),
+        if let data = NotebookDefaults.shared.data(forKey: configsKey),
            let decoded = try? JSONDecoder().decode([AIServiceConfig].self, from: data) {
             configs = decoded.map { decodedConfig in
                 var config = decodedConfig
@@ -190,7 +190,7 @@ class AIConfigManager: ObservableObject {
         }
         
         // 加载选中的配置
-        if let selectedID = UserDefaults.standard.string(forKey: selectedConfigKey),
+        if let selectedID = NotebookDefaults.shared.string(forKey: selectedConfigKey),
            let uuid = UUID(uuidString: selectedID),
            configs.contains(where: { $0.id == uuid }) {
             selectedConfigID = uuid
@@ -208,10 +208,10 @@ class AIConfigManager: ObservableObject {
             }
         }
         if let encoded = try? JSONEncoder().encode(configs) {
-            UserDefaults.standard.set(encoded, forKey: configsKey)
+            NotebookDefaults.shared.set(encoded, forKey: configsKey)
         }
         if let selectedConfigID = selectedConfigID {
-            UserDefaults.standard.set(selectedConfigID.uuidString, forKey: selectedConfigKey)
+            NotebookDefaults.shared.set(selectedConfigID.uuidString, forKey: selectedConfigKey)
         }
     }
 

@@ -17,7 +17,7 @@ final class AutoSyncCoordinator: ObservableObject {
     private weak var store: NoteStore?
     private var pendingPushTimer: Timer?
     private var hasPendingLocalChanges: Bool {
-        didSet { UserDefaults.standard.set(hasPendingLocalChanges, forKey: Self.pendingChangesKey) }
+        didSet { NotebookDefaults.shared.set(hasPendingLocalChanges, forKey: Self.pendingChangesKey) }
     }
     private var isAutomaticSyncRunning = false
     private var isManualSyncRunning = false
@@ -36,7 +36,7 @@ final class AutoSyncCoordinator: ObservableObject {
     private var pushRetryCount: Int = 0
 
     private init() {
-        hasPendingLocalChanges = UserDefaults.standard.bool(forKey: Self.pendingChangesKey)
+        hasPendingLocalChanges = NotebookDefaults.shared.bool(forKey: Self.pendingChangesKey)
     }
 
     func configure(store: NoteStore) {

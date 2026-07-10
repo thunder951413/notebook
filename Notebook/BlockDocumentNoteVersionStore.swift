@@ -88,7 +88,7 @@ enum BlockDocumentNoteVersionStore {
     }()
     private static let jsonDecoder = JSONDecoder()
 
-    static func currentDeviceID(defaults: UserDefaults = .standard) -> String {
+    static func currentDeviceID(defaults: UserDefaults = NotebookDefaults.shared) -> String {
         if let existing = defaults.string(forKey: deviceIdentityKey), !existing.isEmpty {
             return existing
         }

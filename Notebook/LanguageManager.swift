@@ -43,14 +43,14 @@ final class LanguageManager: ObservableObject {
     @Published var currentLanguage: AppLanguage
 
     private init() {
-        let savedValue = UserDefaults.standard.string(forKey: languageKey) ?? "system"
+        let savedValue = NotebookDefaults.shared.string(forKey: languageKey) ?? "system"
         self._currentLanguage = Published(wrappedValue: AppLanguage(rawValue: savedValue) ?? .system)
 
         // 监听语言变化
         $currentLanguage
             .dropFirst()
             .sink { [weak self] newLanguage in
-                UserDefaults.standard.set(newLanguage.rawValue, forKey: self?.languageKey ?? "app_language")
+                NotebookDefaults.shared.set(newLanguage.rawValue, forKey: self?.languageKey ?? "app_language")
                 self?.applyLanguage()
             }
             .store(in: &cancellables)
@@ -60,12 +60,12 @@ final class LanguageManager: ObservableObject {
     func applyLanguage() {
         guard let identifier = currentLanguage.localeIdentifier else {
             // 系统默认，重置为系统语言
-            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+            NotebookDefaults.shared.removeObject(forKey: "AppleLanguages")
             return
         }
 
-        UserDefaults.standard.set([identifier], forKey: "AppleLanguages")
-        UserDefaults.standard.synchronize()
+        NotebookDefaults.shared.set([identifier], forKey: "AppleLanguages")
+        NotebookDefaults.shared.synchronize()
     }
 
     /// 获取本地化字符串

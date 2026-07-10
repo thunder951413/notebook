@@ -40,7 +40,7 @@ final class UpdateChecker: ObservableObject {
     func checkForUpdates(silently: Bool) async -> GitHubReleaseInfo? {
         guard !isChecking else { return nil }
         if silently,
-           let lastCheck = UserDefaults.standard.object(forKey: lastAutomaticCheckKey) as? Date,
+           let lastCheck = NotebookDefaults.shared.object(forKey: lastAutomaticCheckKey) as? Date,
            Date().timeIntervalSince(lastCheck) < automaticCheckInterval {
             return nil
         }
@@ -48,7 +48,7 @@ final class UpdateChecker: ObservableObject {
         defer { isChecking = false }
         if silently {
             // 无论服务器结果如何都限频，避免仓库不可访问时每次启动重复联网。
-            UserDefaults.standard.set(Date(), forKey: lastAutomaticCheckKey)
+            NotebookDefaults.shared.set(Date(), forKey: lastAutomaticCheckKey)
         }
 
         do {

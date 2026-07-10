@@ -43,7 +43,7 @@ class WindowStateManager: ObservableObject {
     
     private init() {
         // 加载保存的状态或创建默认状态
-        if let data = UserDefaults.standard.data(forKey: stateKey),
+        if let data = NotebookDefaults.shared.data(forKey: stateKey),
            let decoded = try? JSONDecoder().decode(WindowState.self, from: data) {
             state = decoded
         } else {
@@ -65,7 +65,7 @@ class WindowStateManager: ObservableObject {
     
     func saveState() {
         if let encoded = try? JSONEncoder().encode(state) {
-            UserDefaults.standard.set(encoded, forKey: stateKey)
+            NotebookDefaults.shared.set(encoded, forKey: stateKey)
         }
     }
     
