@@ -35,6 +35,11 @@ enum SyncPreparationError: LocalizedError {
     }
 }
 
+struct EditorSyncCheckpoint: Equatable {
+    let handlerID: UUID?
+    let revisionFingerprint: String?
+}
+
 /// 保存请求
 struct SaveRequest {
     let noteID: UUID
@@ -71,10 +76,12 @@ final class NoteSaveManager {
     // 待保存的队列（用于自动保存去抖）
     private var pendingSaves: [UUID: SaveRequest] = [:]
     private var pendingTimers: [UUID: Timer] = [:]
+    private var pendingSaveCompletions: [UUID: (SaveResult) -> Void] = [:]
 
     // 当前主编辑器的同步前保存回调。同步必须先抓取编辑器快照，而不只是冲刷已排队的保存请求。
     private var editorSaveHandler: (() -> Bool)?
     private var editorSaveHandlerID: UUID?
+    private var editorRevisionProvider: (() -> String?)?
     
     private init() {}
     
@@ -86,12 +93,14 @@ final class NoteSaveManager {
         modelContext = nil
         currentlySaving.removeAll()
         pendingSaves.removeAll()
+        pendingSaveCompletions.removeAll()
         for timer in pendingTimers.values {
             timer.invalidate()
         }
         pendingTimers.removeAll()
         editorSaveHandler = nil
         editorSaveHandlerID = nil
+        editorRevisionProvider = nil
     }
     
     // MARK: - 公共 API
@@ -103,17 +112,25 @@ final class NoteSaveManager {
     }
     
     /// 延迟保存（自动保存）- 去抖处理
-    func scheduleSave(request: SaveRequest, delay: TimeInterval = 1.0) {
+    func scheduleSave(
+        request: SaveRequest,
+        delay: TimeInterval = 1.0,
+        completion: ((SaveResult) -> Void)? = nil
+    ) {
         let noteID = request.noteID
         cancelPendingSave(for: noteID)
         pendingSaves[noteID] = request
+        pendingSaveCompletions[noteID] = completion
         
         let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if let pendingRequest = self.pendingSaves[noteID] {
                     self.pendingSaves.removeValue(forKey: noteID)
-                    _ = self.performSave(request: pendingRequest)
+                    self.pendingTimers.removeValue(forKey: noteID)
+                    let completion = self.pendingSaveCompletions.removeValue(forKey: noteID)
+                    let result = self.performSave(request: pendingRequest)
+                    completion?(result)
                 }
             }
         }
@@ -128,7 +145,10 @@ final class NoteSaveManager {
     func savePendingImmediately(for noteID: UUID) -> SaveResult? {
         guard let request = pendingSaves.removeValue(forKey: noteID) else { return nil }
         pendingTimers.removeValue(forKey: noteID)?.invalidate()
-        return performSave(request: request)
+        let completion = pendingSaveCompletions.removeValue(forKey: noteID)
+        let result = performSave(request: request)
+        completion?(result)
+        return result
     }
     
     /// 取消待保存任务
@@ -137,15 +157,20 @@ final class NoteSaveManager {
             timer.invalidate()
             pendingTimers.removeValue(forKey: noteID)
             pendingSaves.removeValue(forKey: noteID)
+            pendingSaveCompletions.removeValue(forKey: noteID)
         }
     }
     
     /// 注册当前主编辑器的同步前保存回调。
     @discardableResult
-    func registerEditorSaveHandler(_ handler: @escaping () -> Bool) -> UUID {
+    func registerEditorSaveHandler(
+        revisionProvider: (() -> String?)? = nil,
+        _ handler: @escaping () -> Bool
+    ) -> UUID {
         let id = UUID()
         editorSaveHandler = handler
         editorSaveHandlerID = id
+        editorRevisionProvider = revisionProvider
         return id
     }
 
@@ -154,10 +179,12 @@ final class NoteSaveManager {
         guard editorSaveHandlerID == id else { return }
         editorSaveHandler = nil
         editorSaveHandlerID = nil
+        editorRevisionProvider = nil
     }
 
     /// 在任何远端读写前保存当前编辑器并冲刷待保存队列。任一步失败都必须阻止同步。
-    func prepareForSync() throws {
+    @discardableResult
+    func prepareForSync() throws -> EditorSyncCheckpoint {
         if let editorSaveHandler, !editorSaveHandler() {
             Logger.shared.log(.save, .error, "同步前保存当前编辑器失败，已阻止同步")
             throw SyncPreparationError.editorSaveFailed
@@ -165,9 +192,34 @@ final class NoteSaveManager {
 
         switch flushAllPending() {
         case .success:
-            return
+            return EditorSyncCheckpoint(
+                handlerID: editorSaveHandlerID,
+                revisionFingerprint: editorRevisionProvider?()
+            )
         case .failure(let error):
             Logger.shared.log(.save, .error, "同步前冲刷待保存队列失败，已阻止同步：\(error.localizedDescription)")
+            throw SyncPreparationError.pendingSaveFailed(error)
+        }
+    }
+
+    /// 同步结束时再次核对编辑器。如果网络等待期间继续输入，先把新修订落盘再允许刷新 UI。
+    @discardableResult
+    func finishSync(checkpoint: EditorSyncCheckpoint) throws -> Bool {
+        guard checkpoint.handlerID == editorSaveHandlerID else {
+            // 编辑器视图已经切换或重建；它自己的切换链路负责保存旧笔记。
+            return false
+        }
+        let currentFingerprint = editorRevisionProvider?()
+        guard currentFingerprint != checkpoint.revisionFingerprint else { return false }
+
+        guard editorSaveHandler?() != false else {
+            throw SyncPreparationError.editorSaveFailed
+        }
+        switch flushAllPending() {
+        case .success:
+            Logger.shared.log(.save, .info, "同步期间检测到继续编辑，已在刷新前保存最新修订")
+            return true
+        case .failure(let error):
             throw SyncPreparationError.pendingSaveFailed(error)
         }
     }
@@ -176,7 +228,9 @@ final class NoteSaveManager {
     @discardableResult
     func flushAllPending() -> SaveResult {
         let pending = pendingSaves
+        let completions = pendingSaveCompletions
         pendingSaves.removeAll()
+        pendingSaveCompletions.removeAll()
         
         for timer in pendingTimers.values {
             timer.invalidate()
@@ -185,7 +239,9 @@ final class NoteSaveManager {
         
         var firstError: Error?
         for request in pending.values {
-            if case .failure(let error) = performSave(request: request), firstError == nil {
+            let result = performSave(request: request)
+            completions[request.noteID]?(result)
+            if case .failure(let error) = result, firstError == nil {
                 firstError = error
             }
         }
@@ -225,12 +281,19 @@ final class NoteSaveManager {
         }
 
         // 先创建备份
-        BackupManager.shared.createBackup(
+        guard BackupManager.shared.createBackup(
             noteID: noteID,
             title: request.title,
             rtfdData: request.rtfdData,
             reason: request.reason
-        )
+        ) else {
+            interval.end(.error, "backupFailed")
+            return .failure(NSError(
+                domain: "SaveManager",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "无法创建安全备份，已停止保存以避免覆盖现有数据"]
+            ))
+        }
 
         // 执行保存
         do {
@@ -255,6 +318,7 @@ final class NoteSaveManager {
             interval.end(.error, "entityMissing")
             return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
         } catch {
+            context.rollback()
             interval.end(.error, "result=failure error=\(error.localizedDescription)")
             return .failure(error)
         }
@@ -636,11 +700,7 @@ final class NoteSaveManager {
     }
 
     private func copyItemReplacingIfNeeded(from sourceURL: URL, to destinationURL: URL) throws {
-        try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            try FileManager.default.removeItem(at: destinationURL)
-        }
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        try AtomicFileCommit.copyReplacingAtomically(from: sourceURL, to: destinationURL)
     }
 
     private func reusablePersistedAssets(

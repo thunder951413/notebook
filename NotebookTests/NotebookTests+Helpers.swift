@@ -341,6 +341,7 @@ extension NotebookTests {
     func resetSharedTestState() {
         StorageLocationManager.shared.setBaseDirectoryForTesting(nil)
         NoteSaveManager.shared.resetForTesting()
+        SyncSessionCoordinator.shared.resetForTesting()
         BackupManager.shared.markSaveComplete()
     }
 

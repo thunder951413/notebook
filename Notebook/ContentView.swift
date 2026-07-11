@@ -404,9 +404,14 @@ struct ContentView: View {
             if let editorSaveHandlerID {
                 NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
             }
-            editorSaveHandlerID = NoteSaveManager.shared.registerEditorSaveHandler {
-                saveCurrentEditorContent(reason: "beforeSync")
-            }
+            editorSaveHandlerID = NoteSaveManager.shared.registerEditorSaveHandler(
+                revisionProvider: {
+                    guard let noteID = richTextController.boundNoteID,
+                          let note = store.notes.first(where: { $0.id == noteID }) else { return nil }
+                    return richTextController.revisionFingerprint(title: note.title)
+                },
+                { saveCurrentEditorContent(reason: "syncBarrier") }
+            )
             store.fetchData()
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 updateSelection(pending, reason: "initialExternalNavigation")
@@ -515,8 +520,6 @@ struct ContentView: View {
             DebugLog.app("Saved destination: \(String(describing: selectedDestination)), note: \(selection?.uuidString ?? "nil")", level: .debug)
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
-            saveCurrentEditorContent(reason: "terminate")
-            NoteSaveManager.shared.flushAllPending()
             // 保存当前选择的文件夹和笔记
             AppSettings.shared.lastSelectedFolder = legacyFolderName(for: selectedDestination)
             AppSettings.shared.lastSelectedNoteID = selection

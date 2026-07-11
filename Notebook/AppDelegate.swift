@@ -40,6 +40,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.shared.log(.app, .info, "[AppDelegate] applicationDidFinishLaunching - 程序启动")
         UNUserNotificationCenter.current().delegate = self
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
 
         // 注册表格视图提供器（TextKit 2）
         if #available(macOS 12.0, *) {
@@ -64,6 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 // 同时设置 NoteSaveManager 的 context
                 NoteSaveManager.shared.setContext(container.mainContext)
                 if !isRunningTests {
+                    presentIncompleteSaveWarningIfNeeded()
                     AutoSyncCoordinator.shared.handleApplicationLaunched()
                 }
             }
@@ -96,9 +103,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             }
         }
     }
+
+    @MainActor
+    private func presentIncompleteSaveWarningIfNeeded() {
+        guard let incomplete = BackupManager.shared.checkForIncompleteSave() else { return }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "检测到上次保存可能未完成"
+        alert.informativeText = "笔记 \(incomplete.noteID.uuidString) 在 \(formatter.string(from: incomplete.timestamp)) 保存时异常中断。现有数据未被自动替换，请在“数据管理 → 备份恢复”中核对并按需恢复。"
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
+        BackupManager.shared.markSaveComplete()
+    }
     
     func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         Logger.shared.log(.app, .info, "[AppDelegate] applicationWillTerminate - 程序正在退出！")
+    }
+
+    @objc private func workspaceWillSleep(_ notification: Notification) {
+        do {
+            try NoteSaveManager.shared.prepareForSync()
+            Logger.shared.log(.save, .info, "系统睡眠前已保存当前编辑内容")
+        } catch {
+            Logger.shared.log(.save, .error, "系统睡眠前保存失败：\(error.localizedDescription)")
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -142,11 +175,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Logger.shared.log(.app, .info, "[AppDelegate] applicationShouldTerminate - 准备退出，触发保存...")
         
-        // 发送通知让 ContentView 保存当前笔记
+        do {
+            try NoteSaveManager.shared.prepareForSync()
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "无法安全退出"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "返回笔记")
+            alert.runModal()
+            return .terminateCancel
+        }
+
+        // 当前笔记已可靠落盘，通知视图保存导航状态。
         NotificationCenter.default.post(name: .appShouldTerminate, object: nil)
-        
-        // 刷新所有待保存内容
-        NoteSaveManager.shared.flushAllPending()
 
         if isRunningTests {
             return .terminateNow

@@ -63,4 +63,36 @@ extension NotebookTests {
             }
         }
     }
+
+    @MainActor
+    func testSyncSessionSavesEditsMadeWhileRemoteOperationRuns() async throws {
+        var revision = "before"
+        var saveCount = 0
+        NoteSaveManager.shared.registerEditorSaveHandler(revisionProvider: { revision }) {
+            saveCount += 1
+            return true
+        }
+
+        try await SyncSessionCoordinator.shared.withSession(named: "test") {
+            revision = "after"
+        }
+
+        XCTAssertEqual(saveCount, 2)
+    }
+
+    @MainActor
+    func testSyncSessionRejectsOverlappingBackendOperation() async throws {
+        NoteSaveManager.shared.registerEditorSaveHandler { true }
+
+        try await SyncSessionCoordinator.shared.withSession(named: "outer") {
+            do {
+                try await SyncSessionCoordinator.shared.withSession(named: "inner") {}
+                XCTFail("Expected overlapping sync to be rejected")
+            } catch let error as SyncSessionError {
+                guard case .alreadyRunning("outer") = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
 }

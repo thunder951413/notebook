@@ -52,6 +52,7 @@ final class SSHSyncManager: Sendable {
     private struct AssetDownloadJob {
         let relativePath: String
         let localURL: URL
+        let expectedHash: String?
     }
 
     private let noteDownloadConcurrencyLimit = 4
@@ -1019,33 +1020,69 @@ final class SSHSyncManager: Sendable {
             controlPath: controlPath
         )
 
-        let index = RemoteNoteIndex(
-            generatedAt: Date(),
-            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
-            entries: entries.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
-            deletedEntries: deletedEntries.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
-        )
-        let payload = try encodeRemoteNoteIndex(index)
-        let tempFileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
-        try payload.write(to: tempFileURL, options: [.atomic])
-        defer { try? FileManager.default.removeItem(at: tempFileURL) }
-
-        let remoteTempPath = "\(remoteNoteDirectory)/index.json.tmp"
-        let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
-        try await runSCPUpload(
-            sshpassPath: sshpassPath,
-            config: config,
-            localPath: tempFileURL.path,
-            remotePath: remoteTempPath,
-            controlPath: controlPath
-        )
+        // 多设备可能同时改写目录索引。远端 mkdir 是原子的：持锁期间重新读取并合并，
+        // 避免两个客户端都基于旧 index.json 写回而丢掉另一端刚上传的笔记。
+        let lockPath = "\(remoteNoteDirectory)/.index-write.lock"
+        let quotedLockPath = shellQuotedRemotePath(lockPath)
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
+            command: "i=0; while ! mkdir \(quotedLockPath) 2>/dev/null; do i=$((i+1)); [ $i -ge 30 ] && exit 75; find \(quotedLockPath) -maxdepth 0 -mmin +5 -exec rm -rf {} + 2>/dev/null || true; sleep 1; done",
             controlPath: controlPath
         )
+
+        do {
+            let current = try? await downloadRemoteIndexBundle(config: config, controlPath: controlPath).index
+            var mergedEntries = Dictionary(uniqueKeysWithValues: (current?.entries ?? []).map { ($0.noteID, $0) })
+            for entry in entries {
+                if let existing = mergedEntries[entry.noteID], existing.version > entry.version {
+                    continue
+                }
+                mergedEntries[entry.noteID] = entry
+            }
+            var mergedDeleted = Dictionary(uniqueKeysWithValues: (current?.deletedEntries ?? []).map { ($0.noteID, $0) })
+            for deleted in deletedEntries {
+                if let existing = mergedDeleted[deleted.noteID], existing.deletedAt > deleted.deletedAt {
+                    continue
+                }
+                mergedDeleted[deleted.noteID] = deleted
+            }
+            for noteID in mergedDeleted.keys {
+                mergedEntries.removeValue(forKey: noteID)
+            }
+
+            let index = RemoteNoteIndex(
+                generatedAt: Date(),
+                deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+                entries: mergedEntries.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
+                deletedEntries: mergedDeleted.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+            )
+            let payload = try encodeRemoteNoteIndex(index)
+            let tempFileURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
+            try payload.write(to: tempFileURL, options: [.atomic])
+            defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+            let remoteTempPath = "\(remoteNoteDirectory)/index.json.tmp.\(UUID().uuidString)"
+            let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
+            try await runSCPUpload(
+                sshpassPath: sshpassPath,
+                config: config,
+                localPath: tempFileURL.path,
+                remotePath: remoteTempPath,
+                controlPath: controlPath
+            )
+            try await runSSHCommand(
+                sshpassPath: sshpassPath,
+                config: config,
+                command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
+                controlPath: controlPath
+            )
+            try await runSSHCommand(sshpassPath: sshpassPath, config: config, command: "rmdir \(quotedLockPath)", controlPath: controlPath)
+        } catch {
+            try? await runSSHCommand(sshpassPath: sshpassPath, config: config, command: "rmdir \(quotedLockPath)", controlPath: controlPath)
+            throw error
+        }
     }
 
     private func resolveRemoteIndexBundle(
@@ -1157,11 +1194,12 @@ final class SSHSyncManager: Sendable {
             .sorted { $0.uuidString < $1.uuidString }
     }
 
-    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity? {
-        let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
-            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentBackendSyncStateEntity? {
+        try BlockDocumentNoteVersionStore.syncState(
+            noteID: noteID,
+            backendID: BlockDocumentNoteVersionStore.Backend.ssh,
+            context: context
         )
-        return try context.fetch(descriptor).first
     }
 
     private func runSSHCommand(sshpassPath: String, config: SSHConfig, command: String, controlPath: String? = nil) async throws {
@@ -1555,14 +1593,15 @@ final class SSHSyncManager: Sendable {
     private func cleanupDeletedSyncStates(deletedNoteIDs: Set<UUID>, context: ModelContext) {
         guard !deletedNoteIDs.isEmpty else { return }
         for noteID in deletedNoteIDs {
-            let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
-                predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+            let key = "\(BlockDocumentNoteVersionStore.Backend.ssh)|\(noteID.uuidString)"
+            let descriptor = FetchDescriptor<BlockDocumentBackendSyncStateEntity>(
+                predicate: #Predicate<BlockDocumentBackendSyncStateEntity> { $0.backendNoteKey == key }
             )
             if let syncState = try? context.fetch(descriptor).first {
                 context.delete(syncState)
             }
         }
-        try? BlockDocumentNoteVersionStore.cleanupDeletedTombstones(noteIDs: deletedNoteIDs, context: context)
+        // 墓碑必须长期保留并持续发布；离线设备可能在很久后重新上线，过早清理会导致笔记复活。
         context.saveLogging("AssetDownloadJob.cleanupDeletedSyncStates")
     }
 
@@ -1710,11 +1749,13 @@ final class SSHSyncManager: Sendable {
                     guard checkResult.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS" else { continue }
                 }
 
-                try await runSCPDownload(
+                try await downloadSingleAsset(
+                    relativePath: relativePath,
+                    localURL: localURL,
+                    expectedHash: remoteAssetMap[relativePath]?.contentHash,
                     sshpassPath: sshpassPath,
                     config: config,
-                    remotePath: remotePath,
-                    localPath: localURL.path,
+                    remoteAttachmentsDir: remoteAttachmentsDir,
                     controlPath: controlPath
                 )
             }
@@ -1899,7 +1940,11 @@ final class SSHSyncManager: Sendable {
                 )
 
                 if shouldDownload {
-                    downloadJobs.append(AssetDownloadJob(relativePath: relativePath, localURL: localURL))
+                    downloadJobs.append(AssetDownloadJob(
+                        relativePath: relativePath,
+                        localURL: localURL,
+                        expectedHash: remoteAssetMap[relativePath]?.contentHash
+                    ))
                 }
 
                 processedAssets += 1
@@ -1936,6 +1981,7 @@ final class SSHSyncManager: Sendable {
                         try await self.downloadSingleAsset(
                             relativePath: job.relativePath,
                             localURL: job.localURL,
+                            expectedHash: job.expectedHash,
                             sshpassPath: sshpassPath,
                             config: config,
                             remoteAttachmentsDir: remoteAttachmentsDir,
@@ -2069,6 +2115,7 @@ final class SSHSyncManager: Sendable {
     private func downloadSingleAsset(
         relativePath: String,
         localURL: URL,
+        expectedHash: String?,
         sshpassPath: String,
         config: SSHConfig,
         remoteAttachmentsDir: String,
@@ -2079,14 +2126,25 @@ final class SSHSyncManager: Sendable {
         try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
 
         let remotePath = "\(remoteAttachmentsDir)/\(relativePath)"
+        let stagedURL = localDir.appendingPathComponent(".notebook-download-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
 
         try await runSCPDownload(
             sshpassPath: sshpassPath,
             config: config,
             remotePath: remotePath,
-            localPath: localURL.path,
+            localPath: stagedURL.path,
             controlPath: controlPath
         )
+
+        if let expectedHash, try AtomicFileCommit.sha256(of: stagedURL) != expectedHash {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2004,
+                userInfo: [NSLocalizedDescriptionKey: "附件下载校验失败：\(relativePath)"]
+            )
+        }
+        try AtomicFileCommit.commit(stagedURL: stagedURL, to: localURL)
 
         Logger.shared.log(.storage, .debug, "已下载附件：\(relativePath)")
     }
@@ -2101,6 +2159,7 @@ final class SSHSyncManager: Sendable {
             .sorted { $0.sortOrder < $1.sortOrder }
         let tags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
             .sorted { $0.createdAt < $1.createdAt }
+        let libraryTombstones = try context.fetch(FetchDescriptor<BlockDocumentLibraryTombstoneEntity>())
 
         // 收集加密文件夹数据
         let encryptedData = collectEncryptedFolderSyncData()
@@ -2109,12 +2168,18 @@ final class SSHSyncManager: Sendable {
             exportedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
             folders: folders.map {
-                FolderSyncEntry(id: $0.id, name: $0.name, sortOrder: $0.sortOrder, isSystem: $0.isSystem, createdAt: $0.createdAt, folderType: $0.folderType)
+                FolderSyncEntry(id: $0.id, name: $0.name, sortOrder: $0.sortOrder, isSystem: $0.isSystem, createdAt: $0.createdAt, folderType: $0.folderType, updatedAt: $0.updatedAt)
             },
             tags: tags.map {
-                TagSyncEntry(id: $0.id, name: $0.name, color: $0.color, createdAt: $0.createdAt)
+                TagSyncEntry(id: $0.id, name: $0.name, color: $0.color, createdAt: $0.createdAt, updatedAt: $0.updatedAt)
             },
-            encryptedData: encryptedData
+            encryptedData: encryptedData,
+            deletedFolders: libraryTombstones.filter { $0.itemKind == "folder" }.map {
+                LibraryDeletedEntry(id: $0.itemID, deletedAt: $0.deletedAt, deletedByDeviceID: $0.deletedByDeviceID)
+            },
+            deletedTags: libraryTombstones.filter { $0.itemKind == "tag" }.map {
+                LibraryDeletedEntry(id: $0.itemID, deletedAt: $0.deletedAt, deletedByDeviceID: $0.deletedByDeviceID)
+            }
         )
 
         let encoder = JSONEncoder()
@@ -2168,17 +2233,27 @@ final class SSHSyncManager: Sendable {
 
         // 获取本地 library，确保同步的文件夹/标签与本地 library 关联
         let localLibraryID = ensureLocalLibraryID(in: context)
+        let localTombstones = try context.fetch(FetchDescriptor<BlockDocumentLibraryTombstoneEntity>())
+        let tombstonesByKey = Dictionary(uniqueKeysWithValues: localTombstones.map { ($0.tombstoneKey, $0) })
 
         // 合并文件夹
         for remoteFolder in envelope.folders {
             let idToMatch = remoteFolder.id
+            let remoteUpdatedAt = remoteFolder.updatedAt ?? remoteFolder.createdAt ?? envelope.exportedAt
+            let tombstoneKey = "folder|\(remoteFolder.id.uuidString)"
+            if let tombstone = tombstonesByKey[tombstoneKey], tombstone.deletedAt >= remoteUpdatedAt {
+                continue
+            }
+            if let tombstone = tombstonesByKey[tombstoneKey] { context.delete(tombstone) }
             let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(
                 predicate: #Predicate<BlockDocumentFolderEntity> { $0.id == idToMatch }
             )
             if let existing = try context.fetch(descriptor).first {
+                guard remoteUpdatedAt > existing.updatedAt else { continue }
                 existing.name = remoteFolder.name
                 existing.sortOrder = remoteFolder.sortOrder
                 existing.folderType = remoteFolder.folderType ?? FolderType.noteFolder.rawValue
+                existing.updatedAt = remoteUpdatedAt
             } else {
                 let entity = BlockDocumentFolderEntity(
                     id: remoteFolder.id,
@@ -2187,7 +2262,8 @@ final class SSHSyncManager: Sendable {
                     sortOrder: remoteFolder.sortOrder,
                     isSystem: remoteFolder.isSystem,
                     createdAt: remoteFolder.createdAt,
-                    folderType: remoteFolder.folderType ?? FolderType.noteFolder.rawValue
+                    folderType: remoteFolder.folderType ?? FolderType.noteFolder.rawValue,
+                    updatedAt: remoteUpdatedAt
                 )
                 context.insert(entity)
             }
@@ -2196,22 +2272,38 @@ final class SSHSyncManager: Sendable {
         // 合并标签
         for remoteTag in envelope.tags {
             let idToMatch = remoteTag.id
+            let remoteUpdatedAt = remoteTag.updatedAt ?? remoteTag.createdAt
+            let tombstoneKey = "tag|\(remoteTag.id.uuidString)"
+            if let tombstone = tombstonesByKey[tombstoneKey], tombstone.deletedAt >= remoteUpdatedAt {
+                continue
+            }
+            if let tombstone = tombstonesByKey[tombstoneKey] { context.delete(tombstone) }
             let descriptor = FetchDescriptor<BlockDocumentTagEntity>(
                 predicate: #Predicate<BlockDocumentTagEntity> { $0.id == idToMatch }
             )
             if let existing = try context.fetch(descriptor).first {
+                guard remoteUpdatedAt > existing.updatedAt else { continue }
                 existing.name = remoteTag.name
                 existing.color = remoteTag.color
+                existing.updatedAt = remoteUpdatedAt
             } else {
                 let entity = BlockDocumentTagEntity(
                     id: remoteTag.id,
                     libraryID: localLibraryID,
                     name: remoteTag.name,
                     color: remoteTag.color,
-                    createdAt: remoteTag.createdAt
+                    createdAt: remoteTag.createdAt,
+                    updatedAt: remoteUpdatedAt
                 )
                 context.insert(entity)
             }
+        }
+
+        for deletion in envelope.deletedFolders ?? [] {
+            try applyRemoteLibraryDeletion(deletion, kind: "folder", context: context)
+        }
+        for deletion in envelope.deletedTags ?? [] {
+            try applyRemoteLibraryDeletion(deletion, kind: "tag", context: context)
         }
 
         // 合并加密文件夹数据
@@ -2220,6 +2312,69 @@ final class SSHSyncManager: Sendable {
         }
 
         try context.save()
+    }
+
+    private func applyRemoteLibraryDeletion(
+        _ deletion: LibraryDeletedEntry,
+        kind: String,
+        context: ModelContext
+    ) throws {
+        let key = "\(kind)|\(deletion.id.uuidString)"
+        let tombstoneDescriptor = FetchDescriptor<BlockDocumentLibraryTombstoneEntity>(
+            predicate: #Predicate<BlockDocumentLibraryTombstoneEntity> { $0.tombstoneKey == key }
+        )
+        if let tombstone = try context.fetch(tombstoneDescriptor).first {
+            if deletion.deletedAt > tombstone.deletedAt {
+                tombstone.deletedAt = deletion.deletedAt
+                tombstone.deletedByDeviceID = deletion.deletedByDeviceID
+            }
+        } else {
+            context.insert(BlockDocumentLibraryTombstoneEntity(
+                itemID: deletion.id,
+                itemKind: kind,
+                deletedAt: deletion.deletedAt,
+                deletedByDeviceID: deletion.deletedByDeviceID
+            ))
+        }
+
+        let itemID = deletion.id
+        if kind == "folder" {
+            let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(
+                predicate: #Predicate<BlockDocumentFolderEntity> { $0.id == itemID }
+            )
+            if let folder = try context.fetch(descriptor).first, deletion.deletedAt >= folder.updatedAt {
+                let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(
+                    predicate: #Predicate<BlockDocumentNoteEntity> { $0.folderID == itemID }
+                ))
+                for note in notes {
+                    note.folderID = nil
+                    note.folderName = "未分类"
+                }
+                context.delete(folder)
+            }
+        } else {
+            let descriptor = FetchDescriptor<BlockDocumentTagEntity>(
+                predicate: #Predicate<BlockDocumentTagEntity> { $0.id == itemID }
+            )
+            if let tag = try context.fetch(descriptor).first, deletion.deletedAt >= tag.updatedAt {
+                let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+                for note in notes {
+                    var tagIDs = UUIDListCoding.decode(note.tagIDs)
+                    guard tagIDs.contains(itemID) else { continue }
+                    tagIDs.removeAll { $0 == itemID }
+                    note.tagIDs = UUIDListCoding.encode(tagIDs)
+                    note.version = max(note.version + 1, 1)
+                    note.updatedAt = deletion.deletedAt
+                    NoteStore.reconcileNoteTagLinks(
+                        noteID: note.id,
+                        libraryID: note.libraryID,
+                        tagIDs: tagIDs,
+                        context: context
+                    )
+                }
+                context.delete(tag)
+            }
+        }
     }
 
     /// 获取本地 library 的 ID，确保同步过来的文件夹/标签与本地 library 关联

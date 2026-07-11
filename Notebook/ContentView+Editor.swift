@@ -21,6 +21,7 @@ struct NoteEditorView: View {
     @State private var lastSavedContentHash: Int = 0
     @State private var pendingSaveWorkItem: DispatchWorkItem?
     @State private var showingConflictDiff = false
+    @State private var saveErrorMessage: String?
     
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
@@ -192,6 +193,14 @@ struct NoteEditorView: View {
         .sheet(isPresented: $showingConflictDiff) {
             ConflictDiffView(noteID: note.id, localContent: note.content)
         }
+        .alert("保存失败", isPresented: Binding(
+            get: { saveErrorMessage != nil },
+            set: { if !$0 { saveErrorMessage = nil } }
+        )) {
+            Button("好", role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "未知错误")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .toggleMarkdownPreview)) { _ in
             // 快捷键循环切换三种模式
             let newMode: NoteViewMode
@@ -212,6 +221,7 @@ struct NoteEditorView: View {
             ToolbarItemGroup {
                 Button(l10n(L10nKeys.common.save)) {
                     pendingSaveWorkItem?.cancel()
+                    saveImmediatelyFromEditor(reason: "commandSave")
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .buttonStyle(.plain)
@@ -219,6 +229,41 @@ struct NoteEditorView: View {
                 .frame(width: 0, height: 0)
                 .opacity(0)
             }
+        }
+    }
+
+    private func saveImmediatelyFromEditor(reason: String) {
+        guard controller.isBoundTo(noteID: note.id) else {
+            saveErrorMessage = "编辑器状态尚未就绪，请稍后重试"
+            return
+        }
+        guard let content = controller.snapshotAttributedString() else {
+            saveErrorMessage = "无法读取当前编辑内容"
+            return
+        }
+        guard let request = NoteSaveManager.shared.createRequest(
+            noteID: note.id,
+            title: note.title,
+            folderID: note.folderID,
+            folder: note.folder,
+            reminderAt: note.reminderAt,
+            recurrenceRule: note.recurrenceRule,
+            content: content,
+            reason: reason
+        ) else {
+            saveErrorMessage = "无法创建保存数据"
+            return
+        }
+
+        switch NoteSaveManager.shared.saveImmediately(request: request) {
+        case .success:
+            note.content = content
+            lastSavedTitle = note.title
+            lastSavedContentHash = content.hashValue
+            store.markNoteContentUpdated(id: note.id, content: content)
+            controller.recordSavedState(noteID: note.id, title: note.title, content: content)
+        case .failure(let error):
+            saveErrorMessage = error.localizedDescription
         }
     }
 
@@ -272,9 +317,6 @@ struct NoteEditorView: View {
         // 检查编辑器是否还绑定到正确的笔记
         guard controller.isBoundTo(noteID: noteID) else { return }
         
-        lastSavedTitle = title
-        lastSavedContentHash = editorContent.hashValue
-        
         guard let note = store.notes.first(where: { $0.id == noteID }) else { return }
         
         guard let request = NoteSaveManager.shared.createRequest(
@@ -288,7 +330,11 @@ struct NoteEditorView: View {
             reason: "autoSave"
         ) else { return }
         
-        NoteSaveManager.shared.scheduleSave(request: request, delay: 1.0)
+        NoteSaveManager.shared.scheduleSave(request: request, delay: 1.0) { result in
+            guard case .success = result else { return }
+            lastSavedTitle = title
+            lastSavedContentHash = editorContent.hashValue
+        }
     }
 }
 

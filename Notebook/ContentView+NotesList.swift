@@ -160,8 +160,9 @@ struct NotesListView: View {
             }
 
             do {
-                try NoteSaveManager.shared.prepareForSync()
-                try await operation(context)
+                try await SyncSessionCoordinator.shared.withSession(named: "单篇笔记同步") {
+                    try await operation(context)
+                }
                 showSyncAlert(message: successMessage)
             } catch {
                 showSyncAlert(message: "同步失败：\(error.localizedDescription)")

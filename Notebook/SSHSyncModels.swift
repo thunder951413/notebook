@@ -53,6 +53,14 @@ struct LibrarySyncEnvelope: Codable {
     let folders: [FolderSyncEntry]
     let tags: [TagSyncEntry]
     let encryptedData: EncryptedFolderSyncData?
+    let deletedFolders: [LibraryDeletedEntry]?
+    let deletedTags: [LibraryDeletedEntry]?
+}
+
+struct LibraryDeletedEntry: Codable {
+    let id: UUID
+    let deletedAt: Date
+    let deletedByDeviceID: String
 }
 
 struct FolderSyncEntry: Codable {
@@ -62,6 +70,7 @@ struct FolderSyncEntry: Codable {
     let isSystem: Bool
     let createdAt: Date?
     let folderType: String?
+    let updatedAt: Date?
 }
 
 struct TagSyncEntry: Codable {
@@ -69,6 +78,7 @@ struct TagSyncEntry: Codable {
     let name: String
     let color: String
     let createdAt: Date
+    let updatedAt: Date?
 }
 
 struct EncryptedFolderSyncData: Codable {

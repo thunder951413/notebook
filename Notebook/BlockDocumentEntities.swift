@@ -70,6 +70,7 @@ final class BlockDocumentFolderEntity {
     var sortOrder: Int
     var isSystem: Bool
     var createdAt: Date?
+    var updatedAt: Date = Date()
     var folderType: String = FolderType.noteFolder.rawValue
 
     init(
@@ -79,7 +80,8 @@ final class BlockDocumentFolderEntity {
         sortOrder: Int,
         isSystem: Bool,
         createdAt: Date?,
-        folderType: String = FolderType.noteFolder.rawValue
+        folderType: String = FolderType.noteFolder.rawValue,
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -88,6 +90,7 @@ final class BlockDocumentFolderEntity {
         self.isSystem = isSystem
         self.createdAt = createdAt
         self.folderType = folderType
+        self.updatedAt = updatedAt ?? createdAt ?? Date()
     }
 }
 
@@ -98,19 +101,22 @@ final class BlockDocumentTagEntity {
     var name: String
     var color: String
     var createdAt: Date
+    var updatedAt: Date = Date()
 
     init(
         id: UUID,
         libraryID: UUID,
         name: String,
         color: String,
-        createdAt: Date
+        createdAt: Date,
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.libraryID = libraryID
         self.name = name
         self.color = color
         self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
     }
 }
 
@@ -143,6 +149,7 @@ final class BlockDocumentNoteEntity {
     var lastSavedContentHash: String = ""
     var hasConflict: Bool = false
     @Attribute(.externalStorage) var conflictRemoteSnapshotData: Data?
+    var conflictBackendID: String = ""
     var itemType: String = "note"
     var todoDueAt: Date?
     var todoCompletedAt: Date?
@@ -391,6 +398,47 @@ final class BlockDocumentNoteSyncStateEntity {
     }
 }
 
+/// V6：每个同步后端维护独立游标，避免 SSH/iCloud/本地目录互相误判为已同步。
+@Model
+final class BlockDocumentBackendSyncStateEntity {
+    @Attribute(.unique) var backendNoteKey: String
+    var noteID: UUID
+    var backendID: String
+    var lastRecordedVersion: Int64
+    var lastSyncedVersion: Int64
+    var lastCommonVersion: Int64
+    var lastRemoteVersion: Int64
+    var lastSyncAt: Date?
+    var lastRemoteDeviceID: String?
+    var remoteFingerprint: String
+    var pendingHistoryCount: Int
+
+    init(
+        noteID: UUID,
+        backendID: String,
+        lastRecordedVersion: Int64 = 0,
+        lastSyncedVersion: Int64 = 0,
+        lastCommonVersion: Int64 = 0,
+        lastRemoteVersion: Int64 = 0,
+        lastSyncAt: Date? = nil,
+        lastRemoteDeviceID: String? = nil,
+        remoteFingerprint: String = "",
+        pendingHistoryCount: Int = 0
+    ) {
+        self.backendNoteKey = "\(backendID)|\(noteID.uuidString)"
+        self.noteID = noteID
+        self.backendID = backendID
+        self.lastRecordedVersion = lastRecordedVersion
+        self.lastSyncedVersion = lastSyncedVersion
+        self.lastCommonVersion = lastCommonVersion
+        self.lastRemoteVersion = lastRemoteVersion
+        self.lastSyncAt = lastSyncAt
+        self.lastRemoteDeviceID = lastRemoteDeviceID
+        self.remoteFingerprint = remoteFingerprint
+        self.pendingHistoryCount = pendingHistoryCount
+    }
+}
+
 @Model
 final class BlockDocumentDeletedNoteTombstoneEntity {
     @Attribute(.unique) var noteID: UUID
@@ -408,6 +456,23 @@ final class BlockDocumentDeletedNoteTombstoneEntity {
         self.deletedAt = deletedAt
         self.deletedByDeviceID = deletedByDeviceID
         self.createdAt = createdAt
+    }
+}
+
+@Model
+final class BlockDocumentLibraryTombstoneEntity {
+    @Attribute(.unique) var tombstoneKey: String
+    var itemID: UUID
+    var itemKind: String
+    var deletedAt: Date
+    var deletedByDeviceID: String
+
+    init(itemID: UUID, itemKind: String, deletedAt: Date = Date(), deletedByDeviceID: String) {
+        self.tombstoneKey = "\(itemKind)|\(itemID.uuidString)"
+        self.itemID = itemID
+        self.itemKind = itemKind
+        self.deletedAt = deletedAt
+        self.deletedByDeviceID = deletedByDeviceID
     }
 }
 

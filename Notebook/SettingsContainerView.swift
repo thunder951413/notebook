@@ -1369,8 +1369,9 @@ struct DataManagementView: View {
             }
 
             do {
-                try NoteSaveManager.shared.prepareForSync()
-                let message = try await operation()
+                let message = try await SyncSessionCoordinator.shared.withSession(named: "手动数据同步") {
+                    try await operation()
+                }
 
                 // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据
                 self.store.fetchData()

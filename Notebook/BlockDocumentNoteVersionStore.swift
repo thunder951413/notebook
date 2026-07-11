@@ -80,6 +80,11 @@ struct NoteSyncMergeResult {
 }
 
 enum BlockDocumentNoteVersionStore {
+    enum Backend {
+        static let ssh = "ssh"
+        static let iCloud = "icloud"
+        static let localDirectory = "local-directory"
+    }
     private static let deviceIdentityKey = "BlockDocumentNoteVersionStore.deviceID"
     private static let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -137,9 +142,7 @@ enum BlockDocumentNoteVersionStore {
             }
         )
         if let existing = try context.fetch(versionDescriptor).first {
-            let syncState = try ensureSyncState(noteID: note.id, context: context)
-            syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, existing.version)
-            syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+            try updateRecordedVersionForAllBackends(noteID: note.id, version: existing.version, context: context)
             return existing
         }
 
@@ -158,9 +161,7 @@ enum BlockDocumentNoteVersionStore {
         )
         context.insert(entry)
 
-        let syncState = try ensureSyncState(noteID: note.id, context: context)
-        syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, note.version)
-        syncState.pendingHistoryCount = max(0, Int(syncState.lastRecordedVersion - syncState.lastSyncedVersion))
+        try updateRecordedVersionForAllBackends(noteID: note.id, version: note.version, context: context)
         return entry
     }
 
@@ -259,7 +260,11 @@ enum BlockDocumentNoteVersionStore {
         return note.version
     }
 
-    static func exportEnvelope(noteID: UUID, context: ModelContext) throws -> VersionedNoteSyncEnvelope? {
+    static func exportEnvelope(
+        noteID: UUID,
+        context: ModelContext,
+        backendID: String = Backend.ssh
+    ) throws -> VersionedNoteSyncEnvelope? {
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
             predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
         )
@@ -293,7 +298,7 @@ enum BlockDocumentNoteVersionStore {
                 snapshot: try jsonDecoder.decode(VersionedNoteSnapshot.self, from: $0.snapshotData)
             )
         }
-        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
         return VersionedNoteSyncEnvelope(
             noteID: noteID,
             deviceID: currentDeviceID(),
@@ -314,9 +319,13 @@ enum BlockDocumentNoteVersionStore {
         )
     }
 
-    static func mergeRemoteEnvelope(_ envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws -> NoteSyncMergeResult {
-        let importedVersions = try importHistory(from: envelope, context: context)
-        let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
+    static func mergeRemoteEnvelope(
+        _ envelope: VersionedNoteSyncEnvelope,
+        context: ModelContext,
+        backendID: String = Backend.ssh
+    ) throws -> NoteSyncMergeResult {
+        let importedVersions = try importHistory(from: envelope, backendID: backendID, context: context)
+        let syncState = try ensureSyncState(noteID: envelope.noteID, backendID: backendID, context: context)
         syncState.lastRemoteVersion = envelope.currentVersion
         syncState.lastRemoteDeviceID = envelope.deviceID
 
@@ -349,6 +358,7 @@ enum BlockDocumentNoteVersionStore {
                 // 保存远程快照数据供 diff 使用
                 localNote.hasConflict = true
                 localNote.conflictRemoteSnapshotData = try? jsonEncoder.encode(envelope.currentSnapshot)
+                localNote.conflictBackendID = backendID
 
                 // 不应用远程版本，保留本地内容
                 syncState.lastRemoteVersion = envelope.currentVersion
@@ -372,6 +382,7 @@ enum BlockDocumentNoteVersionStore {
                 if localNote.hasConflict {
                     localNote.hasConflict = false
                     localNote.conflictRemoteSnapshotData = nil
+                    localNote.conflictBackendID = ""
                 }
                 syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
                 syncState.lastCommonVersion = max(syncState.lastCommonVersion, envelope.currentVersion)
@@ -474,8 +485,13 @@ enum BlockDocumentNoteVersionStore {
         )
     }
 
-    static func markSynced(noteID: UUID, syncedVersion: Int64, context: ModelContext) throws {
-        let syncState = try ensureSyncState(noteID: noteID, context: context)
+    static func markSynced(
+        noteID: UUID,
+        syncedVersion: Int64,
+        context: ModelContext,
+        backendID: String = Backend.ssh
+    ) throws {
+        let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
         syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, syncedVersion)
         syncState.lastCommonVersion = max(syncState.lastCommonVersion, syncedVersion)
         syncState.lastSyncAt = Date()
@@ -483,8 +499,12 @@ enum BlockDocumentNoteVersionStore {
         try context.save()
     }
 
-    static func markSynced(envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws {
-        let syncState = try ensureSyncState(noteID: envelope.noteID, context: context)
+    static func markSynced(
+        envelope: VersionedNoteSyncEnvelope,
+        context: ModelContext,
+        backendID: String = Backend.ssh
+    ) throws {
+        let syncState = try ensureSyncState(noteID: envelope.noteID, backendID: backendID, context: context)
         syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, envelope.currentVersion)
         syncState.lastCommonVersion = max(syncState.lastCommonVersion, envelope.currentVersion)
         syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, envelope.currentVersion)
@@ -516,8 +536,10 @@ enum BlockDocumentNoteVersionStore {
 
         note.hasConflict = false
         note.conflictRemoteSnapshotData = nil
+        let backendID = note.conflictBackendID.isEmpty ? Backend.ssh : note.conflictBackendID
+        note.conflictBackendID = ""
 
-        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
         // 不覆盖 remoteFingerprint：冲突检测时已正确设置为 incomingFingerprint
         // 重新从快照计算可能因 JSON round-trip 产生不同指纹，导致下次拉取重复触发冲突
         // 不推进 lastSyncedVersion：保留本地版本需要下次推送覆盖远程
@@ -538,8 +560,10 @@ enum BlockDocumentNoteVersionStore {
         try apply(snapshot: snapshot, to: note, context: context, restoredAt: snapshot.metadata.updatedAt)
         note.hasConflict = false
         note.conflictRemoteSnapshotData = nil
+        let backendID = note.conflictBackendID.isEmpty ? Backend.ssh : note.conflictBackendID
+        note.conflictBackendID = ""
 
-        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
         syncState.lastSyncedVersion = max(syncState.lastSyncedVersion, note.version)
         syncState.lastRemoteVersion = max(syncState.lastRemoteVersion, note.version)
         // 不覆盖 remoteFingerprint：冲突检测时已正确设置为 incomingFingerprint
@@ -589,6 +613,12 @@ enum BlockDocumentNoteVersionStore {
         if let syncState = try context.fetch(syncStateDescriptor).first {
             context.delete(syncState)
         }
+        let backendStates = try context.fetch(
+            FetchDescriptor<BlockDocumentBackendSyncStateEntity>(
+                predicate: #Predicate<BlockDocumentBackendSyncStateEntity> { $0.noteID == noteID }
+            )
+        )
+        for state in backendStates { context.delete(state) }
     }
 
     static func recordDeletedTombstone(noteID: UUID, deletedAt: Date = Date(), context: ModelContext) throws {
@@ -626,7 +656,11 @@ enum BlockDocumentNoteVersionStore {
         }
     }
 
-    private static func importHistory(from envelope: VersionedNoteSyncEnvelope, context: ModelContext) throws -> [Int64] {
+    private static func importHistory(
+        from envelope: VersionedNoteSyncEnvelope,
+        backendID: String,
+        context: ModelContext
+    ) throws -> [Int64] {
         let noteID = envelope.noteID
         var importedVersions: [Int64] = []
 
@@ -657,7 +691,7 @@ enum BlockDocumentNoteVersionStore {
             importedVersions.append(historyEntry.version)
         }
 
-        let syncState = try ensureSyncState(noteID: noteID, context: context)
+        let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
         if let maxHistoryVersion = (envelope.history.map(\.version).max()) {
             syncState.lastRecordedVersion = max(syncState.lastRecordedVersion, maxHistoryVersion)
         }
@@ -677,17 +711,71 @@ enum BlockDocumentNoteVersionStore {
         return library
     }
 
-    private static func ensureSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity {
-        let syncStateDescriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
-            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
-        )
-        if let existing = try context.fetch(syncStateDescriptor).first {
+    static func syncState(
+        noteID: UUID,
+        backendID: String,
+        context: ModelContext
+    ) throws -> BlockDocumentBackendSyncStateEntity? {
+        let key = "\(backendID)|\(noteID.uuidString)"
+        return try context.fetch(
+            FetchDescriptor<BlockDocumentBackendSyncStateEntity>(
+                predicate: #Predicate<BlockDocumentBackendSyncStateEntity> { $0.backendNoteKey == key }
+            )
+        ).first
+    }
+
+    private static func ensureSyncState(
+        noteID: UUID,
+        backendID: String,
+        context: ModelContext
+    ) throws -> BlockDocumentBackendSyncStateEntity {
+        if let existing = try syncState(noteID: noteID, backendID: backendID, context: context) {
             return existing
         }
 
-        let syncState = BlockDocumentNoteSyncStateEntity(noteID: noteID)
+        var legacy: BlockDocumentNoteSyncStateEntity?
+        if backendID == Backend.ssh {
+            legacy = try context.fetch(
+                FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
+                    predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+                )
+            ).first
+        }
+        let noteVersion = try context.fetch(
+            FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+            )
+        ).first?.version ?? 0
+        let syncState = BlockDocumentBackendSyncStateEntity(
+            noteID: noteID,
+            backendID: backendID,
+            lastRecordedVersion: max(legacy?.lastRecordedVersion ?? 0, noteVersion),
+            lastSyncedVersion: legacy?.lastSyncedVersion ?? 0,
+            lastCommonVersion: legacy?.lastCommonVersion ?? 0,
+            lastRemoteVersion: legacy?.lastRemoteVersion ?? 0,
+            lastSyncAt: legacy?.lastSyncAt,
+            lastRemoteDeviceID: legacy?.lastRemoteDeviceID,
+            remoteFingerprint: legacy?.remoteFingerprint ?? "",
+            pendingHistoryCount: max(0, Int(noteVersion - (legacy?.lastSyncedVersion ?? 0)))
+        )
         context.insert(syncState)
         return syncState
+    }
+
+    private static func updateRecordedVersionForAllBackends(
+        noteID: UUID,
+        version: Int64,
+        context: ModelContext
+    ) throws {
+        let states = try context.fetch(
+            FetchDescriptor<BlockDocumentBackendSyncStateEntity>(
+                predicate: #Predicate<BlockDocumentBackendSyncStateEntity> { $0.noteID == noteID }
+            )
+        )
+        for state in states {
+            state.lastRecordedVersion = max(state.lastRecordedVersion, version)
+            state.pendingHistoryCount = max(0, Int(state.lastRecordedVersion - state.lastSyncedVersion))
+        }
     }
 
     private static func apply(

@@ -1,4 +1,35 @@
 import Foundation
+import CryptoKit
+
+enum AtomicFileCommit {
+    static func sha256(of url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func commit(stagedURL: URL, to destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            _ = try fileManager.replaceItemAt(destinationURL, withItemAt: stagedURL)
+        } else {
+            try fileManager.moveItem(at: stagedURL, to: destinationURL)
+        }
+    }
+
+    static func copyReplacingAtomically(from sourceURL: URL, to destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stagedURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(".notebook-stage-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: stagedURL) }
+
+        try fileManager.copyItem(at: sourceURL, to: stagedURL)
+        guard try sha256(of: sourceURL) == sha256(of: stagedURL) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try commit(stagedURL: stagedURL, to: destinationURL)
+    }
+}
 
 /// 将附件目录切换封装为可回滚事务。备份只在数据库事务成功后删除；若应用在
 /// 提交期间异常退出，`AttachmentsBackup_*` 仍可用于启动恢复或人工恢复。

@@ -69,6 +69,12 @@ final class AutoSyncCoordinator: ObservableObject {
         scheduleDebouncedPush(reason: "note=\(noteID.uuidString.prefix(8)) reason=\(reason)")
     }
 
+    func libraryDidChange(reason: String) {
+        hasPendingLocalChanges = true
+        pushRetryCount = 0
+        scheduleDebouncedPush(reason: "library=\(reason)")
+    }
+
     func beginManualSync() {
         isManualSyncRunning = true
         invalidatePendingPushTimer()
@@ -141,12 +147,12 @@ final class AutoSyncCoordinator: ObservableObject {
         Logger.shared.log(.app, .debug, "[AutoSync] 开始自动拉取: \(reason)")
 
         do {
-            // 先抓取当前编辑器快照；保存失败时绝不能让远端内容进入本地。
-            try NoteSaveManager.shared.prepareForSync()
-            _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
-                context: context,
-                config: SSHConfigManager.shared.config
-            )
+            _ = try await SyncSessionCoordinator.shared.withSession(named: "自动拉取") {
+                try await SSHSyncManager.shared.syncAllNotesFromRemote(
+                    context: context,
+                    config: SSHConfigManager.shared.config
+                )
+            }
             lastSuccessfulPullAt = Date()
             store?.fetchData()
             setSidebarIndicatorSuccess()
@@ -174,18 +180,18 @@ final class AutoSyncCoordinator: ObservableObject {
         Logger.shared.log(.app, .debug, "[AutoSync] 开始自动推送: \(reason)")
 
         do {
-            // 推送流程会先拉取，必须先保存当前编辑器，避免未落盘内容被旧数据替换。
-            try NoteSaveManager.shared.prepareForSync()
-            _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
-                context: context,
-                config: SSHConfigManager.shared.config
-            )
-            lastSuccessfulPullAt = Date()
+            try await SyncSessionCoordinator.shared.withSession(named: "自动双向同步") {
+                _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
+                    context: context,
+                    config: SSHConfigManager.shared.config
+                )
+                lastSuccessfulPullAt = Date()
 
-            _ = try await SSHSyncManager.shared.syncAllNotesToRemote(
-                context: context,
-                config: SSHConfigManager.shared.config
-            )
+                _ = try await SSHSyncManager.shared.syncAllNotesToRemote(
+                    context: context,
+                    config: SSHConfigManager.shared.config
+                )
+            }
             hasPendingLocalChanges = false
             lastSuccessfulPushAt = Date()
             setSidebarIndicatorSuccess()

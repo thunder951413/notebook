@@ -1183,7 +1183,9 @@ final class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.folderCount += 1
-        context.saveLogging("NoteStore.addFolder")
+        if context.saveLogging("NoteStore.addFolder") {
+            autoSyncCoordinator.libraryDidChange(reason: "addFolder")
+        }
         fetchData()
     }
     
@@ -1193,13 +1195,16 @@ final class NoteStore: ObservableObject {
         let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
             entity.name = name
+            entity.updatedAt = Date()
 
             let notesInFolder = try? context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.folderID == idToMatch }))
             for note in notesInFolder ?? [] {
                 note.folderName = name
             }
 
-            context.saveLogging("NoteStore.updateFolder")
+            if context.saveLogging("NoteStore.updateFolder") {
+                autoSyncCoordinator.libraryDidChange(reason: "updateFolder")
+            }
             fetchData()
         }
     }
@@ -1224,8 +1229,17 @@ final class NoteStore: ObservableObject {
                 library.folderCount = max(0, library.folderCount - 1)
             }
 
+            let deletedAt = Date()
+            context.insert(BlockDocumentLibraryTombstoneEntity(
+                itemID: id,
+                itemKind: "folder",
+                deletedAt: deletedAt,
+                deletedByDeviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+            ))
             context.delete(entity)
-            context.saveLogging("NoteStore.deleteFolder")
+            if context.saveLogging("NoteStore.deleteFolder") {
+                autoSyncCoordinator.libraryDidChange(reason: "deleteFolder")
+            }
             fetchData()
         }
     }
@@ -1239,9 +1253,12 @@ final class NoteStore: ObservableObject {
             let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
             if let entity = try? context.fetch(descriptor).first {
                 entity.sortOrder = index
+                entity.updatedAt = Date()
             }
         }
-        context.saveLogging("NoteStore.reorderFolders")
+        if context.saveLogging("NoteStore.reorderFolders") {
+            autoSyncCoordinator.libraryDidChange(reason: "reorderFolders")
+        }
         fetchData()
     }
     
@@ -1259,7 +1276,9 @@ final class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.tagCount += 1
-        context.saveLogging("NoteStore.addTag")
+        if context.saveLogging("NoteStore.addTag") {
+            autoSyncCoordinator.libraryDidChange(reason: "addTag")
+        }
         fetchData()
     }
     
@@ -1270,7 +1289,10 @@ final class NoteStore: ObservableObject {
         if let entity = try? context.fetch(descriptor).first {
             if let name { entity.name = name }
             if let color { entity.color = color }
-            context.saveLogging("NoteStore.updateTag")
+            entity.updatedAt = Date()
+            if context.saveLogging("NoteStore.updateTag") {
+                autoSyncCoordinator.libraryDidChange(reason: "updateTag")
+            }
             fetchData()
         }
     }
@@ -1292,8 +1314,16 @@ final class NoteStore: ObservableObject {
                 library.tagCount = max(0, library.tagCount - 1)
             }
 
+            context.insert(BlockDocumentLibraryTombstoneEntity(
+                itemID: id,
+                itemKind: "tag",
+                deletedAt: Date(),
+                deletedByDeviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+            ))
             context.delete(entity)
-            context.saveLogging("NoteStore.deleteTag")
+            if context.saveLogging("NoteStore.deleteTag") {
+                autoSyncCoordinator.libraryDidChange(reason: "deleteTag")
+            }
             fetchData()
         }
     }
@@ -1308,9 +1338,12 @@ final class NoteStore: ObservableObject {
             let descriptor = FetchDescriptor<BlockDocumentTagEntity>(predicate: #Predicate { $0.id == idToMatch })
             if let entity = try? context.fetch(descriptor).first {
                 entity.createdAt = baseDate.addingTimeInterval(TimeInterval(index))
+                entity.updatedAt = baseDate
             }
         }
-        context.saveLogging("NoteStore.reorderTags")
+        if context.saveLogging("NoteStore.reorderTags") {
+            autoSyncCoordinator.libraryDidChange(reason: "reorderTags")
+        }
         fetchData()
     }
     
@@ -1325,6 +1358,8 @@ final class NoteStore: ObservableObject {
             if !currentTagIDs.contains(tagID) {
                 currentTagIDs.append(tagID)
                 entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
+                entity.updatedAt = Date()
+                entity.version = max(entity.version + 1, 1)
                 // 同步更新关联表（派生索引），保证按标签筛选可走 SQLite 索引
                 Self.upsertNoteTagLink(
                     noteID: noteID,
@@ -1333,7 +1368,9 @@ final class NoteStore: ObservableObject {
                     sortOrder: currentTagIDs.count - 1,
                     context: context
                 )
-                context.saveLogging("NoteStore.addTagToNote")
+                if context.saveLogging("NoteStore.addTagToNote") {
+                    autoSyncCoordinator.noteDidSave(noteID: noteID, reason: "addTag")
+                }
                 fetchData()
             }
         }
@@ -1348,9 +1385,12 @@ final class NoteStore: ObservableObject {
             currentTagIDs.removeAll { $0 == tagID }
             entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
             entity.updatedAt = Date()
+            entity.version = max(entity.version + 1, 1)
             // 同步删除关联表记录
             Self.deleteNoteTagLink(noteID: noteID, tagID: tagID, context: context)
-            context.saveLogging("NoteStore.removeTagFromNote")
+            if context.saveLogging("NoteStore.removeTagFromNote") {
+                autoSyncCoordinator.noteDidSave(noteID: noteID, reason: "removeTag")
+            }
             if let idx = notes.firstIndex(where: { $0.id == noteID }) {
                 notes[idx].tagIDs = currentTagIDs
                 notes[idx].updatedAt = entity.updatedAt
