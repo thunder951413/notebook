@@ -27,7 +27,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_NAME="Notebook"
 SCHEME="Notebook"
 OUTPUT_DIR="$PROJECT_DIR/output"
-DERIVED_DATA_DIR="$PROJECT_DIR/build/DerivedData"
+DERIVED_DATA_DIR="$OUTPUT_DIR/DerivedData"
 
 CONFIGURATION="Release"
 SHOULD_CLEAN=false
@@ -99,14 +99,6 @@ if [[ "$SHOULD_CLEAN" == true ]]; then
     rm -rf "$DERIVED_DATA_DIR" "$OUTPUT_DIR"
     echo "  ✓ 已清理 DerivedData 和 output/"
     echo ""
-fi
-
-# 清理项目根 build/ 下的旧残留（避免 "Stale file outside allowed root paths" 警告）
-LEGACY_BUILD="$PROJECT_DIR/build"
-if [[ -d "$LEGACY_BUILD" ]]; then
-    find "$LEGACY_BUILD" -maxdepth 1 \
-        \( -name "*.swiftmodule" -o -name "*.swiftsourceinfo" -o -name "*.abi.json" -o -name "*.swiftdoc" \) \
-        -print -delete >/dev/null 2>&1 || true
 fi
 
 # ──────────────────────────────────────────────
