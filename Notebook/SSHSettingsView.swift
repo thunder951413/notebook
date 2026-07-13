@@ -12,6 +12,9 @@ struct SSHSettingsView: View {
     
     @State private var isTesting = false
     @State private var testResult: TestResult?
+    @State private var mobileQRCode: NSImage?
+    @State private var showMobileQRCode = false
+    @State private var configurationAlert: String?
     
     enum TestResult: Equatable {
         case success
@@ -110,6 +113,12 @@ struct SSHSettingsView: View {
                 }
                 
                 Spacer()
+
+                Button {
+                    presentMobileConfigurationQRCode()
+                } label: {
+                    Label("显示手机配置二维码", systemImage: "qrcode")
+                }
                 
                 Button {
                     testAndSaveConnection()
@@ -129,9 +138,20 @@ struct SSHSettingsView: View {
             }
         }
         .padding(24)
-        .frame(width: 420, height: 520)
+        .frame(width: 560, height: 520)
         .onAppear {
             loadExistingConfig()
+        }
+        .sheet(isPresented: $showMobileQRCode, onDismiss: { mobileQRCode = nil }) {
+            MobileConfigurationQRCodeView(image: mobileQRCode)
+        }
+        .alert("无法生成配置二维码", isPresented: Binding(
+            get: { configurationAlert != nil },
+            set: { if !$0 { configurationAlert = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(configurationAlert ?? "")
         }
     }
     
@@ -198,6 +218,35 @@ struct SSHSettingsView: View {
             }
         }
     }
+
+    private func presentMobileConfigurationQRCode() {
+        let savedConfig = SSHConfigManager.shared.config
+        let normalizedHost = savedConfig.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedUsername = savedConfig.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedHost.isEmpty, !normalizedUsername.isEmpty else {
+            configurationAlert = "请先完成并保存服务器配置。"
+            return
+        }
+
+        let password = SSHConfigManager.shared.loadPassword() ?? ""
+        let fingerprint = SSHKnownHostFingerprint.sha256(host: normalizedHost, port: savedConfig.port)
+        do {
+            let json = try MobileSyncConfigurationEncoder.encode(
+                config: savedConfig,
+                password: password,
+                fingerprint: fingerprint
+            )
+            guard let image = MobileSyncQRCodeGenerator.image(fromUTF8JSON: json) else {
+                configurationAlert = "二维码生成失败，请稍后重试。"
+                return
+            }
+            mobileQRCode = image
+            showMobileQRCode = true
+        } catch {
+            // 不传递底层编码错误，避免将可能包含敏感载荷的上下文带入报告。
+            configurationAlert = "二维码生成失败，请稍后重试。"
+        }
+    }
     
     /// 测试 SSH 连接
     private func testSSHConnection(host: String, port: Int, username: String, password: String) async throws {
@@ -211,6 +260,33 @@ struct SSHSettingsView: View {
         
         // 使用 expect 脚本进行密码认证测试
         try await SSHSyncManager.shared.testConnectionWithPassword(config: config)
+    }
+}
+
+private struct MobileConfigurationQRCodeView: View {
+    let image: NSImage?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("手机同步配置")
+                .font(.title2.bold())
+            if let image {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 320, height: 320)
+                    .accessibilityLabel("手机同步配置二维码")
+            }
+            Text("请在 Android Notebook 的‘设置与同步’中选择‘扫描配置二维码’。")
+                .multilineTextAlignment(.center)
+            Label("二维码包含服务器登录信息，请勿截图或分享给他人。", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.callout.bold())
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(width: 440, height: 470)
     }
 }
 
