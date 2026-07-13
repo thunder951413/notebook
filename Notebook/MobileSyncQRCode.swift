@@ -2,6 +2,7 @@ import AppKit
 import CoreImage
 import CryptoKit
 import Foundation
+import SwiftUI
 
 /// Android Notebook 可扫描的同步配置。仅在用户主动显示二维码时临时创建，禁止持久化或记录。
 struct MobileSyncConfigurationPayload: Codable, Equatable {
@@ -104,4 +105,86 @@ enum SSHKnownHostFingerprint {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+/// 可直接放入任意 SSH/同步设置页面的完整二维码入口。
+struct MobileSyncQRCodeButton: View {
+    @State private var image: NSImage?
+    @State private var isPresented = false
+    @State private var alertMessage: String?
+
+    var body: some View {
+        Button {
+            generateAndPresent()
+        } label: {
+            Label("显示手机配置二维码", systemImage: "qrcode")
+        }
+        .sheet(isPresented: $isPresented, onDismiss: { image = nil }) {
+            MobileConfigurationQRCodeView(image: image)
+        }
+        .alert("无法生成配置二维码", isPresented: Binding(
+            get: { alertMessage != nil },
+            set: { if !$0 { alertMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(alertMessage ?? "")
+        }
+    }
+
+    private func generateAndPresent() {
+        let config = SSHConfigManager.shared.config
+        let host = config.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = config.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !username.isEmpty else {
+            alertMessage = "请先完成并保存服务器配置。"
+            return
+        }
+
+        let password = SSHConfigManager.shared.loadPassword() ?? ""
+        let fingerprint = SSHKnownHostFingerprint.sha256(host: host, port: config.port)
+        do {
+            let json = try MobileSyncConfigurationEncoder.encode(
+                config: config,
+                password: password,
+                fingerprint: fingerprint
+            )
+            guard let generated = MobileSyncQRCodeGenerator.image(fromUTF8JSON: json) else {
+                alertMessage = "二维码生成失败，请稍后重试。"
+                return
+            }
+            image = generated
+            isPresented = true
+        } catch {
+            // 不传递底层编码错误，避免敏感载荷进入错误报告。
+            alertMessage = "二维码生成失败，请稍后重试。"
+        }
+    }
+}
+
+private struct MobileConfigurationQRCodeView: View {
+    let image: NSImage?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("手机同步配置")
+                .font(.title2.bold())
+            if let image {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 320, height: 320)
+                    .accessibilityLabel("手机同步配置二维码")
+            }
+            Text("请在 Android Notebook 的‘设置与同步’中选择‘扫描配置二维码’。")
+                .multilineTextAlignment(.center)
+            Label("二维码包含服务器登录信息，请勿截图或分享给他人。", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.callout.bold())
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(width: 440, height: 470)
+    }
 }

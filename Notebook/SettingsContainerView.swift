@@ -710,7 +710,11 @@ struct DataManagementView: View {
                             Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
                         }
 
-                        if SSHConfigManager.shared.isConfigured {
+                        MobileSyncQRCodeButton()
+                    }
+
+                    if SSHConfigManager.shared.isConfigured {
+                        HStack(spacing: 12) {
                             Button {
                                 performPushSync()
                             } label: {
