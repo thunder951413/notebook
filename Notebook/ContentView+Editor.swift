@@ -263,7 +263,8 @@ struct NoteEditorView: View {
             reminderAt: note.reminderAt,
             recurrenceRule: note.recurrenceRule,
             content: content,
-            reason: reason
+            reason: reason,
+            allowsDestructiveEmptySave: reason == "commandSave"
         ) else {
             saveErrorMessage = "无法创建保存数据"
             return

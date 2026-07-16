@@ -52,6 +52,7 @@ extension NotebookTests {
             recurrenceRule: "none",
             rtfdData: Data([0x00]),
             decodedContent: NSAttributedString(string: "Unsaved content"),
+            allowsDestructiveEmptySave: false,
             reason: "test",
             timestamp: Date()
         )

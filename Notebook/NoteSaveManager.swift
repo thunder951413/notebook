@@ -21,6 +21,17 @@ enum SaveResult {
     case failure(Error)
 }
 
+enum SaveSafetyError: LocalizedError {
+    case destructiveEmptySnapshotBlocked(noteID: UUID, reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .destructiveEmptySnapshotBlocked(_, let reason):
+            return "检测到自动保存产生了空内容快照（\(reason)），已阻止覆盖现有笔记。请确认编辑器内容后使用 ⌘S 明确保存。"
+        }
+    }
+}
+
 enum SyncPreparationError: LocalizedError {
     case editorSaveFailed
     case pendingSaveFailed(Error)
@@ -52,6 +63,8 @@ struct SaveRequest {
     let rtfdData: Data
     /// 已解码的 NSAttributedString（避免保存路径的 RTFD → 反 RTFD 往返）
     let decodedContent: NSAttributedString
+    /// 只有明确的用户保存动作可以授权把已有正文清空。
+    let allowsDestructiveEmptySave: Bool
     let reason: String
     let timestamp: Date
 }
@@ -265,6 +278,18 @@ final class NoteSaveManager {
 
         let noteID = request.noteID
 
+        do {
+            try validateDestructiveEmptySave(request: request, context: context)
+        } catch {
+            Logger.shared.log(
+                .save,
+                .error,
+                "已阻止空快照覆盖现有笔记：noteID=\(noteID.uuidString.prefix(8)) reason=\(request.reason) error=\(error.localizedDescription)"
+            )
+            interval.end(.error, "destructiveEmptySnapshotBlocked")
+            return .failure(error)
+        }
+
         // 检查是否正在保存该笔记
         guard !currentlySaving.contains(noteID) else {
             interval.end(.warn, "alreadySaving_retry")
@@ -322,6 +347,44 @@ final class NoteSaveManager {
             interval.end(.error, "result=failure error=\(error.localizedDescription)")
             return .failure(error)
         }
+    }
+
+    /// 自动保存得到零长度内容时，以数据库历史版本为权威判断是否会造成破坏性清空。
+    /// 此检查必须发生在创建轮转备份之前，避免无效空快照挤掉最后一份可恢复备份。
+    private func validateDestructiveEmptySave(
+        request: SaveRequest,
+        context: ModelContext
+    ) throws {
+        guard request.decodedContent.length == 0,
+              !request.allowsDestructiveEmptySave else { return }
+
+        let noteID = request.noteID
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        guard let entity = try context.fetch(descriptor).first else { return }
+
+        let snapshot = try BlockDocumentNoteVersionStore.snapshot(
+            noteID: noteID,
+            version: entity.version,
+            context: context
+        )
+        let snapshotHasMeaningfulContent = snapshot?.document.blocks.contains { block in
+            if block.asset != nil || block.table != nil { return true }
+            if block.type != "paragraph" { return true }
+            return block.text?.contains {
+                !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            } == true
+        } == true
+        let metadataIndicatesContent = !entity.previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || entity.assetCount > 0
+            || entity.blockCount > 1
+
+        guard snapshotHasMeaningfulContent || metadataIndicatesContent else { return }
+        throw SaveSafetyError.destructiveEmptySnapshotBlocked(
+            noteID: noteID,
+            reason: request.reason
+        )
     }
 
     @discardableResult
@@ -1203,7 +1266,8 @@ extension NoteSaveManager {
         reminderAt: Date?,
         recurrenceRule: String,
         content: NSAttributedString,
-        reason: String
+        reason: String,
+        allowsDestructiveEmptySave: Bool = false
     ) -> SaveRequest? {
         let interval = Logger.shared.beginInterval(
             .save,
@@ -1236,6 +1300,7 @@ extension NoteSaveManager {
             recurrenceRule: recurrenceRule,
             rtfdData: rtfdData,
             decodedContent: cleaned,
+            allowsDestructiveEmptySave: allowsDestructiveEmptySave,
             reason: reason,
             timestamp: Date()
         )

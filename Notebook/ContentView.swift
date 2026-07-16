@@ -152,7 +152,8 @@ struct ContentView: View {
             reminderAt: note.reminderAt,
             recurrenceRule: note.recurrenceRule,
             content: content,
-            reason: reason
+            reason: reason,
+            allowsDestructiveEmptySave: reason == "shortcut"
         ) else {
             interval.end(.error, "createRequestFailed")
             return false
