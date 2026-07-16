@@ -7,7 +7,7 @@
 //  1. 所有保存操作都是同步阻塞的，确保完成后再继续
 //  2. 保存时锁定笔记，防止并发修改
 //  3. 所有状态变更都有日志记录
-//  4. 失败时重试，成功才返回
+//  4. 失败时明确返回，绝不绕过锁或带病覆盖
 //
 
 import Foundation
@@ -80,10 +80,7 @@ final class NoteSaveManager {
         .documentType: NSAttributedString.DocumentType.rtfd
     ]
     
-    // 保存队列 - 确保同一时间只有一个保存操作在执行
-    private let saveQueue = DispatchQueue(label: "com.notebook.save", qos: .userInitiated)
-    
-    // 当前正在保存的笔记ID
+    // 当前正在保存的笔记 ID；所有入口都在 MainActor，用于阻止同步重入。
     private var currentlySaving: Set<UUID> = []
     
     // 待保存的队列（用于自动保存去抖）
@@ -292,8 +289,12 @@ final class NoteSaveManager {
 
         // 检查是否正在保存该笔记
         guard !currentlySaving.contains(noteID) else {
-            interval.end(.warn, "alreadySaving_retry")
-            return waitAndRetry(request: request, maxRetries: 3)
+            interval.end(.warn, "alreadySaving_reentrant")
+            return .failure(NSError(
+                domain: "SaveManager",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "检测到同一笔记的重入保存，已阻止重复写入"]
+            ))
         }
 
         // 标记为正在保存（用于崩溃检测）
@@ -1298,30 +1299,6 @@ final class NoteSaveManager {
         for (blockID, entity) in prevByID where !keptBlockIDs.contains(blockID) {
             context.delete(entity)
         }
-    }
-
-    /// 等待并重试保存
-    private func waitAndRetry(request: SaveRequest, maxRetries: Int) -> SaveResult {
-        var retries = 0
-
-        while retries < maxRetries {
-            Thread.sleep(forTimeInterval: 0.05)
-            if !currentlySaving.contains(request.noteID) {
-                return performSave(request: request)
-            }
-            retries += 1
-        }
-
-        // 重试耗尽后再次检查锁，若仍被占用则返回失败而非绕过锁
-        if currentlySaving.contains(request.noteID) {
-            Logger.shared.log(.save, .error, "waitAndRetry exhausted for noteID=\(request.noteID.uuidString.prefix(8))")
-            return .failure(NSError(
-                domain: "SaveManager",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "笔记正在保存中，请稍后重试"]
-            ))
-        }
-        return performSave(request: request)
     }
 
     /// 验证数据完整性
