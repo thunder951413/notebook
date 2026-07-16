@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Notebook
 
 // MARK: - PasswordManager 单元测试
@@ -28,14 +29,40 @@ extension NotebookTests {
         XCTAssertFalse(manager.hasPassword, "clearPassword 后 hasPassword 应为 false")
     }
 
-    /// setPassword 空密码应失败
+    /// setPassword 不足最短长度的密码应失败
     @MainActor
-    func testPasswordManagerRejectsEmptyPassword() {
+    func testPasswordManagerRejectsShortPassword() {
         let manager = isolatedPasswordManager()
         manager.forceClearPassword()
 
         XCTAssertFalse(manager.setPassword(""), "空密码应被拒绝")
+        XCTAssertFalse(
+            manager.setPassword(String(repeating: "a", count: PasswordManager.minimumPasswordLength - 1)),
+            "不足最短长度的密码应被拒绝"
+        )
         XCTAssertFalse(manager.hasPassword)
+    }
+
+    /// 旧版短密码仍可验证，并在成功验证后迁移为 PBKDF2 记录
+    @MainActor
+    func testPasswordManagerMigratesVerifiedLegacyShortPassword() {
+        let service = "yy.NotebookTests.password.\(UUID().uuidString)"
+        let manager = PasswordManager(keychainService: service)
+        let password = "1234"
+        let salt = "legacy-salt"
+        let legacyHash = SHA256.hash(data: Data((password + salt).utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        XCTAssertTrue(manager.importPasswordConfig(["hash": legacyHash, "salt": salt]))
+        XCTAssertTrue(manager.verifyPassword(password), "旧版短密码应继续可用")
+
+        let migratedHash = KeychainHelper.loadString(service: service, account: "app_password_hash")
+        let migratedSalt = KeychainHelper.loadString(service: service, account: "app_password_salt")
+        XCTAssertTrue(migratedHash?.hasPrefix("pbkdf2_sha256$") == true)
+        XCTAssertNil(migratedSalt, "迁移成功后应删除旧版盐值")
+
+        manager.forceClearPassword()
     }
 
     /// changePassword：旧密码验证 + 新密码设置
@@ -112,11 +139,11 @@ extension NotebookTests {
         // constantTimeCompare 是 private，通过 verifyPassword 间接测试
         let manager = isolatedPasswordManager()
         manager.forceClearPassword()
-        XCTAssertTrue(manager.setPassword("abcdef"))
+        XCTAssertTrue(manager.setPassword("abcdefgh"))
 
         // 长度相同但内容不同
-        XCTAssertFalse(manager.verifyPassword("abcdeg"), "仅末位不同的密码应被拒绝")
-        XCTAssertFalse(manager.verifyPassword("abcdefX"), "多一位的密码应被拒绝")
+        XCTAssertFalse(manager.verifyPassword("abcdefgi"), "仅末位不同的密码应被拒绝")
+        XCTAssertFalse(manager.verifyPassword("abcdefghX"), "多一位的密码应被拒绝")
 
         manager.forceClearPassword()
     }

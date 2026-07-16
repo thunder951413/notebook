@@ -218,8 +218,8 @@ struct PasswordSettingsView: View {
             return
         }
         
-        guard newPassword.count >= 4 else {
-            showError("密码长度至少为4位")
+        guard newPassword.count >= PasswordManager.minimumPasswordLength else {
+            showError("密码长度至少为\(PasswordManager.minimumPasswordLength)位")
             return
         }
         
@@ -239,8 +239,8 @@ struct PasswordSettingsView: View {
             return
         }
         
-        guard newPassword.count >= 4 else {
-            showError("新密码长度至少为4位")
+        guard newPassword.count >= PasswordManager.minimumPasswordLength else {
+            showError("新密码长度至少为\(PasswordManager.minimumPasswordLength)位")
             return
         }
         

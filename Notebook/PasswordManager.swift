@@ -7,6 +7,7 @@ import CommonCrypto
 @MainActor
 final class PasswordManager: ObservableObject {
     static let shared = PasswordManager()
+    static let minimumPasswordLength = 8
     
     private let passwordKey = "app_password_hash"
     private let saltKey = "app_password_salt"
@@ -28,8 +29,13 @@ final class PasswordManager: ObservableObject {
     /// - Returns: 是否成功设置
     @discardableResult
     func setPassword(_ password: String) -> Bool {
-        guard !password.isEmpty else { return false }
-        
+        guard password.count >= Self.minimumPasswordLength else { return false }
+        return storePBKDF2Password(password)
+    }
+
+    /// 写入 PBKDF2 记录。旧版短密码验证成功后也必须允许迁移，
+    /// 但任何新设或修改的密码仍由 setPassword 执行长度策略。
+    private func storePBKDF2Password(_ password: String) -> Bool {
         guard let hash = makePBKDF2PasswordRecord(password) else {
             return false
         }
@@ -62,7 +68,7 @@ final class PasswordManager: ObservableObject {
         let legacyHash = hashLegacyPassword(password, salt: salt)
         let matchesLegacyHash = constantTimeCompare(legacyHash, storedHash)
         if matchesLegacyHash {
-            _ = setPassword(password)
+            _ = storePBKDF2Password(password)
         }
         return matchesLegacyHash
     }
