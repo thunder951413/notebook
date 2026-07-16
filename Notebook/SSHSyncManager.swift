@@ -496,11 +496,10 @@ final class SSHSyncManager: Sendable {
 
                 let syncState = try fetchSyncState(noteID: note.id, context: context)
                 let hasUnresolvedConflict = note.hasConflict
-                let shouldSync = !hasUnresolvedConflict && (
-                    syncState == nil ||
-                    syncState!.lastSyncedVersion < note.version ||
-                    syncState!.pendingHistoryCount > 0
-                )
+                let hasPendingChanges = syncState.map {
+                    $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
+                } ?? true
+                let shouldSync = !hasUnresolvedConflict && hasPendingChanges
                 if shouldSync {
                     try await syncNoteToRemote(
                         noteID: note.id,

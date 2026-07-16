@@ -34,7 +34,8 @@ final class LocalSyncManager: ObservableObject {
     
     /// 同步目录（用户文档目录下的 NotebookSync 文件夹）
     var syncDirectory: URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true)
         return documents.appendingPathComponent("NotebookSync", isDirectory: true)
     }
     private var notesDirectory: URL {
@@ -125,10 +126,9 @@ final class LocalSyncManager: ObservableObject {
 
         for note in notes {
             let syncState = try fetchSyncState(noteID: note.id, context: context)
-            let shouldSync =
-                syncState == nil ||
-                syncState!.lastSyncedVersion < note.version ||
-                syncState!.pendingHistoryCount > 0
+            let shouldSync = syncState.map {
+                $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
+            } ?? true
             if shouldSync {
                 try syncNoteToLocal(noteID: note.id, context: context)
                 syncedNoteIDs.append(note.id)

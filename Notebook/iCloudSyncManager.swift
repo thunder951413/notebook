@@ -248,10 +248,9 @@ final class iCloudSyncManager: ObservableObject {
 
         for note in notes {
             let syncState = try fetchSyncState(noteID: note.id, context: context)
-            let shouldSync =
-                syncState == nil ||
-                syncState!.lastSyncedVersion < note.version ||
-                syncState!.pendingHistoryCount > 0
+            let shouldSync = syncState.map {
+                $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
+            } ?? true
             if shouldSync {
                 try syncNoteToiCloud(noteID: note.id, context: context, notesDirectory: notesDirectory)
                 syncedNoteIDs.append(note.id)
@@ -624,14 +623,14 @@ extension iCloudSyncManager {
 
     /// 上传笔记到 CloudKit
     func uploadNote(_ note: Note) async throws {
-        guard privateDatabase != nil else {
+        guard let privateDatabase else {
             throw iCloudSyncError.iCloudNotAvailable
         }
         
         let record = note.toCKRecord()
         
         do {
-            let (_, _) = try await privateDatabase!.modifyRecords(saving: [record], deleting: [])
+            let (_, _) = try await privateDatabase.modifyRecords(saving: [record], deleting: [])
             DebugLog.storage("Note uploaded: \(note.id)", level: .debug)
         } catch {
             throw iCloudSyncError.syncFailed(error.localizedDescription)
@@ -640,14 +639,14 @@ extension iCloudSyncManager {
     
     /// 从 CloudKit 下载所有笔记
     func downloadAllNotes() async throws -> [Note] {
-        guard privateDatabase != nil else {
+        guard let privateDatabase else {
             throw iCloudSyncError.iCloudNotAvailable
         }
         
         let query = CKQuery(recordType: "Note", predicate: NSPredicate(value: true))
         
         do {
-            let (results, _) = try await privateDatabase!.records(matching: query)
+            let (results, _) = try await privateDatabase.records(matching: query)
             let notes = results.compactMap { result -> Note? in
                 guard case .success(let record) = result.1 else { return nil }
                 return Note(from: record)
@@ -660,14 +659,14 @@ extension iCloudSyncManager {
     
     /// 删除云端笔记
     func deleteNoteFromCloud(_ noteID: UUID) async throws {
-        guard privateDatabase != nil else {
+        guard let privateDatabase else {
             throw iCloudSyncError.iCloudNotAvailable
         }
         
         let recordID = CKRecord.ID(recordName: noteID.uuidString)
         
         do {
-            try await privateDatabase!.deleteRecord(withID: recordID)
+            try await privateDatabase.deleteRecord(withID: recordID)
             DebugLog.storage("Note deleted from cloud: \(noteID)", level: .debug)
         } catch {
             throw iCloudSyncError.syncFailed(error.localizedDescription)
