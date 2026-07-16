@@ -11,6 +11,18 @@ import UniformTypeIdentifiers
 import AppKit
 import Combine
 
+enum SidebarDestination: Equatable, Hashable {
+    case allNotes
+    case unfiled
+    case conflicts
+    case recycleBin
+    case noteFolder(UUID)
+    case encryptedFolder(UUID)
+    case tag(UUID)
+    case todoToday
+    case todoImportant
+    case todoList(UUID)
+}
 
 struct ContentView: View {
     @EnvironmentObject private var store: NoteStore
@@ -25,56 +37,48 @@ struct ContentView: View {
     @State private var searchText: String = ""
     /// 搜索始终覆盖全部笔记（不再提供"当前目录"范围选择器）
     private let searchInAllFolders: Bool = true
-    @State private var selectedFolder: String = l10n(L10nKeys.Folder.allNotes)
-    @State private var selectedTagID: UUID?
-    @State private var selectedEncryptedFolderID: UUID? = nil
-    @State private var isRecycleBinSelected: Bool = false
-    @State private var isConflictSelected: Bool = false
+    @State private var selectedDestination: SidebarDestination = .allNotes
+    @State private var selectedTodoID: UUID?
     @State private var showingDeleteConfirm = false
     @State private var pendingDeleteNoteID: UUID?
+    @State private var pendingDeleteTodoID: UUID?
     @State private var isEncryptedFolderUnlocked: Bool = false
     @StateObject private var richTextController = RichTextController()
+    @State private var editorSaveHandlerID: UUID?
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selectedDestination.isTodoDestination {
+            return []
+        }
         var notes = store.activeNotes
-        Logger.shared.log(.search, .debug, "Start with \(notes.count) notes, selectedFolder: \(selectedFolder), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
+        Logger.shared.log(.search, .debug, "Start with \(notes.count) notes, destination: \(String(describing: selectedDestination)), searchText: \(searchText), searchInAllFolders: \(searchInAllFolders)")
 
         // 0. 排除加密文件夹的笔记（除非当前正在查看加密文件夹）
-        if selectedFolder != EncryptedFolderView.folderName {
+        if !selectedDestination.isEncryptedFolder {
             notes = notes.filter { !EncryptedFolderManager.shared.isEncrypted(note: $0) }
             Logger.shared.log(.search, .debug, "After excluding encrypted notes: \(notes.count) notes")
         }
 
         // 1. 标签筛选
-        if let tagID = selectedTagID {
+        if case .tag(let tagID) = selectedDestination {
             let taggedNoteIDs = store.noteIDSet(forTagID: tagID)
             notes = notes.filter { taggedNoteIDs.contains($0.id) }
             Logger.shared.log(.search, .debug, "After tag filter: \(notes.count) notes")
         }
 
         // 2. 冲突筛选
-        if isConflictSelected {
+        if selectedDestination == .conflicts {
             notes = notes.filter { $0.hasConflict }
             Logger.shared.log(.search, .debug, "After conflict filter: \(notes.count) notes")
         }
 
         // 3. 文件夹筛选
         // 如果有搜索词且选择搜索所有文件夹，则跳过文件夹筛选
-        let shouldApplyFolderFilter = selectedFolder != l10n(L10nKeys.Folder.allNotes) &&
-                                       selectedFolder != "未分类" &&
-                                       selectedFolder != EncryptedFolderView.folderName &&
-                                       !(searchInAllFolders && !q.isEmpty)
-        if shouldApplyFolderFilter {
-            // 通过文件夹名称找到对应的文件夹ID，然后通过ID筛选
-            if let folder = store.folders.first(where: { $0.name == selectedFolder }) {
-                notes = notes.filter { $0.folderID == folder.id }
-            } else {
-                // 如果找不到对应的文件夹，显示空结果
-                notes = []
-            }
+        if case .noteFolder(let folderID) = selectedDestination, !(searchInAllFolders && !q.isEmpty) {
+            notes = notes.filter { $0.folderID == folderID }
             Logger.shared.log(.search, .debug, "After folder filter: \(notes.count) notes")
-        } else if selectedFolder == "未分类" {
+        } else if selectedDestination == .unfiled {
             // 显示未分类（没有 folderID 或 folderID 指向不存在文件夹的笔记）
             let existingFolderIDs = Set(store.folders.map { $0.id })
             notes = notes.filter { note in
@@ -82,16 +86,13 @@ struct ContentView: View {
                 return !existingFolderIDs.contains(folderID)
             }
             Logger.shared.log(.search, .debug, "After uncategorized filter: \(notes.count) notes")
-        } else if selectedFolder == EncryptedFolderView.folderName {
+        } else if case .encryptedFolder(let encryptedFolderID) = selectedDestination {
             // 显示加密文件夹中的笔记
             notes = notes.filter { EncryptedFolderManager.shared.isEncrypted(note: $0) }
-            // 如果选择了特定的加密子文件夹，进一步筛选
-            if let encryptedFolderID = selectedEncryptedFolderID {
-                notes = notes.filter {
-                    EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == encryptedFolderID
-                }
-                Logger.shared.log(.search, .debug, "After encrypted subfolder filter: \(notes.count) notes")
+            notes = notes.filter {
+                EncryptedFolderManager.shared.getEncryptedFolderID(for: $0) == encryptedFolderID
             }
+            Logger.shared.log(.search, .debug, "After encrypted subfolder filter: \(notes.count) notes")
             Logger.shared.log(.search, .debug, "After encrypted folder filter: \(notes.count) notes")
         } else if searchInAllFolders && !q.isEmpty {
             Logger.shared.log(.search, .debug, "Skipping folder filter (searching all folders)")
@@ -110,6 +111,23 @@ struct ContentView: View {
 
     private var filteredNoteIDs: [UUID] {
         filteredNotes.map(\.id)
+    }
+
+    private var filteredTodoItems: [TodoItem] {
+        switch selectedDestination {
+        case .todoToday:
+            return store.todoItemsForToday()
+        case .todoImportant:
+            return store.importantTodoItems()
+        case .todoList(let listID):
+            return store.todoItems(in: listID)
+        default:
+            return []
+        }
+    }
+
+    private var filteredTodoIDs: [UUID] {
+        filteredTodoItems.map(\.id)
     }
 
     /// 保存指定笔记的内容
@@ -154,7 +172,8 @@ struct ContentView: View {
     }
     
     /// 保存当前编辑器中的笔记（用于 appBlur/terminate）
-    private func saveCurrentEditorContent(reason: String) {
+    @discardableResult
+    private func saveCurrentEditorContent(reason: String) -> Bool {
         // 安全机制：检查 boundNoteID 和 selection 是否一致
         let boundIDStr = richTextController.boundNoteID?.uuidString.prefix(8) ?? "nil"
         let selIDStr = selection?.uuidString.prefix(8) ?? "nil"
@@ -162,18 +181,18 @@ struct ContentView: View {
         Logger.shared.log(.save, .debug, "reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
         
         let targetNoteID: UUID
-        if let boundID = richTextController.boundNoteID,
-           let selID = selection,
-           boundID == selID {
+        if let boundID = richTextController.boundNoteID {
+            if let selID = selection, boundID != selID {
+                // 快照属于编辑器实际绑定的笔记，绝不能写进刚切换到的 selection。
+                Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using bound editor note: \(boundID)")
+            }
             targetNoteID = boundID
         } else if let selID = selection {
-            Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using selection: \(selID)")
             targetNoteID = selID
-        } else if let boundID = richTextController.boundNoteID {
-            targetNoteID = boundID
         } else {
-            Logger.shared.log(.save, .error, "No target note ID available")
-            return
+            // 没有打开笔记时没有编辑器内容需要保存。
+            Logger.shared.log(.save, .debug, "No target note ID available; nothing to save")
+            return true
         }
         
         // 从编辑器获取内容；若快照异常为空，回退到内存，避免误清空笔记
@@ -181,9 +200,9 @@ struct ContentView: View {
             Logger.shared.log(.save, .warn, "Editor content is nil, fallback to in-memory content")
             if let index = store.notes.firstIndex(where: { $0.id == targetNoteID }) {
                 let memoryContent = store.notes[index].content
-                saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
+                return saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
             }
-            return
+            return false
         }
         Logger.shared.log(.save, .debug, "Editor content length: \(editorContent.length)")
 
@@ -193,12 +212,11 @@ struct ContentView: View {
            store.notes[index].content.length > 0 {
             let memoryContent = store.notes[index].content
             Logger.shared.log(.save, .warn, "Editor snapshot is empty, fallback to memory content length=\(memoryContent.length)")
-            saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
-            return
+            return saveNoteContent(noteID: targetNoteID, content: memoryContent, reason: reason)
         }
         
         // 执行保存
-        saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
+        return saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
     }
 
     private func updateSelection(_ newSelection: UUID?, reason: String) {
@@ -278,18 +296,27 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(
-                selectedFolder: $selectedFolder,
-                selectedTagID: $selectedTagID,
+                selectedDestination: $selectedDestination,
                 selection: $selection,
-                selectedEncryptedFolderID: $selectedEncryptedFolderID,
                 isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
-                isRecycleBinSelected: $isRecycleBinSelected,
-                isConflictSelected: $isConflictSelected,
                 onCreateNote: createNote
             )
         } content: {
-            if isRecycleBinSelected {
+            if selectedDestination == .recycleBin {
                 RecycleBinView(selection: $selection)
+            } else if selectedDestination.isTodoDestination {
+                TodoListView(
+                    todos: filteredTodoItems,
+                    selection: $selectedTodoID,
+                    onCreateTodo: createTodo,
+                    onToggleComplete: { id, completed in
+                        store.setTodoCompleted(id: id, completed: completed)
+                    },
+                    onDeleteRequest: { id in
+                        pendingDeleteTodoID = id
+                        showingDeleteConfirm = true
+                    }
+                )
             } else {
                 NotesListView(notes: filteredNotes, selection: Binding(
                 get: { selection },
@@ -305,10 +332,22 @@ struct ContentView: View {
             })
             }
         } detail: {
-            if isRecycleBinSelected {
+            if selectedDestination == .recycleBin {
                 ContentUnavailableView("回收站", systemImage: "trash")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(AppColors.editorBackground(colorScheme))
+            } else if selectedDestination.isTodoDestination {
+                TodoDetailView(
+                    todo: store.todoItems.first(where: { $0.id == selectedTodoID }),
+                    lists: store.todoLists,
+                    onOpenNote: { noteID in
+                        if let note = store.activeNotes.first(where: { $0.id == noteID }) {
+                            selectedDestination = destination(for: note)
+                            updateSelection(noteID, reason: "todoLinkedNote")
+                            selectedTodoID = nil
+                        }
+                    }
+                )
             } else if let currentId = selection, let index = store.notes.firstIndex(where: { $0.id == currentId }) {
                 if store.notes[index].isContentLoaded {
                     let noteBinding = $store.notes[index]
@@ -335,22 +374,44 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 Button {
-                    createNote()
+                    if selectedDestination.isTodoDestination {
+                        createTodo()
+                    } else {
+                        createNote()
+                    }
                 } label: {
-                    Label(l10n(L10nKeys.Note.new), systemImage: "plus")
+                    Label(selectedDestination.isTodoDestination ? "新建任务" : l10n(L10nKeys.Note.new), systemImage: "plus")
                 }
 
                 Button {
-                    confirmDeleteSelectedNote()
+                    if selectedDestination.isTodoDestination {
+                        if let selectedTodoID {
+                            pendingDeleteTodoID = selectedTodoID
+                            showingDeleteConfirm = true
+                        }
+                    } else {
+                        confirmDeleteSelectedNote()
+                    }
                 } label: {
                     Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                 }
-                .disabled(selection == nil || isRecycleBinSelected)
+                .disabled((selectedDestination.isTodoDestination ? selectedTodoID == nil : selection == nil) || selectedDestination == .recycleBin)
             }
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索所有笔记...")
         .onAppear {
+            if let editorSaveHandlerID {
+                NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
+            }
+            editorSaveHandlerID = NoteSaveManager.shared.registerEditorSaveHandler(
+                revisionProvider: {
+                    guard let noteID = richTextController.boundNoteID,
+                          let note = store.notes.first(where: { $0.id == noteID }) else { return nil }
+                    return richTextController.revisionFingerprint(title: note.title)
+                },
+                { saveCurrentEditorContent(reason: "syncBarrier") }
+            )
             store.fetchData()
             if !didSyncSelectionFromStore, let pending = store.selectedNoteId {
                 updateSelection(pending, reason: "initialExternalNavigation")
@@ -360,7 +421,7 @@ struct ContentView: View {
                 updateSelection(store.activeNotes.first?.id, reason: "initial")
             }
 
-            if isRecycleBinSelected {
+            if selectedDestination == .recycleBin {
                 selection = nil
             }
 
@@ -378,6 +439,12 @@ struct ContentView: View {
                 }
             }
         }
+        .onDisappear {
+            if let editorSaveHandlerID {
+                NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
+                self.editorSaveHandlerID = nil
+            }
+        }
         .onChange(of: store.selectedNoteId) { _, newValue in
             guard let id = newValue else { return }
             guard let note = store.activeNotes.first(where: { $0.id == id }) else {
@@ -385,32 +452,44 @@ struct ContentView: View {
                 return
             }
 
-            selectedTagID = nil
-            selectedEncryptedFolderID = nil
             isEncryptedFolderUnlocked = false
-            isRecycleBinSelected = false
-            isConflictSelected = false
-            selectedFolder = note.folder
+            selectedDestination = destination(for: note)
             searchText = ""
             updateSelection(id, reason: "externalNavigation")
             store.selectedNoteId = nil
             store.selectedFolderForNavigation = nil
         }
+        .onChange(of: store.selectedTodoId) { _, newValue in
+            guard let id = newValue else { return }
+            guard let todo = store.todoItems.first(where: { $0.id == id }) else {
+                store.selectedTodoId = nil
+                return
+            }
+
+            if let listID = todo.folderID {
+                selectedDestination = .todoList(listID)
+            } else if todo.isImportant {
+                selectedDestination = .todoImportant
+            } else {
+                selectedDestination = .todoToday
+            }
+            selectedTodoID = id
+            selection = nil
+            searchText = ""
+            store.selectedTodoId = nil
+        }
         .onChange(of: store.selectedFolderForNavigation) { _, newValue in
             guard let folder = newValue else { return }
-            selectedTagID = nil
-            isRecycleBinSelected = false
-            isConflictSelected = false
             searchText = ""
-            selectedFolder = folder
+            selectedDestination = destination(forLegacyFolderName: folder)
             store.selectedFolderForNavigation = nil
         }
         .onChange(of: filteredNoteIDs) { _, currentIDs in
-            guard !isRecycleBinSelected else { return }
+            guard selectedDestination != .recycleBin else { return }
+            guard !selectedDestination.isTodoDestination else { return }
             // 如果冲突筛选下已无冲突笔记，自动退出冲突视图
-            if isConflictSelected && !store.activeNotes.contains(where: { $0.hasConflict }) {
-                isConflictSelected = false
-                selectedFolder = l10n(L10nKeys.Folder.allNotes)
+            if selectedDestination == .conflicts && !store.activeNotes.contains(where: { $0.hasConflict }) {
+                selectedDestination = .allNotes
             }
             let nextSelection = VisibleNoteSelectionCoordinator.selectionForVisibleNotes(
                 currentSelection: selection,
@@ -418,6 +497,13 @@ struct ContentView: View {
             )
             guard nextSelection != selection else { return }
             updateSelection(nextSelection, reason: "filterSync")
+        }
+        .onChange(of: filteredTodoIDs) { _, currentIDs in
+            guard selectedDestination.isTodoDestination else { return }
+            if let selectedTodoID, currentIDs.contains(selectedTodoID) {
+                return
+            }
+            selectedTodoID = currentIDs.first
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.fetchData()
@@ -429,17 +515,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             saveCurrentEditorContent(reason: "appBlur")
             // 保存当前选择的文件夹和笔记
-            AppSettings.shared.lastSelectedFolder = selectedFolder
+            AppSettings.shared.lastSelectedFolder = legacyFolderName(for: selectedDestination)
             AppSettings.shared.lastSelectedNoteID = selection
-            DebugLog.app("Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")", level: .debug)
+            DebugLog.app("Saved destination: \(String(describing: selectedDestination)), note: \(selection?.uuidString ?? "nil")", level: .debug)
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldTerminate)) { _ in
-            saveCurrentEditorContent(reason: "terminate")
-            NoteSaveManager.shared.flushAllPending()
             // 保存当前选择的文件夹和笔记
-            AppSettings.shared.lastSelectedFolder = selectedFolder
+            AppSettings.shared.lastSelectedFolder = legacyFolderName(for: selectedDestination)
             AppSettings.shared.lastSelectedNoteID = selection
-            DebugLog.app("Saved folder: \(selectedFolder), note: \(selection?.uuidString ?? "nil")", level: .debug)
+            DebugLog.app("Saved destination: \(String(describing: selectedDestination)), note: \(selection?.uuidString ?? "nil")", level: .debug)
         }
         .onReceive(NotificationCenter.default.publisher(for: .insertTextAtCursor)) { notification in
             if let text = notification.userInfo?["text"] as? String {
@@ -451,17 +535,25 @@ struct ContentView: View {
                 if let id = pendingDeleteNoteID {
                     store.deleteNote(id: id)
                     if selection == id {
-                        let nextSelection = isRecycleBinSelected ? nil : filteredNotes.first?.id
+                        let nextSelection = selectedDestination == .recycleBin ? nil : filteredNotes.first?.id
                         if let nextSelection {
                             store.ensureNoteContentLoaded(id: nextSelection, rememberSelection: true)
                         }
                         selection = nextSelection
                     }
                 }
+                if let id = pendingDeleteTodoID {
+                    store.deleteTodo(id: id)
+                    if selectedTodoID == id {
+                        selectedTodoID = filteredTodoItems.first?.id
+                    }
+                }
                 pendingDeleteNoteID = nil
+                pendingDeleteTodoID = nil
             }
             Button("取消", role: .cancel) {
                 pendingDeleteNoteID = nil
+                pendingDeleteTodoID = nil
             }
         } message: {
             Text("删除后可在回收站恢复，或彻底删除。")
@@ -481,8 +573,15 @@ struct ContentView: View {
             }
         }
         .onReceive(ShortcutActionHandler.shared.deleteNotePublisher) { _ in
-            if !isRecycleBinSelected {
-                confirmDeleteSelectedNote()
+            if selectedDestination != .recycleBin {
+                if selectedDestination.isTodoDestination {
+                    if let selectedTodoID {
+                        pendingDeleteTodoID = selectedTodoID
+                        showingDeleteConfirm = true
+                    }
+                } else {
+                    confirmDeleteSelectedNote()
+                }
             }
         }
         .onReceive(ShortcutActionHandler.shared.focusSearchPublisher) { _ in
@@ -549,8 +648,7 @@ struct ContentView: View {
         searchText = ""
 
         // 检查是否在加密文件夹中
-        if selectedFolder == EncryptedFolderManager.folderName,
-           let encryptedFolderID = selectedEncryptedFolderID {
+        if case .encryptedFolder(let encryptedFolderID) = selectedDestination {
             // 在加密文件夹的子目录中创建加密笔记
             if let newNote = store.createEncryptedNote(in: encryptedFolderID) {
                 updateSelection(newNote.id, reason: "createEncrypted")
@@ -558,13 +656,57 @@ struct ContentView: View {
             return
         }
         
-        let folderName = selectedFolder == l10n(L10nKeys.Folder.allNotes) ? l10n(L10nKeys.Folder.uncategorized) : selectedFolder
-        let folderID = store.folders.first { $0.name == folderName }?.id
+        let targetFolder: Folder?
+        switch selectedDestination {
+        case .noteFolder(let folderID):
+            targetFolder = store.folders.first { $0.id == folderID }
+        default:
+            targetFolder = nil
+        }
+        let folderName = targetFolder?.name ?? l10n(L10nKeys.Folder.uncategorized)
+        let folderID = targetFolder?.id
         if let newNote = store.addNote(title: l10n(L10nKeys.Note.new), folderID: folderID, folderName: folderName) {
-            if let selectedTagID {
-                store.addTagToNote(tagID: selectedTagID, noteID: newNote.id)
+            if case .tag(let tagID) = selectedDestination {
+                store.addTagToNote(tagID: tagID, noteID: newNote.id)
             }
             updateSelection(newNote.id, reason: "create")
+        }
+    }
+
+    private func createTodo() {
+        let listID: UUID?
+        if case .todoList(let id) = selectedDestination {
+            listID = id
+        } else {
+            listID = nil
+        }
+        if let todo = store.addTodo(listID: listID) {
+            if selectedDestination == .todoToday {
+                store.updateTodo(
+                    id: todo.id,
+                    title: todo.title,
+                    notesText: "",
+                    dueAt: Date(),
+                    reminderAt: nil,
+                    recurrenceRule: "none",
+                    isImportant: todo.isImportant,
+                    listID: todo.folderID,
+                    linkedNoteIDs: todo.linkedNoteIDs
+                )
+            } else if selectedDestination == .todoImportant {
+                store.updateTodo(
+                    id: todo.id,
+                    title: todo.title,
+                    notesText: "",
+                    dueAt: todo.dueAt,
+                    reminderAt: nil,
+                    recurrenceRule: "none",
+                    isImportant: true,
+                    listID: todo.folderID,
+                    linkedNoteIDs: todo.linkedNoteIDs
+                )
+            }
+            selectedTodoID = todo.id
         }
     }
 
@@ -597,15 +739,15 @@ struct ContentView: View {
                 let folderExists = lastFolder == allNotesTitle || store.folders.contains(where: { $0.name == lastFolder })
 
                 if folderExists {
-                    selectedFolder = lastFolder
+                    selectedDestination = destination(forLegacyFolderName: lastFolder)
                     DebugLog.app("Restored last selected folder: \(lastFolder)", level: .debug)
                 } else {
                     // Fallback 到全部笔记
-                    selectedFolder = allNotesTitle
+                    selectedDestination = .allNotes
                     DebugLog.app("Last folder '\(lastFolder)' not found, fallback to all notes", level: .debug)
                 }
             } else {
-                selectedFolder = l10n(L10nKeys.Folder.allNotes)
+                selectedDestination = .allNotes
                 DebugLog.app("No last folder saved, defaulting to all notes", level: .debug)
             }
 
@@ -613,38 +755,118 @@ struct ContentView: View {
             if let lastID = AppSettings.shared.lastSelectedNoteID {
                 // 检查笔记是否存在，并且在当前文件夹中
                 if let note = store.activeNotes.first(where: { $0.id == lastID }) {
-                    let allNotesTitle = l10n(L10nKeys.Folder.allNotes)
-                    let noteInCurrentFolder = selectedFolder == allNotesTitle || note.folder == selectedFolder
+                    let noteInCurrentDestination = isNote(note, visibleIn: selectedDestination)
 
-                    if noteInCurrentFolder {
+                    if noteInCurrentDestination {
                         updateSelection(lastID, reason: "launchRestore")
                         DebugLog.app("Restored last selected note: \(lastID)", level: .debug)
                     } else {
                         // 笔记不在当前文件夹中，选择当前文件夹的第一个笔记
-                        updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchFallback")
+                        updateSelection(selectedDestination == .recycleBin ? nil : filteredNotes.first?.id, reason: "launchFallback")
                         DebugLog.app("Last note not in current folder, selecting first note in folder", level: .debug)
                     }
                 } else {
                     // 笔记不存在，选择当前文件夹的第一个笔记
-                    updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchMissingLastNote")
+                    updateSelection(selectedDestination == .recycleBin ? nil : filteredNotes.first?.id, reason: "launchMissingLastNote")
                     DebugLog.app("Last note not found, selecting first note in folder", level: .debug)
                 }
             } else {
-                updateSelection(isRecycleBinSelected ? nil : filteredNotes.first?.id, reason: "launchNoLastNote")
+                updateSelection(selectedDestination == .recycleBin ? nil : filteredNotes.first?.id, reason: "launchNoLastNote")
                 DebugLog.app("No last note saved, selecting first note", level: .debug)
             }
 
         case .selectNone:
-            selectedFolder = l10n(L10nKeys.Folder.allNotes)
-            selectedTagID = nil
+            selectedDestination = .allNotes
             updateSelection(nil, reason: "launchSelectNone")
             DebugLog.app("Selecting none as per settings", level: .debug)
 
         case .showAllNotes:
-            selectedFolder = l10n(L10nKeys.Folder.allNotes)
-            selectedTagID = nil
+            selectedDestination = .allNotes
             updateSelection(store.activeNotes.first?.id, reason: "launchShowAllNotes")
             DebugLog.app("Showing all notes", level: .debug)
+        }
+    }
+
+    private func destination(for note: Note) -> SidebarDestination {
+        if EncryptedFolderManager.shared.isEncrypted(note: note),
+           let encryptedFolderID = EncryptedFolderManager.shared.getEncryptedFolderID(for: note) {
+            return .encryptedFolder(encryptedFolderID)
+        }
+        if let folderID = note.folderID,
+           store.folders.contains(where: { $0.id == folderID }) {
+            return .noteFolder(folderID)
+        }
+        return .unfiled
+    }
+
+    private func destination(forLegacyFolderName folderName: String) -> SidebarDestination {
+        if folderName == l10n(L10nKeys.Folder.allNotes) {
+            return .allNotes
+        }
+        if folderName == l10n(L10nKeys.Folder.uncategorized) || folderName == "未分类" {
+            return .unfiled
+        }
+        if folderName == EncryptedFolderView.folderName {
+            return .allNotes
+        }
+        if let folder = store.folders.first(where: { $0.name == folderName }) {
+            return .noteFolder(folder.id)
+        }
+        return .allNotes
+    }
+
+    private func legacyFolderName(for destination: SidebarDestination) -> String? {
+        switch destination {
+        case .allNotes, .conflicts, .recycleBin, .tag, .todoToday, .todoImportant, .todoList:
+            return l10n(L10nKeys.Folder.allNotes)
+        case .unfiled:
+            return l10n(L10nKeys.Folder.uncategorized)
+        case .noteFolder(let folderID):
+            return store.folders.first(where: { $0.id == folderID })?.name ?? l10n(L10nKeys.Folder.allNotes)
+        case .encryptedFolder:
+            return EncryptedFolderView.folderName
+        }
+    }
+
+    private func isNote(_ note: Note, visibleIn destination: SidebarDestination) -> Bool {
+        switch destination {
+        case .allNotes:
+            return !EncryptedFolderManager.shared.isEncrypted(note: note)
+        case .unfiled:
+            let existingFolderIDs = Set(store.folders.map(\.id))
+            guard !EncryptedFolderManager.shared.isEncrypted(note: note) else { return false }
+            guard let folderID = note.folderID else { return true }
+            return !existingFolderIDs.contains(folderID)
+        case .conflicts:
+            return note.hasConflict && !EncryptedFolderManager.shared.isEncrypted(note: note)
+        case .recycleBin:
+            return note.isInRecycleBin
+        case .noteFolder(let folderID):
+            return note.folderID == folderID && !EncryptedFolderManager.shared.isEncrypted(note: note)
+        case .encryptedFolder(let encryptedFolderID):
+            return EncryptedFolderManager.shared.getEncryptedFolderID(for: note) == encryptedFolderID
+        case .tag(let tagID):
+            return note.tagIDs.contains(tagID) && !EncryptedFolderManager.shared.isEncrypted(note: note)
+        case .todoToday, .todoImportant, .todoList:
+            return false
+        }
+    }
+}
+
+extension SidebarDestination {
+    var isEncryptedFolder: Bool {
+        if case .encryptedFolder = self {
+            return true
+        }
+        return false
+    }
+
+    var isTodoDestination: Bool {
+        switch self {
+        case .todoToday, .todoImportant, .todoList:
+            return true
+        default:
+            return false
         }
     }
 }

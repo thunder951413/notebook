@@ -86,7 +86,7 @@ struct SettingsGeneralView: View {
     @State private var isFileLoggingEnabled = AppSettings.shared.isFileLoggingEnabled
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
-    @State private var recentNoteLoadLimit = AppSettings.shared.recentNoteLoadLimit
+    @State private var automaticUpdateChecksEnabled = AppSettings.shared.automaticUpdateChecksEnabled
     @State private var aiKnowledgeBaseTopK = AppSettings.shared.aiKnowledgeBaseTopK
     @State private var githubTokenInput = ""
     @State private var githubTokenStatusMessage = ""
@@ -148,25 +148,10 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Stepper(
-                        value: $recentNoteLoadLimit,
-                        in: AppSettings.minRecentNoteLoadLimit...AppSettings.maxRecentNoteLoadLimit
-                    ) {
-                        HStack {
-                            Text("保留最近选择的笔记内容")
-                            Spacer()
-                            Text("\(recentNoteLoadLimit) 篇")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .frame(maxWidth: 360)
-                    }
-                    .onChange(of: recentNoteLoadLimit) { _, newValue in
-                        AppSettings.shared.recentNoteLoadLimit = newValue
-                        store.refreshRecentNoteContentWindow()
-                    }
+                    Label("仅在内存中保留当前选择的笔记正文", systemImage: "memorychip")
+                        .frame(maxWidth: 360, alignment: .leading)
 
-                    Text("列表和搜索仍覆盖全部笔记；这里只限制富文本正文和附件在内存中的常驻数量。")
+                    Text("列表使用独立的标题、时间、文件夹和摘要缓存；切换笔记时按需加载正文并释放上一条笔记。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -246,7 +231,7 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 8) {
                         Text(l10n(L10nKeys.Settings.storageCurrentPath))
                             .font(.headline)
 
@@ -320,9 +305,14 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Text("启动时会自动检查 GitHub Release，也可以在这里手动检查。支持 private 仓库；若仓库私有，请配置 GitHub Token。")
+                    Text("可选择每天最多自动检查一次 GitHub Release，也可以手动检查。支持 private 仓库；若仓库私有，请配置 GitHub Token。")
                         .font(.caption)
                         .foregroundColor(.secondary)
+
+                    Toggle("自动检查更新", isOn: $automaticUpdateChecksEnabled)
+                        .onChange(of: automaticUpdateChecksEnabled) { _, enabled in
+                            AppSettings.shared.automaticUpdateChecksEnabled = enabled
+                        }
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("当前版本: \(AppVersion.current.shortVersion) (\(AppVersion.current.buildVersion))")
@@ -486,7 +476,7 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)], alignment: .leading, spacing: 8) {
                         HStack {
                             Text(l10n(L10nKeys.About.appName))
                                 .foregroundColor(.secondary)
@@ -704,7 +694,11 @@ struct DataManagementView: View {
                             Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
                         }
 
-                        if SSHConfigManager.shared.isConfigured {
+                        MobileSyncQRCodeButton()
+                    }
+
+                    if SSHConfigManager.shared.isConfigured {
+                        HStack(spacing: 12) {
                             Button {
                                 performPushSync()
                             } label: {
@@ -894,7 +888,7 @@ struct DataManagementView: View {
                             .foregroundColor(.red)
                     }
 
-                    Text("⚠️ 危险操作：这将永久删除所有笔记、文件夹、标签、附件和配置，恢复到初始状态。此操作不可撤销！")
+                    Text("重置会清空当前资料，但会先自动创建完整恢复备份，并保留资料库存储位置。")
                         .font(.caption)
                         .foregroundColor(.red)
 
@@ -1077,11 +1071,11 @@ struct DataManagementView: View {
 
     private func showImportConfirmation(message: String, confirmAction: @escaping () -> Void) {
         let alert = NSAlert()
-        alert.messageText = "确认导入"
+        alert.messageText = l10n("data.import.confirm.title")
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "导入")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: l10n("data.import.action"))
+        alert.addButton(withTitle: l10n(L10nKeys.cancel))
 
         if alert.runModal() == .alertFirstButtonReturn {
             confirmAction()
@@ -1089,7 +1083,7 @@ struct DataManagementView: View {
     }
 
     private func importConfiguration() {
-        showImportConfirmation(message: "导入配置将覆盖当前的快捷键、环形菜单等设置。\n建议在导入前先导出当前配置作为备份。\n\n是否继续导入？") {
+        showImportConfirmation(message: l10n("data.import.config.confirm")) {
             Task {
                 await self.performImportConfiguration()
             }
@@ -1103,7 +1097,7 @@ struct DataManagementView: View {
             openPanel.allowsMultipleSelection = false
             openPanel.canChooseDirectories = false
             openPanel.canChooseFiles = true
-            openPanel.message = "选择要导入的配置文件"
+            openPanel.message = l10n("data.import.config.choose")
 
             guard openPanel.runModal() == .OK, let zipURL = openPanel.url else {
                 return
@@ -1112,17 +1106,17 @@ struct DataManagementView: View {
             try await DataExportManager.shared.importConfiguration(from: zipURL)
 
             await MainActor.run {
-                errorMessage = "配置导入成功，请重启应用以应用更改"
+                errorMessage = l10n("data.import.config.success")
             }
         } catch {
             await MainActor.run {
-                errorMessage = "导入配置失败: \(error.localizedDescription)"
+                errorMessage = String(format: l10n("data.import.config.failure"), error.localizedDescription)
             }
         }
     }
 
     private func importNotes() {
-        showImportConfirmation(message: "导入笔记会清空当前块级文档库，并用所选笔记包重新写入全部笔记、文件夹和标签。\n建议在导入前先导出当前数据作为备份。\n\n是否继续导入？") {
+        showImportConfirmation(message: l10n("data.import.notes.confirm")) {
             Task {
                 await self.performImportNotes()
             }
@@ -1143,7 +1137,7 @@ struct DataManagementView: View {
             openPanel.allowsMultipleSelection = false
             openPanel.canChooseDirectories = false
             openPanel.canChooseFiles = true
-            openPanel.message = "选择要导入的笔记包"
+            openPanel.message = l10n("data.import.notes.choose")
 
             guard openPanel.runModal() == .OK, let zipURL = openPanel.url else {
                 return
@@ -1153,18 +1147,18 @@ struct DataManagementView: View {
             try await DataExportManager.shared.importNotes(from: zipURL, context: context)
 
             await MainActor.run {
-                errorMessage = "笔记包导入成功，当前文档库已更新"
+                errorMessage = l10n("data.import.notes.success")
                 showPersistedBlockBrowserSheet = true
             }
         } catch {
             await MainActor.run {
-                errorMessage = "导入笔记包失败: \(error.localizedDescription)"
+                errorMessage = String(format: l10n("data.import.notes.failure"), error.localizedDescription)
             }
         }
     }
 
     private func importAllData() {
-        showImportConfirmation(message: "导入所有数据将覆盖当前的配置、笔记、文件夹、标签和附件。\n⚠️ 此操作不可撤销！\n\n强烈建议先导出当前数据作为备份。\n\n是否继续导入？") {
+        showImportConfirmation(message: l10n("data.import.all.confirm")) {
             Task {
                 await self.performImportAllData()
             }
@@ -1175,7 +1169,7 @@ struct DataManagementView: View {
         do {
             guard let container = persistence.modelContainer else {
                 await MainActor.run {
-                    errorMessage = "数据容器未配置"
+                errorMessage = l10n("error.storage.notConfigured")
                 }
                 return
             }
@@ -1185,7 +1179,7 @@ struct DataManagementView: View {
             openPanel.allowsMultipleSelection = false
             openPanel.canChooseDirectories = false
             openPanel.canChooseFiles = true
-            openPanel.message = "选择要导入的数据文件"
+            openPanel.message = l10n("data.import.all.choose")
 
             guard openPanel.runModal() == .OK, let zipURL = openPanel.url else {
                 return
@@ -1195,11 +1189,11 @@ struct DataManagementView: View {
             try await DataExportManager.shared.importAllData(from: zipURL, context: context)
 
             await MainActor.run {
-                errorMessage = "数据导入成功，请重启应用以应用所有更改"
+                errorMessage = l10n("data.import.all.success")
             }
         } catch {
             await MainActor.run {
-                errorMessage = "导入数据失败: \(error.localizedDescription)"
+                errorMessage = String(format: l10n("data.import.all.failure"), error.localizedDescription)
             }
         }
     }
@@ -1208,11 +1202,11 @@ struct DataManagementView: View {
 
     private func showResetConfirmation() {
         let alert = NSAlert()
-        alert.messageText = "⚠️ 确认重置所有数据"
-        alert.informativeText = "此操作将永久删除以下内容：\n\n• 所有笔记\n• 所有文件夹\n• 所有标签\n• 所有附件\n• 所有配置（快捷键、环形菜单等）\n\n此操作不可撤销！\n\n强烈建议先导出所有数据作为备份。\n\n确定要继续吗？"
+        alert.messageText = l10n("data.reset.confirm.title")
+        alert.informativeText = l10n("data.reset.confirm.message")
         alert.alertStyle = .critical
-        alert.addButton(withTitle: "重置")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: l10n("data.reset.action"))
+        alert.addButton(withTitle: l10n(L10nKeys.cancel))
 
         if let resetButton = alert.buttons.first {
             resetButton.hasDestructiveAction = true
@@ -1229,7 +1223,7 @@ struct DataManagementView: View {
         do {
             guard let container = persistence.modelContainer else {
                 await MainActor.run {
-                    errorMessage = "数据容器未配置"
+                    errorMessage = l10n("error.storage.notConfigured")
                 }
                 return
             }
@@ -1238,7 +1232,7 @@ struct DataManagementView: View {
             try await DataExportManager.shared.resetAllData(context: context)
 
             await MainActor.run {
-                errorMessage = "重置成功，应用将退出。请重新启动应用。"
+                errorMessage = l10n("data.reset.success")
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                     NSApp.terminate(nil)
@@ -1246,7 +1240,7 @@ struct DataManagementView: View {
             }
         } catch {
             await MainActor.run {
-                errorMessage = "重置失败: \(error.localizedDescription)"
+                errorMessage = String(format: l10n("data.reset.failure"), error.localizedDescription)
             }
         }
     }
@@ -1363,7 +1357,9 @@ struct DataManagementView: View {
             }
 
             do {
-                let message = try await operation()
+                let message = try await SyncSessionCoordinator.shared.withSession(named: "手动数据同步") {
+                    try await operation()
+                }
 
                 // 同步完成后刷新 NoteStore，让 UI 立即反映最新数据
                 self.store.fetchData()

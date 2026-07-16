@@ -29,7 +29,7 @@ class AIService: ObservableObject {
             throw AIServiceError.missingAPIKey
         }
         
-        let url = URL(string: "\(baseURL)/chat/completions")!
+        let url = try Self.endpointURL(baseURL: baseURL)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -79,7 +79,7 @@ class AIService: ObservableObject {
             throw AIServiceError.missingAPIKey
         }
         
-        let url = URL(string: "\(baseURL)/chat/completions")!
+        let url = try Self.endpointURL(baseURL: baseURL)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -145,6 +145,30 @@ class AIService: ObservableObject {
             // 添加小延迟模拟打字效果
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
+    }
+
+    static func endpointURL(baseURL: String) throws -> URL {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty else {
+            throw AIServiceError.invalidBaseURL
+        }
+
+        let isLoopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        guard scheme == "https" || (scheme == "http" && isLoopback) else {
+            throw AIServiceError.insecureBaseURL
+        }
+
+        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = "/" + ([basePath, "chat/completions"].filter { !$0.isEmpty }.joined(separator: "/"))
+        components.query = nil
+        components.fragment = nil
+        guard let url = components.url else {
+            throw AIServiceError.invalidBaseURL
+        }
+        return url
     }
 }
 
@@ -319,6 +343,8 @@ private struct APIError: Codable {
 
 enum AIServiceError: LocalizedError {
     case missingAPIKey
+    case invalidBaseURL
+    case insecureBaseURL
     case invalidResponse
     case apiError(String)
     case noResponse
@@ -327,6 +353,10 @@ enum AIServiceError: LocalizedError {
         switch self {
         case .missingAPIKey:
             return "请先配置 API Key"
+        case .invalidBaseURL:
+            return "Base URL 无效，请输入完整的 HTTP(S) 地址"
+        case .insecureBaseURL:
+            return "远程 AI 服务必须使用 HTTPS；HTTP 仅允许 localhost"
         case .invalidResponse:
             return "无效的响应"
         case .apiError(let message):

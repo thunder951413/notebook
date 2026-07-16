@@ -38,13 +38,13 @@ final class RadialMenuSettings: ObservableObject {
 
     @Published var isEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(isEnabled, forKey: "radialMenuEnabled")
+            NotebookDefaults.shared.set(isEnabled, forKey: "radialMenuEnabled")
         }
     }
 
     @Published var trigger: RadialMenuTrigger {
         didSet {
-            UserDefaults.standard.set(trigger.rawValue, forKey: "radialMenuTrigger")
+            NotebookDefaults.shared.set(trigger.rawValue, forKey: "radialMenuTrigger")
             // 通知监控器重新配置
             RadialMenuEventMonitor.shared.restartMonitoring()
         }
@@ -58,32 +58,32 @@ final class RadialMenuSettings: ObservableObject {
 
     @Published var menuRadius: CGFloat {
         didSet {
-            UserDefaults.standard.set(menuRadius, forKey: "radialMenuRadius")
+            NotebookDefaults.shared.set(menuRadius, forKey: "radialMenuRadius")
         }
     }
 
     @Published var itemSize: CGFloat {
         didSet {
-            UserDefaults.standard.set(itemSize, forKey: "radialMenuItemSize")
+            NotebookDefaults.shared.set(itemSize, forKey: "radialMenuItemSize")
         }
     }
 
     @Published var menuScale: CGFloat {
         didSet {
-            UserDefaults.standard.set(menuScale, forKey: "radialMenuScale")
+            NotebookDefaults.shared.set(menuScale, forKey: "radialMenuScale")
         }
     }
 
     private init() {
-        self.isEnabled = UserDefaults.standard.bool(forKey: "radialMenuEnabled")
+        self.isEnabled = NotebookDefaults.shared.bool(forKey: "radialMenuEnabled")
 
         // 加载触发方式
-        let triggerRawValue = UserDefaults.standard.string(forKey: "radialMenuTrigger") ?? ""
+        let triggerRawValue = NotebookDefaults.shared.string(forKey: "radialMenuTrigger") ?? ""
         self.trigger = RadialMenuTrigger(rawValue: triggerRawValue) ?? .middleClick
 
-        self.menuRadius = UserDefaults.standard.object(forKey: "radialMenuRadius") as? CGFloat ?? 120
-        self.itemSize = UserDefaults.standard.object(forKey: "radialMenuItemSize") as? CGFloat ?? 50
-        self.menuScale = UserDefaults.standard.object(forKey: "radialMenuScale") as? CGFloat ?? 1.0
+        self.menuRadius = NotebookDefaults.shared.object(forKey: "radialMenuRadius") as? CGFloat ?? 120
+        self.itemSize = NotebookDefaults.shared.object(forKey: "radialMenuItemSize") as? CGFloat ?? 50
+        self.menuScale = NotebookDefaults.shared.object(forKey: "radialMenuScale") as? CGFloat ?? 1.0
         self.menuItems = RadialMenuSettings.loadMenuItems()
 
         // 如果为空，设置默认项
@@ -93,7 +93,7 @@ final class RadialMenuSettings: ObservableObject {
     }
     
     private static func loadMenuItems() -> [RadialMenuItem] {
-        guard let data = UserDefaults.standard.data(forKey: "radialMenuItems"),
+        guard let data = NotebookDefaults.shared.data(forKey: "radialMenuItems"),
               let itemsData = try? JSONDecoder().decode([RadialMenuItemData].self, from: data) else {
             return []
         }
@@ -103,7 +103,7 @@ final class RadialMenuSettings: ObservableObject {
     private func saveMenuItems() {
         let itemsData = menuItems.map { RadialMenuItemData(from: $0) }
         if let data = try? JSONEncoder().encode(itemsData) {
-            UserDefaults.standard.set(data, forKey: "radialMenuItems")
+            NotebookDefaults.shared.set(data, forKey: "radialMenuItems")
         }
     }
     

@@ -61,7 +61,8 @@ struct NotebookSettingView: View {
                 noteID: note.id,
                 title: note.title.isEmpty ? l10n(L10nKeys.Note.reminderTitle) : note.title,
                 body: String(preview),
-                reminderAt: selectedDate
+                reminderAt: selectedDate,
+                recurrence: note.recurrenceRule
             )
         }
         

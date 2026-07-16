@@ -110,6 +110,8 @@ struct SSHSettingsView: View {
                 }
                 
                 Spacer()
+
+                MobileSyncQRCodeButton()
                 
                 Button {
                     testAndSaveConnection()
@@ -129,7 +131,7 @@ struct SSHSettingsView: View {
             }
         }
         .padding(24)
-        .frame(width: 420, height: 520)
+        .frame(width: 560, height: 520)
         .onAppear {
             loadExistingConfig()
         }
@@ -198,7 +200,7 @@ struct SSHSettingsView: View {
             }
         }
     }
-    
+
     /// 测试 SSH 连接
     private func testSSHConnection(host: String, port: Int, username: String, password: String) async throws {
         let config = SSHConfig(

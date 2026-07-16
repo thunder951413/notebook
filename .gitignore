@@ -26,3 +26,6 @@ DerivedData
 #
 .DS_Store
 .vscode/
+
+# Local build artifacts and verification logs
+output/

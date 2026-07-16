@@ -4,12 +4,13 @@ import Combine
 import CommonCrypto
 
 /// 密码管理器 - 用于设置、修改和验证应用密码
-class PasswordManager: ObservableObject {
+@MainActor
+final class PasswordManager: ObservableObject {
     static let shared = PasswordManager()
     
     private let passwordKey = "app_password_hash"
     private let saltKey = "app_password_salt"
-    private let keychainService = "com.notebook.app"
+    private let keychainService: String
     private let pbkdf2Algorithm = "pbkdf2_sha256"
     private let pbkdf2Iterations = 120_000
     private let saltByteCount = 32
@@ -17,7 +18,8 @@ class PasswordManager: ObservableObject {
     
     @Published var hasPassword: Bool = false
     
-    private init() {
+    init(keychainService: String = "com.notebook.app") {
+        self.keychainService = keychainService
         hasPassword = loadPasswordHash() != nil
     }
     
@@ -35,9 +37,7 @@ class PasswordManager: ObservableObject {
         // 保存到 Keychain
         if saveToKeychain(hash, key: passwordKey) {
             _ = deleteFromKeychain(key: saltKey)
-            Task { @MainActor in
-                self.hasPassword = true
-            }
+            hasPassword = true
             return true
         }
         return false
@@ -91,9 +91,7 @@ class PasswordManager: ObservableObject {
         // 从 Keychain 删除
         let success = deleteFromKeychain(key: passwordKey) && deleteFromKeychain(key: saltKey)
         if success {
-            Task { @MainActor in
-                self.hasPassword = false
-            }
+            hasPassword = false
         }
         return success
     }
@@ -102,9 +100,7 @@ class PasswordManager: ObservableObject {
     func forceClearPassword() {
         _ = deleteFromKeychain(key: passwordKey)
         _ = deleteFromKeychain(key: saltKey)
-        Task { @MainActor in
-            self.hasPassword = false
-        }
+        hasPassword = false
     }
     
     // MARK: - Private Methods
@@ -236,25 +232,8 @@ class PasswordManager: ObservableObject {
         }
     }
     
-    // MARK: - Export/Import
-    
-    /// 导出密码配置（哈希和盐值）
-    /// - Returns: 包含密码哈希和盐值的字典，如果没有设置密码则返回 nil
-    func exportPasswordConfig() -> [String: String]? {
-        guard let hash = loadPasswordHash() else {
-            return nil
-        }
+    // MARK: - Legacy Import
 
-        var config = [
-            "hash": hash,
-            "algorithm": hash.hasPrefix("\(pbkdf2Algorithm)$") ? pbkdf2Algorithm : "sha256_legacy"
-        ]
-        if let salt = loadSalt() {
-            config["salt"] = salt
-        }
-        return config
-    }
-    
     /// 导入密码配置
     /// - Parameter config: 包含密码哈希和盐值的字典
     /// - Returns: 是否成功导入
@@ -274,9 +253,7 @@ class PasswordManager: ObservableObject {
         }
 
         if savedHash && savedSalt {
-            Task { @MainActor in
-                self.hasPassword = true
-            }
+            hasPassword = true
             return true
         }
         return false

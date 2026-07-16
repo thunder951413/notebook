@@ -11,7 +11,18 @@ final class StorageLocationManager: ObservableObject {
     @Published private(set) var baseDirectoryURL: URL?
 
     private init() {
-        self.baseDirectoryURL = resolveBaseDirectoryURL()
+        let environment = ProcessInfo.processInfo.environment
+        if let uiTestPath = environment["NOTEBOOK_UI_TEST_DATA_DIR"],
+           !uiTestPath.isEmpty {
+            // UI 测试必须与真实用户库完全隔离，且不写入 security-scoped bookmark。
+            self.baseDirectoryURL = URL(fileURLWithPath: uiTestPath, isDirectory: true)
+        } else if environment["XCTestConfigurationFilePath"] != nil {
+            // 单元测试宿主也不能解析真实 bookmark。使用每个测试进程独立的临时库。
+            self.baseDirectoryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("NotebookUnitTests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        } else {
+            self.baseDirectoryURL = resolveBaseDirectoryURL()
+        }
     }
 
     var isConfigured: Bool {
@@ -125,11 +136,11 @@ final class StorageLocationManager: ObservableObject {
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
-        UserDefaults.standard.set(data, forKey: bookmarkKey)
+        NotebookDefaults.shared.set(data, forKey: bookmarkKey)
     }
 
     private func resolveBaseDirectoryURL() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
+        guard let data = NotebookDefaults.shared.data(forKey: bookmarkKey) else { return nil }
         var isStale = false
         do {
             let url = try URL(

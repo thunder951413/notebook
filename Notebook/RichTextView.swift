@@ -1162,7 +1162,14 @@ class RichTextView: NSTextView {
                         DebugLog.editor("Restored image bounds from link: \(parsed.width)x\(parsed.height)", level: .debug)
                     }
                 }
-                textAttachment.refreshPresentationIfNeeded()
+                if !textAttachment.isImagePresentationLoaded,
+                   textAttachment.kind == .image,
+                   textAttachment.bounds.width > 1,
+                   textAttachment.bounds.height > 1 {
+                    // 持久化尺寸足以维持全文布局；实际图片由编辑器按可视区域加载。
+                } else {
+                    textAttachment.refreshPresentationIfNeeded()
+                }
 
                 // 2) 音频附件：确保 link 属性存在，便于点击播放和 Markdown 提取
                 let hasLink = textStorage.attribute(.link, at: range.location, effectiveRange: nil) != nil

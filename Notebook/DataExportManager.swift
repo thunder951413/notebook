@@ -8,6 +8,9 @@ import Compression
 final class DataExportManager {
     static let shared = DataExportManager()
 
+    private var importFailureInjectorForTesting: (() throws -> Void)?
+    private var resetFailureInjectorForTesting: (() throws -> Void)?
+
     enum BlockLibraryExportError: LocalizedError {
         case libraryUnavailable
 
@@ -31,6 +34,14 @@ final class DataExportManager {
     }
 
     private init() {}
+
+    func setImportFailureInjectorForTesting(_ injector: (() throws -> Void)?) {
+        importFailureInjectorForTesting = injector
+    }
+
+    func setResetFailureInjectorForTesting(_ injector: (() throws -> Void)?) {
+        resetFailureInjectorForTesting = injector
+    }
 
     // MARK: - 导出配置
 
@@ -87,10 +98,9 @@ final class DataExportManager {
         // 导出 AI 配置
         try ConfigurationTransferHelper.exportAIConfig(to: configDir)
 
-        // 导出密码配置
-        try ConfigurationTransferHelper.exportPasswordConfig(to: configDir)
+        // 密码验证记录属于设备凭据，禁止随数据包导出。旧包仍保持兼容导入。
 
-        // 导出加密文件夹配置
+        // 导出锁定文件夹配置（仅应用内访问控制元数据，不代表磁盘加密）
         try ConfigurationTransferHelper.exportEncryptedFolders(to: configDir)
 
         // 导出加密相关数据
@@ -161,6 +171,14 @@ final class DataExportManager {
             .sorted { $0.createdAt < $1.createdAt }
         let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
             .filter { $0.libraryID == library.id }
+        let todoSteps = try context.fetch(FetchDescriptor<TodoStepEntity>())
+            .filter { $0.libraryID == library.id }
+            .sorted { lhs, rhs in
+                if lhs.noteID != rhs.noteID {
+                    return lhs.noteID.uuidString < rhs.noteID.uuidString
+                }
+                return lhs.order < rhs.order
+            }
         let blocks = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
         let assets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
         let attachmentsRoot = try persistentAttachmentsRootDirectory()
@@ -202,7 +220,13 @@ final class DataExportManager {
                     originalFolderName: note.originalFolderName,
                     blockCount: document.blocks.count,
                     assetCount: migratedAssets.count,
-                    documentPath: "Notes/\(note.id.uuidString)/document.json"
+                    documentPath: "Notes/\(note.id.uuidString)/document.json",
+                    itemType: note.itemType,
+                    todoDueAt: note.todoDueAt,
+                    todoCompletedAt: note.todoCompletedAt,
+                    todoIsImportant: note.todoIsImportant,
+                    todoOrder: note.todoOrder,
+                    linkedNoteIDs: UUIDListCoding.decode(note.linkedNoteIDs)
                 )
             )
         }
@@ -217,7 +241,8 @@ final class DataExportManager {
                     name: $0.name,
                     sortOrder: $0.sortOrder,
                     isSystem: $0.isSystem,
-                    createdAt: $0.createdAt
+                    createdAt: $0.createdAt,
+                    folderType: $0.folderType
                 )
             },
             tags: tags.map {
@@ -225,6 +250,16 @@ final class DataExportManager {
                     id: $0.id,
                     name: $0.name,
                     color: $0.color,
+                    createdAt: $0.createdAt
+                )
+            },
+            todoSteps: todoSteps.map {
+                .init(
+                    id: $0.id,
+                    noteID: $0.noteID,
+                    text: $0.text,
+                    checked: $0.checked,
+                    order: $0.order,
                     createdAt: $0.createdAt
                 )
             }
@@ -382,7 +417,7 @@ final class DataExportManager {
         let contents = try FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil)
         for item in contents {
             let destination = directory.appendingPathComponent(item.lastPathComponent)
-            try? FileManager.default.copyItem(at: item, to: destination)
+            try FileManager.default.copyItem(at: item, to: destination)
         }
     }
 
@@ -424,10 +459,43 @@ final class DataExportManager {
 
     /// 导入笔记
     func importNotes(from zipURL: URL, context: ModelContext) async throws {
-        let importer = DocumentMigrationPackageImporter()
-        let handler = SwiftDataDocumentMigrationImportHandler(modelContext: context)
-        let package = try importer.importArchive(from: zipURL, using: handler)
-        package.cleanup()
+        if let safetyBackupURL = try await createSafetyBackup(context: context, directoryName: "BeforeNotesImport") {
+            DebugLog.storage("笔记导入前安全备份已创建: \(safetyBackupURL.path)", level: .info)
+        }
+
+        guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
+        }
+        let currentAttachments = storage.appendingPathComponent("NotebookData/Attachments", isDirectory: true)
+        let stagedAttachments = try stageAttachmentsImport(from: currentAttachments)
+        defer { try? FileManager.default.removeItem(at: stagedAttachments) }
+
+        let previousAutosaveEnabled = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = previousAutosaveEnabled }
+
+        var attachmentsTransaction: AttachmentDirectoryTransaction?
+        do {
+            let importer = DocumentMigrationPackageImporter()
+            let handler = SwiftDataDocumentMigrationImportHandler(
+                modelContext: context,
+                savesIncrementally: false,
+                attachmentsRootOverride: stagedAttachments
+            )
+            let package = try importer.importArchive(from: zipURL, using: handler)
+            package.cleanup()
+
+            let transaction = try beginAttachmentsTransaction(stagedDirectory: stagedAttachments)
+            attachmentsTransaction = transaction
+            try importFailureInjectorForTesting?()
+            try context.save()
+            transaction.finalize()
+            attachmentsTransaction = nil
+        } catch {
+            context.rollback()
+            attachmentsTransaction?.rollback()
+            throw error
+        }
     }
 
     /// 导入所有数据
@@ -442,35 +510,69 @@ final class DataExportManager {
 
         try preflightValidateAllDataImport(at: extractDir)
 
+        // 在任何破坏性变更前生成持久化安全备份。即使进程在附件/数据库提交之间
+        // 意外退出，用户也始终有一份可独立导入的完整恢复包。
+        if let safetyBackupURL = try await createSafetyBackup(context: context, directoryName: "BeforeImport") {
+            DebugLog.storage("导入前安全备份已创建: \(safetyBackupURL.path)", level: .info)
+        }
+
+        // 配置不是 SwiftData 事务的一部分，因此先保存当前配置；核心提交失败时恢复。
+        let configurationRollbackArchive = try await exportConfiguration()
+        defer { try? FileManager.default.removeItem(at: configurationRollbackArchive) }
+
         let attachmentsDir = extractDir.appendingPathComponent("Attachments")
-        let stagedAttachmentsDir = try stageAttachmentsImportIfNeeded(from: attachmentsDir)
+        let stagedAttachmentsDir = try stageAttachmentsImport(from: attachmentsDir)
         defer {
-            if let stagedAttachmentsDir {
-                try? FileManager.default.removeItem(at: stagedAttachmentsDir)
+            try? FileManager.default.removeItem(at: stagedAttachmentsDir)
+        }
+
+        let previousAutosaveEnabled = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = previousAutosaveEnabled }
+
+        var attachmentsTransaction: AttachmentDirectoryTransaction?
+        do {
+            // 所有 SwiftData 删除和插入都留在同一个未保存事务中。附件也只写入暂存目录。
+            let notesDir = extractDir.appendingPathComponent("Notes")
+            if FileManager.default.fileExists(atPath: notesDir.path) {
+                let importer = DocumentMigrationPackageImporter()
+                let handler = SwiftDataDocumentMigrationImportHandler(
+                    modelContext: context,
+                    savesIncrementally: false,
+                    attachmentsRootOverride: stagedAttachmentsDir
+                )
+                let package = try importer.importDirectory(from: notesDir, using: handler)
+                package.cleanup()
             }
-        }
 
-        // 先导入笔记和附件，确认核心数据可落盘，再覆盖配置
-        let notesDir = extractDir.appendingPathComponent("Notes")
-        if FileManager.default.fileExists(atPath: notesDir.path) {
-            try await importAllNotes(from: notesDir, context: context)
-        }
+            let configDir = extractDir.appendingPathComponent("Config")
+            if FileManager.default.fileExists(atPath: configDir.path) {
+                try ConfigurationTransferHelper.importUserDefaults(from: configDir)
+                try ConfigurationTransferHelper.importKeyboardShortcuts(from: configDir)
+                try ConfigurationTransferHelper.importRadialMenuSettings(from: configDir)
+                try ConfigurationTransferHelper.importAppSettings(from: configDir)
+                try ConfigurationTransferHelper.importAIConfig(from: configDir)
+                // 设备访问密码不随数据包迁移，避免旧备份覆盖当前 Keychain 并锁定用户。
+                try ConfigurationTransferHelper.importEncryptedFolders(from: configDir)
+                try ConfigurationTransferHelper.importEncryptedData(from: configDir)
+            }
 
-        if let stagedAttachmentsDir {
-            try commitStagedAttachmentsImport(from: stagedAttachmentsDir)
-        }
-
-        // 导入配置
-        let configDir = extractDir.appendingPathComponent("Config")
-        if FileManager.default.fileExists(atPath: configDir.path) {
-            try ConfigurationTransferHelper.importUserDefaults(from: configDir)
-            try ConfigurationTransferHelper.importKeyboardShortcuts(from: configDir)
-            try ConfigurationTransferHelper.importRadialMenuSettings(from: configDir)
-            try ConfigurationTransferHelper.importAppSettings(from: configDir)
-            try ConfigurationTransferHelper.importAIConfig(from: configDir)
-            try ConfigurationTransferHelper.importPasswordConfig(from: configDir)
-            try ConfigurationTransferHelper.importEncryptedFolders(from: configDir)
-            try ConfigurationTransferHelper.importEncryptedData(from: configDir)
+            let transaction = try beginAttachmentsTransaction(stagedDirectory: stagedAttachmentsDir)
+            attachmentsTransaction = transaction
+            try importFailureInjectorForTesting?()
+            try context.save()
+            transaction.finalize()
+            attachmentsTransaction = nil
+        } catch {
+            context.rollback()
+            attachmentsTransaction?.rollback()
+            // 尽最大努力恢复非数据库配置；恢复失败会记录，但绝不掩盖原始导入错误。
+            do {
+                try await importConfiguration(from: configurationRollbackArchive)
+            } catch {
+                DebugLog.storage("导入失败后恢复配置失败: \(error.localizedDescription)", level: .error)
+            }
+            throw error
         }
     }
 
@@ -504,8 +606,7 @@ final class DataExportManager {
         }
     }
 
-    private func stageAttachmentsImportIfNeeded(from directory: URL) throws -> URL? {
-        guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
+    private func stageAttachmentsImport(from directory: URL) throws -> URL {
         guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
             throw DocumentMigrationPersistenceError.storageNotConfigured
         }
@@ -516,49 +617,53 @@ final class DataExportManager {
         let stagingDir = notebookDataDir.appendingPathComponent("AttachmentsImportStaging_\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
-        let contents = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        for item in contents {
-            let destination = stagingDir.appendingPathComponent(item.lastPathComponent)
-            try FileManager.default.copyItem(at: item, to: destination)
+        if FileManager.default.fileExists(atPath: directory.path) {
+            let contents = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            for item in contents {
+                let destination = stagingDir.appendingPathComponent(item.lastPathComponent)
+                try FileManager.default.copyItem(at: item, to: destination)
+            }
         }
 
         return stagingDir
     }
 
-    private func commitStagedAttachmentsImport(from stagingDir: URL) throws {
+    private func beginAttachmentsTransaction(stagedDirectory: URL) throws -> AttachmentDirectoryTransaction {
         guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
             throw DocumentMigrationPersistenceError.storageNotConfigured
         }
-
-        let fileManager = FileManager.default
         let notebookDataDir = storage.appendingPathComponent("NotebookData", isDirectory: true)
-        try fileManager.createDirectory(at: notebookDataDir, withIntermediateDirectories: true)
-
         let liveDir = notebookDataDir.appendingPathComponent("Attachments", isDirectory: true)
         let backupDir = notebookDataDir.appendingPathComponent("AttachmentsBackup_\(UUID().uuidString)", isDirectory: true)
-        let hadExistingLiveDir = fileManager.fileExists(atPath: liveDir.path)
+        let transaction = AttachmentDirectoryTransaction(
+            stagedDirectory: stagedDirectory,
+            liveDirectory: liveDir,
+            backupDirectory: backupDir
+        )
+        try transaction.begin()
+        return transaction
+    }
 
-        if hadExistingLiveDir {
-            try fileManager.moveItem(at: liveDir, to: backupDir)
+    private func createSafetyBackup(context: ModelContext, directoryName: String) async throws -> URL? {
+        guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
         }
-
-        do {
-            try fileManager.moveItem(at: stagingDir, to: liveDir)
-            if hadExistingLiveDir, fileManager.fileExists(atPath: backupDir.path) {
-                try fileManager.removeItem(at: backupDir)
-            }
-        } catch {
-            if fileManager.fileExists(atPath: liveDir.path) {
-                try? fileManager.removeItem(at: liveDir)
-            }
-            if hadExistingLiveDir, fileManager.fileExists(atPath: backupDir.path) {
-                try? fileManager.moveItem(at: backupDir, to: liveDir)
-            }
-            throw error
+        guard try !context.fetch(FetchDescriptor<BlockDocumentLibraryEntity>()).isEmpty else {
+            return nil
         }
+        let temporaryArchive = try await exportAllData(context: context)
+        defer { try? FileManager.default.removeItem(at: temporaryArchive) }
 
-        let importedCount = try fileManager.contentsOfDirectory(at: liveDir, includingPropertiesForKeys: nil).count
-        DebugLog.storage("已导入 \(importedCount) 个附件", level: .debug)
+        let backupDirectory = storage
+            .appendingPathComponent("NotebookData", isDirectory: true)
+            .appendingPathComponent("Backups", isDirectory: true)
+            .appendingPathComponent(directoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        let destination = backupDirectory.appendingPathComponent(
+            "Notebook_\(directoryName)_\(formattedDate())_\(UUID().uuidString).zip"
+        )
+        try FileManager.default.copyItem(at: temporaryArchive, to: destination)
+        return destination
     }
 
     // MARK: - 重置功能
@@ -566,97 +671,70 @@ final class DataExportManager {
     /// 重置所有数据（删除所有笔记、文件夹、标签、附件和配置）
     func resetAllData(context: ModelContext) async throws {
         DebugLog.storage("开始重置所有数据...", level: .debug)
-
-        let allBlocks = try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>())
-        for block in allBlocks {
-            context.delete(block)
+        if let safetyBackupURL = try await createSafetyBackup(context: context, directoryName: "BeforeReset") {
+            DebugLog.storage("重置前安全备份已创建: \(safetyBackupURL.path)", level: .info)
         }
-        DebugLog.storage("已删除 \(allBlocks.count) 个块", level: .debug)
 
-        let allAssets = try context.fetch(FetchDescriptor<BlockDocumentAssetEntity>())
-        for asset in allAssets {
-            context.delete(asset)
+        guard let storage = StorageLocationManager.shared.baseDirectoryURL else {
+            throw DocumentMigrationPersistenceError.storageNotConfigured
         }
-        DebugLog.storage("已删除 \(allAssets.count) 个资源", level: .debug)
+        let notebookDataDirectory = storage.appendingPathComponent("NotebookData", isDirectory: true)
+        let emptyAttachmentsDirectory = notebookDataDirectory
+            .appendingPathComponent("AttachmentsResetStaging_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: emptyAttachmentsDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyAttachmentsDirectory) }
 
-        let allNotes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
-        for note in allNotes {
-            context.delete(note)
+        let previousAutosaveEnabled = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = previousAutosaveEnabled }
+
+        var attachmentsTransaction: AttachmentDirectoryTransaction?
+        do {
+            try deleteAllEntities(context: context)
+            let transaction = try beginAttachmentsTransaction(stagedDirectory: emptyAttachmentsDirectory)
+            attachmentsTransaction = transaction
+            try resetFailureInjectorForTesting?()
+            try context.save()
+            transaction.finalize()
+            attachmentsTransaction = nil
+
+            // 数据提交成功后才清理非关键配置。存储位置和安全备份始终保留。
+            resetAllSettings()
+            resetKeyboardShortcuts()
+            resetRadialMenuSettings()
+            DebugLog.storage("重置完成", level: .debug)
+        } catch {
+            context.rollback()
+            attachmentsTransaction?.rollback()
+            throw error
         }
-        DebugLog.storage("已删除 \(allNotes.count) 个笔记", level: .debug)
-
-        let allFolders = try context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
-        for folder in allFolders {
-            context.delete(folder)
-        }
-        DebugLog.storage("已删除 \(allFolders.count) 个文件夹", level: .debug)
-
-        let allTags = try context.fetch(FetchDescriptor<BlockDocumentTagEntity>())
-        for tag in allTags {
-            context.delete(tag)
-        }
-        DebugLog.storage("已删除 \(allTags.count) 个标签", level: .debug)
-
-        let allLibraries = try context.fetch(FetchDescriptor<BlockDocumentLibraryEntity>())
-        for library in allLibraries {
-            context.delete(library)
-        }
-        DebugLog.storage("已删除 \(allLibraries.count) 个文档库", level: .debug)
-
-        try context.save()
-        DebugLog.storage("数据库已清空", level: .debug)
-
-        // 5. 删除所有附件文件
-        try deleteAllAttachments()
-
-        // 6. 删除数据库文件
-        try deleteDatabaseFiles()
-
-        // 7. 重置所有 UserDefaults 设置
-        resetAllSettings()
-
-        // 8. 重置快捷键设置
-        resetKeyboardShortcuts()
-
-        // 9. 重置环形菜单设置
-        resetRadialMenuSettings()
-
-        DebugLog.storage("重置完成", level: .debug)
     }
 
-    /// 删除所有附件文件
-    private func deleteAllAttachments() throws {
-        guard let storage = StorageLocationManager.shared.baseDirectoryURL else { return }
-
-        let attachmentsDir = storage.appendingPathComponent("NotebookData/Attachments")
-        guard FileManager.default.fileExists(atPath: attachmentsDir.path) else { return }
-
-        let contents = try FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil)
-        for item in contents {
-            try FileManager.default.removeItem(at: item)
-        }
-
-        DebugLog.storage("已删除 \(contents.count) 个附件文件", level: .debug)
+    private func deleteAllEntities(context: ModelContext) throws {
+        try deleteAll(BlockDocumentBlockEntity.self, context: context)
+        try deleteAll(BlockDocumentAssetEntity.self, context: context)
+        try deleteAll(TodoStepEntity.self, context: context)
+        try deleteAll(BlockDocumentNoteTagEntity.self, context: context)
+        try deleteAll(BlockDocumentNoteVersionEntity.self, context: context)
+        try deleteAll(BlockDocumentNoteSyncStateEntity.self, context: context)
+        try deleteAll(BlockDocumentBackendSyncStateEntity.self, context: context)
+        try deleteAll(BlockDocumentDeletedNoteTombstoneEntity.self, context: context)
+        try deleteAll(BlockDocumentLibraryTombstoneEntity.self, context: context)
+        try deleteAll(BlockDocumentNoteEntity.self, context: context)
+        try deleteAll(BlockDocumentTagEntity.self, context: context)
+        try deleteAll(BlockDocumentFolderEntity.self, context: context)
+        try deleteAll(BlockDocumentLibraryEntity.self, context: context)
     }
 
-    /// 删除数据库文件
-    private func deleteDatabaseFiles() throws {
-        guard let storage = StorageLocationManager.shared.baseDirectoryURL else { return }
-
-        let databaseDir = storage.appendingPathComponent("NotebookData/Database")
-        guard FileManager.default.fileExists(atPath: databaseDir.path) else { return }
-
-        let contents = try FileManager.default.contentsOfDirectory(at: databaseDir, includingPropertiesForKeys: nil)
-        for item in contents {
-            try FileManager.default.removeItem(at: item)
+    private func deleteAll<T: PersistentModel>(_ type: T.Type, context: ModelContext) throws {
+        for model in try context.fetch(FetchDescriptor<T>()) {
+            context.delete(model)
         }
-
-        DebugLog.storage("已删除 \(contents.count) 个数据库文件", level: .debug)
     }
 
     /// 重置所有 UserDefaults 设置
     private func resetAllSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
 
         // 清除最近选择的文件夹和笔记
         defaults.removeObject(forKey: "lastSelectedFolder")
@@ -675,8 +753,7 @@ final class DataExportManager {
         defaults.removeObject(forKey: "update.github_repository_url")
         _ = GitHubTokenManager.shared.deleteToken()
 
-        // 清除存储位置设置
-        defaults.removeObject(forKey: "storageLocationBookmark")
+        // 保留 storageDirectoryBookmark：安全备份仍位于该资料库中，重启后必须可访问。
 
         DebugLog.storage("已重置所有 UserDefaults 设置", level: .debug)
     }
@@ -689,7 +766,7 @@ final class DataExportManager {
 
     /// 重置环形菜单设置
     private func resetRadialMenuSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = NotebookDefaults.shared
         defaults.removeObject(forKey: "radialMenuEnabled")
         defaults.removeObject(forKey: "radialMenuTrigger")
         defaults.removeObject(forKey: "radialMenuRadius")

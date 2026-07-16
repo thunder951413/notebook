@@ -36,6 +36,7 @@ extension ModelContext {
             try save()
             return true
         } catch {
+            rollback()
             let scope = context()
             let fileName = "\(file)".split(separator: "/").last.map(String.init) ?? "\(file)"
             let prefix = scope.isEmpty ? "" : "[\(scope)] "

@@ -165,6 +165,8 @@ struct SettingsRootView: View {
                             } label: {
                                 Text(SSHConfigManager.shared.isConfigured ? "修改配置" : "配置服务器")
                             }
+
+                            MobileSyncQRCodeButton()
                         }
 
                         if SSHConfigManager.shared.isConfigured {

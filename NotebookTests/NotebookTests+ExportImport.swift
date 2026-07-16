@@ -123,8 +123,8 @@ extension NotebookTests {
 
     @MainActor
     func testImportConfigurationUsesPlistRadialSettingsAndSkipsStorageBookmark() async throws {
-        let defaults = UserDefaults.standard
-        let keysToClear = [
+        let defaults = NotebookDefaults.shared
+        let keysToRestore = [
             "radialMenuEnabled",
             "radialMenuTrigger",
             "radialMenuRadius",
@@ -133,11 +133,22 @@ extension NotebookTests {
             "startup_behavior",
             "storageDirectoryBookmark"
         ]
+        let previousValues: [String: Any] = Dictionary(
+            uniqueKeysWithValues: keysToRestore.compactMap { key in
+                defaults.object(forKey: key).map { (key, $0) }
+            }
+        )
         defer {
-            for key in keysToClear {
-                defaults.removeObject(forKey: key)
+            for key in keysToRestore {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
             }
         }
+
+        let bookmarkBeforeImport = defaults.data(forKey: "storageDirectoryBookmark")
 
         let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
@@ -171,7 +182,7 @@ extension NotebookTests {
         XCTAssertEqual(defaults.double(forKey: "radialMenuRadius"), 160.0, accuracy: 0.001)
         XCTAssertEqual(defaults.double(forKey: "radialMenuItemSize"), 52.0, accuracy: 0.001)
         XCTAssertEqual(defaults.double(forKey: "radialMenuScale"), 1.2, accuracy: 0.001)
-        XCTAssertNil(defaults.object(forKey: "storageDirectoryBookmark"))
+        XCTAssertEqual(defaults.data(forKey: "storageDirectoryBookmark"), bookmarkBeforeImport)
     }
 
     @MainActor
@@ -226,6 +237,105 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testImportAllDataCommitFailureRollsBackDatabaseAttachmentsAndCreatesSafetyBackup() async throws {
+        let baseDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+
+        let storage = StorageLocationManager.shared
+        storage.setBaseDirectoryForTesting(baseDirectory)
+        defer {
+            DataExportManager.shared.setImportFailureInjectorForTesting(nil)
+            storage.setBaseDirectoryForTesting(nil)
+            try? FileManager.default.removeItem(at: baseDirectory)
+        }
+        try storage.ensureDirectoryStructureExists()
+
+        let sourceContainer = try makeInMemoryContainer()
+        let sourceContext = sourceContainer.mainContext
+        try insertMinimalBlockLibrary(context: sourceContext, title: "新资料")
+        let importArchiveURL = try await DataExportManager.shared.exportAllData(context: sourceContext)
+        defer { try? FileManager.default.removeItem(at: importArchiveURL) }
+
+        let destinationContainer = try makeInMemoryContainer()
+        let destinationContext = destinationContainer.mainContext
+        let existingNoteID = try insertMinimalBlockLibrary(context: destinationContext, title: "应保留资料")
+
+        let attachmentsDirectory = try storage.attachmentsDirectoryURL()
+        let markerURL = attachmentsDirectory.appendingPathComponent("existing-marker.txt")
+        try Data("keep-me".utf8).write(to: markerURL, options: .atomic)
+
+        DataExportManager.shared.setImportFailureInjectorForTesting {
+            throw NSError(domain: "NotebookTests.ImportFailure", code: 1)
+        }
+
+        do {
+            try await DataExportManager.shared.importAllData(from: importArchiveURL, context: destinationContext)
+            XCTFail("Expected injected commit failure")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, "NotebookTests.ImportFailure")
+        }
+
+        let notes = try destinationContext.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+        XCTAssertEqual(notes.map(\.id), [existingNoteID])
+        XCTAssertEqual(notes.first?.title, "应保留资料")
+        XCTAssertEqual(try Data(contentsOf: markerURL), Data("keep-me".utf8))
+
+        let safetyBackupDirectory = baseDirectory
+            .appendingPathComponent("NotebookData/Backups/BeforeImport", isDirectory: true)
+        let backups = try FileManager.default.contentsOfDirectory(at: safetyBackupDirectory, includingPropertiesForKeys: nil)
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(backups.first?.pathExtension, "zip")
+    }
+
+    @MainActor
+    func testResetFailureRollsBackDatabaseAndAttachmentsWithoutDeletingStoreFiles() async throws {
+        let baseDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+
+        let storage = StorageLocationManager.shared
+        storage.setBaseDirectoryForTesting(baseDirectory)
+        defer {
+            DataExportManager.shared.setResetFailureInjectorForTesting(nil)
+            storage.setBaseDirectoryForTesting(nil)
+            try? FileManager.default.removeItem(at: baseDirectory)
+        }
+        try storage.ensureDirectoryStructureExists()
+
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let existingNoteID = try insertMinimalBlockLibrary(context: context, title: "重置失败后保留")
+
+        let attachmentsDirectory = try storage.attachmentsDirectoryURL()
+        let attachmentURL = attachmentsDirectory.appendingPathComponent("reset-marker.txt")
+        try Data("keep-attachment".utf8).write(to: attachmentURL, options: .atomic)
+
+        let storeMarkerURL = try storage.databaseDirectoryURL().appendingPathComponent("store-marker")
+        try Data("keep-store".utf8).write(to: storeMarkerURL, options: .atomic)
+
+        DataExportManager.shared.setResetFailureInjectorForTesting {
+            throw NSError(domain: "NotebookTests.ResetFailure", code: 1)
+        }
+
+        do {
+            try await DataExportManager.shared.resetAllData(context: context)
+            XCTFail("Expected injected reset failure")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, "NotebookTests.ResetFailure")
+        }
+
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+        XCTAssertEqual(notes.map(\.id), [existingNoteID])
+        XCTAssertEqual(try Data(contentsOf: attachmentURL), Data("keep-attachment".utf8))
+        XCTAssertEqual(try Data(contentsOf: storeMarkerURL), Data("keep-store".utf8))
+
+        let backupDirectory = baseDirectory.appendingPathComponent("NotebookData/Backups/BeforeReset", isDirectory: true)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(at: backupDirectory, includingPropertiesForKeys: nil).count,
+            1
+        )
+    }
+
+    @MainActor
 
 
     func testExportAllDataOmitsStorageBookmarkAndDatabaseDirectory() async throws {
@@ -233,15 +343,21 @@ extension NotebookTests {
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
 
         let storage = StorageLocationManager.shared
+        let previousBaseURL = storage.baseDirectoryURL
+        let previousBookmark = NotebookDefaults.shared.data(forKey: "storageDirectoryBookmark")
         storage.setBaseDirectoryForTesting(baseDirectory)
         defer {
-            storage.setBaseDirectoryForTesting(nil)
-            UserDefaults.standard.removeObject(forKey: "storageDirectoryBookmark")
+            storage.setBaseDirectoryForTesting(previousBaseURL)
+            if let previousBookmark {
+                NotebookDefaults.shared.set(previousBookmark, forKey: "storageDirectoryBookmark")
+            } else {
+                NotebookDefaults.shared.removeObject(forKey: "storageDirectoryBookmark")
+            }
             try? FileManager.default.removeItem(at: baseDirectory)
         }
 
         try storage.ensureDirectoryStructureExists()
-        UserDefaults.standard.set(Data("bookmark".utf8), forKey: "storageDirectoryBookmark")
+        NotebookDefaults.shared.set(Data("bookmark".utf8), forKey: "storageDirectoryBookmark")
 
         let container = try makeInMemoryContainer()
         let context = container.mainContext

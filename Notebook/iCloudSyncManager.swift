@@ -230,6 +230,12 @@ final class iCloudSyncManager: ObservableObject {
     }
 
     func syncAllNotesToiCloud(context: ModelContext) async throws -> [UUID] {
+        try await SyncSessionCoordinator.shared.withSession(named: "iCloud 推送") {
+            try await syncAllNotesToiCloudImpl(context: context)
+        }
+    }
+
+    private func syncAllNotesToiCloudImpl(context: ModelContext) async throws -> [UUID] {
         guard let notesDirectory = notesDirectoryURL else {
             throw iCloudSyncError.iCloudNotAvailable
         }
@@ -261,6 +267,12 @@ final class iCloudSyncManager: ObservableObject {
     }
 
     func syncAllNotesFromiCloud(context: ModelContext) async throws -> [NoteSyncMergeResult] {
+        try await SyncSessionCoordinator.shared.withSession(named: "iCloud 拉取") {
+            try await syncAllNotesFromiCloudImpl(context: context)
+        }
+    }
+
+    private func syncAllNotesFromiCloudImpl(context: ModelContext) async throws -> [NoteSyncMergeResult] {
         guard let notesDirectory = notesDirectoryURL else {
             throw iCloudSyncError.iCloudNotAvailable
         }
@@ -295,10 +307,12 @@ final class iCloudSyncManager: ObservableObject {
     }
 
     func syncBidirectional(context: ModelContext) async throws -> (pulled: Int, pushed: Int, conflicts: Int) {
-        let pullResults = try await syncAllNotesFromiCloud(context: context)
-        let pushIDs = try await syncAllNotesToiCloud(context: context)
-        let conflicts = pullResults.filter(\.detectedConflict).count
-        return (pullResults.count, pushIDs.count, conflicts)
+        try await SyncSessionCoordinator.shared.withSession(named: "iCloud 双向同步") {
+            let pullResults = try await syncAllNotesFromiCloudImpl(context: context)
+            let pushIDs = try await syncAllNotesToiCloudImpl(context: context)
+            let conflicts = pullResults.filter(\.detectedConflict).count
+            return (pullResults.count, pushIDs.count, conflicts)
+        }
     }
 }
 
@@ -427,7 +441,11 @@ extension iCloudSyncManager {
     }
 
     private func syncNoteToiCloud(noteID: UUID, context: ModelContext, notesDirectory: URL) throws {
-        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(
+            noteID: noteID,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.iCloud
+        ) else {
             return
         }
         let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
@@ -440,7 +458,11 @@ extension iCloudSyncManager {
             try FileManager.default.moveItem(at: tempURL, to: fileURL)
         }
         try copyAssetsToiCloud(envelope: envelope)
-        try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+        try BlockDocumentNoteVersionStore.markSynced(
+            envelope: envelope,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.iCloud
+        )
     }
 
     private func syncNoteFromiCloud(noteID: UUID, context: ModelContext, notesDirectory: URL) throws -> NoteSyncMergeResult {
@@ -448,12 +470,17 @@ extension iCloudSyncManager {
         let payload = try Data(contentsOf: fileURL)
         let envelope = try jsonDecoder.decode(VersionedNoteSyncEnvelope.self, from: payload)
         try copyAssetsFromiCloud(envelope: envelope)
-        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(
+            envelope,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.iCloud
+        )
         if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
                 syncedVersion: min(result.localVersion, result.remoteVersion),
-                context: context
+                context: context,
+                backendID: BlockDocumentNoteVersionStore.Backend.iCloud
             )
         }
         return result
@@ -474,7 +501,11 @@ extension iCloudSyncManager {
     }
 
     private func makeIndexEntry(noteID: UUID, context: ModelContext) throws -> iCloudNoteIndexEntry? {
-        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(
+            noteID: noteID,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.iCloud
+        ) else {
             return nil
         }
         let contentHash = try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot)
@@ -512,11 +543,12 @@ extension iCloudSyncManager {
         return try jsonDecoder.decode(iCloudNoteIndex.self, from: data)
     }
 
-    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity? {
-        let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
-            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentBackendSyncStateEntity? {
+        try BlockDocumentNoteVersionStore.syncState(
+            noteID: noteID,
+            backendID: BlockDocumentNoteVersionStore.Backend.iCloud,
+            context: context
         )
-        return try context.fetch(descriptor).first
     }
 
     private func copyAssetsToiCloud(envelope: VersionedNoteSyncEnvelope) throws {
@@ -573,10 +605,7 @@ extension iCloudSyncManager {
                     at: destinationURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true
                 )
-                if fileManager.fileExists(atPath: destinationURL.path) {
-                    try fileManager.removeItem(at: destinationURL)
-                }
-                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                try AtomicFileCommit.copyReplacingAtomically(from: sourceURL, to: destinationURL)
             }
         }
     }

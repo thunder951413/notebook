@@ -7,9 +7,9 @@ final class PersistenceController: ObservableObject {
     static let shared = PersistenceController()
 
     @Published private(set) var modelContainer: ModelContainer?
-    /// 当前 store format 版本，与 `NotebookSchemaV4.versionIdentifier` 对齐。
+    /// 当前 store format 版本，与 `NotebookSchemaV6.versionIdentifier` 对齐。
     /// 每次引入 schema 变更时需同步 bump，并在 `NotebookSchemaMigrationPlan` 中追加 stage。
-    static let currentStoreFormatVersion = 4
+    static let currentStoreFormatVersion = 6
 
     static let appSchema = Schema([
         BlockDocumentLibraryEntity.self,
@@ -20,8 +20,11 @@ final class PersistenceController: ObservableObject {
         BlockDocumentAssetEntity.self,
         BlockDocumentNoteVersionEntity.self,
         BlockDocumentNoteSyncStateEntity.self,
+        BlockDocumentBackendSyncStateEntity.self,
         BlockDocumentDeletedNoteTombstoneEntity.self,
-        BlockDocumentNoteTagEntity.self
+        BlockDocumentLibraryTombstoneEntity.self,
+        BlockDocumentNoteTagEntity.self,
+        TodoStepEntity.self
     ])
 
     private init() {}
@@ -67,8 +70,10 @@ final class PersistenceController: ObservableObject {
         )
 
         let config = ModelConfiguration(schema: schema, url: storeURL)
-        // 显式传入 migrationPlan，让 SwiftData 按版本顺序执行 stage（V1→V2 等）。
-        // 即便当前 stage 仅做日志记录，接线后未来 V3+ 的破坏性迁移可直接在此链路追加。
+        // 当前 V1...V5 都只包含带默认值的新增字段/实体，交由 SwiftData 的自动
+        // lightweight migration 处理。不要连接 NotebookSchemaMigrationPlan：其历史版本
+        // 仍复用当前实体类型，不能代表真实的旧 schema；强行连接反而可能让既有 store
+        // 无法匹配版本。任何未来破坏性迁移必须先引入独立的版本化实体定义和旧库夹具。
         let container = try ModelContainer(for: schema, configurations: [config])
         logIntegrityReport(for: container)
 

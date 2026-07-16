@@ -2,9 +2,27 @@ import SwiftUI
 import SwiftData
 import Combine
 
-class NoteStore: ObservableObject {
+struct NoteContentRetentionPolicy {
+    static let maximumLoadedNoteCount = 1
+
+    static func initialContentIDs(
+        existingNoteIDs: Set<UUID>,
+        recentSelectedNoteIDs: [UUID],
+        lastSelectedNoteID: UUID?,
+        fallbackNoteID: UUID?
+    ) -> Set<UUID> {
+        let candidates = recentSelectedNoteIDs + [lastSelectedNoteID, fallbackNoteID].compactMap { $0 }
+        guard let selectedID = candidates.first(where: existingNoteIDs.contains) else { return [] }
+        return [selectedID]
+    }
+}
+
+@MainActor
+final class NoteStore: ObservableObject {
     @Published var notes: [Note] = []
     @Published var folders: [Folder] = []
+    @Published var todoItems: [TodoItem] = []
+    @Published var todoLists: [TodoList] = []
     @Published var tags: [Tag] = []
     @Published var encryptedFolders: [EncryptedFolder] = []
 
@@ -20,6 +38,8 @@ class NoteStore: ObservableObject {
     
     /// 用于菜单栏 Popover 跳转的选中笔记 ID
     @Published var selectedNoteId: UUID?
+    /// 用于通知/外部入口跳转的选中 Todo ID
+    @Published var selectedTodoId: UUID?
     /// 用于菜单栏 Popover 跳转的选中文件夹
     @Published var selectedFolderForNavigation: String?
     
@@ -69,12 +89,22 @@ class NoteStore: ObservableObject {
         return library
     }
     
+    convenience init() {
+        self.init(
+            persistenceController: .shared,
+            storageLocationManager: .shared,
+            noteSaveManager: .shared,
+            autoSyncCoordinator: .shared,
+            encryptedFolderManager: .shared
+        )
+    }
+
     init(
-        persistenceController: PersistenceController = .shared,
-        storageLocationManager: StorageLocationManager = .shared,
-        noteSaveManager: NoteSaveManager = .shared,
-        autoSyncCoordinator: AutoSyncCoordinator = .shared,
-        encryptedFolderManager: EncryptedFolderManager = .shared
+        persistenceController: PersistenceController,
+        storageLocationManager: StorageLocationManager,
+        noteSaveManager: NoteSaveManager,
+        autoSyncCoordinator: AutoSyncCoordinator,
+        encryptedFolderManager: EncryptedFolderManager
     ) {
         self.persistenceController = persistenceController
         self.storageLocationManager = storageLocationManager
@@ -131,8 +161,10 @@ class NoteStore: ObservableObject {
         
         do {
             guard let library = ensureBlockDocumentLibrary(in: context) else { return }
+            cleanupExpiredOneTimeReminders(context: context)
             try loadBlockDocumentData(context: context, library: library)
             loadEncryptedFolders()
+            reschedulePendingTodoReminders()
         } catch {
             Logger.shared.log(.storage, .error, "Fetch failed: \(error.localizedDescription)")
         }
@@ -159,13 +191,26 @@ class NoteStore: ObservableObject {
             sortBy: [SortDescriptor(\.createdAt)]
         )
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
-            predicate: #Predicate<BlockDocumentNoteEntity> { $0.libraryID == libraryID },
+            predicate: #Predicate<BlockDocumentNoteEntity> {
+                $0.libraryID == libraryID && ($0.itemType == "note" || $0.itemType == "")
+            },
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        )
+        let todoDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> {
+                $0.libraryID == libraryID && $0.itemType == "todo"
+            },
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
 
         let folderEntities = try context.fetch(folderDescriptor)
         let tagEntities = try context.fetch(tagDescriptor)
         let noteEntities = try context.fetch(noteDescriptor)
+        let todoEntities = try context.fetch(todoDescriptor)
+        let didBackfillItemTypes = backfillMissingItemTypes(in: noteEntities)
+        if didBackfillItemTypes {
+            context.saveLogging("NoteStore.backfillMissingItemTypes")
+        }
         try ensureNoteTagLinksBackfilled(for: noteEntities, libraryID: libraryID, context: context)
 
         let loadedContentIDs = recentNoteContentIDs(from: noteEntities)
@@ -218,13 +263,48 @@ class NoteStore: ObservableObject {
             )
         }
 
-        self.folders = folderEntities.map {
+        let noteFolderEntities = folderEntities.filter {
+            (FolderType(rawValue: $0.folderType) ?? .noteFolder) == .noteFolder
+        }
+        let todoListEntities = folderEntities.filter {
+            FolderType(rawValue: $0.folderType) == .todoList
+        }
+
+        self.folders = noteFolderEntities.map {
             Folder(
                 id: $0.id,
                 name: $0.name,
                 sortOrder: $0.sortOrder,
                 createdAt: $0.createdAt ?? Date(),
+                isSystem: $0.isSystem,
+                folderType: .noteFolder
+            )
+        }
+        self.todoLists = todoListEntities.map {
+            TodoList(
+                id: $0.id,
+                name: $0.name,
+                sortOrder: $0.sortOrder,
+                createdAt: $0.createdAt ?? Date(),
                 isSystem: $0.isSystem
+            )
+        }
+        self.todoItems = todoEntities.map {
+            TodoItem(
+                id: $0.id,
+                title: $0.title,
+                contentPreview: $0.previewText,
+                createdAt: $0.createdAt,
+                updatedAt: $0.updatedAt,
+                folderID: $0.folderID,
+                reminderAt: $0.reminderAt,
+                recurrenceRule: $0.recurrenceRule,
+                dueAt: $0.todoDueAt,
+                completedAt: $0.todoCompletedAt,
+                isImportant: $0.todoIsImportant,
+                order: $0.todoOrder,
+                linkedNoteIDs: UUIDListCoding.decode($0.linkedNoteIDs),
+                deletedAt: $0.deletedAt
             )
         }
         self.tags = tagEntities.enumerated().map { index, entity in
@@ -299,24 +379,28 @@ class NoteStore: ObservableObject {
 
     private func recentNoteContentIDs(from noteEntities: [BlockDocumentNoteEntity]) -> Set<UUID> {
         let existingNoteIDs = Set(noteEntities.map(\.id))
-        let limit = AppSettings.shared.recentNoteLoadLimit
-        var orderedIDs: [UUID] = []
+        return NoteContentRetentionPolicy.initialContentIDs(
+            existingNoteIDs: existingNoteIDs,
+            recentSelectedNoteIDs: AppSettings.shared.recentSelectedNoteIDs,
+            lastSelectedNoteID: AppSettings.shared.lastSelectedNoteID,
+            fallbackNoteID: noteEntities.first?.id
+        )
+    }
 
-        func appendIfAvailable(_ id: UUID?) {
-            guard let id, existingNoteIDs.contains(id), !orderedIDs.contains(id) else { return }
-            orderedIDs.append(id)
+    private static func normalizedItemType(_ itemType: String) -> String {
+        itemType.trimmingCharacters(in: .whitespacesAndNewlines) == "todo" ? "todo" : "note"
+    }
+
+    private func backfillMissingItemTypes(in entities: [BlockDocumentNoteEntity]) -> Bool {
+        var changed = false
+        for entity in entities {
+            let normalized = Self.normalizedItemType(entity.itemType)
+            if entity.itemType != normalized {
+                entity.itemType = normalized
+                changed = true
+            }
         }
-
-        for id in AppSettings.shared.recentSelectedNoteIDs {
-            appendIfAvailable(id)
-        }
-        appendIfAvailable(AppSettings.shared.lastSelectedNoteID)
-
-        if orderedIDs.isEmpty {
-            appendIfAvailable(noteEntities.first?.id)
-        }
-
-        return Set(orderedIDs.prefix(limit))
+        return changed
     }
 
     private func fetchBlocks(
@@ -486,11 +570,9 @@ class NoteStore: ObservableObject {
     }
 
     func refreshRecentNoteContentWindow(keeping keepID: UUID? = nil) {
-        let recentIDs = Array(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
-        for id in recentIDs {
-            _ = ensureNoteContentLoaded(id: id, pruneAfterLoad: false)
-        }
-        pruneLoadedNoteContents(keeping: keepID ?? recentIDs.first)
+        let selectedID = keepID ?? AppSettings.shared.recentSelectedNoteIDs.first
+        _ = ensureNoteContentLoaded(id: selectedID, pruneAfterLoad: false)
+        pruneLoadedNoteContents(keeping: selectedID)
     }
 
     func noteMatchesSearch(_ note: Note, query: String) -> Bool {
@@ -527,10 +609,9 @@ class NoteStore: ObservableObject {
     }
 
     private func pruneLoadedNoteContents(keeping keepID: UUID? = nil) {
-        let allowedIDs = Set(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
         for index in notes.indices {
             let noteID = notes[index].id
-            guard noteID != keepID, !allowedIDs.contains(noteID), notes[index].isContentLoaded else { continue }
+            guard noteID != keepID, notes[index].isContentLoaded else { continue }
             notes[index].content = NSAttributedString(string: "")
             notes[index].isContentLoaded = false
         }
@@ -546,7 +627,7 @@ class NoteStore: ObservableObject {
             let entities = try context.fetch(descriptor)
             var changed = false
             for entity in entities {
-                let isOneTime = entity.recurrenceRule == nil || entity.recurrenceRule == "none"
+                let isOneTime = entity.recurrenceRule.isEmpty || entity.recurrenceRule == "none"
                 if isOneTime, let date = entity.reminderAt, date < now {
                     entity.reminderAt = nil
                     changed = true
@@ -557,6 +638,38 @@ class NoteStore: ObservableObject {
             }
         } catch {
             DebugLog.storage("Cleanup expired reminders failed: \(error)", level: .warn)
+        }
+    }
+
+    private func reschedulePendingTodoReminders() {
+        let now = Date()
+        // 与系统通知中心对账：已完成或已关闭提醒的 Todo 不能保留历史重复通知。
+        for item in activeTodoItems where item.isCompleted || item.reminderAt == nil {
+            NotificationManager.shared.cancel(noteID: item.id)
+        }
+
+        let pending = activeTodoItems.filter { item in
+            guard !item.isCompleted, let reminderAt = item.reminderAt else { return false }
+            return item.recurrenceRule != "none" || reminderAt > now
+        }
+
+        for item in pending {
+            Task { @MainActor in
+                // fetchData 后任务才可能真正执行；期间 Todo 可能已完成或提醒已被修改。
+                guard let currentItem = self.activeTodoItems.first(where: { $0.id == item.id }),
+                      !currentItem.isCompleted,
+                      let reminderAt = currentItem.reminderAt else {
+                    NotificationManager.shared.cancel(noteID: item.id)
+                    return
+                }
+                await NotificationManager.shared.schedule(
+                    todoID: currentItem.id,
+                    title: currentItem.title.isEmpty ? "Todo 提醒" : currentItem.title,
+                    body: currentItem.contentPreview,
+                    reminderAt: reminderAt,
+                    recurrence: currentItem.recurrenceRule
+                )
+            }
         }
     }
     
@@ -751,13 +864,313 @@ class NoteStore: ObservableObject {
             documentSchemaVersion: "1.0",
             documentSource: "app",
             blockCount: 0,
-            assetCount: 0
+            assetCount: 0,
+            itemType: "note"
         )
         context.insert(entity)
         library.noteCount += 1
         context.saveLogging("NoteStore.addNote")
         fetchData()
         return activeNotes.first(where: { $0.id == entity.id })
+    }
+
+    // MARK: - Todo Management
+
+    var activeTodoItems: [TodoItem] {
+        todoItems.filter { !$0.isInRecycleBin }
+    }
+
+    var completedTodoItems: [TodoItem] {
+        activeTodoItems.filter { $0.isCompleted }
+    }
+
+    func todoItemsForToday() -> [TodoItem] {
+        let calendar = Calendar.current
+        return activeTodoItems.filter { item in
+            guard !item.isCompleted else { return false }
+            if let dueAt = item.dueAt, calendar.isDateInToday(dueAt) {
+                return true
+            }
+            if let reminderAt = item.reminderAt, calendar.isDateInToday(reminderAt) {
+                return true
+            }
+            return false
+        }
+    }
+
+    func importantTodoItems() -> [TodoItem] {
+        activeTodoItems.filter { !$0.isCompleted && $0.isImportant }
+    }
+
+    func todoItems(in listID: UUID?) -> [TodoItem] {
+        activeTodoItems.filter { $0.folderID == listID }
+    }
+
+    @discardableResult
+    func addTodoList(name: String) -> TodoList? {
+        guard let context = modelContext else { return nil }
+        guard let library = ensureBlockDocumentLibrary(in: context) else { return nil }
+        let maxSortOrder = (try? context.fetch(FetchDescriptor<BlockDocumentFolderEntity>())
+            .filter { $0.libraryID == library.id && (FolderType(rawValue: $0.folderType) == .todoList) }
+            .map(\.sortOrder)
+            .max()) ?? -1
+        let entity = BlockDocumentFolderEntity(
+            id: UUID(),
+            libraryID: library.id,
+            name: name,
+            sortOrder: maxSortOrder + 1,
+            isSystem: false,
+            createdAt: Date(),
+            folderType: FolderType.todoList.rawValue
+        )
+        context.insert(entity)
+        library.folderCount += 1
+        context.saveLogging("NoteStore.addTodoList")
+        fetchData()
+        return todoLists.first(where: { $0.id == entity.id })
+    }
+
+    func updateTodoList(id: UUID, name: String) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            entity.name = name
+
+            let todosInList = try? context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.folderID == idToMatch }))
+            for todo in todosInList ?? [] where todo.itemType == "todo" {
+                todo.folderName = name
+            }
+
+            context.saveLogging("NoteStore.updateTodoList")
+            fetchData()
+        }
+    }
+
+    func deleteTodoList(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+        if let entity = try? context.fetch(descriptor).first {
+            let todosInList = try? context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.folderID == idToMatch }))
+            for todo in todosInList ?? [] where todo.itemType == "todo" {
+                todo.folderID = nil
+                todo.folderName = "Todo"
+            }
+
+            context.delete(entity)
+            context.saveLogging("NoteStore.deleteTodoList")
+            fetchData()
+        }
+    }
+
+    func reorderTodoLists(fromOffsets: IndexSet, toOffset: Int) {
+        guard let context = modelContext else { return }
+        var reordered = todoLists
+        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        for (index, list) in reordered.enumerated() {
+            let idToMatch = list.id
+            let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
+            if let entity = try? context.fetch(descriptor).first {
+                entity.sortOrder = index
+            }
+        }
+        context.saveLogging("NoteStore.reorderTodoLists")
+        fetchData()
+    }
+
+    @discardableResult
+    func addTodo(title: String = "新任务", listID: UUID? = nil) -> TodoItem? {
+        guard let context = modelContext else { return nil }
+        guard let library = ensureBlockDocumentLibrary(in: context) else { return nil }
+        let createdAt = Date()
+        let maxOrder = todoItems(in: listID).map(\.order).max() ?? -1
+        let listName = todoListName(for: listID)
+        let entity = BlockDocumentNoteEntity(
+            id: UUID(),
+            libraryID: library.id,
+            title: title,
+            createdAt: createdAt,
+            updatedAt: createdAt,
+            folderID: listID,
+            folderName: listName,
+            reminderAt: nil,
+            recurrenceRule: "none",
+            version: 0,
+            tagIDs: "",
+            viewMode: NoteViewMode.text.rawValue,
+            deletedAt: nil,
+            originalFolderID: nil,
+            originalFolderName: nil,
+            documentSchemaVersion: "1.0",
+            documentSource: "app",
+            blockCount: 0,
+            assetCount: 0,
+            itemType: "todo",
+            todoOrder: maxOrder + 1
+        )
+        context.insert(entity)
+        library.noteCount += 1
+        context.saveLogging("NoteStore.addTodo")
+        fetchData()
+        return activeTodoItems.first(where: { $0.id == entity.id })
+    }
+
+    func loadTodoNotesText(id: UUID) -> String {
+        guard let context = modelContext else { return "" }
+        do {
+            return try loadFullBlockContent(noteID: id, context: context).string
+        } catch {
+            DebugLog.storage("Failed to load todo notes for \(id): \(error)", level: .warn)
+            return todoItems.first(where: { $0.id == id })?.contentPreview ?? ""
+        }
+    }
+
+    func updateTodo(
+        id: UUID,
+        title: String,
+        notesText: String,
+        dueAt: Date?,
+        reminderAt: Date?,
+        recurrenceRule: String,
+        isImportant: Bool,
+        listID: UUID?,
+        linkedNoteIDs: [UUID] = []
+    ) {
+        guard let context = modelContext else { return }
+        let listName = todoListName(for: listID)
+        let content = NSAttributedString(string: notesText)
+
+        guard let request = noteSaveManager.createRequest(
+            noteID: id,
+            title: title,
+            folderID: listID,
+            folder: listName,
+            reminderAt: reminderAt,
+            recurrenceRule: recurrenceRule,
+            content: content,
+            reason: "todoUpdate"
+        ) else {
+            return
+        }
+
+        _ = noteSaveManager.saveImmediately(request: request)
+
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        if let entity = try? context.fetch(descriptor).first {
+            entity.itemType = "todo"
+            entity.todoDueAt = dueAt
+            entity.todoIsImportant = isImportant
+            entity.folderID = listID
+            entity.folderName = listName
+            entity.linkedNoteIDs = UUIDListCoding.encode(linkedNoteIDs)
+            entity.updatedAt = Date()
+            entity.version = max(entity.version + 1, 1)
+            context.saveLogging("NoteStore.updateTodo")
+            autoSyncCoordinator.noteDidSave(noteID: id, reason: "todoUpdate")
+        }
+
+        fetchData()
+    }
+
+    func setTodoCompleted(id: UUID, completed: Bool) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        if let entity = try? context.fetch(descriptor).first {
+            entity.todoCompletedAt = completed ? Date() : nil
+            entity.updatedAt = Date()
+            entity.version = max(entity.version + 1, 1)
+            context.saveLogging("NoteStore.setTodoCompleted")
+            autoSyncCoordinator.noteDidSave(noteID: id, reason: "todoCompleted")
+            if completed {
+                NotificationManager.shared.cancel(noteID: id)
+            }
+            fetchData()
+        }
+    }
+
+    func deleteTodo(id: UUID) {
+        moveNoteToRecycleBin(id: id)
+        NotificationManager.shared.cancel(noteID: id)
+        fetchData()
+    }
+
+    func steps(for todoID: UUID) -> [TodoStepEntity] {
+        guard let context = modelContext else { return [] }
+        let idToMatch = todoID
+        let descriptor = FetchDescriptor<TodoStepEntity>(
+            predicate: #Predicate<TodoStepEntity> { $0.noteID == idToMatch },
+            sortBy: [SortDescriptor(\.order)]
+        )
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    func addTodoStep(todoID: UUID, text: String = "") {
+        guard let context = modelContext,
+              let todo = try? fetchNoteEntity(id: todoID, context: context) else { return }
+        let maxOrder = steps(for: todoID).map(\.order).max() ?? -1
+        context.insert(
+            TodoStepEntity(
+                noteID: todoID,
+                libraryID: todo.libraryID,
+                text: text,
+                order: maxOrder + 1
+            )
+        )
+        todo.updatedAt = Date()
+        todo.version = max(todo.version + 1, 1)
+        context.saveLogging("NoteStore.addTodoStep")
+        autoSyncCoordinator.noteDidSave(noteID: todoID, reason: "todoStepAdd")
+    }
+
+    func updateTodoStep(id: UUID, text: String? = nil, checked: Bool? = nil) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<TodoStepEntity>(
+            predicate: #Predicate<TodoStepEntity> { $0.id == idToMatch }
+        )
+        if let step = try? context.fetch(descriptor).first {
+            if let text { step.text = text }
+            if let checked { step.checked = checked }
+            if let todo = try? fetchNoteEntity(id: step.noteID, context: context) {
+                todo.updatedAt = Date()
+                todo.version = max(todo.version + 1, 1)
+            }
+            context.saveLogging("NoteStore.updateTodoStep")
+            autoSyncCoordinator.noteDidSave(noteID: step.noteID, reason: "todoStepUpdate")
+        }
+    }
+
+    func deleteTodoStep(id: UUID) {
+        guard let context = modelContext else { return }
+        let idToMatch = id
+        let descriptor = FetchDescriptor<TodoStepEntity>(
+            predicate: #Predicate<TodoStepEntity> { $0.id == idToMatch }
+        )
+        if let step = try? context.fetch(descriptor).first {
+            let todoID = step.noteID
+            context.delete(step)
+            if let todo = try? fetchNoteEntity(id: todoID, context: context) {
+                todo.updatedAt = Date()
+                todo.version = max(todo.version + 1, 1)
+            }
+            context.saveLogging("NoteStore.deleteTodoStep")
+            autoSyncCoordinator.noteDidSave(noteID: todoID, reason: "todoStepDelete")
+        }
+    }
+
+    private func todoListName(for listID: UUID?) -> String {
+        guard let listID,
+              let list = todoLists.first(where: { $0.id == listID }) else {
+            return "Todo"
+        }
+        return list.name
     }
     
     func addFolder(name: String) {
@@ -777,7 +1190,9 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.folderCount += 1
-        context.saveLogging("NoteStore.addFolder")
+        if context.saveLogging("NoteStore.addFolder") {
+            autoSyncCoordinator.libraryDidChange(reason: "addFolder")
+        }
         fetchData()
     }
     
@@ -787,13 +1202,16 @@ class NoteStore: ObservableObject {
         let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
         if let entity = try? context.fetch(descriptor).first {
             entity.name = name
+            entity.updatedAt = Date()
 
             let notesInFolder = try? context.fetch(FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.folderID == idToMatch }))
             for note in notesInFolder ?? [] {
                 note.folderName = name
             }
 
-            context.saveLogging("NoteStore.updateFolder")
+            if context.saveLogging("NoteStore.updateFolder") {
+                autoSyncCoordinator.libraryDidChange(reason: "updateFolder")
+            }
             fetchData()
         }
     }
@@ -818,8 +1236,17 @@ class NoteStore: ObservableObject {
                 library.folderCount = max(0, library.folderCount - 1)
             }
 
+            let deletedAt = Date()
+            context.insert(BlockDocumentLibraryTombstoneEntity(
+                itemID: id,
+                itemKind: "folder",
+                deletedAt: deletedAt,
+                deletedByDeviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+            ))
             context.delete(entity)
-            context.saveLogging("NoteStore.deleteFolder")
+            if context.saveLogging("NoteStore.deleteFolder") {
+                autoSyncCoordinator.libraryDidChange(reason: "deleteFolder")
+            }
             fetchData()
         }
     }
@@ -833,9 +1260,12 @@ class NoteStore: ObservableObject {
             let descriptor = FetchDescriptor<BlockDocumentFolderEntity>(predicate: #Predicate { $0.id == idToMatch })
             if let entity = try? context.fetch(descriptor).first {
                 entity.sortOrder = index
+                entity.updatedAt = Date()
             }
         }
-        context.saveLogging("NoteStore.reorderFolders")
+        if context.saveLogging("NoteStore.reorderFolders") {
+            autoSyncCoordinator.libraryDidChange(reason: "reorderFolders")
+        }
         fetchData()
     }
     
@@ -853,7 +1283,9 @@ class NoteStore: ObservableObject {
         )
         context.insert(entity)
         library.tagCount += 1
-        context.saveLogging("NoteStore.addTag")
+        if context.saveLogging("NoteStore.addTag") {
+            autoSyncCoordinator.libraryDidChange(reason: "addTag")
+        }
         fetchData()
     }
     
@@ -864,7 +1296,10 @@ class NoteStore: ObservableObject {
         if let entity = try? context.fetch(descriptor).first {
             if let name { entity.name = name }
             if let color { entity.color = color }
-            context.saveLogging("NoteStore.updateTag")
+            entity.updatedAt = Date()
+            if context.saveLogging("NoteStore.updateTag") {
+                autoSyncCoordinator.libraryDidChange(reason: "updateTag")
+            }
             fetchData()
         }
     }
@@ -886,8 +1321,16 @@ class NoteStore: ObservableObject {
                 library.tagCount = max(0, library.tagCount - 1)
             }
 
+            context.insert(BlockDocumentLibraryTombstoneEntity(
+                itemID: id,
+                itemKind: "tag",
+                deletedAt: Date(),
+                deletedByDeviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+            ))
             context.delete(entity)
-            context.saveLogging("NoteStore.deleteTag")
+            if context.saveLogging("NoteStore.deleteTag") {
+                autoSyncCoordinator.libraryDidChange(reason: "deleteTag")
+            }
             fetchData()
         }
     }
@@ -902,9 +1345,12 @@ class NoteStore: ObservableObject {
             let descriptor = FetchDescriptor<BlockDocumentTagEntity>(predicate: #Predicate { $0.id == idToMatch })
             if let entity = try? context.fetch(descriptor).first {
                 entity.createdAt = baseDate.addingTimeInterval(TimeInterval(index))
+                entity.updatedAt = baseDate
             }
         }
-        context.saveLogging("NoteStore.reorderTags")
+        if context.saveLogging("NoteStore.reorderTags") {
+            autoSyncCoordinator.libraryDidChange(reason: "reorderTags")
+        }
         fetchData()
     }
     
@@ -919,6 +1365,8 @@ class NoteStore: ObservableObject {
             if !currentTagIDs.contains(tagID) {
                 currentTagIDs.append(tagID)
                 entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
+                entity.updatedAt = Date()
+                entity.version = max(entity.version + 1, 1)
                 // 同步更新关联表（派生索引），保证按标签筛选可走 SQLite 索引
                 Self.upsertNoteTagLink(
                     noteID: noteID,
@@ -927,7 +1375,9 @@ class NoteStore: ObservableObject {
                     sortOrder: currentTagIDs.count - 1,
                     context: context
                 )
-                context.saveLogging("NoteStore.addTagToNote")
+                if context.saveLogging("NoteStore.addTagToNote") {
+                    autoSyncCoordinator.noteDidSave(noteID: noteID, reason: "addTag")
+                }
                 fetchData()
             }
         }
@@ -942,9 +1392,12 @@ class NoteStore: ObservableObject {
             currentTagIDs.removeAll { $0 == tagID }
             entity.tagIDs = UUIDListCoding.encode(currentTagIDs)
             entity.updatedAt = Date()
+            entity.version = max(entity.version + 1, 1)
             // 同步删除关联表记录
             Self.deleteNoteTagLink(noteID: noteID, tagID: tagID, context: context)
-            context.saveLogging("NoteStore.removeTagFromNote")
+            if context.saveLogging("NoteStore.removeTagFromNote") {
+                autoSyncCoordinator.noteDidSave(noteID: noteID, reason: "removeTag")
+            }
             if let idx = notes.firstIndex(where: { $0.id == noteID }) {
                 notes[idx].tagIDs = currentTagIDs
                 notes[idx].updatedAt = entity.updatedAt
@@ -1098,6 +1551,7 @@ class NoteStore: ObservableObject {
 
         _ = noteSaveManager.saveImmediately(request: request)
         searchableTextCache.removeValue(forKey: id)
+        ensureItemType(id: id, itemType: "note")
 
         if let idx = notes.firstIndex(where: { $0.id == id }) {
             notes[idx].title = title
@@ -1158,6 +1612,7 @@ class NoteStore: ObservableObject {
 
         _ = noteSaveManager.saveImmediately(request: request)
         searchableTextCache.removeValue(forKey: note.id)
+        ensureItemType(id: note.id, itemType: "note")
 
         if let idx = notes.firstIndex(where: { $0.id == note.id }) {
             var updatedNote = note
@@ -1165,6 +1620,18 @@ class NoteStore: ObservableObject {
             updatedNote.isContentLoaded = true
             notes[idx] = updatedNote
             notes[idx].updatedAt = Date()
+        }
+    }
+
+    private func ensureItemType(id: UUID, itemType: String) {
+        guard let context = modelContext else { return }
+        do {
+            if let entity = try fetchNoteEntity(id: id, context: context), entity.itemType != itemType {
+                entity.itemType = itemType
+                context.saveLogging("NoteStore.ensureItemType")
+            }
+        } catch {
+            DebugLog.storage("Failed to ensure itemType for \(id): \(error)", level: .warn)
         }
     }
     
@@ -1309,9 +1776,13 @@ class NoteStore: ObservableObject {
             let assetDescriptor = FetchDescriptor<BlockDocumentAssetEntity>(
                 predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == idToMatch }
             )
+            let stepDescriptor = FetchDescriptor<TodoStepEntity>(
+                predicate: #Predicate<TodoStepEntity> { $0.noteID == idToMatch }
+            )
 
             let blocks = (try? context.fetch(blockDescriptor)) ?? []
             let assets = (try? context.fetch(assetDescriptor)) ?? []
+            let steps = (try? context.fetch(stepDescriptor)) ?? []
             deleteBlockDocumentArtifacts(noteID: id, assets: assets)
 
             for block in blocks {
@@ -1319,6 +1790,9 @@ class NoteStore: ObservableObject {
             }
             for asset in assets {
                 context.delete(asset)
+            }
+            for step in steps {
+                context.delete(step)
             }
 
             let libraryID = entity.libraryID
@@ -1334,6 +1808,7 @@ class NoteStore: ObservableObject {
             try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
             context.saveLogging("NoteStore.deleteNotePermanently")
             notes.removeAll { $0.id == id }
+            todoItems.removeAll { $0.id == id }
             autoSyncCoordinator.noteDidSave(noteID: id, reason: "deletePermanently")
         }
     }
@@ -1437,7 +1912,7 @@ class NoteStore: ObservableObject {
     
     /// 加载加密文件夹
     func loadEncryptedFolders() {
-        if let data = UserDefaults.standard.data(forKey: encryptedFoldersKey),
+        if let data = NotebookDefaults.shared.data(forKey: encryptedFoldersKey),
            let folders = try? JSONDecoder().decode([EncryptedFolder].self, from: data) {
             self.encryptedFolders = folders.sorted { $0.order < $1.order }
         }
@@ -1446,7 +1921,7 @@ class NoteStore: ObservableObject {
     /// 保存加密文件夹
     private func saveEncryptedFolders() {
         if let data = try? JSONEncoder().encode(encryptedFolders) {
-            UserDefaults.standard.set(data, forKey: encryptedFoldersKey)
+            NotebookDefaults.shared.set(data, forKey: encryptedFoldersKey)
         }
     }
     
@@ -1459,7 +1934,7 @@ class NoteStore: ObservableObject {
         
         // 保存文件夹名称到 UserDefaults 以便查找
         let key = "encrypted_folder_name_\(newFolder.id.uuidString)"
-        UserDefaults.standard.set(name, forKey: key)
+        NotebookDefaults.shared.set(name, forKey: key)
     }
     
     /// 删除加密文件夹
@@ -1477,7 +1952,7 @@ class NoteStore: ObservableObject {
         
         // 删除文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        UserDefaults.standard.removeObject(forKey: key)
+        NotebookDefaults.shared.removeObject(forKey: key)
     }
     
     /// 重命名加密文件夹
@@ -1489,7 +1964,7 @@ class NoteStore: ObservableObject {
         
         // 更新文件夹名称
         let key = "encrypted_folder_name_\(id.uuidString)"
-        UserDefaults.standard.set(newName, forKey: key)
+        NotebookDefaults.shared.set(newName, forKey: key)
         
         // 更新该文件夹中所有笔记的 folder 名称
         let notesInFolder = notes.filter { 
@@ -1537,9 +2012,9 @@ class NoteStore: ObservableObject {
                 // 没有加密文件夹，创建一个默认的
                 let defaultFolderID = UUID()
                 targetFolderID = defaultFolderID
-                encryptedFolderName = "🔒 加密笔记"
+                encryptedFolderName = "🔒 锁定笔记"
                 let key = "encrypted_folder_name_\(defaultFolderID.uuidString)"
-                UserDefaults.standard.set("加密笔记", forKey: key)
+                NotebookDefaults.shared.set("锁定笔记", forKey: key)
             }
         }
         

@@ -103,6 +103,14 @@ final class RichTextController: ObservableObject {
         return savedState.titleHash != title.hashValue || savedState.contentHash != content.hashValue
     }
 
+    /// 不提交输入法、不改变焦点，只用于判断同步等待期间编辑器是否发生变化。
+    func revisionFingerprint(title: String) -> String? {
+        guard let textView, let boundNoteID else { return nil }
+        let contentHash = textView.attributedString().hash
+        let markedTextMarker = hasMarkedText ? "marked" : "committed"
+        return "\(boundNoteID.uuidString)|\(title.hashValue)|\(contentHash)|\(markedTextMarker)"
+    }
+
     func bind(textView: NSTextView, noteID: UUID) {
         if boundNoteID != nil && boundNoteID != noteID {
             clearNoteSearch()

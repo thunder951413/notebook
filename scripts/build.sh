@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 #
-# build.sh — 编译 Notebook 应用并把 .app 放到项目目录
+# build.sh — 编译 Notebook 应用并把所有生成产物放到 output/ 目录
 #
 # 用法：
-#   ./scripts/build.sh                # Debug 构建，输出到项目根目录 build/
+#   ./scripts/build.sh                # Debug 构建，输出到项目根目录 output/
 #   ./scripts/build.sh release        # Release 构建（带签名）
 #   ./scripts/build.sh debug          # Debug 构建（默认）
 #   ./scripts/build.sh clean          # 清理后 Debug 构建
 #
 # 输出：
-#   build/Notebook.app                # 编译产物
-#   build/Notebook.app.dSYM.zip       # 调试符号（Release 时附带）
+#   output/Notebook.app               # 编译产物
+#   output/Notebook.app.dSYM.zip      # 调试符号（Release 时附带）
+#   output/DerivedData/               # Xcode 中间产物
 #
 # 前置条件：
 #   - 已安装 Xcode（脚本会自动选择 /Applications/Xcode.app）
@@ -26,7 +27,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_NAME="Notebook"
 SCHEME="Notebook"
 BUNDLE_ID="yy.Notebook"
-BUILD_DIR="$PROJECT_DIR/build"
+OUTPUT_DIR="$PROJECT_DIR/output"
+DERIVED_DATA_DIR="$OUTPUT_DIR/DerivedData"
 
 CONFIGURATION="Debug"
 SHOULD_CLEAN=false
@@ -56,7 +58,7 @@ while [[ $# -gt 0 ]]; do
   ./scripts/build.sh debug          # Debug 构建（默认）
   ./scripts/build.sh clean          # 清理后 Debug 构建
 
-输出目录：$BUILD_DIR/
+输出目录：$OUTPUT_DIR/
 EOF
             exit 0
             ;;
@@ -91,7 +93,7 @@ echo ""
 if [[ "$SHOULD_CLEAN" == true ]]; then
     echo "▸ 清理构建产物..."
     "$XCODEBUILD" clean -project "$PROJECT_DIR/$PROJECT_NAME.xcodeproj" -scheme "$SCHEME" -quiet
-    rm -rf "$BUILD_DIR"
+    rm -rf "$OUTPUT_DIR"
     echo "  ✓ 已清理"
     echo ""
 fi
@@ -101,38 +103,38 @@ fi
 # ──────────────────────────────────────────────
 echo "▸ 开始编译 ($CONFIGURATION)..."
 
-# 确保 BUILD_DIR 存在（用于写入 build.log）
-mkdir -p "$BUILD_DIR"
+# 确保输出目录存在（用于写入 build.log）
+mkdir -p "$OUTPUT_DIR"
 
 ARCHIVE_ARGS=(
     -project "$PROJECT_DIR/$PROJECT_NAME.xcodeproj"
     -scheme "$SCHEME"
     -configuration "$CONFIGURATION"
     -destination "generic/platform=macOS"
-    -derivedDataPath "$BUILD_DIR/DerivedData"
-    CONFIGURATION_BUILD_DIR="$BUILD_DIR"
+    -derivedDataPath "$DERIVED_DATA_DIR"
+    CONFIGURATION_BUILD_DIR="$OUTPUT_DIR"
 )
 
 # 临时关闭 pipefail，避免 tee 管道干扰 xcodebuild 退出码判断
 set +o pipefail
-"$XCODEBUILD" "${ARCHIVE_ARGS[@]}" build 2>&1 | tee "$BUILD_DIR/build.log"
+"$XCODEBUILD" "${ARCHIVE_ARGS[@]}" build 2>&1 | tee "$OUTPUT_DIR/build.log"
 BUILD_STATUS=${PIPESTATUS[0]}
 set -o pipefail
 
 if [[ "$BUILD_STATUS" -ne 0 ]]; then
     echo ""
-    echo "❌ 编译失败，完整日志: $BUILD_DIR/build.log"
+    echo "❌ 编译失败，完整日志: $OUTPUT_DIR/build.log"
     # 显示最后 30 行错误
     echo ""
     echo "── 最后 30 行输出 ──"
-    tail -30 "$BUILD_DIR/build.log"
+    tail -30 "$OUTPUT_DIR/build.log"
     exit 1
 fi
 
 # ──────────────────────────────────────────────
 # 验证产物
 # ──────────────────────────────────────────────
-APP_PATH="$BUILD_DIR/$PROJECT_NAME.app"
+APP_PATH="$OUTPUT_DIR/$PROJECT_NAME.app"
 
 if [[ ! -d "$APP_PATH" ]]; then
     echo "❌ 编译完成但未找到 .app 产物: $APP_PATH"
@@ -152,7 +154,7 @@ echo "  产物:   $APP_PATH"
 echo "  大小:   $APP_SIZE"
 echo "  版本:   $APP_VERSION (build $APP_BUILD)"
 echo "  配置:   $CONFIGURATION"
-echo "  日志:   $BUILD_DIR/build.log"
+echo "  日志:   $OUTPUT_DIR/build.log"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -162,8 +164,8 @@ if [[ "$CONFIGURATION" == "Release" ]]; then
     DSYM_PATH="$APP_PATH.dSYM"
     if [[ -d "$DSYM_PATH" ]]; then
         echo "▸ 打包调试符号..."
-        ditto -c -k --keepParent "$DSYM_PATH" "$BUILD_DIR/$PROJECT_NAME.app.dSYM.zip"
-        echo "  ✓ $BUILD_DIR/$PROJECT_NAME.app.dSYM.zip"
+        ditto -c -k --keepParent "$DSYM_PATH" "$OUTPUT_DIR/$PROJECT_NAME.app.dSYM.zip"
+        echo "  ✓ $OUTPUT_DIR/$PROJECT_NAME.app.dSYM.zip"
         echo ""
     fi
 fi

@@ -191,7 +191,7 @@ final class KeyboardShortcutManager: ObservableObject {
     
     /// 加载保存的快捷键
     private func loadShortcuts() {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let data = NotebookDefaults.shared.data(forKey: defaultsKey),
               let saved = try? JSONDecoder().decode([String: KeyboardShortcut].self, from: data) else {
             // 使用默认快捷键
             shortcuts = Dictionary(uniqueKeysWithValues: ShortcutAction.allCases.compactMap { action in
@@ -211,7 +211,7 @@ final class KeyboardShortcutManager: ObservableObject {
     private func saveShortcuts() {
         let data = Dictionary(uniqueKeysWithValues: shortcuts.map { ($0.key.rawValue, $0.value) })
         if let encoded = try? JSONEncoder().encode(data) {
-            UserDefaults.standard.set(encoded, forKey: defaultsKey)
+            NotebookDefaults.shared.set(encoded, forKey: defaultsKey)
         }
     }
     

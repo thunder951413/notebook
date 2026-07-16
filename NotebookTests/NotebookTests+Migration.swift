@@ -5,41 +5,114 @@ import SwiftData
 // MARK: - Schema 迁移与版本测试
 
 extension NotebookTests {
-    /// 验证当前 store format 版本与 NotebookSchemaV4 对齐
     @MainActor
-    func testCurrentStoreFormatVersionIsV4() {
-        XCTAssertEqual(PersistenceController.currentStoreFormatVersion, 4, "当前版本应为 4（V1→V2→V3→V4）")
+    func testProductionOpenPathPreservesExistingStoreAndCreatesPreMigrationBackup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotebookMigrationRoundTrip-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let storage = StorageLocationManager.shared
+        let previousBaseURL = storage.baseDirectoryURL
+        storage.setBaseDirectoryForTesting(root)
+        defer { storage.setBaseDirectoryForTesting(previousBaseURL) }
+        try storage.ensureDirectoryStructureExists()
+
+        let notebookData = try storage.notebookDataDirectoryURL()
+        let databaseDirectory = try storage.databaseDirectoryURL()
+        let storeURL = databaseDirectory.appendingPathComponent("notebook.store")
+        let config = ModelConfiguration(schema: PersistenceController.appSchema, url: storeURL)
+
+        let noteID = UUID()
+        do {
+            let container = try ModelContainer(for: PersistenceController.appSchema, configurations: [config])
+            let context = container.mainContext
+            let library = BlockDocumentLibraryEntity(schemaVersion: "1.0", sourceExportedAt: Date())
+            context.insert(library)
+            let note = BlockDocumentNoteEntity(
+                id: noteID,
+                libraryID: library.id,
+                title: "Migration sentinel",
+                createdAt: Date(),
+                updatedAt: Date(),
+                folderID: nil,
+                folderName: "",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 1,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 0,
+                assetCount: 0
+            )
+            context.insert(note)
+            try context.save()
+        }
+
+        let oldState = PersistenceMigrationSafety.State(
+            storeFormatVersion: PersistenceController.currentStoreFormatVersion - 1,
+            updatedAt: Date(),
+            lastBackupID: nil
+        )
+        try JSONEncoder().encode(oldState).write(
+            to: notebookData.appendingPathComponent(PersistenceMigrationSafety.stateFilename),
+            options: .atomic
+        )
+
+        let reopened = try PersistenceController.makeModelContainer(
+            storageLocationManager: storage,
+            migrationReason: "unit-test-round-trip"
+        )
+        let idToMatch = noteID
+        let notes = try reopened.mainContext.fetch(
+            FetchDescriptor<BlockDocumentNoteEntity>(predicate: #Predicate { $0.id == idToMatch })
+        )
+        XCTAssertEqual(notes.first?.title, "Migration sentinel")
+
+        let backup = try XCTUnwrap(PersistenceMigrationSafety.latestBackup(in: notebookData))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: backup.appendingPathComponent(PersistenceMigrationSafety.databaseSnapshotDirectoryName).path
+        ))
+    }
+    /// 验证当前 store format 版本与 NotebookSchemaV6 对齐
+    @MainActor
+    func testCurrentStoreFormatVersionIsV6() {
+        XCTAssertEqual(PersistenceController.currentStoreFormatVersion, 6, "当前版本应为 6（V1→V2→V3→V4→V5→V6）")
     }
 
-    /// 验证 Migration Plan 包含 3 个 stage（V1→V2, V2→V3, V3→V4）
-    func testMigrationPlanHasThreeStages() {
-        XCTAssertEqual(NotebookSchemaMigrationPlan.stages.count, 3, "应有 3 个迁移 stage")
+    /// 验证 Migration Plan 包含 5 个 stage（V1→…→V6）
+    func testMigrationPlanHasFiveStages() {
+        XCTAssertEqual(NotebookSchemaMigrationPlan.stages.count, 5, "应有 5 个迁移 stage")
     }
 
-    /// 验证 Migration Plan schemas 包含 V1-V4
-    func testMigrationPlanSchemasIncludeV1ThroughV4() {
-        XCTAssertEqual(NotebookSchemaMigrationPlan.schemas.count, 4, "应包含 V1-V4 四个版本")
+    /// 验证 Migration Plan schemas 包含 V1-V6
+    func testMigrationPlanSchemasIncludeV1ThroughV6() {
+        XCTAssertEqual(NotebookSchemaMigrationPlan.schemas.count, 6, "应包含 V1-V6 六个版本")
     }
 
-    /// 验证 appSchema 包含所有 10 个 entity（含新增的 BlockDocumentNoteTagEntity）
+    /// 验证 appSchema 包含 TodoStepEntity（V5 引入）
     @MainActor
     func testAppSchemaIncludesAllEntities() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext
-        let link = BlockDocumentNoteTagEntity(
+        let step = TodoStepEntity(
             noteID: UUID(),
-            tagID: UUID(),
             libraryID: UUID(),
-            sortOrder: 0
+            text: "测试步骤"
         )
-        context.insert(link)
+        context.insert(step)
         try context.save()
 
-        let idToMatch = link.id
-        let descriptor = FetchDescriptor<BlockDocumentNoteTagEntity>(
+        let idToMatch = step.id
+        let descriptor = FetchDescriptor<TodoStepEntity>(
             predicate: #Predicate { $0.id == idToMatch }
         )
-        XCTAssertEqual(try context.fetch(descriptor).count, 1, "appSchema 应包含 BlockDocumentNoteTagEntity")
+        XCTAssertEqual(try context.fetch(descriptor).count, 1, "appSchema 应包含 TodoStepEntity")
     }
 
     /// 验证 in-memory container 可正常创建并包含所有 entity
@@ -116,6 +189,178 @@ extension NotebookTests {
         )
         let links = try context.fetch(linkDescriptor)
         XCTAssertEqual(links.count, 1, "关联表应包含 1 条记录")
+    }
+
+    @MainActor
+    func testTodoEntitiesAreLoadedSeparatelyFromNotesAndFolders() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let libraryID = UUID()
+        let noteFolderID = UUID()
+        let todoListID = UUID()
+        let noteID = UUID()
+        let todoID = UUID()
+
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: Date(),
+                importedAt: Date(),
+                noteCount: 2,
+                folderCount: 2,
+                tagCount: 0
+            )
+        )
+        context.insert(
+            BlockDocumentFolderEntity(
+                id: noteFolderID,
+                libraryID: libraryID,
+                name: "笔记文件夹",
+                sortOrder: 0,
+                isSystem: false,
+                createdAt: Date(),
+                folderType: FolderType.noteFolder.rawValue
+            )
+        )
+        context.insert(
+            BlockDocumentFolderEntity(
+                id: todoListID,
+                libraryID: libraryID,
+                name: "工作 Todo",
+                sortOrder: 1,
+                isSystem: false,
+                createdAt: Date(),
+                folderType: FolderType.todoList.rawValue
+            )
+        )
+        context.insert(
+            BlockDocumentNoteEntity(
+                id: noteID,
+                libraryID: libraryID,
+                title: "普通笔记",
+                createdAt: Date(),
+                updatedAt: Date(),
+                folderID: noteFolderID,
+                folderName: "笔记文件夹",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 1,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 0,
+                assetCount: 0,
+                itemType: "note"
+            )
+        )
+        context.insert(
+            BlockDocumentNoteEntity(
+                id: todoID,
+                libraryID: libraryID,
+                title: "Todo 任务",
+                createdAt: Date(),
+                updatedAt: Date(),
+                folderID: todoListID,
+                folderName: "工作 Todo",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 1,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 0,
+                assetCount: 0,
+                itemType: "todo",
+                todoIsImportant: true,
+                todoOrder: 3
+            )
+        )
+        context.insert(
+            TodoStepEntity(
+                noteID: todoID,
+                libraryID: libraryID,
+                text: "第一步"
+            )
+        )
+        try context.save()
+
+        let store = NoteStore()
+        store.setContext(context)
+
+        XCTAssertEqual(store.notes.map(\.id), [noteID])
+        XCTAssertEqual(store.folders.map(\.id), [noteFolderID])
+        XCTAssertEqual(store.todoItems.map(\.id), [todoID])
+        XCTAssertEqual(store.todoLists.map(\.id), [todoListID])
+        XCTAssertEqual(store.importantTodoItems().map(\.id), [todoID])
+        XCTAssertEqual(store.steps(for: todoID).map(\.text), ["第一步"])
+    }
+
+    @MainActor
+    func testBlankItemTypeIsRecoveredAsNote() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let libraryID = UUID()
+        let noteID = UUID()
+
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: Date(),
+                importedAt: Date(),
+                noteCount: 1,
+                folderCount: 0,
+                tagCount: 0
+            )
+        )
+
+        context.insert(
+            BlockDocumentNoteEntity(
+                id: noteID,
+                libraryID: libraryID,
+                title: "Recovered note",
+                createdAt: Date(),
+                updatedAt: Date(),
+                folderID: nil,
+                folderName: "未分类",
+                reminderAt: nil,
+                recurrenceRule: "none",
+                version: 1,
+                tagIDs: "",
+                viewMode: "text",
+                deletedAt: nil,
+                originalFolderID: nil,
+                originalFolderName: nil,
+                documentSchemaVersion: "1.0",
+                documentSource: "test",
+                blockCount: 0,
+                assetCount: 0,
+                itemType: ""
+            )
+        )
+        try context.save()
+
+        let store = NoteStore()
+        store.setContext(context)
+
+        XCTAssertEqual(store.notes.map(\.id), [noteID])
+        XCTAssertTrue(store.todoItems.isEmpty)
+
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        let recovered = try XCTUnwrap(context.fetch(descriptor).first)
+        XCTAssertEqual(recovered.itemType, "note")
     }
 
     /// 验证级联删除：删除 note 后 blocks/assets 自动删除

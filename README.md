@@ -18,6 +18,8 @@ Notebook 是一款专为 macOS 设计的轻量级富文本笔记应用。它结�
   - 点击放大按钮即可快速唤起主界面。
 - **💾 灵活存储**：支持自定义数据存放位置，保障数据隐私。
 - **🌓 自动主题**：完美适配 macOS 浅色与深色模式。
+- **✅ Todo**：支持今天、重要、自定义列表、步骤、提醒和关联笔记。
+- **🔒 应用内锁定**：可用密码限制锁定文件夹的应用内访问。该功能不等同于磁盘加密；数据库和附件仍受 macOS 账户与磁盘安全机制保护。
 
 ## 🛠️ 技术架构
 
@@ -44,6 +46,15 @@ git clone https://github.com/thunder951413/notebook.git
 ## 📦 发版
 
 仓库已配置 GitHub Actions 自动发布流程：当推送 `v*` 格式的 tag 时，会自动构建并创建 GitHub Release。
+
+正式发布流水线只接受 Release 构建，并要求 Developer ID 签名、Apple 公证和 Gatekeeper 验证全部通过。仓库需要配置：
+
+- `BUILD_CERTIFICATE_BASE64`
+- `P12_PASSWORD`
+- `KEYCHAIN_PASSWORD`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
 
 如果仓库是私有的，可在应用设置中填写 GitHub Token；Token 会保存在 macOS 钥匙串中，用于访问私有仓库的 Release/tag。
 
@@ -89,6 +100,13 @@ git clone https://github.com/thunder951413/notebook.git
 ## 📄 开源协议
 
 本项目采用 [MIT 许可协议](LICENSE)。
+
+## 🔐 安全说明
+
+- AI API Key 仅保存在 macOS Keychain；配置和数据导出不会包含 API Key。
+- 应用密码的验证记录使用 PBKDF2-HMAC-SHA256，并保存在 Keychain。
+- “锁定文件夹”只提供应用内访问控制，不声称提供数据库或附件的磁盘加密。
+- Schema 更新前会自动建立完整数据库快照；迁移和导入均应先在备份上验证。
 
 ---
 

@@ -80,7 +80,7 @@ class SSHConfigManager: ObservableObject {
     }
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: configKey),
+        if let data = NotebookDefaults.shared.data(forKey: configKey),
            let loaded = try? JSONDecoder().decode(SSHConfig.self, from: data) {
             self.config = SSHConfig(
                 host: loaded.host,
@@ -94,7 +94,7 @@ class SSHConfigManager: ObservableObject {
     }
 
     func clearConfig() {
-        UserDefaults.standard.removeObject(forKey: configKey)
+        NotebookDefaults.shared.removeObject(forKey: configKey)
         Self.deletePasswordFromKeychain()
         config = .default
     }
@@ -103,7 +103,7 @@ class SSHConfigManager: ObservableObject {
         do {
             let encoder = JSONEncoder()
             let data = try encoder.encode(config)
-            UserDefaults.standard.set(data, forKey: configKey)
+            NotebookDefaults.shared.set(data, forKey: configKey)
         } catch {
             Logger.shared.log(.storage, .error, "保存 SSH 配置失败: \(error.localizedDescription)")
         }

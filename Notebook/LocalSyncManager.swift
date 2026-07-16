@@ -104,6 +104,12 @@ final class LocalSyncManager: ObservableObject {
     }
 
     func syncAllNotesToLocal(context: ModelContext) async throws -> [UUID] {
+        try await SyncSessionCoordinator.shared.withSession(named: "本地目录推送") {
+            try await syncAllNotesToLocalImpl(context: context)
+        }
+    }
+
+    private func syncAllNotesToLocalImpl(context: ModelContext) async throws -> [UUID] {
         syncStatus = .syncing
         defer {
             if case .syncing = syncStatus {
@@ -138,6 +144,12 @@ final class LocalSyncManager: ObservableObject {
     }
 
     func syncAllNotesFromLocal(context: ModelContext) async throws -> [NoteSyncMergeResult] {
+        try await SyncSessionCoordinator.shared.withSession(named: "本地目录拉取") {
+            try await syncAllNotesFromLocalImpl(context: context)
+        }
+    }
+
+    private func syncAllNotesFromLocalImpl(context: ModelContext) async throws -> [NoteSyncMergeResult] {
         syncStatus = .syncing
         defer {
             if case .syncing = syncStatus {
@@ -175,14 +187,20 @@ final class LocalSyncManager: ObservableObject {
     }
 
     func syncBidirectional(context: ModelContext) async throws -> (pulled: Int, pushed: Int, conflicts: Int) {
-        let pullResults = try await syncAllNotesFromLocal(context: context)
-        let pushIDs = try await syncAllNotesToLocal(context: context)
-        let conflicts = pullResults.filter(\.detectedConflict).count
-        return (pullResults.count, pushIDs.count, conflicts)
+        try await SyncSessionCoordinator.shared.withSession(named: "本地目录双向同步") {
+            let pullResults = try await syncAllNotesFromLocalImpl(context: context)
+            let pushIDs = try await syncAllNotesToLocalImpl(context: context)
+            let conflicts = pullResults.filter(\.detectedConflict).count
+            return (pullResults.count, pushIDs.count, conflicts)
+        }
     }
 
     private func syncNoteToLocal(noteID: UUID, context: ModelContext) throws {
-        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(
+            noteID: noteID,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.localDirectory
+        ) else {
             return
         }
         let fileURL = notesDirectory.appendingPathComponent("\(noteID.uuidString).json")
@@ -197,7 +215,11 @@ final class LocalSyncManager: ObservableObject {
             try FileManager.default.moveItem(at: tempURL, to: fileURL)
         }
         try copyAssetsForExport(envelope: envelope)
-        try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+        try BlockDocumentNoteVersionStore.markSynced(
+            envelope: envelope,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.localDirectory
+        )
     }
 
     private func syncNoteFromLocal(noteID: UUID, context: ModelContext) throws -> NoteSyncMergeResult {
@@ -205,19 +227,28 @@ final class LocalSyncManager: ObservableObject {
         let payload = try Data(contentsOf: fileURL)
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
         try copyAssetsForImport(envelope: envelope)
-        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(envelope, context: context)
+        let result = try BlockDocumentNoteVersionStore.mergeRemoteEnvelope(
+            envelope,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.localDirectory
+        )
         if result.appliedRemoteSnapshot {
             try BlockDocumentNoteVersionStore.markSynced(
                 noteID: noteID,
                 syncedVersion: min(result.localVersion, result.remoteVersion),
-                context: context
+                context: context,
+                backendID: BlockDocumentNoteVersionStore.Backend.localDirectory
             )
         }
         return result
     }
 
     private func makeIndexEntry(noteID: UUID, context: ModelContext) throws -> LocalNoteIndexEntry? {
-        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
+        guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(
+            noteID: noteID,
+            context: context,
+            backendID: BlockDocumentNoteVersionStore.Backend.localDirectory
+        ) else {
             return nil
         }
         let contentHash = try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot)
@@ -268,11 +299,12 @@ final class LocalSyncManager: ObservableObject {
             .sorted { $0.uuidString < $1.uuidString }
     }
 
-    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentNoteSyncStateEntity? {
-        let descriptor = FetchDescriptor<BlockDocumentNoteSyncStateEntity>(
-            predicate: #Predicate<BlockDocumentNoteSyncStateEntity> { $0.noteID == noteID }
+    private func fetchSyncState(noteID: UUID, context: ModelContext) throws -> BlockDocumentBackendSyncStateEntity? {
+        try BlockDocumentNoteVersionStore.syncState(
+            noteID: noteID,
+            backendID: BlockDocumentNoteVersionStore.Backend.localDirectory,
+            context: context
         )
-        return try context.fetch(descriptor).first
     }
 
     private func copyAssetsForExport(envelope: VersionedNoteSyncEnvelope) throws {
@@ -323,10 +355,7 @@ final class LocalSyncManager: ObservableObject {
                     at: destinationURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true
                 )
-                if fileManager.fileExists(atPath: destinationURL.path) {
-                    try fileManager.removeItem(at: destinationURL)
-                }
-                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                try AtomicFileCommit.copyReplacingAtomically(from: sourceURL, to: destinationURL)
             }
         }
     }

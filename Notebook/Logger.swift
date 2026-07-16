@@ -113,7 +113,7 @@ final class Logger {
 
     func reloadPersistenceSettings() {
         queue.async {
-            let defaults = UserDefaults.standard
+            let defaults = NotebookDefaults.shared
             self.isFileLoggingEnabled = defaults.bool(forKey: Keys.isFileLoggingEnabled)
             self.retentionMode = defaults.bool(forKey: Keys.keepHistoricalLogFiles) ? .keepAllByDay : .todayOnly
 

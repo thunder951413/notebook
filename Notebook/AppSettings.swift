@@ -6,7 +6,7 @@ import Combine
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    private let defaults = NotebookDefaults.shared
     private var cancellables = Set<AnyCancellable>()
     
     /// 是否启用 iCloud 同步设置
@@ -22,6 +22,7 @@ final class AppSettings: ObservableObject {
     private enum Keys {
         static let foldersExpanded = "sidebar_folders_expanded"
         static let tagsExpanded = "sidebar_tags_expanded"
+        static let todoExpanded = "sidebar_todo_expanded"
         static let lastSelectedNoteID = "last_selected_note_id"
         static let lastSelectedFolder = "last_selected_folder"
         static let startupBehavior = "startup_behavior" // "restore", "none", "all_notes"
@@ -35,23 +36,21 @@ final class AppSettings: ObservableObject {
         static let isFileLoggingEnabled = "logger.file_logging_enabled"
         static let keepHistoricalLogFiles = "logger.keep_historical_files"
         static let githubRepositoryURL = "update.github_repository_url"
-        static let recentNoteLoadLimit = "notes.recent_load_limit"
+        static let automaticUpdateChecksEnabled = "update.automatic_checks_enabled"
         static let recentSelectedNoteIDs = "notes.recent_selected_ids"
         static let aiKnowledgeBaseTopK = "ai.knowledge_base_top_k"
     }
 
-    static let defaultRecentNoteLoadLimit = 5
-    static let minRecentNoteLoadLimit = 1
-    static let maxRecentNoteLoadLimit = 50
-
     static let defaultAIKnowledgeBaseTopK = 5
     static let minAIKnowledgeBaseTopK = 1
     static let maxAIKnowledgeBaseTopK = 20
+    private static let recentSelectionHistoryLimit = 20
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
     private enum iCloudKeys {
         static let foldersExpanded = "icloud.sidebar_folders_expanded"
         static let tagsExpanded = "icloud.sidebar_tags_expanded"
+        static let todoExpanded = "icloud.sidebar_todo_expanded"
         static let startupBehavior = "icloud.startup_behavior"
         static let accentColor = "icloud.accent_color"
     }
@@ -68,6 +67,11 @@ final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.tagsExpanded) }
     }
 
+    var isTodoExpanded: Bool {
+        get { defaults.object(forKey: Keys.todoExpanded) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.todoExpanded) }
+    }
+
     // MARK: - 最后选中的笔记
 
     var lastSelectedNoteID: UUID? {
@@ -81,18 +85,6 @@ final class AppSettings: ObservableObject {
             } else {
                 defaults.removeObject(forKey: Keys.lastSelectedNoteID)
             }
-        }
-    }
-
-    // MARK: - 最近笔记内容加载
-
-    var recentNoteLoadLimit: Int {
-        get {
-            let storedValue = defaults.object(forKey: Keys.recentNoteLoadLimit) as? Int
-            return Self.clampedRecentNoteLoadLimit(storedValue ?? Self.defaultRecentNoteLoadLimit)
-        }
-        set {
-            defaults.set(Self.clampedRecentNoteLoadLimit(newValue), forKey: Keys.recentNoteLoadLimit)
         }
     }
 
@@ -122,7 +114,7 @@ final class AppSettings: ObservableObject {
             let uniqueIDs = newValue.filter { seen.insert($0).inserted }
             defaults.set(
                 uniqueIDs
-                    .prefix(Self.maxRecentNoteLoadLimit)
+                    .prefix(Self.recentSelectionHistoryLimit)
                     .map(\.uuidString),
                 forKey: Keys.recentSelectedNoteIDs
             )
@@ -134,10 +126,6 @@ final class AppSettings: ObservableObject {
         var ids = recentSelectedNoteIDs.filter { $0 != id }
         ids.insert(id, at: 0)
         recentSelectedNoteIDs = ids
-    }
-
-    private static func clampedRecentNoteLoadLimit(_ value: Int) -> Int {
-        min(max(value, minRecentNoteLoadLimit), maxRecentNoteLoadLimit)
     }
 
     // MARK: - 最后选中的文件夹
@@ -212,6 +200,11 @@ final class AppSettings: ObservableObject {
         set {
             defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.githubRepositoryURL)
         }
+    }
+
+    var automaticUpdateChecksEnabled: Bool {
+        get { defaults.object(forKey: Keys.automaticUpdateChecksEnabled) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.automaticUpdateChecksEnabled) }
     }
 
     var githubRepositoryURL: URL? {
@@ -475,6 +468,7 @@ final class AppSettings: ObservableObject {
         
         keyValueStore.set(isFoldersExpanded, forKey: iCloudKeys.foldersExpanded)
         keyValueStore.set(isTagsExpanded, forKey: iCloudKeys.tagsExpanded)
+        keyValueStore.set(isTodoExpanded, forKey: iCloudKeys.todoExpanded)
         keyValueStore.set(startupBehavior.rawValue, forKey: iCloudKeys.startupBehavior)
         
         if let colorData = defaults.data(forKey: Keys.accentColor) {
@@ -500,6 +494,10 @@ final class AppSettings: ObservableObject {
         if keyValueStore.object(forKey: iCloudKeys.tagsExpanded) != nil {
             isTagsExpanded = keyValueStore.bool(forKey: iCloudKeys.tagsExpanded)
         }
+
+        if keyValueStore.object(forKey: iCloudKeys.todoExpanded) != nil {
+            isTodoExpanded = keyValueStore.bool(forKey: iCloudKeys.todoExpanded)
+        }
         
         // 恢复启动行为
         if let behaviorRaw = keyValueStore.string(forKey: iCloudKeys.startupBehavior),
@@ -521,6 +519,7 @@ final class AppSettings: ObservableObject {
         
         keyValueStore.removeObject(forKey: iCloudKeys.foldersExpanded)
         keyValueStore.removeObject(forKey: iCloudKeys.tagsExpanded)
+        keyValueStore.removeObject(forKey: iCloudKeys.todoExpanded)
         keyValueStore.removeObject(forKey: iCloudKeys.startupBehavior)
         keyValueStore.removeObject(forKey: iCloudKeys.accentColor)
         

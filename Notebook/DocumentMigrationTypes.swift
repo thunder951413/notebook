@@ -6,6 +6,7 @@ struct DocumentMigrationPackage: Codable {
     let notes: [NoteItem]
     let folders: [FolderItem]
     let tags: [TagItem]
+    let todoSteps: [TodoStepItem]?
 
     struct NoteItem: Codable {
         let id: UUID
@@ -25,6 +26,12 @@ struct DocumentMigrationPackage: Codable {
         let blockCount: Int
         let assetCount: Int
         let documentPath: String
+        let itemType: String?
+        let todoDueAt: Date?
+        let todoCompletedAt: Date?
+        let todoIsImportant: Bool?
+        let todoOrder: Int?
+        let linkedNoteIDs: [UUID]?
     }
 
     struct FolderItem: Codable {
@@ -33,12 +40,22 @@ struct DocumentMigrationPackage: Codable {
         let sortOrder: Int
         let isSystem: Bool
         let createdAt: Date?
+        let folderType: String?
     }
 
     struct TagItem: Codable {
         let id: UUID
         let name: String
         let color: String
+        let createdAt: Date
+    }
+
+    struct TodoStepItem: Codable {
+        let id: UUID
+        let noteID: UUID
+        let text: String
+        let checked: Bool
+        let order: Int
         let createdAt: Date
     }
 }
@@ -325,19 +342,22 @@ struct ImportedDocumentFolder {
     let sortOrder: Int
     let isSystem: Bool
     let createdAt: Date?
+    let folderType: String
 
     init(
         id: UUID,
         name: String,
         sortOrder: Int,
         isSystem: Bool,
-        createdAt: Date?
+        createdAt: Date?,
+        folderType: String = FolderType.noteFolder.rawValue
     ) {
         self.id = id
         self.name = name
         self.sortOrder = sortOrder
         self.isSystem = isSystem
         self.createdAt = createdAt
+        self.folderType = folderType
     }
 
     init(item: DocumentMigrationPackage.FolderItem) {
@@ -346,6 +366,7 @@ struct ImportedDocumentFolder {
         sortOrder = item.sortOrder
         isSystem = item.isSystem
         createdAt = item.createdAt
+        folderType = item.folderType ?? FolderType.noteFolder.rawValue
     }
 }
 
@@ -392,6 +413,12 @@ struct ImportedDocumentNote {
     let originalFolderName: String?
     let document: ImportedDocument
     let assets: [ImportedDocumentAsset]
+    let itemType: String
+    let todoDueAt: Date?
+    let todoCompletedAt: Date?
+    let todoIsImportant: Bool
+    let todoOrder: Int
+    let linkedNoteIDs: [UUID]
 
     init(
         id: UUID,
@@ -409,7 +436,13 @@ struct ImportedDocumentNote {
         originalFolderID: UUID?,
         originalFolderName: String?,
         document: ImportedDocument,
-        assets: [ImportedDocumentAsset]
+        assets: [ImportedDocumentAsset],
+        itemType: String = "note",
+        todoDueAt: Date? = nil,
+        todoCompletedAt: Date? = nil,
+        todoIsImportant: Bool = false,
+        todoOrder: Int = 0,
+        linkedNoteIDs: [UUID] = []
     ) {
         self.id = id
         self.title = title
@@ -427,6 +460,12 @@ struct ImportedDocumentNote {
         self.originalFolderName = originalFolderName
         self.document = document
         self.assets = assets
+        self.itemType = itemType
+        self.todoDueAt = todoDueAt
+        self.todoCompletedAt = todoCompletedAt
+        self.todoIsImportant = todoIsImportant
+        self.todoOrder = todoOrder
+        self.linkedNoteIDs = linkedNoteIDs
     }
 
     init(note: LoadedDocumentMigrationNote) {
@@ -445,7 +484,13 @@ struct ImportedDocumentNote {
         originalFolderID = note.metadata.originalFolderID
         originalFolderName = note.metadata.originalFolderName
         document = ImportedDocument(document: note.document)
-        assets = note.assets.map(ImportedDocumentAsset.init)
+        assets = note.assets.map { ImportedDocumentAsset(asset: $0) }
+        itemType = note.metadata.itemType ?? "note"
+        todoDueAt = note.metadata.todoDueAt
+        todoCompletedAt = note.metadata.todoCompletedAt
+        todoIsImportant = note.metadata.todoIsImportant ?? false
+        todoOrder = note.metadata.todoOrder ?? 0
+        linkedNoteIDs = note.metadata.linkedNoteIDs ?? []
     }
 }
 
@@ -467,7 +512,7 @@ struct ImportedDocument {
     init(document: MigratedDocument) {
         schemaVersion = document.schemaVersion
         source = document.source
-        blocks = document.blocks.map(ImportedDocumentBlock.init)
+        blocks = document.blocks.map { ImportedDocumentBlock(block: $0) }
     }
 }
 
@@ -531,14 +576,14 @@ struct ImportedDocumentBlock {
     init(block: MigratedDocumentBlock) {
         id = block.id
         kind = ImportedDocumentBlockKind(rawValue: block.type) ?? .unsupported
-        text = (block.text ?? []).map(ImportedInlineText.init)
+        text = (block.text ?? []).map { ImportedInlineText(span: $0) }
         level = block.level
         listStyle = block.listStyle.map { ImportedDocumentListStyle(rawValue: $0) ?? .unknown }
         order = block.order
         checked = block.checked
         indent = block.indent
-        asset = block.asset.map(ImportedDocumentAssetReference.init)
-        table = block.table.map(ImportedDocumentTable.init)
+        asset = block.asset.map { ImportedDocumentAssetReference(reference: $0) }
+        table = block.table.map { ImportedDocumentTable(table: $0) }
         sourceType = block.type
     }
 }

@@ -70,6 +70,8 @@ final class BlockDocumentFolderEntity {
     var sortOrder: Int
     var isSystem: Bool
     var createdAt: Date?
+    var updatedAt: Date = Date()
+    var folderType: String = FolderType.noteFolder.rawValue
 
     init(
         id: UUID,
@@ -77,7 +79,9 @@ final class BlockDocumentFolderEntity {
         name: String,
         sortOrder: Int,
         isSystem: Bool,
-        createdAt: Date?
+        createdAt: Date?,
+        folderType: String = FolderType.noteFolder.rawValue,
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -85,6 +89,8 @@ final class BlockDocumentFolderEntity {
         self.sortOrder = sortOrder
         self.isSystem = isSystem
         self.createdAt = createdAt
+        self.folderType = folderType
+        self.updatedAt = updatedAt ?? createdAt ?? Date()
     }
 }
 
@@ -95,19 +101,22 @@ final class BlockDocumentTagEntity {
     var name: String
     var color: String
     var createdAt: Date
+    var updatedAt: Date = Date()
 
     init(
         id: UUID,
         libraryID: UUID,
         name: String,
         color: String,
-        createdAt: Date
+        createdAt: Date,
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.libraryID = libraryID
         self.name = name
         self.color = color
         self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
     }
 }
 
@@ -140,6 +149,13 @@ final class BlockDocumentNoteEntity {
     var lastSavedContentHash: String = ""
     var hasConflict: Bool = false
     @Attribute(.externalStorage) var conflictRemoteSnapshotData: Data?
+    var conflictBackendID: String = ""
+    var itemType: String = "note"
+    var todoDueAt: Date?
+    var todoCompletedAt: Date?
+    var todoIsImportant: Bool = false
+    var todoOrder: Int = 0
+    var linkedNoteIDs: String = ""
 
     // MARK: — Relationships（与 UUID 字段并存）
     // 设计说明：保留 noteID: UUID 字段以维持现有基于 predicate 的查询兼容性
@@ -172,7 +188,13 @@ final class BlockDocumentNoteEntity {
         documentSource: String,
         blockCount: Int,
         assetCount: Int,
-        lastSavedContentHash: String = ""
+        lastSavedContentHash: String = "",
+        itemType: String = "note",
+        todoDueAt: Date? = nil,
+        todoCompletedAt: Date? = nil,
+        todoIsImportant: Bool = false,
+        todoOrder: Int = 0,
+        linkedNoteIDs: String = ""
     ) {
         self.id = id
         self.libraryID = libraryID
@@ -194,6 +216,12 @@ final class BlockDocumentNoteEntity {
         self.blockCount = blockCount
         self.assetCount = assetCount
         self.lastSavedContentHash = lastSavedContentHash
+        self.itemType = itemType
+        self.todoDueAt = todoDueAt
+        self.todoCompletedAt = todoCompletedAt
+        self.todoIsImportant = todoIsImportant
+        self.todoOrder = todoOrder
+        self.linkedNoteIDs = linkedNoteIDs
     }
 }
 
@@ -370,6 +398,47 @@ final class BlockDocumentNoteSyncStateEntity {
     }
 }
 
+/// V6：每个同步后端维护独立游标，避免 SSH/iCloud/本地目录互相误判为已同步。
+@Model
+final class BlockDocumentBackendSyncStateEntity {
+    @Attribute(.unique) var backendNoteKey: String
+    var noteID: UUID
+    var backendID: String
+    var lastRecordedVersion: Int64
+    var lastSyncedVersion: Int64
+    var lastCommonVersion: Int64
+    var lastRemoteVersion: Int64
+    var lastSyncAt: Date?
+    var lastRemoteDeviceID: String?
+    var remoteFingerprint: String
+    var pendingHistoryCount: Int
+
+    init(
+        noteID: UUID,
+        backendID: String,
+        lastRecordedVersion: Int64 = 0,
+        lastSyncedVersion: Int64 = 0,
+        lastCommonVersion: Int64 = 0,
+        lastRemoteVersion: Int64 = 0,
+        lastSyncAt: Date? = nil,
+        lastRemoteDeviceID: String? = nil,
+        remoteFingerprint: String = "",
+        pendingHistoryCount: Int = 0
+    ) {
+        self.backendNoteKey = "\(backendID)|\(noteID.uuidString)"
+        self.noteID = noteID
+        self.backendID = backendID
+        self.lastRecordedVersion = lastRecordedVersion
+        self.lastSyncedVersion = lastSyncedVersion
+        self.lastCommonVersion = lastCommonVersion
+        self.lastRemoteVersion = lastRemoteVersion
+        self.lastSyncAt = lastSyncAt
+        self.lastRemoteDeviceID = lastRemoteDeviceID
+        self.remoteFingerprint = remoteFingerprint
+        self.pendingHistoryCount = pendingHistoryCount
+    }
+}
+
 @Model
 final class BlockDocumentDeletedNoteTombstoneEntity {
     @Attribute(.unique) var noteID: UUID
@@ -387,6 +456,23 @@ final class BlockDocumentDeletedNoteTombstoneEntity {
         self.deletedAt = deletedAt
         self.deletedByDeviceID = deletedByDeviceID
         self.createdAt = createdAt
+    }
+}
+
+@Model
+final class BlockDocumentLibraryTombstoneEntity {
+    @Attribute(.unique) var tombstoneKey: String
+    var itemID: UUID
+    var itemKind: String
+    var deletedAt: Date
+    var deletedByDeviceID: String
+
+    init(itemID: UUID, itemKind: String, deletedAt: Date = Date(), deletedByDeviceID: String) {
+        self.tombstoneKey = "\(itemKind)|\(itemID.uuidString)"
+        self.itemID = itemID
+        self.itemKind = itemKind
+        self.deletedAt = deletedAt
+        self.deletedByDeviceID = deletedByDeviceID
     }
 }
 
@@ -417,5 +503,34 @@ final class BlockDocumentNoteTagEntity {
         self.tagID = tagID
         self.libraryID = libraryID
         self.sortOrder = sortOrder
+    }
+}
+
+@Model
+final class TodoStepEntity {
+    @Attribute(.unique) var id: UUID
+    var noteID: UUID
+    var libraryID: UUID
+    var text: String
+    var checked: Bool
+    var order: Int
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        noteID: UUID,
+        libraryID: UUID,
+        text: String,
+        checked: Bool = false,
+        order: Int = 0,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.noteID = noteID
+        self.libraryID = libraryID
+        self.text = text
+        self.checked = checked
+        self.order = order
+        self.createdAt = createdAt
     }
 }

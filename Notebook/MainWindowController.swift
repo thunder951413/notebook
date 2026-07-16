@@ -168,6 +168,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // 关闭按钮：只隐藏窗口，不销毁控制器
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        do {
+            try NoteSaveManager.shared.prepareForSync()
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "无法安全关闭窗口"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "返回笔记")
+            alert.beginSheetModal(for: sender)
+            return false
+        }
         // 关闭前保存窗口状态
         saveWindowState()
         sender.orderOut(nil)
