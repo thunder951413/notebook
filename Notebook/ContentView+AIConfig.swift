@@ -151,7 +151,7 @@ struct ConfigRow: View {
             if config.apiKey.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                    .help("未配置 API Key")
+                    .notebookHelp("未配置 API Key")
             }
         }
         .padding(.vertical, 4)
@@ -325,4 +325,3 @@ struct ModelButton: View {
         .buttonStyle(.plain)
     }
 }
-

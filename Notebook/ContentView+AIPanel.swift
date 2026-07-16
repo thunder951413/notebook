@@ -46,7 +46,7 @@ struct AIPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(isKnowledgeBaseMode ? Color.accentColor : Color.secondary)
-                .help(isKnowledgeBaseMode ? "全库问答：已开启（自动检索相关笔记）" : "全库问答：已关闭（点击开启）")
+                .notebookHelp(isKnowledgeBaseMode ? "全库问答：已开启（自动检索相关笔记）" : "全库问答：已关闭（点击开启）")
 
                 // 插入到笔记按钮
                 Button {
@@ -57,7 +57,7 @@ struct AIPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("插入对话到笔记")
+                .notebookHelp("插入对话到笔记")
                 .disabled(messages.isEmpty)
                 
                 // 设置按钮
@@ -71,7 +71,7 @@ struct AIPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("清空对话")
+                .notebookHelp("清空对话")
                 
                 Button {
                     withAnimation(.easeInOut(duration: 0.25)) {
@@ -83,7 +83,7 @@ struct AIPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("关闭")
+                .notebookHelp("关闭")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -467,4 +467,3 @@ struct AIPanelView: View {
         )
     }
 }
-

@@ -25,6 +25,12 @@ final class NotebookTests: XCTestCase {
         XCTAssertTrue(true)
     }
 
+    func testSwiftUITooltipsAreDisabledOnMacOS27() {
+        XCTAssertTrue(NotebookRuntimeCompatibility.allowsSwiftUITooltips(osMajorVersion: 26))
+        XCTAssertFalse(NotebookRuntimeCompatibility.allowsSwiftUITooltips(osMajorVersion: 27))
+        XCTAssertFalse(NotebookRuntimeCompatibility.allowsSwiftUITooltips(osMajorVersion: 28))
+    }
+
     func testUUIDListCodingPreservesOrderAndDropsInvalidDuplicates() {
         let first = UUID()
         let second = UUID()

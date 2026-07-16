@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 /// 颜色系统：支持浅色/深色并随系统自动切换（默认）。
@@ -45,4 +46,33 @@ struct AttachmentAppearance {
     static var borderColor: NSColor { .separatorColor }
     static var selectionColor: NSColor { .selectedContentBackgroundColor.withAlphaComponent(0.3) }
     static var uncheckedStrokeColor: NSColor { .tertiaryLabelColor }
+}
+
+/// macOS 27 beta 的 SwiftUI TooltipBridge 会在鼠标进入/退出跟踪区时偶发崩溃。
+/// 在该系统版本暂时不注册动态 tooltip；较早的稳定系统继续使用原生提示。
+enum NotebookRuntimeCompatibility {
+    static func allowsSwiftUITooltips(osMajorVersion: Int) -> Bool {
+        osMajorVersion < 27
+    }
+}
+
+private struct NotebookHelpModifier: ViewModifier {
+    let text: String
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if NotebookRuntimeCompatibility.allowsSwiftUITooltips(
+            osMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        ) {
+            content.help(text)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func notebookHelp(_ text: String) -> some View {
+        modifier(NotebookHelpModifier(text: text))
+    }
 }

@@ -242,7 +242,7 @@ struct SidebarView: View {
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)
-                    .help(l10n(L10nKeys.Todo.manageLists))
+                    .notebookHelp(l10n(L10nKeys.Todo.manageLists))
                 }
             }
             .buttonStyle(.plain)
@@ -351,7 +351,7 @@ struct SidebarView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.green)
                 .frame(width: 16, alignment: .center)
-                .help("自动同步成功")
+                .notebookHelp("自动同步成功")
                 .transition(.opacity)
         }
     }
@@ -546,7 +546,7 @@ struct SidebarView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
-                    .help(tagsFilterMode == .allTags ? l10n("tags.filter.all") : l10n("tags.filter.currentFolder"))
+                    .notebookHelp(tagsFilterMode == .allTags ? l10n("tags.filter.all") : l10n("tags.filter.currentFolder"))
                     .accessibilityLabel(tagsFilterMode == .allTags ? l10n("tags.filter.all") : l10n("tags.filter.currentFolder"))
                     Button {
                         showingTagManagement = true

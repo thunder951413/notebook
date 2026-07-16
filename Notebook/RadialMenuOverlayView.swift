@@ -172,6 +172,6 @@ struct RadialMenuButton: View {
         .frame(width: size, height: size)
         .scaleEffect(isHovered ? 1.15 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isHovered)
-        .help(item.action.displayName)
+        .notebookHelp(item.action.displayName)
     }
 }

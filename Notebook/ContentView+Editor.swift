@@ -719,7 +719,7 @@ struct EditorTopBarView: View {
                         .foregroundStyle(ThemeManager.shared.accentColor)
                 }
                 .buttonStyle(.plain)
-                .help("选择视图模式")
+                .notebookHelp("选择视图模式")
                 
                 Divider().frame(height: 18)
                 
@@ -734,7 +734,7 @@ struct EditorTopBarView: View {
                         .foregroundStyle(windowState.isRightSidebarExpanded ? ThemeManager.shared.accentColor : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("AI 助手")
+                .notebookHelp("AI 助手")
                 
                 Divider().frame(height: 18)
                 
@@ -785,7 +785,7 @@ struct EditorTopBarView: View {
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-        .help("录音")
+        .notebookHelp("录音")
     }
 
     private var noteSearchButton: some View {
@@ -797,7 +797,7 @@ struct EditorTopBarView: View {
                 .foregroundStyle(showingNoteSearch ? ThemeManager.shared.accentColor : .secondary)
         }
         .buttonStyle(.plain)
-        .help("搜索当前笔记")
+        .notebookHelp("搜索当前笔记")
     }
 
     private var noteSearchBar: some View {
@@ -829,7 +829,7 @@ struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .disabled(controller.noteSearchResultCount == 0)
-            .help("上一个结果")
+            .notebookHelp("上一个结果")
 
             Button {
                 controller.selectNextNoteSearchMatch()
@@ -839,7 +839,7 @@ struct EditorTopBarView: View {
             }
             .buttonStyle(.plain)
             .disabled(controller.noteSearchResultCount == 0)
-            .help("下一个结果")
+            .notebookHelp("下一个结果")
 
             Button {
                 closeNoteSearch()
@@ -848,7 +848,7 @@ struct EditorTopBarView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("关闭搜索")
+            .notebookHelp("关闭搜索")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

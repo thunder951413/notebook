@@ -817,27 +817,27 @@ struct DataManagementView: View {
                         Button("导出配置") {
                             exportConfiguration()
                         }
-                        .help("导出应用设置、快捷键和环形菜单配置")
+                        .notebookHelp("导出应用设置、快捷键和环形菜单配置")
 
                         Button("导出所有笔记") {
                             exportAllNotes()
                         }
-                        .help("导出所有笔记、文件夹和标签（不包含附件）")
+                        .notebookHelp("导出所有笔记、文件夹和标签（不包含附件）")
 
                         Button("预览笔记包") {
                             previewDocumentMigrationPackage()
                         }
-                        .help("读取笔记导出包，并用块级只读视图验证显示效果")
+                        .notebookHelp("读取笔记导出包，并用块级只读视图验证显示效果")
 
                         Button("浏览当前文档库") {
                             browsePersistedBlockDocumentLibrary()
                         }
-                        .help("浏览当前已写入 SwiftData 的块级文档数据")
+                        .notebookHelp("浏览当前已写入 SwiftData 的块级文档数据")
 
                         Button("导出所有数据") {
                             exportAllData()
                         }
-                        .help("导出所有数据，包括配置、笔记、文件夹、标签和附件")
+                        .notebookHelp("导出所有数据，包括配置、笔记、文件夹、标签和附件")
                     }
                 }
 
@@ -861,17 +861,17 @@ struct DataManagementView: View {
                         Button("导入配置") {
                             importConfiguration()
                         }
-                        .help("导入应用设置、快捷键和环形菜单配置")
+                        .notebookHelp("导入应用设置、快捷键和环形菜单配置")
 
                         Button("导入笔记") {
                             importNotes()
                         }
-                        .help("导入块级文档笔记包，并重建当前文档库")
+                        .notebookHelp("导入块级文档笔记包，并重建当前文档库")
 
                         Button("导入所有数据") {
                             importAllData()
                         }
-                        .help("导入所有数据，包括配置、笔记、文件夹、标签和附件")
+                        .notebookHelp("导入所有数据，包括配置、笔记、文件夹、标签和附件")
                     }
                 }
 
@@ -896,7 +896,7 @@ struct DataManagementView: View {
                         showResetConfirmation()
                     }
                     .foregroundColor(.red)
-                    .help("删除所有数据，恢复到初始状态")
+                    .notebookHelp("删除所有数据，恢复到初始状态")
                 }
 
                 if let errorMessage {

@@ -122,7 +122,7 @@ struct RadialMenuItemView: View {
         .frame(width: itemSize, height: itemSize)
         .scaleEffect(isSelected ? 1.15 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isSelected)
-        .help(item.action.displayName)
+        .notebookHelp(item.action.displayName)
     }
 }
 

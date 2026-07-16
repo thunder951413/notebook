@@ -105,7 +105,7 @@ struct AIServiceSelectorButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .help("选择 AI 服务")
+        .notebookHelp("选择 AI 服务")
         .sheet(isPresented: $showingSettings) {
             AIConfigManagementView()
         }
@@ -126,7 +126,7 @@ struct AISettingsButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .help("AI 设置")
+        .notebookHelp("AI 设置")
         .sheet(isPresented: $showingSettings) {
             AIConfigManagementView()
         }

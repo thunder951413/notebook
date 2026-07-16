@@ -37,7 +37,7 @@ struct PopoverView: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
                 .buttonStyle(.plain)
-                .help(l10n(L10nKeys.Popover.openMainWindow))
+                .notebookHelp(l10n(L10nKeys.Popover.openMainWindow))
             }
 
             TextField(l10n("popover.searchPlaceholder"), text: $query)

@@ -307,7 +307,7 @@ struct EncryptedFolderView: View {
                         .font(.caption)
                 }
                 .buttonStyle(.borderless)
-                .help("重新锁定")
+                .notebookHelp("重新锁定")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
