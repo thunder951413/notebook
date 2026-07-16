@@ -193,10 +193,9 @@ final class SSHSyncManager: Sendable {
         let didRemove = await state.removeControlMasterPath(controlPath)
         guard didRemove else { return }
 
-        // 发送退出信号给 ControlMaster
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        task.arguments = [
+        // 发送退出信号给 ControlMaster；退出清理也必须有超时并响应 Task 取消，
+        // 避免 ssh -O exit 异常时卡住整个应用退出流程。
+        let arguments = [
             "-o", "ControlPath=\(controlPath)",
             "-o", "ControlMaster=no",
             "-O", "exit",
@@ -204,9 +203,22 @@ final class SSHSyncManager: Sendable {
         ]
 
         do {
-            try task.run()
-            task.waitUntilExit()
-            Logger.shared.log(.storage, .debug, "[SSHSync] SSH 主连接已关闭: \(config.username)@\(config.host):\(config.port)")
+            let result = try await CancellableProcessRunner.run(
+                executablePath: "/usr/bin/ssh",
+                arguments: arguments,
+                environment: ProcessInfo.processInfo.environment,
+                timeout: 3,
+                timeoutError: NSError(
+                    domain: "SSHSync",
+                    code: -2002,
+                    userInfo: [NSLocalizedDescriptionKey: "关闭 SSH 主连接超时"]
+                )
+            )
+            if result.terminationStatus == 0 {
+                Logger.shared.log(.storage, .debug, "[SSHSync] SSH 主连接已关闭: \(config.username)@\(config.host):\(config.port)")
+            } else {
+                Logger.shared.log(.storage, .warn, "[SSHSync] SSH 主连接退出码: \(result.terminationStatus)")
+            }
         } catch {
             Logger.shared.log(.storage, .warn, "[SSHSync] 关闭 SSH 主连接失败: \(error.localizedDescription)")
         }

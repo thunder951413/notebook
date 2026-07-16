@@ -206,6 +206,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 group.cancelAll()
             }
 
+            // 无论自动同步是完成还是达到退出等待上限，都关闭复用连接并清理 socket。
+            // 清理本身也设置上限，不能反过来无限阻塞应用退出。
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await SSHSyncManager.shared.closeAllControlMasterConnections()
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                }
+                _ = await group.next()
+                group.cancelAll()
+            }
+
             Logger.shared.log(.app, .info, "[AppDelegate] 保存完成，允许退出")
             NSApp.reply(toApplicationShouldTerminate: true)
         }
