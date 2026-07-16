@@ -911,6 +911,97 @@ final class NoteStore: ObservableObject {
         return activeNotes.first(where: { $0.id == entity.id })
     }
 
+    /// 将外部文本文件作为一篇新笔记写入数据库；正文保存成功后再应用加密目录和标签。
+    @discardableResult
+    func importTextNote(
+        _ document: ImportedTextNoteFile,
+        target: TextNoteImportTarget
+    ) -> Note? {
+        guard let context = modelContext else { return nil }
+        guard let createdNote = addNote(
+            title: document.title,
+            folderID: target.folderID,
+            folderName: target.folderName
+        ) else { return nil }
+
+        let content = NSAttributedString(string: document.content)
+        guard let request = noteSaveManager.createRequest(
+            noteID: createdNote.id,
+            title: document.title,
+            folderID: target.folderID,
+            folder: target.folderName,
+            reminderAt: nil,
+            recurrenceRule: "none",
+            content: content,
+            reason: "fileDropImport"
+        ) else {
+            rollbackFailedTextImport(noteID: createdNote.id, context: context)
+            return nil
+        }
+
+        guard case .success = noteSaveManager.saveImmediately(request: request) else {
+            rollbackFailedTextImport(noteID: createdNote.id, context: context)
+            return nil
+        }
+        markNoteContentUpdated(id: createdNote.id, content: content)
+
+        if let encryptedFolderID = target.encryptedFolderID,
+           moveNoteToEncryptedFolder(id: createdNote.id, to: encryptedFolderID) == nil {
+            Logger.shared.log(
+                .storage,
+                .error,
+                "Text import saved but could not apply encrypted folder: noteID=\(createdNote.id.uuidString.prefix(8))"
+            )
+            rollbackFailedTextImport(noteID: createdNote.id, context: context)
+            return nil
+        }
+        if let tagID = target.tagID {
+            addTagToNote(tagID: tagID, noteID: createdNote.id)
+        }
+
+        return ensureNoteContentLoaded(id: createdNote.id, pruneAfterLoad: false)
+    }
+
+    private func rollbackFailedTextImport(noteID: UUID, context: ModelContext) {
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        guard let entity = try? context.fetch(descriptor).first else { return }
+        let blockDescriptor = FetchDescriptor<BlockDocumentBlockEntity>(
+            predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == idToMatch }
+        )
+        let assetDescriptor = FetchDescriptor<BlockDocumentAssetEntity>(
+            predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == idToMatch }
+        )
+        let stepDescriptor = FetchDescriptor<TodoStepEntity>(
+            predicate: #Predicate<TodoStepEntity> { $0.noteID == idToMatch }
+        )
+        let blocks = (try? context.fetch(blockDescriptor)) ?? []
+        let assets = (try? context.fetch(assetDescriptor)) ?? []
+        let steps = (try? context.fetch(stepDescriptor)) ?? []
+
+        deleteBlockDocumentArtifacts(noteID: noteID, assets: assets)
+        blocks.forEach(context.delete)
+        assets.forEach(context.delete)
+        steps.forEach(context.delete)
+
+        let libraryID = entity.libraryID
+        context.delete(entity)
+
+        let libraryDescriptor = FetchDescriptor<BlockDocumentLibraryEntity>(
+            predicate: #Predicate<BlockDocumentLibraryEntity> { $0.id == libraryID }
+        )
+        if let library = try? context.fetch(libraryDescriptor).first {
+            library.noteCount = max(0, library.noteCount - 1)
+        }
+        try? BlockDocumentNoteVersionStore.deleteHistory(noteID: noteID, context: context)
+        try? NoteReadingPositionStore.delete(noteID: noteID, context: context)
+        context.saveLogging("NoteStore.rollbackFailedTextImport")
+        readingPositions.removeValue(forKey: noteID)
+        fetchData()
+    }
+
     // MARK: - Todo Management
 
     var activeTodoItems: [TodoItem] {

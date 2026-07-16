@@ -45,6 +45,9 @@ struct ContentView: View {
     @State private var isEncryptedFolderUnlocked: Bool = false
     @StateObject private var richTextController = RichTextController()
     @State private var editorSaveHandlerID: UUID?
+    @State private var isTextFileDropTarget = false
+    @State private var isImportingTextFiles = false
+    @State private var textFileImportMessage: String?
 
     private var filteredNotes: [Note] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -414,6 +417,15 @@ struct ContentView: View {
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索所有笔记...")
+        .modifier(
+            TextNoteDropModifier(
+                isTargeted: $isTextFileDropTarget,
+                isImporting: $isImportingTextFiles,
+                message: $textFileImportMessage,
+                accentColor: themeManager.accentColor,
+                onDrop: handleDroppedTextFiles
+            )
+        )
         .onAppear {
             if let editorSaveHandlerID {
                 NoteSaveManager.shared.unregisterEditorSaveHandler(id: editorSaveHandlerID)
@@ -685,6 +697,104 @@ struct ContentView: View {
             }
             updateSelection(newNote.id, reason: "create")
         }
+    }
+
+    private func currentTextNoteImportTarget() -> TextNoteImportTarget? {
+        let uncategorizedName = l10n(L10nKeys.Folder.uncategorized)
+        switch selectedDestination {
+        case .allNotes, .unfiled:
+            return TextNoteImportTarget(
+                folderID: nil,
+                folderName: uncategorizedName,
+                encryptedFolderID: nil,
+                tagID: nil
+            )
+        case .noteFolder(let folderID):
+            guard let folder = store.folders.first(where: { $0.id == folderID }) else {
+                textFileImportMessage = "当前目录已不存在，请重新选择目录后再导入。"
+                return nil
+            }
+            return TextNoteImportTarget(
+                folderID: folder.id,
+                folderName: folder.name,
+                encryptedFolderID: nil,
+                tagID: nil
+            )
+        case .encryptedFolder(let folderID):
+            guard isEncryptedFolderUnlocked else {
+                textFileImportMessage = "请先解锁当前加密目录，再导入文本笔记。"
+                return nil
+            }
+            guard let folder = store.encryptedFolders.first(where: { $0.id == folderID }) else {
+                textFileImportMessage = "当前加密目录已不存在，请重新选择目录后再导入。"
+                return nil
+            }
+            return TextNoteImportTarget(
+                folderID: folder.id,
+                folderName: "🔒 " + folder.name,
+                encryptedFolderID: folder.id,
+                tagID: nil
+            )
+        case .tag(let tagID):
+            return TextNoteImportTarget(
+                folderID: nil,
+                folderName: uncategorizedName,
+                encryptedFolderID: nil,
+                tagID: tagID
+            )
+        case .conflicts, .recycleBin, .todoToday, .todoImportant, .todoList:
+            textFileImportMessage = "当前位置不是笔记目录，请先选择“全部笔记”、未分类或一个笔记目录。"
+            return nil
+        }
+    }
+
+    private func handleDroppedTextFiles(_ urls: [URL]) -> Bool {
+        let supportedURLs = urls.filter(TextNoteFileImporter.supports)
+        guard !supportedURLs.isEmpty else {
+            textFileImportMessage = "仅支持导入 .txt 和 .md 文件。"
+            return false
+        }
+        guard let target = currentTextNoteImportTarget() else { return false }
+
+        isImportingTextFiles = true
+        Task {
+            let batch = await Task.detached(priority: .userInitiated) {
+                TextNoteFileImporter.loadBatch(supportedURLs)
+            }.value
+
+            var importedNoteIDs: [UUID] = []
+            var failures = batch.failures
+            for document in batch.documents {
+                if let note = store.importTextNote(document, target: target) {
+                    importedNoteIDs.append(note.id)
+                } else {
+                    failures.append(
+                        TextNoteImportFailure(
+                            filename: document.sourceURL.lastPathComponent,
+                            message: "无法写入数据库"
+                        )
+                    )
+                }
+            }
+
+            isImportingTextFiles = false
+            isTextFileDropTarget = false
+            if let lastImportedID = importedNoteIDs.last {
+                searchText = ""
+                updateSelection(lastImportedID, reason: "fileDropImport")
+            }
+
+            Logger.shared.log(
+                .storage,
+                failures.isEmpty ? .info : .warn,
+                "Text file drop import completed: imported=\(importedNoteIDs.count) failed=\(failures.count)"
+            )
+            if !failures.isEmpty {
+                let details = failures.map { "\($0.filename)：\($0.message)" }.joined(separator: "\n")
+                textFileImportMessage = "已导入 \(importedNoteIDs.count) 篇，失败 \(failures.count) 篇：\n\(details)"
+            }
+        }
+        return true
     }
 
     private func createTodo() {
