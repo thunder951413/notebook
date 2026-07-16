@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -25,8 +31,10 @@ jobs:
           echo "KEYCHAIN_PATH=$RUNNER_TEMP/notebook-signing.keychain-db" >> "$GITHUB_ENV"
           echo "ARCHIVE_PATH=$RUNNER_TEMP/Notebook.xcarchive" >> "$GITHUB_ENV"
           echo "APP_PATH=$RUNNER_TEMP/Notebook.xcarchive/Products/Applications/Notebook.app" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=${{ inputs.release_tag || github.ref_name }}" >> "$GITHUB_ENV"
 
-      - name: Verify release secrets
+      - name: Select release signing mode
+        id: release_mode
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
@@ -35,11 +43,24 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          missing=0
           for name in BUILD_CERTIFICATE_BASE64 P12_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
-            test -n "${!name}" || { echo "Missing required secret: $name"; exit 1; }
+            if test -z "${!name}"; then
+              echo "Missing optional signing secret: $name"
+              missing=1
+            fi
           done
+          if test "$missing" -eq 0; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_ASSET=Notebook-${{ inputs.release_tag || github.ref_name }}.zip" >> "$GITHUB_ENV"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_ASSET=Notebook-${{ inputs.release_tag || github.ref_name }}-adhoc.zip" >> "$GITHUB_ENV"
+            echo "::warning::Apple signing secrets are incomplete; publishing an ad-hoc signed build without notarization."
+          fi
 
       - name: Import Developer ID certificate
+        if: steps.release_mode.outputs.signed == 'true'
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
@@ -77,6 +98,7 @@ jobs:
             test
 
       - name: Archive signed Release app
+        if: steps.release_mode.outputs.signed == 'true'
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
@@ -92,7 +114,22 @@ jobs:
             archive
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
+      - name: Archive ad-hoc Release app
+        if: steps.release_mode.outputs.signed != 'true'
+        run: |
+          xcodebuild \
+            -scheme Notebook \
+            -project Notebook.xcodeproj \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
       - name: Notarize and staple
+        if: steps.release_mode.outputs.signed == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -109,14 +146,15 @@ jobs:
           xcrun stapler validate "$APP_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
 
-      - name: Package notarized app
+      - name: Package Release app
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "Notebook-${{ github.ref_name }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$RELEASE_ASSET"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: Notebook-${{ github.ref_name }}.zip
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.RELEASE_ASSET }}
           generate_release_notes: true
 
       - name: Remove temporary keychain
