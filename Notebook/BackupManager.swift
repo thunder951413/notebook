@@ -94,8 +94,9 @@ final class BackupManager {
     /// 从备份恢复
     func restoreBackup(_ backup: BackupItem, context: ModelContext) -> Bool {
         do {
+            let backupNoteID = backup.noteID
             let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
-                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == backup.noteID }
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == backupNoteID }
             )
 
             let entities = try context.fetch(descriptor)

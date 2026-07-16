@@ -1,8 +1,8 @@
-import AppKit
+@preconcurrency import AppKit
 import SwiftUI
 
 /// 表格数据模型
-struct TableData: Codable {
+nonisolated struct TableData: Codable {
     var rows: [[String]]
     var columnWidths: [CGFloat]
     var rowHeights: [CGFloat]
@@ -57,7 +57,8 @@ struct TableData: Codable {
 }
 
 /// 表格附件 - 用于在富文本中嵌入可编辑表格
-final class TableTextAttachment: NSTextAttachment {
+/// NSTextAttachment 的编解码入口由 AppKit 定义为非隔离；实例仍只由编辑器在主线程展示。
+nonisolated final class TableTextAttachment: NSTextAttachment {
     private static let dataKey = "table_data"
     private static let isTableDebugEnabled = false
     private static func log(_ message: String) {

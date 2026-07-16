@@ -5,7 +5,7 @@ import Foundation
 import SwiftUI
 
 /// Android Notebook 可扫描的同步配置。仅在用户主动显示二维码时临时创建，禁止持久化或记录。
-struct MobileSyncConfigurationPayload: Codable, Equatable {
+nonisolated struct MobileSyncConfigurationPayload: Codable, Equatable {
     let type: String
     let version: Int
     let host: String
@@ -34,7 +34,7 @@ struct MobileSyncConfigurationPayload: Codable, Equatable {
     }
 }
 
-enum MobileSyncConfigurationEncoder {
+nonisolated enum MobileSyncConfigurationEncoder {
     static func encode(
         config: SSHConfig,
         password: String,
@@ -104,7 +104,7 @@ enum SSHKnownHostFingerprint {
 }
 
 private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
+    nonisolated var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 /// 可直接放入任意 SSH/同步设置页面的完整二维码入口。

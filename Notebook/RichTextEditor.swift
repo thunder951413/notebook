@@ -295,13 +295,6 @@ struct RichTextEditor: NSViewRepresentable {
                 }
         }
 
-        deinit {
-            bindingUpdateWorkItem?.cancel()
-            for observer in attachmentViewportObservers {
-                NotificationCenter.default.removeObserver(observer)
-            }
-        }
-
         func bindAttachmentViewport(scrollView: NSScrollView, textView: NSTextView) {
             unbindAttachmentViewport()
             attachmentScrollView = scrollView

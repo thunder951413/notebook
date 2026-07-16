@@ -88,9 +88,10 @@ struct MarkdownWebView: NSViewRepresentable {
 
         context.coordinator.reloadWorkItem?.cancel()
         let isFirstLoad = context.coordinator.lastLoadedHTML == nil
-        let workItem = DispatchWorkItem {
+        let workItem = DispatchWorkItem { [weak webView, weak coordinator = context.coordinator] in
+            guard let webView, let coordinator else { return }
             webView.loadHTMLString(html, baseURL: nil)
-            context.coordinator.lastLoadedHTML = html
+            coordinator.lastLoadedHTML = html
         }
         context.coordinator.reloadWorkItem = workItem
 
@@ -106,8 +107,13 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.reloadWorkItem?.cancel()
+        coordinator.reloadWorkItem = nil
         coordinator.flushReadingPosition()
+        NotificationCenter.default.removeObserver(coordinator)
         nsView.configuration.userContentController.removeScriptMessageHandler(forName: "readingPosition")
+        nsView.navigationDelegate = nil
+        nsView.stopLoading()
     }
 
     func generateHTML(
@@ -153,7 +159,7 @@ struct MarkdownWebView: NSViewRepresentable {
             applyInitialReadingPositionIfNeeded()
         }
 
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             guard navigationAction.navigationType == .linkActivated,
                   let url = navigationAction.request.url else {
                 decisionHandler(.allow)
@@ -307,10 +313,6 @@ struct MarkdownWebView: NSViewRepresentable {
             }
         }
 
-        deinit {
-            reloadWorkItem?.cancel()
-            NotificationCenter.default.removeObserver(self)
-        }
     }
 }
 

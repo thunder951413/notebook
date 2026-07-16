@@ -287,9 +287,6 @@ struct TableOfContentsMenu: NSViewRepresentable {
             return indent + item.title
         }
 
-        deinit {
-            cancellable?.cancel()
-        }
     }
 }
 

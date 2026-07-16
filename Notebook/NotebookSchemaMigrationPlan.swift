@@ -4,7 +4,7 @@ import SwiftData
 /// Schema 版本 1 —— 项目最初发布的 SwiftData 模型集合。
 /// 仅包含未引入 `previewText` / `hasLegacyCheckboxMigrated` 字段时的实体定义。
 enum NotebookSchemaV1: VersionedSchema {
-    static var versionIdentifier = Schema.Version(1, 0, 0)
+    static let versionIdentifier = Schema.Version(1, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         [
@@ -28,7 +28,7 @@ enum NotebookSchemaV1: VersionedSchema {
 /// 这两个字段均带默认值，SwiftData lightweight migration 可自动处理；
 /// 此处的显式声明仅为版本记录，便于未来 V3+ 迁移做版本对齐。
 enum NotebookSchemaV2: VersionedSchema {
-    static var versionIdentifier = Schema.Version(2, 0, 0)
+    static let versionIdentifier = Schema.Version(2, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV1.models
@@ -40,7 +40,7 @@ enum NotebookSchemaV2: VersionedSchema {
 ///
 /// 迁移时需要回填已有 Block/Asset 实体的 `note` 反向关系（旧数据该字段为 nil）。
 enum NotebookSchemaV3: VersionedSchema {
-    static var versionIdentifier = Schema.Version(3, 0, 0)
+    static let versionIdentifier = Schema.Version(3, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV1.models
@@ -51,7 +51,7 @@ enum NotebookSchemaV3: VersionedSchema {
 /// 为"按标签筛选笔记"提供 SQLite 索引查询。
 /// `BlockDocumentNoteEntity.tagIDs` 字符串字段保留作为权威序列化格式。
 enum NotebookSchemaV4: VersionedSchema {
-    static var versionIdentifier = Schema.Version(4, 0, 0)
+    static let versionIdentifier = Schema.Version(4, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV1.models + [BlockDocumentNoteTagEntity.self]
@@ -64,7 +64,7 @@ enum NotebookSchemaV4: VersionedSchema {
 /// - `BlockDocumentFolderEntity.folderType`
 /// - `TodoStepEntity`
 enum NotebookSchemaV5: VersionedSchema {
-    static var versionIdentifier = Schema.Version(5, 0, 0)
+    static let versionIdentifier = Schema.Version(5, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV4.models + [TodoStepEntity.self]
@@ -73,7 +73,7 @@ enum NotebookSchemaV5: VersionedSchema {
 
 /// Schema 版本 6 —— 新增按后端隔离的同步游标实体；旧游标保留用于 SSH 懒迁移。
 enum NotebookSchemaV6: VersionedSchema {
-    static var versionIdentifier = Schema.Version(6, 0, 0)
+    static let versionIdentifier = Schema.Version(6, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV5.models + [
@@ -85,7 +85,7 @@ enum NotebookSchemaV6: VersionedSchema {
 
 /// Schema 版本 7 —— 新增独立的逐笔记阅读位置实体。
 enum NotebookSchemaV7: VersionedSchema {
-    static var versionIdentifier = Schema.Version(7, 0, 0)
+    static let versionIdentifier = Schema.Version(7, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         NotebookSchemaV6.models + [BlockDocumentReadingPositionEntity.self]

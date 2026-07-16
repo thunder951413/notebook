@@ -1,4 +1,4 @@
-import AppKit
+@preconcurrency import AppKit
 import SwiftUI
 
 /// 表格单元格位置
@@ -8,35 +8,37 @@ struct TableCellPosition: Hashable {
 }
 
 /// 表格附件视图提供器 - TextKit 2 方式嵌入交互视图
+/// TextKit 仅在主线程调用 `loadView`；`assumeIsolated` 不发生线程跳转，Sendable 声明用于表达该框架约束。
 @available(macOS 12.0, *)
-class TableAttachmentViewProvider: NSTextAttachmentViewProvider {
+nonisolated final class TableAttachmentViewProvider: NSTextAttachmentViewProvider, @unchecked Sendable {
     private var hostingView: NSHostingView<TableInlineEditView>?
     
     override func loadView() {
-        super.loadView()
-        
-        guard let textAttachment = textAttachment as? TableTextAttachment else {
-            return
-        }
-        
-        let attachment = textAttachment
-        
-        let editView = TableInlineEditView(
-            tableData: attachment.tableData,
-            onCellEdited: { [weak attachment] row, col, value in
-                attachment?.updateCell(row: row, column: col, value: value)
-            },
-            onStructureChanged: { [weak attachment] newData in
-                attachment?.tableData = newData
-                attachment?.updateImage()
+        MainActor.assumeIsolated {
+            super.loadView()
+
+            guard let textAttachment = textAttachment as? TableTextAttachment else {
+                return
             }
-        )
-        
-        let hosting = NSHostingView(rootView: editView)
-        hosting.frame = NSRect(x: 0, y: 0, width: attachment.bounds.width, height: attachment.bounds.height)
-        
-        view = hosting
-        hostingView = hosting
+
+            let attachment = textAttachment
+            let editView = TableInlineEditView(
+                tableData: attachment.tableData,
+                onCellEdited: { [weak attachment] row, col, value in
+                    attachment?.updateCell(row: row, column: col, value: value)
+                },
+                onStructureChanged: { [weak attachment] newData in
+                    attachment?.tableData = newData
+                    attachment?.updateImage()
+                }
+            )
+
+            let hosting = NSHostingView(rootView: editView)
+            hosting.frame = NSRect(x: 0, y: 0, width: attachment.bounds.width, height: attachment.bounds.height)
+
+            view = hosting
+            hostingView = hosting
+        }
     }
     
     override func attachmentBounds(for attributes: [NSAttributedString.Key : Any], location: NSTextLocation, textContainer: NSTextContainer?, proposedLineFragment: CGRect, position: CGPoint) -> CGRect {

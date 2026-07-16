@@ -1,8 +1,9 @@
-import AppKit
+@preconcurrency import AppKit
 import SwiftUI
 
 /// 音频块附件：显示音频卡片（模仿苹果备忘录样式）
-final class AudioBlockAttachment: NSTextAttachment {
+/// NSTextAttachment 的编解码入口由 AppKit 定义为非隔离；实例仍只由编辑器在主线程展示。
+nonisolated final class AudioBlockAttachment: NSTextAttachment {
     override static var supportsSecureCoding: Bool { true }
 
     let fileURL: URL
@@ -243,25 +244,28 @@ final class AudioBlockAttachment: NSTextAttachment {
     }
 
     private static func resolveAudioFileURL(fromFilename filename: String) -> URL? {
-        let location = StorageLocationManager.shared
-        guard let base = location.baseDirectoryURL else { return nil }
+        guard Thread.isMainThread else { return nil }
+        return MainActor.assumeIsolated {
+            let location = StorageLocationManager.shared
+            guard let base = location.baseDirectoryURL else { return nil }
 
-        var result: URL?
-        location.withSecurityScopedAccess(base) {
-            guard let attachmentsDir = try? location.attachmentsDirectoryURL(),
-                  let noteDirs = try? FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil) else {
-                return
-            }
+            var result: URL?
+            location.withSecurityScopedAccess(base) {
+                guard let attachmentsDir = try? location.attachmentsDirectoryURL(),
+                      let noteDirs = try? FileManager.default.contentsOfDirectory(at: attachmentsDir, includingPropertiesForKeys: nil) else {
+                    return
+                }
 
-            for noteDir in noteDirs {
-                let candidate = noteDir.appendingPathComponent(filename)
-                if FileManager.default.fileExists(atPath: candidate.path) {
-                    result = candidate
-                    break
+                for noteDir in noteDirs {
+                    let candidate = noteDir.appendingPathComponent(filename)
+                    if FileManager.default.fileExists(atPath: candidate.path) {
+                        result = candidate
+                        break
+                    }
                 }
             }
+            return result
         }
-        return result
     }
 
     private static func uniqueTemporaryFileURL(directoryName: String, preferredFilename: String) -> URL {

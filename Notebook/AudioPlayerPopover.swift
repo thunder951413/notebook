@@ -267,18 +267,24 @@ struct AudioPlayerPopoverContent: View {
 
     private func startTimer() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            if selectedRoute == .realtimeMix {
-                if let start = playbackStartedAt {
-                    currentTime = min(Date().timeIntervalSince(start), duration)
-                }
-            } else {
-                currentTime = audioPlayer?.currentTime ?? 0
+            Task { @MainActor in
+                updatePlaybackProgress()
             }
+        }
+    }
 
-            if currentTime >= duration {
-                isPlaying = false
-                stopTimer()
+    private func updatePlaybackProgress() {
+        if selectedRoute == .realtimeMix {
+            if let start = playbackStartedAt {
+                currentTime = min(Date().timeIntervalSince(start), duration)
             }
+        } else {
+            currentTime = audioPlayer?.currentTime ?? 0
+        }
+
+        if currentTime >= duration {
+            isPlaying = false
+            stopTimer()
         }
     }
 

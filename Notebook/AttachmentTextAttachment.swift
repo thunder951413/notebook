@@ -1,8 +1,9 @@
-import AppKit
+@preconcurrency import AppKit
 
 /// 用于把本地附件路径写入富文本中，便于序列化/反序列化。
 /// 主要用于图片（通过 fileWrapper 打包进 RTFD）；音频展示/播放使用 `AudioBlockAttachment`。
-final class AttachmentTextAttachment: NSTextAttachment {
+/// NSTextAttachment 的编解码入口由 AppKit 定义为非隔离；实例仍只由编辑器在主线程展示。
+nonisolated final class AttachmentTextAttachment: NSTextAttachment {
     override static var supportsSecureCoding: Bool { true }
 
     let attachmentFileURL: URL

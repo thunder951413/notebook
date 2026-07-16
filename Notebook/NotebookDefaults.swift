@@ -6,7 +6,8 @@ import Foundation
 /// 真实的 `yy.Notebook` 偏好域。测试进程改用按进程隔离的 suite，生产运行仍保持
 /// 原有 standard domain，既不迁移也不清空用户现有设置。
 nonisolated enum NotebookDefaults {
-    static let shared: UserDefaults = {
+    /// UserDefaults 自身支持并发读取/写入；unsafe 仅用于表达 Foundation 尚未声明 Sendable。
+    nonisolated(unsafe) static let shared: UserDefaults = {
         let environment = ProcessInfo.processInfo.environment
         let isTestProcess = environment["XCTestConfigurationFilePath"] != nil
             || environment["NOTEBOOK_UI_TEST_DATA_DIR"] != nil

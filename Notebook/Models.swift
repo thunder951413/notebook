@@ -117,10 +117,6 @@ final class NoteStore: ObservableObject {
         setupModelContext()
     }
 
-    deinit {
-        modelContext = nil
-    }
-
     /// 从外部设置 ModelContext（用于 AppDelegate 注入）
     func setContext(_ context: ModelContext) {
         self.modelContext = context

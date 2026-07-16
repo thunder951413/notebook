@@ -20,7 +20,7 @@ import Foundation
 /// - ContentView / 应用主流程 → `DebugLog.app(...)`
 /// - 同步 / 存储相关 → `DebugLog.storage(...)`
 /// - 附件 / 表格 → `DebugLog.attachment(...)`
-enum DebugLog {
+nonisolated enum DebugLog {
     @inline(__always)
     static func log(_ module: LogModule, _ level: LogLevel = .debug, _ message: @autoclosure () -> String) {
         let text = message()

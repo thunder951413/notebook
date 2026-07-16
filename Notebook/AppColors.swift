@@ -38,7 +38,7 @@ struct AppColors {
     }
 }
 
-struct AttachmentAppearance {
+nonisolated struct AttachmentAppearance {
     static var primaryTextColor: NSColor { .textColor }
     static var secondaryTextColor: NSColor { .secondaryLabelColor }
     static var backgroundColor: NSColor { .textBackgroundColor }

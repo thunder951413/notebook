@@ -204,9 +204,4 @@ final class ShortcutActionHandler: ObservableObject {
         }
     }
     
-    deinit {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
 }

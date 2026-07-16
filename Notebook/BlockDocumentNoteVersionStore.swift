@@ -340,8 +340,9 @@ enum BlockDocumentNoteVersionStore {
         // 用内容指纹而非版本号做冲突检测，避免跨设备版本号不可比的问题
         let incomingFingerprint = try snapshotFingerprint(envelope.currentSnapshot)
 
+        let envelopeNoteID = envelope.noteID
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
-            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelope.noteID }
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == envelopeNoteID }
         )
         let localNote = try context.fetch(noteDescriptor).first
 
@@ -673,9 +674,10 @@ enum BlockDocumentNoteVersionStore {
         var importedVersions: [Int64] = []
 
         for historyEntry in envelope.history {
+            let historyVersion = historyEntry.version
             let versionDescriptor = FetchDescriptor<BlockDocumentNoteVersionEntity>(
                 predicate: #Predicate<BlockDocumentNoteVersionEntity> {
-                    $0.noteID == noteID && $0.version == historyEntry.version
+                    $0.noteID == noteID && $0.version == historyVersion
                 }
             )
             if try context.fetch(versionDescriptor).first != nil {

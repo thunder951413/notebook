@@ -25,7 +25,7 @@ struct LogEntry: Codable {
     let message: String
 }
 
-struct LogInterval {
+nonisolated struct LogInterval {
     private let module: LogModule
     private let level: LogLevel
     private let name: String
@@ -51,7 +51,8 @@ struct LogInterval {
     }
 }
 
-final class Logger {
+/// 所有可变状态只允许在 `queue` 上访问，因此该类型可安全跨线程记录日志。
+nonisolated final class Logger: @unchecked Sendable {
     static let shared = Logger()
 
     enum FileRetentionMode {

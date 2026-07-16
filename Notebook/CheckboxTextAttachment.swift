@@ -1,10 +1,11 @@
-import AppKit
+@preconcurrency import AppKit
 
 /// 调试开关
-private let isDebugEnabled = false
+nonisolated private let isDebugEnabled = false
 
 /// 复选框附件 - 用于待办列表，仿照 macOS 备忘录样式
-final class CheckboxTextAttachment: NSTextAttachment {
+/// NSTextAttachment 的编解码入口由 AppKit 定义为非隔离；实例仍只由编辑器在主线程展示。
+nonisolated final class CheckboxTextAttachment: NSTextAttachment {
     private static let checkedKey = "checkbox_isChecked"
 
     var isChecked: Bool = false {
