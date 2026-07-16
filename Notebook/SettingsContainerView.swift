@@ -1572,9 +1572,10 @@ private struct DocumentMigrationPreviewView: View {
         VStack(spacing: 0) {
             headerView
             Divider()
-            HSplitView {
+            HStack(spacing: 0) {
                 sidebarView
-                    .frame(minWidth: 240, idealWidth: 280, maxWidth: 320)
+                    .frame(width: 280)
+                Divider()
                 detailView
                     .frame(minWidth: 500)
             }

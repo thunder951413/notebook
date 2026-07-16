@@ -294,16 +294,22 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        // macOS 27 beta 的 SwiftUI/AppKit 桥接层会在 NavigationSplitView 的
+        // NSSplitView display-cycle hit test 中偶发访问失效的 responder。
+        // 使用等价的纯 SwiftUI 三栏布局，避免把主内容嵌进该桥接层。
+        HStack(spacing: 0) {
             SidebarView(
                 selectedDestination: $selectedDestination,
                 selection: $selection,
                 isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
                 onCreateNote: createNote
             )
-        } content: {
+
+            Divider()
+
             if selectedDestination == .recycleBin {
                 RecycleBinView(selection: $selection)
+                    .frame(width: 260)
             } else if selectedDestination.isTodoDestination {
                 TodoListView(
                     todos: filteredTodoItems,
@@ -317,21 +323,25 @@ struct ContentView: View {
                         showingDeleteConfirm = true
                     }
                 )
+                .frame(width: 260)
             } else {
                 NotesListView(notes: filteredNotes, selection: Binding(
-                get: { selection },
-                set: { newSelection in
-                    // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
-                    DispatchQueue.main.async {
-                        updateSelection(newSelection, reason: "switch")
+                    get: { selection },
+                    set: { newSelection in
+                        // 使用 DispatchQueue 避免 Publishing changes from within view updates 警告
+                        DispatchQueue.main.async {
+                            updateSelection(newSelection, reason: "switch")
+                        }
                     }
-                }
-            ), onDeleteRequest: { id in
-                pendingDeleteNoteID = id
-                showingDeleteConfirm = true
-            })
+                ), onDeleteRequest: { id in
+                    pendingDeleteNoteID = id
+                    showingDeleteConfirm = true
+                })
+                .frame(width: 260)
             }
-        } detail: {
+
+            Divider()
+
             if selectedDestination == .recycleBin {
                 ContentUnavailableView("回收站", systemImage: "trash")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
