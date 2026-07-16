@@ -776,10 +776,7 @@ class ConfigSyncManager {
     }
 
     private func commonSSHOptions(port: Int) -> [String] {
-        [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
+        SSHHostKeyPolicy.options + [
             "-o", "PreferredAuthentications=keyboard-interactive,password",
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",
@@ -791,10 +788,7 @@ class ConfigSyncManager {
     }
 
     private func commonSCPOptions(port: Int) -> [String] {
-        [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
+        SSHHostKeyPolicy.options + [
             "-o", "PreferredAuthentications=keyboard-interactive,password",
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",

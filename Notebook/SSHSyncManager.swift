@@ -153,26 +153,25 @@ final class SSHSyncManager: Sendable {
         }
 
         // 建立新的主连接
+        let connectionArguments = [
+            "-e",
+            "ssh",
+            "-f",  // 后台运行
+            "-N",  // 不执行远程命令
+            "-o", "ControlMaster=yes",
+            "-o", "ControlPath=\(controlPath)",
+            "-o", "ControlPersist=600"  // 10 分钟无连接自动关闭
+        ] + SSHHostKeyPolicy.options + [
+            "-o", "PreferredAuthentications=keyboard-interactive,password",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ConnectTimeout=15",
+            "-p", String(config.port),
+            "\(config.username)@\(config.host)"
+        ]
         let result = try await executeProcess(
             executablePath: sshpassPath,
-            arguments: [
-                "-e",
-                "ssh",
-                "-f",  // 后台运行
-                "-N",  // 不执行远程命令
-                "-o", "ControlMaster=yes",
-                "-o", "ControlPath=\(controlPath)",
-                "-o", "ControlPersist=600",  // 10 分钟无连接自动关闭
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "GlobalKnownHostsFile=/dev/null",
-                "-o", "PreferredAuthentications=keyboard-interactive,password",
-                "-o", "PubkeyAuthentication=no",
-                "-o", "NumberOfPasswordPrompts=1",
-                "-o", "ConnectTimeout=15",
-                "-p", String(config.port),
-                "\(config.username)@\(config.host)"
-            ],
+            arguments: connectionArguments,
             password: config.password,
             timeout: 20
         )
@@ -1457,10 +1456,7 @@ final class SSHSyncManager: Sendable {
     }
 
     private func commonSSHOptions(port: Int, controlPath: String? = nil) -> [String] {
-        var options = [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
+        var options = SSHHostKeyPolicy.options + [
             "-o", "PreferredAuthentications=keyboard-interactive,password",
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",
@@ -1483,10 +1479,7 @@ final class SSHSyncManager: Sendable {
     }
 
     private func commonSCPOptions(port: Int, controlPath: String? = nil) -> [String] {
-        var options = [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "GlobalKnownHostsFile=/dev/null",
+        var options = SSHHostKeyPolicy.options + [
             "-o", "PreferredAuthentications=keyboard-interactive,password",
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",

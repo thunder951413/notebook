@@ -67,4 +67,20 @@ extension NotebookTests {
             "https://example.com/v1/chat/completions"
         )
     }
+
+    @MainActor
+    func testAIResponseDiagnosticContainsMetadataOnly() {
+        let diagnostic = AIService.responseDiagnostic(statusCode: 401, dataCount: 123)
+        XCTAssertEqual(diagnostic, "AI response: HTTP 401, bytes=123")
+        XCTAssertFalse(diagnostic.contains("response body"))
+        XCTAssertFalse(diagnostic.contains("secret"))
+    }
+
+    func testSSHHostKeyPolicyUsesTrustOnFirstUseAndKnownHosts() {
+        XCTAssertTrue(SSHHostKeyPolicy.options.contains("StrictHostKeyChecking=accept-new"))
+        XCTAssertTrue(SSHHostKeyPolicy.options.contains("HashKnownHosts=yes"))
+        XCTAssertFalse(SSHHostKeyPolicy.options.contains("StrictHostKeyChecking=no"))
+        XCTAssertFalse(SSHHostKeyPolicy.options.contains("UserKnownHostsFile=/dev/null"))
+        XCTAssertFalse(SSHHostKeyPolicy.options.contains("GlobalKnownHostsFile=/dev/null"))
+    }
 }

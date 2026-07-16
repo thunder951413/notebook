@@ -1,6 +1,15 @@
 import Foundation
 import Combine
 
+/// 首次连接时记录主机密钥，后续连接拒绝密钥发生变化的服务器。
+/// 使用 OpenSSH 默认的 known_hosts，便于系统 ssh、配置同步和移动端配对共享同一信任记录。
+enum SSHHostKeyPolicy {
+    static let options = [
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "HashKnownHosts=yes"
+    ]
+}
+
 /// SSH 配置模型
 struct SSHConfig: Codable {
     var host: String

@@ -104,7 +104,7 @@ class AIService: ObservableObject {
         
         guard httpResponse.statusCode == 200 else {
             let responseString = String(data: data, encoding: .utf8) ?? "无法读取响应"
-            DebugLog.app("HTTP \(httpResponse.statusCode): \(responseString)", level: .debug)
+            DebugLog.app(Self.responseDiagnostic(statusCode: httpResponse.statusCode, dataCount: data.count), level: .debug)
             
             // 尝试解析错误响应
             if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
@@ -125,12 +125,11 @@ class AIService: ObservableObject {
                 throw AIServiceError.apiError("请求过于频繁 (429)，请稍后再试")
             }
             
-            throw AIServiceError.apiError("HTTP \(httpResponse.statusCode): \(responseString.prefix(200))")
+            throw AIServiceError.apiError("HTTP \(httpResponse.statusCode)（响应内容已隐藏）")
         }
         
         // 解析非流式响应
-        let responseString = String(data: data, encoding: .utf8) ?? ""
-        DebugLog.app(": \(responseString.prefix(500))", level: .debug)
+        DebugLog.app(Self.responseDiagnostic(statusCode: httpResponse.statusCode, dataCount: data.count), level: .debug)
         
         let responseBody = try JSONDecoder().decode(ResponseBody.self, from: data)
         
@@ -169,6 +168,10 @@ class AIService: ObservableObject {
             throw AIServiceError.invalidBaseURL
         }
         return url
+    }
+
+    static func responseDiagnostic(statusCode: Int, dataCount: Int) -> String {
+        "AI response: HTTP \(statusCode), bytes=\(dataCount)"
     }
 }
 
