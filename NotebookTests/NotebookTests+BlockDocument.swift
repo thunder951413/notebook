@@ -8,6 +8,44 @@ import SwiftUI
 extension NotebookTests {
 
     @MainActor
+    func testMovingEncryptedNoteUpdatesPersistentFolderAndEncryptedMapping() throws {
+        EncryptedFolderManager.shared.clearAllEncryptedData()
+        NotebookDefaults.shared.removeObject(forKey: "encrypted_folders")
+        defer {
+            EncryptedFolderManager.shared.clearAllEncryptedData()
+            NotebookDefaults.shared.removeObject(forKey: "encrypted_folders")
+        }
+
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let store = NoteStore()
+        store.setContext(context)
+        store.createEncryptedFolder(name: "来源")
+        store.createEncryptedFolder(name: "目标")
+
+        let sourceFolder = try XCTUnwrap(store.encryptedFolders.first(where: { $0.name == "来源" }))
+        let targetFolder = try XCTUnwrap(store.encryptedFolders.first(where: { $0.name == "目标" }))
+        let note = try XCTUnwrap(store.createEncryptedNote(in: sourceFolder.id))
+        XCTAssertEqual(EncryptedFolderManager.shared.getEncryptedFolderID(for: note), sourceFolder.id)
+
+        let movedNote = try XCTUnwrap(store.moveNoteToEncryptedFolder(id: note.id, to: targetFolder.id))
+        XCTAssertEqual(movedNote.folderID, targetFolder.id)
+        XCTAssertEqual(movedNote.folder, "🔒 目标")
+        XCTAssertEqual(EncryptedFolderManager.shared.getEncryptedFolderID(for: movedNote), targetFolder.id)
+
+        let noteID = note.id
+        let persisted = try XCTUnwrap(
+            try context.fetch(
+                FetchDescriptor<BlockDocumentNoteEntity>(
+                    predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+                )
+            ).first
+        )
+        XCTAssertEqual(persisted.folderID, targetFolder.id)
+        XCTAssertEqual(persisted.folderName, "🔒 目标")
+    }
+
+    @MainActor
     func testBlockDocumentNoteMovesToRecycleBinAndRestores() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext
