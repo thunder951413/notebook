@@ -7,14 +7,15 @@ final class PersistenceController: ObservableObject {
     static let shared = PersistenceController()
 
     @Published private(set) var modelContainer: ModelContainer?
-    /// 当前 store format 版本，与 `NotebookSchemaV6.versionIdentifier` 对齐。
+    /// 当前 store format 版本，与 `NotebookSchemaV7.versionIdentifier` 对齐。
     /// 每次引入 schema 变更时需同步 bump，并在 `NotebookSchemaMigrationPlan` 中追加 stage。
-    static let currentStoreFormatVersion = 6
+    static let currentStoreFormatVersion = 7
 
     static let appSchema = Schema([
         BlockDocumentLibraryEntity.self,
         BlockDocumentFolderEntity.self,
         BlockDocumentTagEntity.self,
+        BlockDocumentReadingPositionEntity.self,
         BlockDocumentNoteEntity.self,
         BlockDocumentBlockEntity.self,
         BlockDocumentAssetEntity.self,

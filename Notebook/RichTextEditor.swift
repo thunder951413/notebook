@@ -11,6 +11,8 @@ struct RichTextEditor: NSViewRepresentable {
 
     /// 当前显示的笔记 ID，用来判断是否发生了“切换笔记”（从而强制刷新内容）
     let noteID: UUID
+    let readingPosition: NoteReadingPosition?
+    let onReadingPositionChange: (UUID, Int, Double) -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -65,6 +67,14 @@ struct RichTextEditor: NSViewRepresentable {
         scroll.documentView = textView
         controller.bind(textView: textView, noteID: noteID)
         context.coordinator.bindAttachmentViewport(scrollView: scroll, textView: textView)
+        context.coordinator.configureReadingPosition(
+            noteID: noteID,
+            position: readingPosition,
+            onChange: onReadingPositionChange
+        )
+        context.coordinator.lastAppliedNoteID = noteID
+        context.coordinator.lastAppliedColorScheme = scheme
+        context.coordinator.restoreReadingPositionWhenReady()
 
         return scroll
     }
@@ -73,6 +83,8 @@ struct RichTextEditor: NSViewRepresentable {
         guard let textView = nsView.documentView as? RichTextView else { return }
         let didSwitchNote = context.coordinator.lastAppliedNoteID != noteID
         let didChangeColorScheme = context.coordinator.lastAppliedColorScheme != colorScheme
+
+        context.coordinator.updateReadingPositionHandler(onReadingPositionChange)
 
         // 确保 pasteCoordinator 始终是最新的
         textView.pasteCoordinator = context.coordinator
@@ -93,6 +105,12 @@ struct RichTextEditor: NSViewRepresentable {
                 metadata: "from=\(context.coordinator.lastAppliedNoteID?.uuidString.prefix(8) ?? "nil") to=\(noteID.uuidString.prefix(8)) incomingLength=\(attributedText.length) existingLength=\(textView.string.count)"
             )
 
+            context.coordinator.flushReadingPosition()
+            context.coordinator.configureReadingPosition(
+                noteID: noteID,
+                position: readingPosition,
+                onChange: onReadingPositionChange
+            )
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
 
@@ -118,6 +136,7 @@ struct RichTextEditor: NSViewRepresentable {
             // 只有在内容实际更新后才绑定新的 noteID
             controller.bind(textView: textView, noteID: noteID)
             context.coordinator.noteContentDidChange()
+            context.coordinator.restoreReadingPositionWhenReady()
 
             // 内容更新完成后再恢复撤销注册
             if let undoManager = textView.undoManager {
@@ -218,6 +237,7 @@ struct RichTextEditor: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.flushReadingPosition()
         coordinator.unbindAttachmentViewport()
     }
 
@@ -238,6 +258,12 @@ struct RichTextEditor: NSViewRepresentable {
         private weak var attachmentTextView: NSTextView?
         private var attachmentViewportObservers: [NSObjectProtocol] = []
         private var visibleImageAttachments: [ObjectIdentifier: (AttachmentTextAttachment, NSRange)] = [:]
+        private var readingPositionNoteID: UUID?
+        private var pendingReadingPosition: NoteReadingPosition?
+        private var readingPositionChangeHandler: ((UUID, Int, Double) -> Void)?
+        private var readingPositionWorkItem: DispatchWorkItem?
+        private var restoreGeneration = 0
+        private var isRestoringReadingPosition = false
 
         init(attributedText: Binding<NSAttributedString>, controller: RichTextController) {
             _attributedText = attributedText
@@ -275,6 +301,7 @@ struct RichTextEditor: NSViewRepresentable {
                 ) { [weak self] _ in
                     Task { @MainActor [weak self] in
                         self?.refreshVisibleImageAttachments()
+                        self?.scheduleReadingPositionCapture()
                     }
                 },
                 center.addObserver(
@@ -291,6 +318,8 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         func unbindAttachmentViewport() {
+            readingPositionWorkItem?.cancel()
+            readingPositionWorkItem = nil
             for observer in attachmentViewportObservers {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -301,6 +330,103 @@ struct RichTextEditor: NSViewRepresentable {
             visibleImageAttachments.removeAll()
             attachmentScrollView = nil
             attachmentTextView = nil
+        }
+
+        func configureReadingPosition(
+            noteID: UUID,
+            position: NoteReadingPosition?,
+            onChange: @escaping (UUID, Int, Double) -> Void
+        ) {
+            readingPositionNoteID = noteID
+            pendingReadingPosition = position
+            readingPositionChangeHandler = onChange
+        }
+
+        func updateReadingPositionHandler(_ handler: @escaping (UUID, Int, Double) -> Void) {
+            readingPositionChangeHandler = handler
+        }
+
+        func restoreReadingPositionWhenReady() {
+            restoreGeneration += 1
+            let generation = restoreGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.restoreGeneration else { return }
+                self.restoreReadingPosition()
+            }
+        }
+
+        private func restoreReadingPosition() {
+            guard let position = pendingReadingPosition,
+                  position.noteID == readingPositionNoteID,
+                  let scrollView = attachmentScrollView,
+                  let textView = attachmentTextView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+
+            let textLength = textView.textStorage?.length ?? 0
+            guard textLength > 0 else { return }
+            let characterIndex = min(max(position.anchorUTF16Offset, 0), textLength - 1)
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: NSRange(location: characterIndex, length: 1),
+                actualCharacterRange: nil
+            )
+            layoutManager.ensureLayout(for: textContainer)
+            var anchorRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            anchorRect.origin.y += textView.textContainerInset.height
+
+            let clipView = scrollView.contentView
+            let viewportHeight = max(clipView.bounds.height, 1)
+            let documentHeight = max(textView.bounds.height, anchorRect.maxY)
+            let desiredY = anchorRect.minY - position.viewportOffsetFraction * viewportHeight
+            let maximumY = max(0, documentHeight - viewportHeight)
+            isRestoringReadingPosition = true
+            clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: min(max(desiredY, 0), maximumY)))
+            scrollView.reflectScrolledClipView(clipView)
+            isRestoringReadingPosition = false
+            pendingReadingPosition = nil
+        }
+
+        private func scheduleReadingPositionCapture() {
+            guard !isRestoringReadingPosition, !isProgrammaticUpdate else { return }
+            readingPositionWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.captureReadingPosition()
+            }
+            readingPositionWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)
+        }
+
+        func flushReadingPosition() {
+            readingPositionWorkItem?.cancel()
+            readingPositionWorkItem = nil
+            captureReadingPosition()
+        }
+
+        private func captureReadingPosition() {
+            guard !isRestoringReadingPosition,
+                  let noteID = readingPositionNoteID,
+                  let handler = readingPositionChangeHandler,
+                  let scrollView = attachmentScrollView,
+                  let textView = attachmentTextView,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  (textView.textStorage?.length ?? 0) > 0 else { return }
+
+            let clipBounds = scrollView.contentView.bounds
+            let topInContainer = max(0, clipBounds.minY - textView.textContainerInset.height)
+            let probeRect = NSRect(x: 0, y: topInContainer, width: max(textContainer.containerSize.width, 1), height: 1)
+            let glyphRange = layoutManager.glyphRange(forBoundingRect: probeRect, in: textContainer)
+            guard glyphRange.location != NSNotFound, glyphRange.length > 0 else { return }
+            let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            guard characterRange.location != NSNotFound else { return }
+
+            var anchorRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyphRange.location, length: 1), in: textContainer)
+            anchorRect.origin.y += textView.textContainerInset.height
+            let fraction = (anchorRect.minY - clipBounds.minY) / max(clipBounds.height, 1)
+            let clampedFraction = min(max(fraction, -1), 1)
+            DispatchQueue.main.async {
+                handler(noteID, characterRange.location, clampedFraction)
+            }
         }
 
         func noteContentDidChange() {

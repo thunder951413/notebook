@@ -79,20 +79,20 @@ extension NotebookTests {
             atPath: backup.appendingPathComponent(PersistenceMigrationSafety.databaseSnapshotDirectoryName).path
         ))
     }
-    /// 验证当前 store format 版本与 NotebookSchemaV6 对齐
+    /// 验证当前 store format 版本与 NotebookSchemaV7 对齐
     @MainActor
-    func testCurrentStoreFormatVersionIsV6() {
-        XCTAssertEqual(PersistenceController.currentStoreFormatVersion, 6, "当前版本应为 6（V1→V2→V3→V4→V5→V6）")
+    func testCurrentStoreFormatVersionIsV7() {
+        XCTAssertEqual(PersistenceController.currentStoreFormatVersion, 7, "当前版本应为 7（V1→…→V7）")
     }
 
-    /// 验证 Migration Plan 包含 5 个 stage（V1→…→V6）
-    func testMigrationPlanHasFiveStages() {
-        XCTAssertEqual(NotebookSchemaMigrationPlan.stages.count, 5, "应有 5 个迁移 stage")
+    /// 验证 Migration Plan 包含 6 个 stage（V1→…→V7）
+    func testMigrationPlanHasSixStages() {
+        XCTAssertEqual(NotebookSchemaMigrationPlan.stages.count, 6, "应有 6 个迁移 stage")
     }
 
-    /// 验证 Migration Plan schemas 包含 V1-V6
-    func testMigrationPlanSchemasIncludeV1ThroughV6() {
-        XCTAssertEqual(NotebookSchemaMigrationPlan.schemas.count, 6, "应包含 V1-V6 六个版本")
+    /// 验证 Migration Plan schemas 包含 V1-V7
+    func testMigrationPlanSchemasIncludeV1ThroughV7() {
+        XCTAssertEqual(NotebookSchemaMigrationPlan.schemas.count, 7, "应包含 V1-V7 七个版本")
     }
 
     /// 验证 appSchema 包含 TodoStepEntity（V5 引入）

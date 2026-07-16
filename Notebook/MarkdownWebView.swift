@@ -21,9 +21,31 @@ struct MarkdownWebView: NSViewRepresentable {
     @Binding var height: CGFloat
     let noteID: UUID
     var renderAttributedContent: Bool = true
+    var readingPosition: NoteReadingPosition? = nil
+    var onReadingPositionChange: ((UUID, Int, Double) -> Void)? = nil
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(context.coordinator, name: "readingPosition")
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: """
+                    (function() {
+                        var notebookReadingPositionTimer = null;
+                        window.addEventListener('scroll', function() {
+                            clearTimeout(notebookReadingPositionTimer);
+                            notebookReadingPositionTimer = setTimeout(function() {
+                                var maxOffset = Math.max((document.body.scrollHeight || 0) - (window.innerHeight || 0), 0);
+                                var progress = maxOffset > 0 ? Math.max(0, Math.min(1, (window.scrollY || window.pageYOffset || 0) / maxOffset)) : 0;
+                                window.webkit.messageHandlers.readingPosition.postMessage(progress);
+                            }, 450);
+                        }, true);
+                    })();
+                """,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            )
+        )
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -40,6 +62,7 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.parent = self
         let html = MarkdownHTMLRenderer(
             markdown: markdown,
             attributedContent: attributedContent,
@@ -82,6 +105,11 @@ struct MarkdownWebView: NSViewRepresentable {
         Coordinator(self)
     }
 
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.flushReadingPosition()
+        nsView.configuration.userContentController.removeScriptMessageHandler(forName: "readingPosition")
+    }
+
     func generateHTML(
         from markdown: String,
         attributed: NSAttributedString?,
@@ -97,12 +125,15 @@ struct MarkdownWebView: NSViewRepresentable {
         ).generateHTML()
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: MarkdownWebView
         var webView: WKWebView?
         var lastLoadedHTML: String?
         var reloadWorkItem: DispatchWorkItem?
         var navigationState = MarkdownPreviewNavigationState()
+        private var didRestoreInitialReadingPosition = false
+        private var isRestoringReadingPosition = false
+        private var suppressReadingPositionUntil = Date.distantPast
 
         init(_ parent: MarkdownWebView) {
             self.parent = parent
@@ -119,6 +150,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 }
             }
             applyPendingNavigationIfNeeded()
+            applyInitialReadingPositionIfNeeded()
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -175,6 +207,57 @@ struct MarkdownWebView: NSViewRepresentable {
                     contentHeight: contentHeight,
                     viewportHeight: viewportHeight
                 )
+            }
+        }
+
+        func flushReadingPosition() {
+            guard !isRestoringReadingPosition,
+                  let webView,
+                  let handler = parent.onReadingPositionChange else { return }
+            let sourceLength = (parent.markdown as NSString).length
+            let script = """
+                (function() {
+                    var maxOffset = Math.max((document.body.scrollHeight || 0) - (window.innerHeight || 0), 0);
+                    if (maxOffset <= 0) return 0;
+                    return Math.max(0, Math.min(1, (window.scrollY || window.pageYOffset || 0) / maxOffset));
+                })();
+            """
+            webView.evaluateJavaScript(script) { [noteID = parent.noteID] result, _ in
+                guard let progress = result as? Double else { return }
+                let offset = Int((Double(sourceLength) * progress).rounded())
+                DispatchQueue.main.async { handler(noteID, offset, 0) }
+            }
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "readingPosition",
+                  !isRestoringReadingPosition,
+                  Date() >= suppressReadingPositionUntil,
+                  let progress = (message.body as? NSNumber)?.doubleValue,
+                  let handler = parent.onReadingPositionChange else { return }
+            let sourceLength = (parent.markdown as NSString).length
+            let offset = Int((Double(sourceLength) * min(max(progress, 0), 1)).rounded())
+            handler(parent.noteID, offset, 0)
+        }
+
+        private func applyInitialReadingPositionIfNeeded() {
+            guard !didRestoreInitialReadingPosition,
+                  let position = parent.readingPosition,
+                  position.noteID == parent.noteID,
+                  let webView else { return }
+            didRestoreInitialReadingPosition = true
+            let sourceLength = max((parent.markdown as NSString).length, 1)
+            let progress = min(max(Double(position.anchorUTF16Offset) / Double(sourceLength), 0), 1)
+            isRestoringReadingPosition = true
+            suppressReadingPositionUntil = Date().addingTimeInterval(1)
+            let script = """
+                (function() {
+                    var maxOffset = Math.max((document.body.scrollHeight || 0) - (window.innerHeight || 0), 0);
+                    window.scrollTo({ top: maxOffset * \(progress), behavior: 'auto' });
+                })();
+            """
+            webView.evaluateJavaScript(script) { [weak self] _, _ in
+                self?.isRestoringReadingPosition = false
             }
         }
 

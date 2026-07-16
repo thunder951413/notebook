@@ -63,5 +63,60 @@ final class NotebookTests: XCTestCase {
         XCTAssertEqual(loadedIDs, [fallbackID])
     }
 
+    func testReadingPositionConflictUsesTimestampThenDeviceID() {
+        let noteID = UUID()
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let older = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: 10,
+            viewportOffsetFraction: 0,
+            updatedAt: date.addingTimeInterval(-1),
+            deviceID: "z-device"
+        )
+        let current = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: 20,
+            viewportOffsetFraction: 0.2,
+            updatedAt: date,
+            deviceID: "a-device"
+        )
+        let tieBreakerWinner = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: 30,
+            viewportOffsetFraction: -0.1,
+            updatedAt: date,
+            deviceID: "z-device"
+        )
+
+        XCTAssertFalse(NoteReadingPosition.wins(older, over: current))
+        XCTAssertTrue(NoteReadingPosition.wins(tieBreakerWinner, over: current))
+    }
+
+    @MainActor
+    func testReadingPositionPersistsAndRejectsStaleMerge() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let noteID = UUID()
+        let newer = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: 321,
+            viewportOffsetFraction: 0.25,
+            updatedAt: Date(),
+            deviceID: "mac"
+        )
+        let stale = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: 1,
+            viewportOffsetFraction: 0,
+            updatedAt: newer.updatedAt.addingTimeInterval(-10),
+            deviceID: "android"
+        )
+
+        XCTAssertTrue(try NoteReadingPositionStore.merge(newer, context: context))
+        try context.save()
+        XCTAssertFalse(try NoteReadingPositionStore.merge(stale, context: context))
+        XCTAssertEqual(try NoteReadingPositionStore.all(context: context), [newer])
+    }
+
 
 }

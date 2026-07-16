@@ -25,6 +25,7 @@ final class NoteStore: ObservableObject {
     @Published var todoLists: [TodoList] = []
     @Published var tags: [Tag] = []
     @Published var encryptedFolders: [EncryptedFolder] = []
+    @Published private(set) var readingPositions: [UUID: NoteReadingPosition] = [:]
 
     /// 非回收站的笔记
     var activeNotes: [Note] {
@@ -163,10 +164,46 @@ final class NoteStore: ObservableObject {
             guard let library = ensureBlockDocumentLibrary(in: context) else { return }
             cleanupExpiredOneTimeReminders(context: context)
             try loadBlockDocumentData(context: context, library: library)
+            readingPositions = Dictionary(
+                uniqueKeysWithValues: try NoteReadingPositionStore.all(context: context).map { ($0.noteID, $0) }
+            )
             loadEncryptedFolders()
             reschedulePendingTodoReminders()
         } catch {
             Logger.shared.log(.storage, .error, "Fetch failed: \(error.localizedDescription)")
+        }
+    }
+
+    func readingPosition(for noteID: UUID) -> NoteReadingPosition? {
+        readingPositions[noteID]
+    }
+
+    func recordReadingPosition(
+        noteID: UUID,
+        anchorUTF16Offset: Int,
+        viewportOffsetFraction: Double
+    ) {
+        guard let context = modelContext else { return }
+        let clampedFraction = min(max(viewportOffsetFraction, -1), 1)
+        if let current = readingPositions[noteID],
+           current.anchorUTF16Offset == max(0, anchorUTF16Offset),
+           abs(current.viewportOffsetFraction - clampedFraction) < 0.001 {
+            return
+        }
+        let position = NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: max(0, anchorUTF16Offset),
+            viewportOffsetFraction: clampedFraction,
+            updatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+        )
+        do {
+            guard try NoteReadingPositionStore.merge(position, context: context) else { return }
+            try context.save()
+            readingPositions[noteID] = position
+            autoSyncCoordinator.libraryDidChange(reason: "readingPosition")
+        } catch {
+            Logger.shared.log(.storage, .error, "保存阅读位置失败: \(error.localizedDescription)")
         }
     }
 
@@ -1806,7 +1843,9 @@ final class NoteStore: ObservableObject {
             }
 
             try? BlockDocumentNoteVersionStore.deleteHistory(noteID: id, context: context)
+            try? NoteReadingPositionStore.delete(noteID: id, context: context)
             context.saveLogging("NoteStore.deleteNotePermanently")
+            readingPositions.removeValue(forKey: id)
             notes.removeAll { $0.id == id }
             todoItems.removeAll { $0.id == id }
             autoSyncCoordinator.noteDidSave(noteID: id, reason: "deletePermanently")

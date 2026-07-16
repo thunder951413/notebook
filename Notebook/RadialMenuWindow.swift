@@ -3,11 +3,15 @@ import AppKit
 import Combine
 
 /// 环形菜单窗口控制器
+@MainActor
 final class RadialMenuWindowController: NSObject {
     static let shared = RadialMenuWindowController()
     
     private var window: NSWindow?
     private var eventMonitor: Any?
+    /// SwiftUI/AppKit 仍可能在当前事件结束后的 display cycle 中访问 responder 树。
+    /// 延迟释放已隐藏窗口，避免命中测试命中已销毁的 NSHostingView。
+    private var retiringWindows: [ObjectIdentifier: NSWindow] = [:]
     
     private override init() {
         super.init()
@@ -53,7 +57,7 @@ final class RadialMenuWindowController: NSObject {
         self.window = window
         window.makeKeyAndOrderFront(nil)
         
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 {
                 self?.hide()
                 return nil
@@ -68,8 +72,21 @@ final class RadialMenuWindowController: NSObject {
             eventMonitor = nil
         }
         
-        window?.orderOut(nil)
-        window = nil
+        guard let window else { return }
+        self.window = nil
+        window.ignoresMouseEvents = true
+        window.orderOut(nil)
+
+        let identifier = ObjectIdentifier(window)
+        retiringWindows[identifier] = window
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak window] in
+            guard let self else { return }
+            if let window {
+                window.contentView = nil
+                window.close()
+            }
+            self.retiringWindows.removeValue(forKey: identifier)
+        }
     }
     
     private func executeAction(_ action: ShortcutAction) {
@@ -195,17 +212,34 @@ struct RadialMenuWindowContent: View {
             }
             .contentShape(Rectangle())
             .onContinuousHover { phase in
+                let nextPosition: Int?
                 switch phase {
                 case .active(let location):
-                    updateHover(at: location, center: center, innerRadius: innerRadius, outerRadius: outerRadius)
+                    nextPosition = hoverPosition(
+                        at: location,
+                        center: center,
+                        innerRadius: innerRadius,
+                        outerRadius: outerRadius
+                    )
                 case .ended:
-                    hoveredPosition = nil
+                    nextPosition = nil
+                }
+                // 不在 SwiftUI/AppKit 正执行 responder hit-test 的事件回调中重建视图树。
+                DispatchQueue.main.async {
+                    if hoveredPosition != nextPosition {
+                        hoveredPosition = nextPosition
+                    }
                 }
             }
         }
     }
     
-    private func updateHover(at location: CGPoint, center: CGPoint, innerRadius: CGFloat, outerRadius: CGFloat) {
+    private func hoverPosition(
+        at location: CGPoint,
+        center: CGPoint,
+        innerRadius: CGFloat,
+        outerRadius: CGFloat
+    ) -> Int? {
         let dx = location.x - center.x
         let dy = location.y - center.y
         let distance = hypot(dx, dy)
@@ -216,15 +250,13 @@ struct RadialMenuWindowContent: View {
         // 如果在中心圆内，不悬停任何扇形
         if distance < innerRadius {
             DebugLog.app("In center, no hover", level: .debug)
-            hoveredPosition = nil
-            return
+            return nil
         }
         
         // 如果在外圆外，不悬停
         if distance > outerRadius {
             DebugLog.app("Outside ring, no hover", level: .debug)
-            hoveredPosition = nil
-            return
+            return nil
         }
         
         // 计算角度
@@ -251,10 +283,7 @@ struct RadialMenuWindowContent: View {
         
         DebugLog.app("Sector index: \(sectorIndex)", level: .debug)
         
-        if hoveredPosition != sectorIndex {
-            DebugLog.app("Hover changed to sector \(sectorIndex)", level: .debug)
-            hoveredPosition = sectorIndex
-        }
+        return sectorIndex
     }
 }
 

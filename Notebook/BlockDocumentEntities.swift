@@ -33,6 +33,34 @@ struct BlockDocumentTablePayload: Codable {
     let rowHeights: [Double]
 }
 
+/// 与笔记正文版本相互独立的阅读位置。字符偏移采用 UTF-16，和
+/// NSAttributedString / NSString / Android String 的索引单位一致。
+struct NoteReadingPosition: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+
+    let noteID: UUID
+    let anchorUTF16Offset: Int
+    /// 锚点相对可视区域顶部的比例；0 表示锚点位于顶部。
+    let viewportOffsetFraction: Double
+    let updatedAt: Date
+    let deviceID: String
+
+    static func wins(_ candidate: Self, over current: Self?) -> Bool {
+        guard let current else { return true }
+        if candidate.updatedAt != current.updatedAt {
+            return candidate.updatedAt > current.updatedAt
+        }
+        return candidate.deviceID > current.deviceID
+    }
+}
+
+struct ReadingPositionSyncEnvelope: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let exportedAt: Date
+    let deviceID: String
+    let positions: [NoteReadingPosition]
+}
+
 @Model
 final class BlockDocumentLibraryEntity {
     @Attribute(.unique) var id: UUID
@@ -117,6 +145,95 @@ final class BlockDocumentTagEntity {
         self.color = color
         self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt
+    }
+}
+
+@Model
+final class BlockDocumentReadingPositionEntity {
+    @Attribute(.unique) var noteID: UUID = UUID()
+    var anchorUTF16Offset: Int = 0
+    var viewportOffsetFraction: Double = 0
+    var updatedAt: Date = Date.distantPast
+    var deviceID: String = ""
+
+    init(position: NoteReadingPosition) {
+        noteID = position.noteID
+        anchorUTF16Offset = position.anchorUTF16Offset
+        viewportOffsetFraction = position.viewportOffsetFraction
+        updatedAt = position.updatedAt
+        deviceID = position.deviceID
+    }
+
+    var value: NoteReadingPosition {
+        NoteReadingPosition(
+            noteID: noteID,
+            anchorUTF16Offset: anchorUTF16Offset,
+            viewportOffsetFraction: viewportOffsetFraction,
+            updatedAt: updatedAt,
+            deviceID: deviceID
+        )
+    }
+
+    func apply(_ position: NoteReadingPosition) {
+        anchorUTF16Offset = position.anchorUTF16Offset
+        viewportOffsetFraction = position.viewportOffsetFraction
+        updatedAt = position.updatedAt
+        deviceID = position.deviceID
+    }
+}
+
+enum NoteReadingPositionStore {
+    static func position(noteID: UUID, context: ModelContext) throws -> NoteReadingPosition? {
+        let id = noteID
+        return try context.fetch(
+            FetchDescriptor<BlockDocumentReadingPositionEntity>(
+                predicate: #Predicate<BlockDocumentReadingPositionEntity> { $0.noteID == id }
+            )
+        ).first?.value
+    }
+
+    static func all(context: ModelContext) throws -> [NoteReadingPosition] {
+        try context.fetch(FetchDescriptor<BlockDocumentReadingPositionEntity>())
+            .map(\.value)
+    }
+
+    @discardableResult
+    static func merge(_ position: NoteReadingPosition, context: ModelContext) throws -> Bool {
+        let noteID = position.noteID
+        let descriptor = FetchDescriptor<BlockDocumentReadingPositionEntity>(
+            predicate: #Predicate<BlockDocumentReadingPositionEntity> { $0.noteID == noteID }
+        )
+        if let entity = try context.fetch(descriptor).first {
+            guard NoteReadingPosition.wins(position, over: entity.value) else { return false }
+            entity.apply(position)
+        } else {
+            context.insert(BlockDocumentReadingPositionEntity(position: position))
+        }
+        return true
+    }
+
+    @discardableResult
+    static func merge(_ positions: [NoteReadingPosition], context: ModelContext) throws -> Bool {
+        var changed = false
+        for position in positions {
+            changed = try merge(position, context: context) || changed
+        }
+        if changed {
+            try context.save()
+        }
+        return changed
+    }
+
+    static func delete(noteID: UUID, context: ModelContext) throws {
+        let id = noteID
+        let entities = try context.fetch(
+            FetchDescriptor<BlockDocumentReadingPositionEntity>(
+                predicate: #Predicate<BlockDocumentReadingPositionEntity> { $0.noteID == id }
+            )
+        )
+        for entity in entities {
+            context.delete(entity)
+        }
     }
 }
 

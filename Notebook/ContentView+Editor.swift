@@ -130,7 +130,9 @@ struct NoteEditorView: View {
                                 attributedText: $note.content,
                                 controller: controller,
                                 isEditable: true,
-                                noteID: note.id
+                                noteID: note.id,
+                                readingPosition: store.readingPosition(for: note.id),
+                                onReadingPositionChange: store.recordReadingPosition
                             )
                             .id(note.id)
                             .frame(maxHeight: .infinity)
@@ -139,7 +141,13 @@ struct NoteEditorView: View {
                             }
                         case .preview:
                             // Markdown 预览模式
-                            NoteMarkdownPreviewView(content: note.content, colorScheme: colorScheme, noteID: note.id)
+                            NoteMarkdownPreviewView(
+                                content: note.content,
+                                colorScheme: colorScheme,
+                                noteID: note.id,
+                                readingPosition: store.readingPosition(for: note.id),
+                                onReadingPositionChange: store.recordReadingPosition
+                            )
                                 .frame(maxHeight: .infinity)
                         case .split:
                             // 分屏预览模式
@@ -149,7 +157,9 @@ struct NoteEditorView: View {
                                     attributedText: $note.content,
                                     controller: controller,
                                     isEditable: true,
-                                    noteID: note.id
+                                    noteID: note.id,
+                                    readingPosition: store.readingPosition(for: note.id),
+                                    onReadingPositionChange: store.recordReadingPosition
                                 )
                                 .id(note.id)
                                 .frame(maxHeight: .infinity)
@@ -163,7 +173,11 @@ struct NoteEditorView: View {
                                     .foregroundStyle(Color.gray.opacity(0.3))
 
                                 // 右侧预览
-                                NoteMarkdownPreviewView(content: note.content, colorScheme: colorScheme, noteID: note.id)
+                                NoteMarkdownPreviewView(
+                                    content: note.content,
+                                    colorScheme: colorScheme,
+                                    noteID: note.id
+                                )
                                     .frame(maxHeight: .infinity)
                             }
                         }
@@ -375,6 +389,12 @@ struct EditorTopBarView: View {
         Logger.shared.log(.encryption, .info, "\(action) [\(noteIDPrefix)] '\(noteTitle)' into encrypted folder '\(folder.name)'")
     }
 
+    /// NSMenu 仍在跟踪鼠标/命中测试时同步发布列表变更，会让当前编辑器和菜单宿主
+    /// 同时从 SwiftUI responder 树中消失。等菜单跟踪周期结束后再修改应用状态。
+    private func performAfterFolderMenuCloses(_ operation: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: operation)
+    }
+
     var recurrenceOptions: [(String, String)] {
         [
             (l10n(L10nKeys.Note.noRecurrence), "none"),
@@ -561,8 +581,10 @@ struct EditorTopBarView: View {
                 Menu {
                     ForEach(store.folders) { folder in
                         Button(folder.name) {
-                            note.folder = folder.name
-                            note.folderID = folder.id
+                            performAfterFolderMenuCloses {
+                                note.folder = folder.name
+                                note.folderID = folder.id
+                            }
                         }
                     }
 
@@ -575,7 +597,9 @@ struct EditorTopBarView: View {
                             } else {
                                 ForEach(store.encryptedFolders) { folder in
                                     Button(folder.name) {
-                                        moveNoteToEncryptedFolder(folder)
+                                        performAfterFolderMenuCloses {
+                                            moveNoteToEncryptedFolder(folder)
+                                        }
                                     }
                                 }
                             }

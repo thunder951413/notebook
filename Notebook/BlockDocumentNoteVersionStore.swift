@@ -55,6 +55,8 @@ struct VersionedNoteSyncEnvelope: Codable {
     let currentSnapshot: VersionedNoteSnapshot
     let history: [VersionedNoteHistoryEnvelope]
     let syncState: VersionedNoteSyncStatePayload
+    /// 兼容 iCloud/本地目录同步；SSH 另外使用独立聚合文件，避免正文版本未变时漏传。
+    let readingPosition: NoteReadingPosition?
 }
 
 struct NoteVersionComparison {
@@ -299,6 +301,7 @@ enum BlockDocumentNoteVersionStore {
             )
         }
         let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
+        let readingPosition = try NoteReadingPositionStore.position(noteID: noteID, context: context)
         return VersionedNoteSyncEnvelope(
             noteID: noteID,
             deviceID: currentDeviceID(),
@@ -315,7 +318,8 @@ enum BlockDocumentNoteVersionStore {
                 lastRemoteDeviceID: syncState.lastRemoteDeviceID,
                 remoteFingerprint: syncState.remoteFingerprint,
                 pendingHistoryCount: syncState.pendingHistoryCount
-            )
+            ),
+            readingPosition: readingPosition
         )
     }
 
@@ -324,6 +328,10 @@ enum BlockDocumentNoteVersionStore {
         context: ModelContext,
         backendID: String = Backend.ssh
     ) throws -> NoteSyncMergeResult {
+        if let readingPosition = envelope.readingPosition,
+           try NoteReadingPositionStore.merge(readingPosition, context: context) {
+            try context.save()
+        }
         let importedVersions = try importHistory(from: envelope, backendID: backendID, context: context)
         let syncState = try ensureSyncState(noteID: envelope.noteID, backendID: backendID, context: context)
         syncState.lastRemoteVersion = envelope.currentVersion

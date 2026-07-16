@@ -579,6 +579,7 @@ final class SSHSyncManager: Sendable {
                 message: "正在同步文件夹和标签..."
             )
             try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
+            try await syncReadingPositionsToRemote(context: context, config: config, controlPath: controlPath)
             await reportProgress(
                 progressHandler,
                 phase: .pushLibrary,
@@ -648,6 +649,7 @@ final class SSHSyncManager: Sendable {
                 message: "正在拉取文件夹和标签..."
             )
             try await syncLibraryFromRemote(context: context, config: config, controlPath: controlPath)
+            try await syncReadingPositionsFromRemote(context: context, config: config, controlPath: controlPath)
             await reportProgress(
                 progressHandler,
                 phase: .pullLibrary,
@@ -929,6 +931,125 @@ final class SSHSyncManager: Sendable {
         )
 
         return try Data(contentsOf: tempFileURL)
+    }
+
+    /// 阅读位置使用独立文件同步，避免仅浏览笔记就覆盖远程正文或增加正文版本。
+    private func syncReadingPositionsToRemote(
+        context: ModelContext,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        let localPositions = try NoteReadingPositionStore.all(context: context)
+        let remoteEnvelope = try await downloadReadingPositionsEnvelopeIfPresent(
+            config: config,
+            controlPath: controlPath
+        )
+        if let remoteEnvelope,
+           remoteEnvelope.schemaVersion > NoteReadingPosition.schemaVersion {
+            Logger.shared.log(.storage, .warn, "[SSHSync] 远程阅读位置协议版本过新，保留远程文件并跳过推送")
+            return
+        }
+        let deletedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
+        var merged = Dictionary(uniqueKeysWithValues: localPositions.map { ($0.noteID, $0) })
+        for position in remoteEnvelope?.positions ?? []
+        where !deletedNoteIDs.contains(position.noteID) && NoteReadingPosition.wins(position, over: merged[position.noteID]) {
+            merged[position.noteID] = position
+        }
+        for deletedNoteID in deletedNoteIDs {
+            merged.removeValue(forKey: deletedNoteID)
+        }
+        let positions = merged.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+        guard !positions.isEmpty || remoteEnvelope != nil else { return }
+
+        _ = try NoteReadingPositionStore.merge(positions, context: context)
+        let envelope = ReadingPositionSyncEnvelope(
+            schemaVersion: NoteReadingPosition.schemaVersion,
+            exportedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            positions: positions
+        )
+        try await uploadReadingPositionsEnvelope(envelope, config: config, controlPath: controlPath)
+    }
+
+    private func syncReadingPositionsFromRemote(
+        context: ModelContext,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        guard let envelope = try await downloadReadingPositionsEnvelopeIfPresent(
+            config: config,
+            controlPath: controlPath
+        ) else { return }
+        guard envelope.schemaVersion <= NoteReadingPosition.schemaVersion else {
+            Logger.shared.log(.storage, .warn, "[SSHSync] 远程阅读位置协议版本过新，已跳过")
+            return
+        }
+        _ = try NoteReadingPositionStore.merge(envelope.positions, context: context)
+    }
+
+    private func downloadReadingPositionsEnvelopeIfPresent(
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws -> ReadingPositionSyncEnvelope? {
+        let sshpassPath = try checkSshpassAvailable()
+        let remotePath = "\(config.repositoryPath)/notes/reading_positions.json"
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reading_positions_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        do {
+            try await runSCPDownload(
+                sshpassPath: sshpassPath,
+                config: config,
+                remotePath: remotePath,
+                localPath: temporaryURL.path,
+                controlPath: controlPath
+            )
+        } catch {
+            if isRemoteFileMissing(error) { return nil }
+            throw error
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ReadingPositionSyncEnvelope.self, from: Data(contentsOf: temporaryURL))
+    }
+
+    private func uploadReadingPositionsEnvelope(
+        _ envelope: ReadingPositionSyncEnvelope,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        let sshpassPath = try checkSshpassAvailable()
+        let remoteDirectory = "\(config.repositoryPath)/notes"
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p \(shellQuotedRemotePath(remoteDirectory))",
+            controlPath: controlPath
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(envelope)
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reading_positions_upload_\(UUID().uuidString).json")
+        try data.write(to: temporaryURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+        let remoteTemporaryPath = "\(remoteDirectory)/reading_positions.json.tmp.\(UUID().uuidString)"
+        let remoteTargetPath = "\(remoteDirectory)/reading_positions.json"
+        try await runSCPUpload(
+            sshpassPath: sshpassPath,
+            config: config,
+            localPath: temporaryURL.path,
+            remotePath: remoteTemporaryPath,
+            controlPath: controlPath
+        )
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mv \(shellQuotedRemotePath(remoteTemporaryPath)) \(shellQuotedRemotePath(remoteTargetPath))",
+            controlPath: controlPath
+        )
     }
 
     private func syncDownloadedRemoteNotePayload(

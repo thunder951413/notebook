@@ -7,6 +7,8 @@ struct NoteMarkdownPreviewView: View {
     let content: NSAttributedString
     let colorScheme: ColorScheme
     let noteID: UUID
+    var readingPosition: NoteReadingPosition? = nil
+    var onReadingPositionChange: ((UUID, Int, Double) -> Void)? = nil
     @State private var webViewHeight: CGFloat = 500
     @State private var scrollOffset: CGFloat = 0
     @State private var renderedContent: NSAttributedString = NSAttributedString(string: "")
@@ -49,7 +51,9 @@ struct NoteMarkdownPreviewView: View {
             colorScheme: colorScheme,
             height: $webViewHeight,
             noteID: noteID,
-            renderAttributedContent: false
+            renderAttributedContent: false,
+            readingPosition: readingPosition,
+            onReadingPositionChange: onReadingPositionChange
         )
         .frame(maxHeight: .infinity)
         .padding(.horizontal, 16)
