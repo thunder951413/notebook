@@ -11,6 +11,91 @@ enum SSHHostKeyPolicy {
     ]
 }
 
+/// SSH 与配置同步共用的进程参数构造器。
+/// 密码只通过 SSHPASS 环境变量传递，绝不能出现在可被系统进程列表读取的参数中。
+enum SSHProcessTransport {
+    static func findSSHpassPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> String? {
+        let searchPath = environment["PATH"] ?? ""
+        let directories = searchPath.split(separator: ":").map(String.init) + [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin"
+        ]
+        var visited = Set<String>()
+        for directory in directories where visited.insert(directory).inserted {
+            let candidate = URL(fileURLWithPath: directory)
+                .appendingPathComponent("sshpass")
+                .path
+            if fileManager.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    static func environment(password: String) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["SSHPASS"] = password
+        return environment
+    }
+
+    static func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
+        ["-e", "ssh"] + commonOptions(port: config.port, portFlag: "-p", controlPath: controlPath) + [
+            "\(config.username)@\(config.host)",
+            command
+        ]
+    }
+
+    static func scpUploadArguments(
+        config: SSHConfig,
+        localPath: String,
+        remotePath: String,
+        controlPath: String? = nil
+    ) -> [String] {
+        ["-e", "scp"] + commonOptions(port: config.port, portFlag: "-P", controlPath: controlPath) + [
+            localPath,
+            "\(config.username)@\(config.host):\(remotePath)"
+        ]
+    }
+
+    static func scpDownloadArguments(
+        config: SSHConfig,
+        remotePath: String,
+        localPath: String,
+        controlPath: String? = nil
+    ) -> [String] {
+        ["-e", "scp"] + commonOptions(port: config.port, portFlag: "-P", controlPath: controlPath) + [
+            "\(config.username)@\(config.host):\(remotePath)",
+            localPath
+        ]
+    }
+
+    private static func commonOptions(port: Int, portFlag: String, controlPath: String?) -> [String] {
+        var options = SSHHostKeyPolicy.options + [
+            "-o", "PreferredAuthentications=keyboard-interactive,password",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2",
+            portFlag, String(port)
+        ]
+        if let controlPath {
+            options += [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=600"
+            ]
+        }
+        return options
+    }
+}
+
 struct ProcessExecutionOutput: Sendable {
     let terminationStatus: Int32
     let standardOutput: String

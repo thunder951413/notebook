@@ -649,39 +649,17 @@ class ConfigSyncManager {
         return result
     }
 
-    // MARK: - SSH工具方法（从SSHSyncManager复制）
+    // MARK: - SSH 工具方法
 
     private func findSshpassPath() throws -> String {
-        // 复用SSHSyncManager中的逻辑
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-c", "which sshpass 2>/dev/null || echo ''"]
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-        task.environment = env
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-
-            if task.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !path.isEmpty {
-                    return path
-                }
-            }
-        } catch {
-            DebugLog.storage("which sshpass 失败: \(error)", level: .warn)
+        guard let path = SSHProcessTransport.findSSHpassPath() else {
+            throw NSError(
+                domain: "ConfigSync",
+                code: -1000,
+                userInfo: [NSLocalizedDescriptionKey: "未找到 sshpass，请先安装后再同步配置"]
+            )
         }
-
-        // 回退到硬编码路径
-        return "/usr/local/bin/sshpass"
+        return path
     }
 
     private func ensureRemoteDirectory(config: SSHConfig) async throws {
@@ -746,57 +724,15 @@ class ConfigSyncManager {
     }
 
     private func sshArguments(config: SSHConfig, command: String) -> [String] {
-        [
-            "-p", config.password,
-            "ssh"
-        ] + commonSSHOptions(port: config.port) + [
-            "\(config.username)@\(config.host)",
-            command
-        ]
+        SSHProcessTransport.sshArguments(config: config, command: command)
     }
 
     private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String) -> [String] {
-        [
-            "-p", config.password,
-            "scp"
-        ] + commonSCPOptions(port: config.port) + [
-            localPath,
-            "\(config.username)@\(config.host):\(remotePath)"
-        ]
+        SSHProcessTransport.scpUploadArguments(config: config, localPath: localPath, remotePath: remotePath)
     }
 
     private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String) -> [String] {
-        [
-            "-p", config.password,
-            "scp"
-        ] + commonSCPOptions(port: config.port) + [
-            "\(config.username)@\(config.host):\(remotePath)",
-            localPath
-        ]
-    }
-
-    private func commonSSHOptions(port: Int) -> [String] {
-        SSHHostKeyPolicy.options + [
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-p", String(port)
-        ]
-    }
-
-    private func commonSCPOptions(port: Int) -> [String] {
-        SSHHostKeyPolicy.options + [
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-P", String(port)
-        ]
+        SSHProcessTransport.scpDownloadArguments(config: config, remotePath: remotePath, localPath: localPath)
     }
 
     private func executeProcess(
@@ -805,13 +741,11 @@ class ConfigSyncManager {
         password: String,
         timeout: TimeInterval = 45
     ) async throws -> ProcessExecutionResult {
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         let timeoutErrorMessage = sanitizeLog("SSH操作超时，请检查服务器连通性、端口配置或网络状态", password: password)
         return try await CancellableProcessRunner.run(
             executablePath: executablePath,
             arguments: arguments,
-            environment: env,
+            environment: SSHProcessTransport.environment(password: password),
             timeout: timeout,
             timeoutError: NSError(
                 domain: "ConfigSync",

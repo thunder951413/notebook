@@ -84,6 +84,28 @@ extension NotebookTests {
         XCTAssertFalse(SSHHostKeyPolicy.options.contains("GlobalKnownHostsFile=/dev/null"))
     }
 
+    @MainActor
+    func testSSHTransportKeepsPasswordOutOfProcessArguments() {
+        var config = SSHConfig.default
+        config.host = "example.com"
+        config.username = "user"
+        config.password = "very-secret-password"
+
+        let sshArguments = SSHProcessTransport.sshArguments(config: config, command: "true")
+        let uploadArguments = SSHProcessTransport.scpUploadArguments(
+            config: config,
+            localPath: "/tmp/local",
+            remotePath: "/tmp/remote"
+        )
+        let environment = SSHProcessTransport.environment(password: config.password)
+
+        XCTAssertEqual(Array(sshArguments.prefix(2)), ["-e", "ssh"])
+        XCTAssertEqual(Array(uploadArguments.prefix(2)), ["-e", "scp"])
+        XCTAssertFalse(sshArguments.contains(config.password))
+        XCTAssertFalse(uploadArguments.contains(config.password))
+        XCTAssertEqual(environment["SSHPASS"], config.password)
+    }
+
     func testCancellableProcessRunnerTerminatesChildProcess() async throws {
         let startedAt = Date()
         let processTask = Task {

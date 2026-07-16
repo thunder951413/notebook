@@ -267,38 +267,7 @@ final class SSHSyncManager: Sendable {
 
     /// 查找 sshpass 可执行文件路径 - 简化版本
     private func findSshpassPath() -> String? {
-        // 首先尝试通过 which 命令查找
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-c", "which sshpass 2>/dev/null || echo ''"]
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-        task.environment = env
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-
-            if task.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !path.isEmpty {
-                    return path
-                }
-            }
-        } catch {
-            Logger.shared.log(.storage, .warn, "which sshpass 失败: \(error.localizedDescription)")
-        }
-
-        // 回退到硬编码路径
-        let hardcodedPath = "/usr/local/bin/sshpass"
-        Logger.shared.log(.storage, .warn, "使用硬编码路径: \(hardcodedPath)")
-        return hardcodedPath
+        SSHProcessTransport.findSSHpassPath()
     }
 
     /// 检查 sshpass 是否可用
@@ -306,8 +275,11 @@ final class SSHSyncManager: Sendable {
         if let path = findSshpassPath(), !path.isEmpty {
             return path
         }
-        // 最后的回退：直接尝试硬编码路径
-        return "/usr/local/bin/sshpass"
+        throw NSError(
+            domain: "SSHSync",
+            code: -1000,
+            userInfo: [NSLocalizedDescriptionKey: "未找到 sshpass，请先安装后再配置 SSH 同步"]
+        )
     }
 
     private static func sanitizeLog(_ text: String, password: String) -> String {
@@ -1434,79 +1406,25 @@ final class SSHSyncManager: Sendable {
     }
 
     private func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
-        [
-            "-e",
-            "ssh"
-        ] + commonSSHOptions(port: config.port, controlPath: controlPath) + [
-            "\(config.username)@\(config.host)",
-            command
-        ]
+        SSHProcessTransport.sshArguments(config: config, command: command, controlPath: controlPath)
     }
 
     private func scpUploadArguments(config: SSHConfig, localPath: String, remotePath: String, controlPath: String? = nil) -> [String] {
-        [
-            "-e",
-            "scp"
-        ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
-            localPath,
-            "\(config.username)@\(config.host):\(remotePath)"
-        ]
+        SSHProcessTransport.scpUploadArguments(
+            config: config,
+            localPath: localPath,
+            remotePath: remotePath,
+            controlPath: controlPath
+        )
     }
 
     private func scpDownloadArguments(config: SSHConfig, remotePath: String, localPath: String, controlPath: String? = nil) -> [String] {
-        [
-            "-e",
-            "scp"
-        ] + commonSCPOptions(port: config.port, controlPath: controlPath) + [
-            "\(config.username)@\(config.host):\(remotePath)",
-            localPath
-        ]
-    }
-
-    private func commonSSHOptions(port: Int, controlPath: String? = nil) -> [String] {
-        var options = SSHHostKeyPolicy.options + [
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-p", String(port)
-        ]
-        
-        // 如果提供了 controlPath，使用连接复用
-        if let controlPath = controlPath {
-            options.append(contentsOf: [
-                "-o", "ControlMaster=auto",
-                "-o", "ControlPath=\(controlPath)",
-                "-o", "ControlPersist=600"
-            ])
-        }
-        
-        return options
-    }
-
-    private func commonSCPOptions(port: Int, controlPath: String? = nil) -> [String] {
-        var options = SSHHostKeyPolicy.options + [
-            "-o", "PreferredAuthentications=keyboard-interactive,password",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-            "-P", String(port)
-        ]
-        
-        // 如果提供了 controlPath，使用连接复用
-        if let controlPath = controlPath {
-            options.append(contentsOf: [
-                "-o", "ControlMaster=auto",
-                "-o", "ControlPath=\(controlPath)",
-                "-o", "ControlPersist=600"
-            ])
-        }
-        
-        return options
+        SSHProcessTransport.scpDownloadArguments(
+            config: config,
+            remotePath: remotePath,
+            localPath: localPath,
+            controlPath: controlPath
+        )
     }
 
     private func executeProcess(
@@ -1515,14 +1433,11 @@ final class SSHSyncManager: Sendable {
         password: String,
         timeout: TimeInterval = 45
     ) async throws -> ProcessExecutionResult {
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        env["SSHPASS"] = password
         let timeoutErrorMessage = Self.sanitizeLog("SSH 操作超时，请检查服务器连通性、端口配置或网络状态", password: password)
         return try await CancellableProcessRunner.run(
             executablePath: executablePath,
             arguments: arguments,
-            environment: env,
+            environment: SSHProcessTransport.environment(password: password),
             timeout: timeout,
             timeoutError: NSError(
                 domain: "SSHSync",
