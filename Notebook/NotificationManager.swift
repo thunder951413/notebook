@@ -1,11 +1,30 @@
 import Foundation
 import UserNotifications
 
+struct NotificationScheduleRevisionTracker {
+    private var revisions: [UUID: UInt64] = [:]
+
+    mutating func begin(for itemID: UUID) -> UInt64 {
+        let revision = (revisions[itemID] ?? 0) &+ 1
+        revisions[itemID] = revision
+        return revision
+    }
+
+    mutating func invalidate(for itemID: UUID) {
+        _ = begin(for: itemID)
+    }
+
+    func isCurrent(_ revision: UInt64, for itemID: UUID) -> Bool {
+        revisions[itemID] == revision
+    }
+}
+
 @MainActor
 final class NotificationManager {
     static let shared = NotificationManager()
 
     private let center = UNUserNotificationCenter.current()
+    private var revisionTracker = NotificationScheduleRevisionTracker()
 
     private init() {}
 
@@ -30,7 +49,9 @@ final class NotificationManager {
     }
 
     private func schedule(itemID: UUID, itemType: String, title: String, body: String, reminderAt: Date, recurrence: String) async {
+        let revision = revisionTracker.begin(for: itemID)
         await requestAuthorizationIfNeeded()
+        guard revisionTracker.isCurrent(revision, for: itemID) else { return }
 
         let id = itemID.uuidString
         center.removePendingNotificationRequests(withIdentifiers: [id])
@@ -78,9 +99,16 @@ final class NotificationManager {
 
         let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
         try? await center.add(request)
+
+        // schedule 在 await 期间可能被“完成/删除”取消；防止旧任务随后把重复提醒加回来。
+        if !revisionTracker.isCurrent(revision, for: itemID) {
+            center.removePendingNotificationRequests(withIdentifiers: [id])
+            center.removeDeliveredNotifications(withIdentifiers: [id])
+        }
     }
 
     func cancel(noteID: UUID) {
+        revisionTracker.invalidate(for: noteID)
         let id = noteID.uuidString
         center.removePendingNotificationRequests(withIdentifiers: [id])
         center.removeDeliveredNotifications(withIdentifiers: [id])

@@ -643,20 +643,31 @@ final class NoteStore: ObservableObject {
 
     private func reschedulePendingTodoReminders() {
         let now = Date()
+        // 与系统通知中心对账：已完成或已关闭提醒的 Todo 不能保留历史重复通知。
+        for item in activeTodoItems where item.isCompleted || item.reminderAt == nil {
+            NotificationManager.shared.cancel(noteID: item.id)
+        }
+
         let pending = activeTodoItems.filter { item in
             guard !item.isCompleted, let reminderAt = item.reminderAt else { return false }
             return item.recurrenceRule != "none" || reminderAt > now
         }
 
         for item in pending {
-            guard let reminderAt = item.reminderAt else { continue }
             Task { @MainActor in
+                // fetchData 后任务才可能真正执行；期间 Todo 可能已完成或提醒已被修改。
+                guard let currentItem = self.activeTodoItems.first(where: { $0.id == item.id }),
+                      !currentItem.isCompleted,
+                      let reminderAt = currentItem.reminderAt else {
+                    NotificationManager.shared.cancel(noteID: item.id)
+                    return
+                }
                 await NotificationManager.shared.schedule(
-                    todoID: item.id,
-                    title: item.title.isEmpty ? "Todo 提醒" : item.title,
-                    body: item.contentPreview,
+                    todoID: currentItem.id,
+                    title: currentItem.title.isEmpty ? "Todo 提醒" : currentItem.title,
+                    body: currentItem.contentPreview,
                     reminderAt: reminderAt,
-                    recurrence: item.recurrenceRule
+                    recurrence: currentItem.recurrenceRule
                 )
             }
         }
@@ -1078,9 +1089,7 @@ final class NoteStore: ObservableObject {
             context.saveLogging("NoteStore.setTodoCompleted")
             autoSyncCoordinator.noteDidSave(noteID: id, reason: "todoCompleted")
             if completed {
-                Task { @MainActor in
-                    NotificationManager.shared.cancel(noteID: id)
-                }
+                NotificationManager.shared.cancel(noteID: id)
             }
             fetchData()
         }
@@ -1088,9 +1097,7 @@ final class NoteStore: ObservableObject {
 
     func deleteTodo(id: UUID) {
         moveNoteToRecycleBin(id: id)
-        Task { @MainActor in
-            NotificationManager.shared.cancel(noteID: id)
-        }
+        NotificationManager.shared.cancel(noteID: id)
         fetchData()
     }
 

@@ -14,6 +14,11 @@ final class AutoSyncCoordinator: ObservableObject {
 
     private static let pendingChangesKey = "AutoSyncCoordinator.hasPendingLocalChanges"
 
+    private struct PendingNotePush {
+        let reason: String
+        let revision: UInt64
+    }
+
     private weak var store: NoteStore?
     private var pendingPushTimer: Timer?
     private var hasPendingLocalChanges: Bool {
@@ -22,6 +27,11 @@ final class AutoSyncCoordinator: ObservableObject {
     private var isAutomaticSyncRunning = false
     private var isManualSyncRunning = false
     private var didScheduleInitialPull = false
+    private var requiresFullPush: Bool
+    private var pendingNotePushes: [UUID: PendingNotePush] = [:]
+    private var notePushTask: Task<Void, Never>?
+    private var nextNotePushRevision: UInt64 = 0
+    private var notePushRetryCount = 0
     private var indicatorDismissTask: Task<Void, Never>?
     private(set) var lastSuccessfulPullAt: Date?
     private(set) var lastSuccessfulPushAt: Date?
@@ -35,8 +45,38 @@ final class AutoSyncCoordinator: ObservableObject {
     private let successIndicatorDurationNanoseconds: UInt64 = 3_000_000_000
     private var pushRetryCount: Int = 0
 
-    private init() {
-        hasPendingLocalChanges = NotebookDefaults.shared.bool(forKey: Self.pendingChangesKey)
+    private let remoteConfiguredProvider: @MainActor () -> Bool
+    private let persistenceAvailableProvider: @MainActor () -> Bool
+    private let syncSavedNoteOperation: @MainActor (UUID) async throws -> Void
+
+    init(
+        remoteConfigured: @escaping @MainActor () -> Bool = {
+            SSHConfigManager.shared.isConfigured
+        },
+        persistenceAvailable: @escaping @MainActor () -> Bool = {
+            PersistenceController.shared.modelContainer != nil
+        },
+        syncSavedNote: @escaping @MainActor (UUID) async throws -> Void = { noteID in
+            guard let context = PersistenceController.shared.modelContainer?.mainContext else {
+                throw NSError(
+                    domain: "AutoSync",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"]
+                )
+            }
+            try await SSHSyncManager.shared.syncNoteToRemote(
+                noteID: noteID,
+                context: context,
+                config: SSHConfigManager.shared.config
+            )
+        }
+    ) {
+        let hadPendingLocalChanges = NotebookDefaults.shared.bool(forKey: Self.pendingChangesKey)
+        hasPendingLocalChanges = hadPendingLocalChanges
+        requiresFullPush = hadPendingLocalChanges
+        remoteConfiguredProvider = remoteConfigured
+        persistenceAvailableProvider = persistenceAvailable
+        syncSavedNoteOperation = syncSavedNote
     }
 
     func configure(store: NoteStore) {
@@ -64,13 +104,33 @@ final class AutoSyncCoordinator: ObservableObject {
     }
 
     func noteDidSave(noteID: UUID, reason: String) {
+        guard canUseAutoSync else {
+            Logger.shared.log(
+                .app,
+                .debug,
+                "[AutoSync] 笔记保存后跳过远程推送（SSH 远程或数据容器未配置）: note=\(noteID.uuidString.prefix(8))"
+            )
+            return
+        }
+
         hasPendingLocalChanges = true
-        pushRetryCount = 0
-        scheduleDebouncedPush(reason: "note=\(noteID.uuidString.prefix(8)) reason=\(reason)")
+        if reason == "deletePermanently" {
+            // 单篇上传需要笔记实体；永久删除只能通过全量索引中的墓碑传播。
+            requiresFullPush = true
+            pushRetryCount = 0
+            scheduleDebouncedPush(reason: "noteDeletion=\(noteID.uuidString.prefix(8))")
+            return
+        }
+
+        notePushRetryCount = 0
+        nextNotePushRevision &+= 1
+        pendingNotePushes[noteID] = PendingNotePush(reason: reason, revision: nextNotePushRevision)
+        schedulePendingNotePush()
     }
 
     func libraryDidChange(reason: String) {
         hasPendingLocalChanges = true
+        requiresFullPush = true
         pushRetryCount = 0
         scheduleDebouncedPush(reason: "library=\(reason)")
     }
@@ -83,14 +143,20 @@ final class AutoSyncCoordinator: ObservableObject {
     func endManualSync() {
         isManualSyncRunning = false
 
-        if hasPendingLocalChanges {
+        if requiresFullPush {
             scheduleDebouncedPush(reason: "manualSyncFinished")
         }
+        schedulePendingNotePush()
     }
 
     func markLocalChangesPushed() {
         hasPendingLocalChanges = false
+        requiresFullPush = false
+        pendingNotePushes.removeAll()
+        notePushTask?.cancel()
+        notePushTask = nil
         pushRetryCount = 0
+        notePushRetryCount = 0
         lastSuccessfulPushAt = Date()
         invalidatePendingPushTimer()
     }
@@ -102,7 +168,103 @@ final class AutoSyncCoordinator: ObservableObject {
     }
 
     private var canUseAutoSync: Bool {
-        SSHConfigManager.shared.isConfigured && PersistenceController.shared.modelContainer != nil
+        remoteConfiguredProvider() && persistenceAvailableProvider()
+    }
+
+    private func schedulePendingNotePush(after delay: TimeInterval = 0) {
+        guard notePushTask == nil, !pendingNotePushes.isEmpty, canUseAutoSync else { return }
+
+        notePushTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                let nanoseconds = UInt64(delay * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+            guard !Task.isCancelled, let self else { return }
+            await self.pushNextSavedNote()
+        }
+    }
+
+    private func pushNextSavedNote() async {
+        guard canUseAutoSync else {
+            pendingNotePushes.removeAll()
+            if !requiresFullPush {
+                hasPendingLocalChanges = false
+            }
+            finishNotePushTask()
+            return
+        }
+        guard !isAutomaticSyncRunning, !isManualSyncRunning else {
+            finishNotePushTask(retryAfter: 1)
+            return
+        }
+        guard let (noteID, pendingPush) = pendingNotePushes.first else {
+            finishNotePushTask()
+            return
+        }
+
+        isAutomaticSyncRunning = true
+        setSidebarIndicatorSyncing()
+        Logger.shared.log(
+            .app,
+            .debug,
+            "[AutoSync] 开始推送已保存笔记: note=\(noteID.uuidString.prefix(8)) reason=\(pendingPush.reason)"
+        )
+
+        do {
+            try await SyncSessionCoordinator.shared.withSession(named: "保存后推送笔记") {
+                try await syncSavedNoteOperation(noteID)
+            }
+            if pendingNotePushes[noteID]?.revision == pendingPush.revision {
+                pendingNotePushes.removeValue(forKey: noteID)
+            }
+            notePushRetryCount = 0
+            lastSuccessfulPushAt = Date()
+            isAutomaticSyncRunning = false
+            if pendingNotePushes.isEmpty && !requiresFullPush {
+                hasPendingLocalChanges = false
+            }
+            setSidebarIndicatorSuccess()
+            Logger.shared.log(.app, .info, "[AutoSync] 已保存笔记推送完成: note=\(noteID.uuidString.prefix(8))")
+            finishNotePushTask()
+        } catch let error as SyncSessionError {
+            isAutomaticSyncRunning = false
+            switch error {
+            case .alreadyRunning:
+                clearSidebarIndicator()
+                finishNotePushTask(retryAfter: 1)
+            }
+        } catch {
+            isAutomaticSyncRunning = false
+            clearSidebarIndicator()
+            notePushRetryCount += 1
+            let retryDelay = min(
+                pushRetryBaseInterval * pow(2.0, Double(max(0, notePushRetryCount - 1))),
+                pushRetryMaxInterval
+            )
+            Logger.shared.log(
+                .app,
+                .error,
+                "[AutoSync] 已保存笔记推送失败，稍后重试: note=\(noteID.uuidString.prefix(8)) error=\(error.localizedDescription)"
+            )
+            finishNotePushTask(retryAfter: retryDelay)
+        }
+    }
+
+    private func finishNotePushTask(retryAfter delay: TimeInterval = 0) {
+        notePushTask = nil
+        if !pendingNotePushes.isEmpty {
+            schedulePendingNotePush(after: delay)
+        }
+    }
+
+    func waitForSavedNotePushesForTesting() async {
+        while let task = notePushTask {
+            await task.value
+        }
+    }
+
+    var pendingSavedNotePushCountForTesting: Int {
+        pendingNotePushes.count
     }
 
     private func scheduleDebouncedPush(reason: String) {
@@ -193,6 +355,10 @@ final class AutoSyncCoordinator: ObservableObject {
                 )
             }
             hasPendingLocalChanges = false
+            requiresFullPush = false
+            pendingNotePushes.removeAll()
+            notePushTask?.cancel()
+            notePushTask = nil
             lastSuccessfulPushAt = Date()
             setSidebarIndicatorSuccess()
             Logger.shared.log(.app, .info, "[AutoSync] 自动推送完成: \(reason)")

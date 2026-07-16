@@ -436,7 +436,12 @@ struct TodoDetailView: View {
         )
 
         if let effectiveReminderAt {
-            Task {
+            Task { @MainActor in
+                // 自动保存产生的调度任务可能晚于“标记完成”执行，提交前必须复检状态。
+                guard store.activeTodoItems.first(where: { $0.id == todoID })?.isCompleted == false else {
+                    NotificationManager.shared.cancel(noteID: todoID)
+                    return
+                }
                 await NotificationManager.shared.schedule(
                     todoID: todoID,
                     title: title.isEmpty ? l10n(L10nKeys.Todo.reminderTitle) : title,

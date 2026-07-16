@@ -95,4 +95,60 @@ extension NotebookTests {
             }
         }
     }
+
+    @MainActor
+    func testSavedNoteIsNotQueuedWhenRemoteIsNotConfigured() async {
+        var pushedNoteIDs: [UUID] = []
+        let coordinator = AutoSyncCoordinator(
+            remoteConfigured: { false },
+            persistenceAvailable: { true },
+            syncSavedNote: { pushedNoteIDs.append($0) }
+        )
+
+        coordinator.noteDidSave(noteID: UUID(), reason: "testSave")
+        await coordinator.waitForSavedNotePushesForTesting()
+
+        XCTAssertTrue(pushedNoteIDs.isEmpty)
+        XCTAssertEqual(coordinator.pendingSavedNotePushCountForTesting, 0)
+    }
+
+    @MainActor
+    func testSavedChangedNoteIsPushedToConfiguredRemote() async {
+        var pushedNoteIDs: [UUID] = []
+        let coordinator = AutoSyncCoordinator(
+            remoteConfigured: { true },
+            persistenceAvailable: { true },
+            syncSavedNote: { pushedNoteIDs.append($0) }
+        )
+        let firstNoteID = UUID()
+        let secondNoteID = UUID()
+
+        coordinator.noteDidSave(noteID: firstNoteID, reason: "autoSave")
+        coordinator.noteDidSave(noteID: secondNoteID, reason: "manualSave")
+        await coordinator.waitForSavedNotePushesForTesting()
+
+        XCTAssertEqual(Set(pushedNoteIDs), Set([firstNoteID, secondNoteID]))
+        XCTAssertEqual(pushedNoteIDs.count, 2)
+        XCTAssertEqual(coordinator.pendingSavedNotePushCountForTesting, 0)
+    }
+
+    func testNotificationCancellationInvalidatesInFlightSchedule() {
+        var tracker = NotificationScheduleRevisionTracker()
+        let itemID = UUID()
+        let schedulingRevision = tracker.begin(for: itemID)
+
+        tracker.invalidate(for: itemID)
+
+        XCTAssertFalse(tracker.isCurrent(schedulingRevision, for: itemID))
+    }
+
+    func testNewNotificationScheduleSupersedesOlderSchedule() {
+        var tracker = NotificationScheduleRevisionTracker()
+        let itemID = UUID()
+        let oldRevision = tracker.begin(for: itemID)
+        let newRevision = tracker.begin(for: itemID)
+
+        XCTAssertFalse(tracker.isCurrent(oldRevision, for: itemID))
+        XCTAssertTrue(tracker.isCurrent(newRevision, for: itemID))
+    }
 }
