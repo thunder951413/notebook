@@ -47,6 +47,7 @@ struct NotesListView: View {
                 Section {
                     ForEach(sortedNotes) { note in
                         NoteRowView(note: note, isSelected: selection == note.id)
+                            .accessibilityIdentifier("notebook.noteRow.\(note.id.uuidString)")
                             .id("\(note.id.uuidString)-\(note.title)")
                             .tag(note.id)
                             .contentShape(Rectangle())

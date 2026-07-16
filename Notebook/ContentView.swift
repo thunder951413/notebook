@@ -427,6 +427,7 @@ struct ContentView: View {
                 } label: {
                     Label(selectedDestination.isTodoDestination ? "新建任务" : l10n(L10nKeys.Note.new), systemImage: "plus")
                 }
+                .accessibilityIdentifier("notebook.newItem")
 
                 Button {
                     if selectedDestination.isTodoDestination {
@@ -440,6 +441,7 @@ struct ContentView: View {
                 } label: {
                     Label(l10n(L10nKeys.common.delete), systemImage: "trash")
                 }
+                .accessibilityIdentifier("notebook.deleteItem")
                 .disabled((selectedDestination.isTodoDestination ? selectedTodoID == nil : selection == nil) || selectedDestination == .recycleBin)
             }
         }

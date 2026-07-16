@@ -85,6 +85,7 @@ struct NoteEditorView: View {
 
                     VStack(alignment: .leading, spacing: 0) {
                         TextField(l10n(L10nKeys.Note.titlePlaceholder), text: $note.title)
+                            .accessibilityIdentifier("notebook.noteTitle")
                             .font(.title2)
                             .textFieldStyle(.plain)
                             .padding(.horizontal, 16)

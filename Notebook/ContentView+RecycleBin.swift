@@ -82,6 +82,7 @@ struct RecycleBinView: View {
                 List(selection: $selectedIDs) {
                     ForEach(sortedNotes) { note in
                         RecycleBinRow(note: note)
+                            .accessibilityIdentifier("notebook.recycleNoteRow.\(note.id.uuidString)")
                             .tag(note.id)
                             .contentShape(Rectangle())
                             .contextMenu {
@@ -231,4 +232,3 @@ struct RecycleBinRow: View {
 }
 
 // MARK: - AI 服务选择头部
-

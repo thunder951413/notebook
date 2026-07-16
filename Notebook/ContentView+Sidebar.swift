@@ -434,6 +434,8 @@ struct SidebarView: View {
             selectedDestination = .recycleBin
             selection = nil
         }
+        .accessibilityIdentifier("notebook.recycleBin")
+        .accessibilityAddTraits(.isButton)
         .padding(.horizontal, 8)
     }
 

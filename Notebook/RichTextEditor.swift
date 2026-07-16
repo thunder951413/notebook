@@ -31,6 +31,8 @@ struct RichTextEditor: NSViewRepresentable {
         scroll.backgroundColor = NSColor(AppColors.editorBackground(scheme))
 
         let textView = RichTextView()
+        scroll.setAccessibilityIdentifier("notebook.noteBodyScroll")
+        textView.setAccessibilityIdentifier("notebook.noteBody")
         textView.isRichText = true
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
