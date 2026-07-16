@@ -125,28 +125,20 @@ extension NotebookTests {
 
     @MainActor
     func testSavedNoteIsNotQueuedWhenRemoteIsNotConfigured() async {
-        var pushedNoteIDs: [UUID] = []
-        let coordinator = AutoSyncCoordinator(
-            remoteConfigured: { false },
-            persistenceAvailable: { true },
-            syncSavedNote: { pushedNoteIDs.append($0) }
-        )
+        let backend = TestNoteSyncBackend(isConfigured: false)
+        let coordinator = AutoSyncCoordinator(backend: backend)
 
         coordinator.noteDidSave(noteID: UUID(), reason: "testSave")
         await coordinator.waitForSavedNotePushesForTesting()
 
-        XCTAssertTrue(pushedNoteIDs.isEmpty)
+        XCTAssertTrue(backend.pushedNoteIDs.isEmpty)
         XCTAssertEqual(coordinator.pendingSavedNotePushCountForTesting, 0)
     }
 
     @MainActor
     func testSavedChangedNoteIsPushedToConfiguredRemote() async {
-        var pushedNoteIDs: [UUID] = []
-        let coordinator = AutoSyncCoordinator(
-            remoteConfigured: { true },
-            persistenceAvailable: { true },
-            syncSavedNote: { pushedNoteIDs.append($0) }
-        )
+        let backend = TestNoteSyncBackend()
+        let coordinator = AutoSyncCoordinator(backend: backend)
         let firstNoteID = UUID()
         let secondNoteID = UUID()
 
@@ -154,9 +146,24 @@ extension NotebookTests {
         coordinator.noteDidSave(noteID: secondNoteID, reason: "manualSave")
         await coordinator.waitForSavedNotePushesForTesting()
 
-        XCTAssertEqual(Set(pushedNoteIDs), Set([firstNoteID, secondNoteID]))
-        XCTAssertEqual(pushedNoteIDs.count, 2)
+        XCTAssertEqual(Set(backend.pushedNoteIDs), Set([firstNoteID, secondNoteID]))
+        XCTAssertEqual(backend.pushedNoteIDs.count, 2)
         XCTAssertEqual(coordinator.pendingSavedNotePushCountForTesting, 0)
+    }
+
+    @MainActor
+    func testAutomaticFullSyncUsesInjectedBackend() async {
+        let backend = TestNoteSyncBackend()
+        let coordinator = AutoSyncCoordinator(backend: backend)
+
+        await coordinator.runAutomaticPullForTesting()
+        XCTAssertEqual(backend.pullAllCallCount, 1)
+        XCTAssertEqual(backend.pushAllCallCount, 0)
+
+        coordinator.libraryDidChange(reason: "test")
+        await coordinator.runAutomaticPushForTesting()
+        XCTAssertEqual(backend.pullAllCallCount, 2, "全量推送前应先合并远程变更")
+        XCTAssertEqual(backend.pushAllCallCount, 1)
     }
 
     func testNotificationCancellationInvalidatesInFlightSchedule() {
@@ -177,5 +184,31 @@ extension NotebookTests {
 
         XCTAssertFalse(tracker.isCurrent(oldRevision, for: itemID))
         XCTAssertTrue(tracker.isCurrent(newRevision, for: itemID))
+    }
+}
+
+@MainActor
+private final class TestNoteSyncBackend: NoteSyncBackend {
+    let isConfigured: Bool
+    let isPersistenceAvailable: Bool
+    private(set) var pushedNoteIDs: [UUID] = []
+    private(set) var pullAllCallCount = 0
+    private(set) var pushAllCallCount = 0
+
+    init(isConfigured: Bool = true, isPersistenceAvailable: Bool = true) {
+        self.isConfigured = isConfigured
+        self.isPersistenceAvailable = isPersistenceAvailable
+    }
+
+    func pushSavedNote(noteID: UUID) async throws {
+        pushedNoteIDs.append(noteID)
+    }
+
+    func pullAllNotes() async throws {
+        pullAllCallCount += 1
+    }
+
+    func pushAllNotes() async throws {
+        pushAllCallCount += 1
     }
 }

@@ -45,38 +45,13 @@ final class AutoSyncCoordinator: ObservableObject {
     private let successIndicatorDurationNanoseconds: UInt64 = 3_000_000_000
     private var pushRetryCount: Int = 0
 
-    private let remoteConfiguredProvider: @MainActor () -> Bool
-    private let persistenceAvailableProvider: @MainActor () -> Bool
-    private let syncSavedNoteOperation: @MainActor (UUID) async throws -> Void
+    private let backend: any NoteSyncBackend
 
-    init(
-        remoteConfigured: @escaping @MainActor () -> Bool = {
-            SSHConfigManager.shared.isConfigured
-        },
-        persistenceAvailable: @escaping @MainActor () -> Bool = {
-            PersistenceController.shared.modelContainer != nil
-        },
-        syncSavedNote: @escaping @MainActor (UUID) async throws -> Void = { noteID in
-            guard let context = PersistenceController.shared.modelContainer?.mainContext else {
-                throw NSError(
-                    domain: "AutoSync",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"]
-                )
-            }
-            try await SSHSyncManager.shared.syncNoteToRemote(
-                noteID: noteID,
-                context: context,
-                config: SSHConfigManager.shared.config
-            )
-        }
-    ) {
+    init(backend: (any NoteSyncBackend)? = nil) {
         let hadPendingLocalChanges = NotebookDefaults.shared.bool(forKey: Self.pendingChangesKey)
         hasPendingLocalChanges = hadPendingLocalChanges
         requiresFullPush = hadPendingLocalChanges
-        remoteConfiguredProvider = remoteConfigured
-        persistenceAvailableProvider = persistenceAvailable
-        syncSavedNoteOperation = syncSavedNote
+        self.backend = backend ?? SSHNoteSyncBackend.shared
     }
 
     func configure(store: NoteStore) {
@@ -168,7 +143,7 @@ final class AutoSyncCoordinator: ObservableObject {
     }
 
     private var canUseAutoSync: Bool {
-        remoteConfiguredProvider() && persistenceAvailableProvider()
+        backend.isConfigured && backend.isPersistenceAvailable
     }
 
     private func schedulePendingNotePush(after delay: TimeInterval = 0) {
@@ -212,7 +187,7 @@ final class AutoSyncCoordinator: ObservableObject {
 
         do {
             try await SyncSessionCoordinator.shared.withSession(named: "保存后推送笔记") {
-                try await syncSavedNoteOperation(noteID)
+                try await backend.pushSavedNote(noteID: noteID)
             }
             if pendingNotePushes[noteID]?.revision == pendingPush.revision {
                 pendingNotePushes.removeValue(forKey: noteID)
@@ -267,6 +242,14 @@ final class AutoSyncCoordinator: ObservableObject {
         pendingNotePushes.count
     }
 
+    func runAutomaticPullForTesting() async {
+        await runAutomaticPull(reason: "test", force: true)
+    }
+
+    func runAutomaticPushForTesting() async {
+        await runAutomaticPush(reason: "test")
+    }
+
     private func scheduleDebouncedPush(reason: String) {
         invalidatePendingPushTimer()
         guard canUseAutoSync else { return }
@@ -301,8 +284,6 @@ final class AutoSyncCoordinator: ObservableObject {
         guard canUseAutoSync else { return }
         guard !isAutomaticSyncRunning, !isManualSyncRunning else { return }
         guard force || shouldPullOnForeground() else { return }
-        guard let context = PersistenceController.shared.modelContainer?.mainContext else { return }
-
         isAutomaticSyncRunning = true
         defer { isAutomaticSyncRunning = false }
         setSidebarIndicatorSyncing()
@@ -310,10 +291,7 @@ final class AutoSyncCoordinator: ObservableObject {
 
         do {
             _ = try await SyncSessionCoordinator.shared.withSession(named: "自动拉取") {
-                try await SSHSyncManager.shared.syncAllNotesFromRemote(
-                    context: context,
-                    config: SSHConfigManager.shared.config
-                )
+                try await backend.pullAllNotes()
             }
             lastSuccessfulPullAt = Date()
             store?.fetchData()
@@ -332,8 +310,6 @@ final class AutoSyncCoordinator: ObservableObject {
             scheduleDebouncedPush(reason: "deferredBecauseSyncRunning")
             return
         }
-        guard let context = PersistenceController.shared.modelContainer?.mainContext else { return }
-
         isAutomaticSyncRunning = true
         defer { isAutomaticSyncRunning = false }
 
@@ -343,16 +319,10 @@ final class AutoSyncCoordinator: ObservableObject {
 
         do {
             try await SyncSessionCoordinator.shared.withSession(named: "自动双向同步") {
-                _ = try await SSHSyncManager.shared.syncAllNotesFromRemote(
-                    context: context,
-                    config: SSHConfigManager.shared.config
-                )
+                try await backend.pullAllNotes()
                 lastSuccessfulPullAt = Date()
 
-                _ = try await SSHSyncManager.shared.syncAllNotesToRemote(
-                    context: context,
-                    config: SSHConfigManager.shared.config
-                )
+                try await backend.pushAllNotes()
             }
             hasPendingLocalChanges = false
             requiresFullPush = false
