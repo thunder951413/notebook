@@ -367,6 +367,9 @@ struct ContentView: View {
                         controller: richTextController,
                         isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
                     )
+                    // 纯 SwiftUI 三栏布局不会像 NavigationSplitView 一样自动裁剪详情栏。
+                    // 防止具有较大固有宽度的编辑器子视图覆盖笔记列表和侧边栏。
+                    .clipped()
                 } else {
                     ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

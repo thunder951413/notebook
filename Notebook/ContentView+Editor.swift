@@ -413,9 +413,26 @@ struct EditorTopBarView: View {
         return "系统默认"
     }
 
+    private func toolbarViewport<Content: View>(
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        GeometryReader { toolbarGeometry in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    content()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(minWidth: toolbarGeometry.size.width, alignment: .leading)
+            }
+        }
+        .frame(height: 40)
+        .clipped()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            toolbarViewport {
                 // 格式菜单（合并所有文本样式）
                 Menu {
                     Button {
@@ -745,8 +762,6 @@ struct EditorTopBarView: View {
                 // 本笔记搜索按钮
                 noteSearchButton
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
 
             if showingNoteSearch {
                 Divider()
