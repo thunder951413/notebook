@@ -9,6 +9,8 @@ final class AttachmentTextAttachment: NSTextAttachment {
     let attachmentFilename: String
     let kind: AttachmentKind
     private let embeddedFileData: Data?
+    private let defersImagePresentation: Bool
+    private(set) var isImagePresentationLoaded = false
 
     private static func uniqueTemporaryFileURL(directoryName: String, preferredFilename: String) -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
@@ -21,18 +23,29 @@ final class AttachmentTextAttachment: NSTextAttachment {
         return directory.appendingPathComponent(uniqueName, isDirectory: false)
     }
 
-    init(fileURL: URL, kind: AttachmentKind, embeddedFileData: Data? = nil, attachmentFilename: String? = nil) {
+    init(
+        fileURL: URL,
+        kind: AttachmentKind,
+        embeddedFileData: Data? = nil,
+        attachmentFilename: String? = nil,
+        deferImagePresentation: Bool = false
+    ) {
         self.attachmentFileURL = fileURL
         self.attachmentFilename = attachmentFilename ?? (fileURL.lastPathComponent.isEmpty ? Self.defaultFilename(for: kind) : fileURL.lastPathComponent)
         self.kind = kind
-        self.embeddedFileData = embeddedFileData ?? (try? Data(contentsOf: fileURL))
+        self.defersImagePresentation = deferImagePresentation && kind == .image
+        self.embeddedFileData = embeddedFileData ?? (self.defersImagePresentation ? nil : (try? Data(contentsOf: fileURL)))
         super.init(data: nil, ofType: nil)
 
         // 运行时不要挂 fileWrapper，避免 NSTextView 把它当成“文件附件”并显示右上角系统菜单
         if kind == .audio {
             self.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
         } else if kind == .image {
-            applyImagePresentationIfNeeded()
+            if defersImagePresentation {
+                applyImagePlaceholder()
+            } else {
+                applyImagePresentationIfNeeded()
+            }
         }
     }
 
@@ -46,6 +59,7 @@ final class AttachmentTextAttachment: NSTextAttachment {
             self.kind = .image
             DebugLog.attachment("No kind found, defaulting to image", level: .debug)
         }
+        self.defersImagePresentation = false
 
         let decodedFilename = coder.decodeObject(of: NSString.self, forKey: "NotebookAttachmentFilename") as String?
         let fallbackFilename = decodedFilename.flatMap { $0.isEmpty ? nil : String($0) } ?? Self.defaultFilename(for: kind)
@@ -120,6 +134,16 @@ final class AttachmentTextAttachment: NSTextAttachment {
         }
     }
 
+    func unloadDeferredImagePresentation() {
+        guard defersImagePresentation, kind == .image, isImagePresentationLoaded else { return }
+        applyImagePlaceholder()
+        isImagePresentationLoaded = false
+    }
+
+    private func applyImagePlaceholder() {
+        image = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)
+    }
+
     private func applyImagePresentationIfNeeded() {
         guard let data = attachmentData(),
               let image = NSImage(data: data) else { return }
@@ -127,6 +151,7 @@ final class AttachmentTextAttachment: NSTextAttachment {
         // 如果附件已经有有效尺寸（例如用户拖拽缩放后持久化的 bounds），优先保留
         if bounds.width > 1, bounds.height > 1 {
             self.image = image
+            isImagePresentationLoaded = true
             return
         }
 
@@ -144,6 +169,7 @@ final class AttachmentTextAttachment: NSTextAttachment {
 
         self.image = image
         self.bounds = NSRect(origin: .zero, size: newSize)
+        isImagePresentationLoaded = true
     }
 
     private static func defaultFilename(for kind: AttachmentKind) -> String {

@@ -7,6 +7,65 @@ import SwiftUI
 
 extension NotebookTests {
 
+    func testDeferredImagePresentationPreservesLayoutWhileLoadingAndUnloading() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let imageURL = tempDirectory.appendingPathComponent("viewport-image.png")
+        let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 2,
+            pixelsHigh: 2,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+        let pngData = try XCTUnwrap(bitmap?.representation(using: .png, properties: [:]))
+        try pngData.write(to: imageURL)
+
+        let expectedBounds = NSRect(x: 0, y: 0, width: 320, height: 180)
+        let attachment = AttachmentTextAttachment(
+            fileURL: imageURL,
+            kind: .image,
+            deferImagePresentation: true
+        )
+        attachment.bounds = expectedBounds
+
+        XCTAssertFalse(attachment.isImagePresentationLoaded)
+        XCTAssertEqual(attachment.bounds, expectedBounds)
+
+        attachment.refreshPresentationIfNeeded()
+        XCTAssertTrue(attachment.isImagePresentationLoaded)
+        XCTAssertEqual(attachment.bounds, expectedBounds)
+
+        attachment.unloadDeferredImagePresentation()
+        XCTAssertFalse(attachment.isImagePresentationLoaded)
+        XCTAssertEqual(attachment.bounds, expectedBounds)
+    }
+
+    func testDeferredAudioAttachmentDoesNotRetainWholeFileInMemory() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let audioURL = tempDirectory.appendingPathComponent("deferred.m4a")
+        try Data([0x01, 0x02, 0x03]).write(to: audioURL)
+        let attachment = AudioBlockAttachment(
+            fileURL: audioURL,
+            duration: 3,
+            createDate: Date(),
+            deferAudioDataLoading: true
+        )
+
+        try FileManager.default.removeItem(at: audioURL)
+        XCTAssertNil(attachment.audioData())
+    }
+
     func testAttachmentTextAttachmentUsesEmbeddedDataWhenFileIsUnavailable() throws {
         let missingDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let sourceURL = missingDirectory.appendingPathComponent("persisted-image.png")

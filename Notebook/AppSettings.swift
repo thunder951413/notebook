@@ -37,18 +37,14 @@ final class AppSettings: ObservableObject {
         static let keepHistoricalLogFiles = "logger.keep_historical_files"
         static let githubRepositoryURL = "update.github_repository_url"
         static let automaticUpdateChecksEnabled = "update.automatic_checks_enabled"
-        static let recentNoteLoadLimit = "notes.recent_load_limit"
         static let recentSelectedNoteIDs = "notes.recent_selected_ids"
         static let aiKnowledgeBaseTopK = "ai.knowledge_base_top_k"
     }
 
-    static let defaultRecentNoteLoadLimit = 5
-    static let minRecentNoteLoadLimit = 1
-    static let maxRecentNoteLoadLimit = 50
-
     static let defaultAIKnowledgeBaseTopK = 5
     static let minAIKnowledgeBaseTopK = 1
     static let maxAIKnowledgeBaseTopK = 20
+    private static let recentSelectionHistoryLimit = 20
     
     // iCloud 同步键（使用 NSUbiquitousKeyValueStore）
     private enum iCloudKeys {
@@ -92,18 +88,6 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    // MARK: - 最近笔记内容加载
-
-    var recentNoteLoadLimit: Int {
-        get {
-            let storedValue = defaults.object(forKey: Keys.recentNoteLoadLimit) as? Int
-            return Self.clampedRecentNoteLoadLimit(storedValue ?? Self.defaultRecentNoteLoadLimit)
-        }
-        set {
-            defaults.set(Self.clampedRecentNoteLoadLimit(newValue), forKey: Keys.recentNoteLoadLimit)
-        }
-    }
-
     // MARK: - AI 全库问答 Top-K 数量
 
     var aiKnowledgeBaseTopK: Int {
@@ -130,7 +114,7 @@ final class AppSettings: ObservableObject {
             let uniqueIDs = newValue.filter { seen.insert($0).inserted }
             defaults.set(
                 uniqueIDs
-                    .prefix(Self.maxRecentNoteLoadLimit)
+                    .prefix(Self.recentSelectionHistoryLimit)
                     .map(\.uuidString),
                 forKey: Keys.recentSelectedNoteIDs
             )
@@ -142,10 +126,6 @@ final class AppSettings: ObservableObject {
         var ids = recentSelectedNoteIDs.filter { $0 != id }
         ids.insert(id, at: 0)
         recentSelectedNoteIDs = ids
-    }
-
-    private static func clampedRecentNoteLoadLimit(_ value: Int) -> Int {
-        min(max(value, minRecentNoteLoadLimit), maxRecentNoteLoadLimit)
     }
 
     // MARK: - 最后选中的文件夹

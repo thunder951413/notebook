@@ -87,7 +87,6 @@ struct SettingsGeneralView: View {
     @State private var keepHistoricalLogFiles = AppSettings.shared.keepHistoricalLogFiles
     @State private var githubRepositoryURLString = AppSettings.shared.githubRepositoryURLString
     @State private var automaticUpdateChecksEnabled = AppSettings.shared.automaticUpdateChecksEnabled
-    @State private var recentNoteLoadLimit = AppSettings.shared.recentNoteLoadLimit
     @State private var aiKnowledgeBaseTopK = AppSettings.shared.aiKnowledgeBaseTopK
     @State private var githubTokenInput = ""
     @State private var githubTokenStatusMessage = ""
@@ -149,25 +148,10 @@ struct SettingsGeneralView: View {
                         .font(.title2)
                         .bold()
 
-                    Stepper(
-                        value: $recentNoteLoadLimit,
-                        in: AppSettings.minRecentNoteLoadLimit...AppSettings.maxRecentNoteLoadLimit
-                    ) {
-                        HStack {
-                            Text("保留最近选择的笔记内容")
-                            Spacer()
-                            Text("\(recentNoteLoadLimit) 篇")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .frame(maxWidth: 360)
-                    }
-                    .onChange(of: recentNoteLoadLimit) { _, newValue in
-                        AppSettings.shared.recentNoteLoadLimit = newValue
-                        store.refreshRecentNoteContentWindow()
-                    }
+                    Label("仅在内存中保留当前选择的笔记正文", systemImage: "memorychip")
+                        .frame(maxWidth: 360, alignment: .leading)
 
-                    Text("列表和搜索仍覆盖全部笔记；这里只限制富文本正文和附件在内存中的常驻数量。")
+                    Text("列表使用独立的标题、时间、文件夹和摘要缓存；切换笔记时按需加载正文并释放上一条笔记。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

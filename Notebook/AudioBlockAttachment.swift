@@ -26,7 +26,8 @@ final class AudioBlockAttachment: NSTextAttachment {
         createDate: Date = Date(),
         embeddedAudioData: Data? = nil,
         attachmentFilename: String? = nil,
-        embeddedManifestData: Data? = nil
+        embeddedManifestData: Data? = nil,
+        deferAudioDataLoading: Bool = false
     ) {
         self.fileURL = fileURL
         self.attachmentFilename = attachmentFilename ?? fileURL.lastPathComponent
@@ -36,7 +37,7 @@ final class AudioBlockAttachment: NSTextAttachment {
         self.manifestFilename = resolvedManifestData != nil ? candidateManifestFilename : nil
         self.duration = duration
         self.createDate = createDate
-        self.embeddedAudioData = embeddedAudioData ?? (try? Data(contentsOf: fileURL))
+        self.embeddedAudioData = embeddedAudioData ?? (deferAudioDataLoading ? nil : (try? Data(contentsOf: fileURL)))
         self.embeddedManifestData = resolvedManifestData
         super.init(data: nil, ofType: nil)
         

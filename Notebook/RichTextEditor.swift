@@ -64,6 +64,7 @@ struct RichTextEditor: NSViewRepresentable {
 
         scroll.documentView = textView
         controller.bind(textView: textView, noteID: noteID)
+        context.coordinator.bindAttachmentViewport(scrollView: scroll, textView: textView)
 
         return scroll
     }
@@ -116,6 +117,7 @@ struct RichTextEditor: NSViewRepresentable {
 
             // 只有在内容实际更新后才绑定新的 noteID
             controller.bind(textView: textView, noteID: noteID)
+            context.coordinator.noteContentDidChange()
 
             // 内容更新完成后再恢复撤销注册
             if let undoManager = textView.undoManager {
@@ -215,6 +217,10 @@ struct RichTextEditor: NSViewRepresentable {
         Coordinator(attributedText: $attributedText, controller: controller)
     }
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.unbindAttachmentViewport()
+    }
+
     final class Coordinator: NSObject, NSTextViewDelegate, PasteCoordinatorProtocol {
         @Binding var attributedText: NSAttributedString
         var isProgrammaticUpdate = false
@@ -228,6 +234,10 @@ struct RichTextEditor: NSViewRepresentable {
         private var pendingContent: NSAttributedString?
 
         private var fontChangeCancellable: AnyCancellable?
+        private weak var attachmentScrollView: NSScrollView?
+        private weak var attachmentTextView: NSTextView?
+        private var attachmentViewportObservers: [NSObjectProtocol] = []
+        private var visibleImageAttachments: [ObjectIdentifier: (AttachmentTextAttachment, NSRange)] = [:]
 
         init(attributedText: Binding<NSAttributedString>, controller: RichTextController) {
             _attributedText = attributedText
@@ -240,6 +250,106 @@ struct RichTextEditor: NSViewRepresentable {
                 .sink { [weak self] _ in
                     self?.applyFontSetting()
                 }
+        }
+
+        deinit {
+            for observer in attachmentViewportObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        func bindAttachmentViewport(scrollView: NSScrollView, textView: NSTextView) {
+            unbindAttachmentViewport()
+            attachmentScrollView = scrollView
+            attachmentTextView = textView
+
+            let clipView = scrollView.contentView
+            clipView.postsBoundsChangedNotifications = true
+            clipView.postsFrameChangedNotifications = true
+            let center = NotificationCenter.default
+            attachmentViewportObservers = [
+                center.addObserver(
+                    forName: NSView.boundsDidChangeNotification,
+                    object: clipView,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.refreshVisibleImageAttachments()
+                    }
+                },
+                center.addObserver(
+                    forName: NSView.frameDidChangeNotification,
+                    object: clipView,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.refreshVisibleImageAttachments()
+                    }
+                }
+            ]
+            noteContentDidChange()
+        }
+
+        func unbindAttachmentViewport() {
+            for observer in attachmentViewportObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            attachmentViewportObservers.removeAll()
+            for (attachment, _) in visibleImageAttachments.values {
+                attachment.unloadDeferredImagePresentation()
+            }
+            visibleImageAttachments.removeAll()
+            attachmentScrollView = nil
+            attachmentTextView = nil
+        }
+
+        func noteContentDidChange() {
+            for (attachment, _) in visibleImageAttachments.values {
+                attachment.unloadDeferredImagePresentation()
+            }
+            visibleImageAttachments.removeAll()
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshVisibleImageAttachments()
+            }
+        }
+
+        private func refreshVisibleImageAttachments() {
+            guard let scrollView = attachmentScrollView,
+                  let textView = attachmentTextView,
+                  let textStorage = textView.textStorage,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer,
+                  textStorage.length > 0 else { return }
+
+            let visibleRect = scrollView.contentView.bounds.offsetBy(
+                dx: -textView.textContainerInset.width,
+                dy: -textView.textContainerInset.height
+            )
+            let preloadHeight = max(visibleRect.height, 1)
+            let preloadRect = visibleRect.insetBy(dx: 0, dy: -preloadHeight)
+            let glyphRange = layoutManager.glyphRange(forBoundingRect: preloadRect, in: textContainer)
+            let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            guard characterRange.location != NSNotFound, characterRange.length > 0 else { return }
+
+            var nextVisible: [ObjectIdentifier: (AttachmentTextAttachment, NSRange)] = [:]
+            textStorage.enumerateAttribute(.attachment, in: characterRange, options: []) { value, range, _ in
+                guard let attachment = value as? AttachmentTextAttachment,
+                      attachment.kind == .image else { return }
+                if !attachment.isImagePresentationLoaded {
+                    attachment.refreshPresentationIfNeeded()
+                }
+                nextVisible[ObjectIdentifier(attachment)] = (attachment, range)
+            }
+
+            for (identifier, (attachment, range)) in visibleImageAttachments where nextVisible[identifier] == nil {
+                attachment.unloadDeferredImagePresentation()
+                layoutManager.invalidateDisplay(forCharacterRange: range)
+            }
+            for (_, range) in nextVisible.values {
+                layoutManager.invalidateDisplay(forCharacterRange: range)
+            }
+            visibleImageAttachments = nextVisible
+            textView.needsDisplay = true
         }
 
         /// 应用字体设置到当前文本视图

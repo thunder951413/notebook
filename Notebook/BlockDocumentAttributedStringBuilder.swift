@@ -213,9 +213,14 @@ struct BlockDocumentAttributedStringBuilder {
             return NSAttributedString(string: "[图片]")
         }
 
-        let attachment = AttachmentTextAttachment(fileURL: fileURL, kind: .image)
         let width = CGFloat(asset.width ?? 0)
         let height = CGFloat(asset.height ?? 0)
+        let hasPersistedSize = width > 1 && height > 1
+        let attachment = AttachmentTextAttachment(
+            fileURL: fileURL,
+            kind: .image,
+            deferImagePresentation: hasPersistedSize
+        )
         if width > 1, height > 1 {
             attachment.bounds = CGRect(x: 0, y: 0, width: width, height: height)
         }
@@ -246,7 +251,8 @@ struct BlockDocumentAttributedStringBuilder {
         let attachment = AudioBlockAttachment(
             fileURL: fileURL,
             duration: asset.duration ?? 0,
-            createDate: asset.createdAt ?? Date()
+            createDate: asset.createdAt ?? Date(),
+            deferAudioDataLoading: true
         )
         let result = NSMutableAttributedString(attachment: attachment)
         result.addAttribute(.link, value: fileURL, range: NSRange(location: 0, length: result.length))

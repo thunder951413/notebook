@@ -2,6 +2,21 @@ import SwiftUI
 import SwiftData
 import Combine
 
+struct NoteContentRetentionPolicy {
+    static let maximumLoadedNoteCount = 1
+
+    static func initialContentIDs(
+        existingNoteIDs: Set<UUID>,
+        recentSelectedNoteIDs: [UUID],
+        lastSelectedNoteID: UUID?,
+        fallbackNoteID: UUID?
+    ) -> Set<UUID> {
+        let candidates = recentSelectedNoteIDs + [lastSelectedNoteID, fallbackNoteID].compactMap { $0 }
+        guard let selectedID = candidates.first(where: existingNoteIDs.contains) else { return [] }
+        return [selectedID]
+    }
+}
+
 @MainActor
 final class NoteStore: ObservableObject {
     @Published var notes: [Note] = []
@@ -364,24 +379,12 @@ final class NoteStore: ObservableObject {
 
     private func recentNoteContentIDs(from noteEntities: [BlockDocumentNoteEntity]) -> Set<UUID> {
         let existingNoteIDs = Set(noteEntities.map(\.id))
-        let limit = AppSettings.shared.recentNoteLoadLimit
-        var orderedIDs: [UUID] = []
-
-        func appendIfAvailable(_ id: UUID?) {
-            guard let id, existingNoteIDs.contains(id), !orderedIDs.contains(id) else { return }
-            orderedIDs.append(id)
-        }
-
-        for id in AppSettings.shared.recentSelectedNoteIDs {
-            appendIfAvailable(id)
-        }
-        appendIfAvailable(AppSettings.shared.lastSelectedNoteID)
-
-        if orderedIDs.isEmpty {
-            appendIfAvailable(noteEntities.first?.id)
-        }
-
-        return Set(orderedIDs.prefix(limit))
+        return NoteContentRetentionPolicy.initialContentIDs(
+            existingNoteIDs: existingNoteIDs,
+            recentSelectedNoteIDs: AppSettings.shared.recentSelectedNoteIDs,
+            lastSelectedNoteID: AppSettings.shared.lastSelectedNoteID,
+            fallbackNoteID: noteEntities.first?.id
+        )
     }
 
     private static func normalizedItemType(_ itemType: String) -> String {
@@ -567,11 +570,9 @@ final class NoteStore: ObservableObject {
     }
 
     func refreshRecentNoteContentWindow(keeping keepID: UUID? = nil) {
-        let recentIDs = Array(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
-        for id in recentIDs {
-            _ = ensureNoteContentLoaded(id: id, pruneAfterLoad: false)
-        }
-        pruneLoadedNoteContents(keeping: keepID ?? recentIDs.first)
+        let selectedID = keepID ?? AppSettings.shared.recentSelectedNoteIDs.first
+        _ = ensureNoteContentLoaded(id: selectedID, pruneAfterLoad: false)
+        pruneLoadedNoteContents(keeping: selectedID)
     }
 
     func noteMatchesSearch(_ note: Note, query: String) -> Bool {
@@ -608,10 +609,9 @@ final class NoteStore: ObservableObject {
     }
 
     private func pruneLoadedNoteContents(keeping keepID: UUID? = nil) {
-        let allowedIDs = Set(AppSettings.shared.recentSelectedNoteIDs.prefix(AppSettings.shared.recentNoteLoadLimit))
         for index in notes.indices {
             let noteID = notes[index].id
-            guard noteID != keepID, !allowedIDs.contains(noteID), notes[index].isContentLoaded else { continue }
+            guard noteID != keepID, notes[index].isContentLoaded else { continue }
             notes[index].content = NSAttributedString(string: "")
             notes[index].isContentLoaded = false
         }

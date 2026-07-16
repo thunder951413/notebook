@@ -13,15 +13,18 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     env:
-      KEYCHAIN_PATH: ${{ runner.temp }}/notebook-signing.keychain-db
-      ARCHIVE_PATH: ${{ runner.temp }}/Notebook.xcarchive
-      APP_PATH: ${{ runner.temp }}/Notebook.xcarchive/Products/Applications/Notebook.app
       NOTARY_PROFILE: notebook-notary
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
+      - name: Configure temporary paths
+        run: |
+          echo "KEYCHAIN_PATH=$RUNNER_TEMP/notebook-signing.keychain-db" >> "$GITHUB_ENV"
+          echo "ARCHIVE_PATH=$RUNNER_TEMP/Notebook.xcarchive" >> "$GITHUB_ENV"
+          echo "APP_PATH=$RUNNER_TEMP/Notebook.xcarchive/Products/Applications/Notebook.app" >> "$GITHUB_ENV"
 
       - name: Verify release secrets
         env:
@@ -58,6 +61,7 @@ jobs:
             -project Notebook.xcodeproj \
             -destination 'platform=macOS,arch=arm64' \
             -only-testing:NotebookTests \
+            CODE_SIGNING_ALLOWED=NO \
             test
 
       - name: Run isolated UI smoke test
@@ -67,6 +71,9 @@ jobs:
             -project Notebook.xcodeproj \
             -destination 'platform=macOS,arch=arm64' \
             -only-testing:NotebookUITests/NotebookUITests/testAppLaunchesWithIsolatedEmptyLibrary \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM= \
             test
 
       - name: Archive signed Release app
