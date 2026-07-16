@@ -83,4 +83,47 @@ extension NotebookTests {
         XCTAssertFalse(SSHHostKeyPolicy.options.contains("UserKnownHostsFile=/dev/null"))
         XCTAssertFalse(SSHHostKeyPolicy.options.contains("GlobalKnownHostsFile=/dev/null"))
     }
+
+    func testCancellableProcessRunnerTerminatesChildProcess() async throws {
+        let startedAt = Date()
+        let processTask = Task {
+            try await CancellableProcessRunner.run(
+                executablePath: "/bin/sleep",
+                arguments: ["10"],
+                environment: ProcessInfo.processInfo.environment,
+                timeout: 20,
+                timeoutError: NSError(domain: "test", code: -1)
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        processTask.cancel()
+
+        do {
+            _ = try await processTask.value
+            XCTFail("取消后不应返回成功结果")
+        } catch is CancellationError {
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+        }
+    }
+
+    func testCancellableProcessRunnerTimesOutAndTerminatesChildProcess() async throws {
+        let startedAt = Date()
+        let timeoutError = NSError(domain: "ProcessRunnerTimeoutTest", code: -1001)
+
+        do {
+            _ = try await CancellableProcessRunner.run(
+                executablePath: "/bin/sleep",
+                arguments: ["10"],
+                environment: ProcessInfo.processInfo.environment,
+                timeout: 0.05,
+                timeoutError: timeoutError
+            )
+            XCTFail("超时后不应返回成功结果")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, timeoutError.domain)
+            XCTAssertEqual(error.code, timeoutError.code)
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+        }
+    }
 }

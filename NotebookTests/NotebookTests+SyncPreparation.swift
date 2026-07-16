@@ -82,6 +82,32 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testCancelledSyncSessionStillSavesEditsMadeWhileRemoteOperationRuns() async throws {
+        var revision = "before"
+        var saveCount = 0
+        NoteSaveManager.shared.registerEditorSaveHandler(revisionProvider: { revision }) {
+            saveCount += 1
+            return true
+        }
+
+        let syncTask = Task { @MainActor in
+            try await SyncSessionCoordinator.shared.withSession(named: "cancel-test") {
+                revision = "during-sync"
+                try await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
+        while revision != "during-sync" { await Task.yield() }
+        syncTask.cancel()
+
+        do {
+            _ = try await syncTask.value
+            XCTFail("取消后的同步不应成功")
+        } catch is CancellationError {
+            XCTAssertEqual(saveCount, 2)
+        }
+    }
+
+    @MainActor
     func testSyncSessionRejectsOverlappingBackendOperation() async throws {
         NoteSaveManager.shared.registerEditorSaveHandler { true }
 

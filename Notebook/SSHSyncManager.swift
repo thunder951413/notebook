@@ -12,11 +12,7 @@ import Dispatch
 final class SSHSyncManager: Sendable {
     static let shared = SSHSyncManager()
 
-    private struct ProcessExecutionResult {
-        let terminationStatus: Int32
-        let standardOutput: String
-        let standardError: String
-    }
+    private typealias ProcessExecutionResult = ProcessExecutionOutput
 
     private struct RemoteSyncCacheState: Codable {
         let noteIndexHash: String?
@@ -1510,66 +1506,18 @@ final class SSHSyncManager: Sendable {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["SSHPASS"] = password
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executablePath)
-        task.arguments = arguments
-        task.environment = env
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
-
         let timeoutErrorMessage = Self.sanitizeLog("SSH 操作超时，请检查服务器连通性、端口配置或网络状态", password: password)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var finished = false
-            let finishedQueue = DispatchQueue(label: "com.notebook.ssh.finished")
-
-            @Sendable func resume(_ result: Result<ProcessExecutionResult, Error>) {
-                lock.lock()
-                defer { lock.unlock() }
-
-                var shouldResume = false
-                finishedQueue.sync {
-                    guard !finished else { return }
-                    finished = true
-                    shouldResume = true
-                }
-
-                guard shouldResume else { return }
-                continuation.resume(with: result)
-            }
-
-            task.terminationHandler = { process in
-                let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                resume(.success(ProcessExecutionResult(
-                    terminationStatus: process.terminationStatus,
-                    standardOutput: output,
-                    standardError: error
-                )))
-            }
-
-            do {
-                try task.run()
-            } catch {
-                resume(.failure(error))
-                return
-            }
-
-            Task.detached {
-                let delay = UInt64(max(1, timeout) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: delay)
-                guard task.isRunning else { return }
-                task.terminate()
-                resume(.failure(NSError(
-                    domain: "SSHSync",
-                    code: -1001,
-                    userInfo: [NSLocalizedDescriptionKey: timeoutErrorMessage]
-                )))
-            }
-        }
+        return try await CancellableProcessRunner.run(
+            executablePath: executablePath,
+            arguments: arguments,
+            environment: env,
+            timeout: timeout,
+            timeoutError: NSError(
+                domain: "SSHSync",
+                code: -1001,
+                userInfo: [NSLocalizedDescriptionKey: timeoutErrorMessage]
+            )
+        )
     }
 
     private func escapeSingleQuoted(_ value: String) -> String {

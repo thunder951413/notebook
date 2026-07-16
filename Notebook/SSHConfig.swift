@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 
 /// 首次连接时记录主机密钥，后续连接拒绝密钥发生变化的服务器。
 /// 使用 OpenSSH 默认的 known_hosts，便于系统 ssh、配置同步和移动端配对共享同一信任记录。
@@ -8,6 +9,90 @@ enum SSHHostKeyPolicy {
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "HashKnownHosts=yes"
     ]
+}
+
+struct ProcessExecutionOutput: Sendable {
+    let terminationStatus: Int32
+    let standardOutput: String
+    let standardError: String
+}
+
+/// 统一管理外部进程的完成、超时和 Swift Task 取消，保证 continuation 只恢复一次。
+enum CancellableProcessRunner {
+    static func run(
+        executablePath: String,
+        arguments: [String],
+        environment: [String: String],
+        timeout: TimeInterval,
+        timeoutError: Error
+    ) async throws -> ProcessExecutionOutput {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.environment = environment
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        let didFinish = OSAllocatedUnfairLock(initialState: false)
+
+        let output = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProcessExecutionOutput, Error>) in
+                @Sendable func resume(_ result: Result<ProcessExecutionOutput, Error>) {
+                    let shouldResume = didFinish.withLock { finished in
+                        guard !finished else { return false }
+                        finished = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    continuation.resume(with: result)
+                }
+
+                process.terminationHandler = { terminatedProcess in
+                    let standardOutput = String(
+                        data: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                        encoding: .utf8
+                    ) ?? ""
+                    let standardError = String(
+                        data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                        encoding: .utf8
+                    ) ?? ""
+                    resume(.success(ProcessExecutionOutput(
+                        terminationStatus: terminatedProcess.terminationStatus,
+                        standardOutput: standardOutput,
+                        standardError: standardError
+                    )))
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    resume(.failure(error))
+                    return
+                }
+
+                if withUnsafeCurrentTask(body: { $0?.isCancelled ?? false }) {
+                    if process.isRunning { process.terminate() }
+                    resume(.failure(CancellationError()))
+                    return
+                }
+
+                Task.detached {
+                    let delay = UInt64(max(0.01, timeout) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard process.isRunning else { return }
+                    resume(.failure(timeoutError))
+                    if process.isRunning { process.terminate() }
+                }
+            }
+        } onCancel: {
+            if process.isRunning { process.terminate() }
+        }
+
+        try Task.checkCancellation()
+        return output
+    }
 }
 
 /// SSH 配置模型

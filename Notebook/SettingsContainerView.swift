@@ -644,6 +644,7 @@ struct DataManagementView: View {
     @State private var errorMessage: String?
     @State private var showSSHSettingsSheet = false
     @State private var isSyncing = false
+    @State private var syncTask: Task<Void, Never>?
     @State private var syncResult: SyncResult?
     @State private var syncProgress: SSHSyncProgress?
     @State private var conflictResults: [NoteSyncMergeResult]?
@@ -721,6 +722,12 @@ struct DataManagementView: View {
                                 performBidirectionalSync()
                             }
                             .disabled(isSyncing)
+
+                            if isSyncing {
+                                Button("取消同步", role: .cancel) {
+                                    cancelSync()
+                                }
+                            }
                         }
                     }
 
@@ -1351,9 +1358,12 @@ struct DataManagementView: View {
         syncProgress = nil
         AutoSyncCoordinator.shared.beginManualSync()
 
-        Task { @MainActor [self] in
+        syncTask = Task { @MainActor [self] in
             defer {
                 AutoSyncCoordinator.shared.endManualSync()
+                self.isSyncing = false
+                self.syncProgress = nil
+                self.syncTask = nil
             }
 
             do {
@@ -1365,19 +1375,28 @@ struct DataManagementView: View {
                 self.store.fetchData()
 
                 self.syncResult = .success(message)
-                self.isSyncing = false
-                self.syncProgress = nil
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                     self.syncResult = nil
                     self.conflictResults = nil
                 }
+            } catch is CancellationError {
+                self.syncResult = .failure("同步已取消")
             } catch {
                 self.syncResult = .failure("同步失败: \(error.localizedDescription)")
-                self.isSyncing = false
-                self.syncProgress = nil
             }
         }
+    }
+
+    private func cancelSync() {
+        guard isSyncing else { return }
+        syncProgress = SSHSyncProgress(
+            phase: syncProgress?.phase ?? .pullNotes,
+            current: syncProgress?.current ?? 0,
+            total: syncProgress?.total ?? 1,
+            message: "正在取消同步..."
+        )
+        syncTask?.cancel()
     }
 }
 
