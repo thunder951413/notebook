@@ -1907,6 +1907,37 @@ final class NoteStore: ObservableObject {
             fetchData()
         }
     }
+
+    /// 在锁定文件夹之间移动笔记，同时提交数据库字段和独立的锁定目录映射。
+    @discardableResult
+    func moveNoteToEncryptedFolder(id: UUID, to folderID: UUID) -> Note? {
+        guard let context = modelContext,
+              let folder = encryptedFolders.first(where: { $0.id == folderID }),
+              let noteIndex = notes.firstIndex(where: { $0.id == id }) else { return nil }
+
+        let idToMatch = id
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        guard let entity = try? context.fetch(descriptor).first else { return nil }
+
+        let folderName = "🔒 " + folder.name
+        let updatedAt = Date()
+        entity.folderID = folderID
+        entity.folderName = folderName
+        entity.tagIDs = ""
+        entity.updatedAt = updatedAt
+        guard context.saveLogging("NoteStore.moveNoteToEncryptedFolder") else { return nil }
+
+        var updatedNote = notes[noteIndex]
+        encryptedFolderManager.encryptNote(&updatedNote, to: folderID)
+        updatedNote.folder = folderName
+        updatedNote.updatedAt = updatedAt
+        notes[noteIndex] = updatedNote
+        searchableTextCache.removeValue(forKey: id)
+        autoSyncCoordinator.noteDidSave(noteID: id, reason: "moveEncryptedFolder")
+        return updatedNote
+    }
     
     // MARK: - Encrypted Folder Management
     

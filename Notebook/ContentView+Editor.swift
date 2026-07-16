@@ -364,19 +364,15 @@ struct EditorTopBarView: View {
     private func moveNoteToEncryptedFolder(_ folder: EncryptedFolder) {
         let noteTitle = note.title.isEmpty ? "(无标题)" : note.title
         let noteIDPrefix = note.id.uuidString.prefix(8)
-
-        guard !EncryptedFolderManager.shared.isEncrypted(note: note) else {
-            note.folderID = folder.id
-            note.folder = "🔒 " + folder.name
-            Logger.shared.log(.encryption, .info, "Move encrypted note [\(noteIDPrefix)] '\(noteTitle)' to encrypted folder '\(folder.name)'")
+        let wasEncrypted = EncryptedFolderManager.shared.isEncrypted(note: note)
+        guard let updatedNote = store.moveNoteToEncryptedFolder(id: note.id, to: folder.id) else {
+            Logger.shared.log(.encryption, .error, "Failed to move note [\(noteIDPrefix)] '\(noteTitle)' to encrypted folder '\(folder.name)'")
             return
         }
 
-        var updatedNote = note
-        EncryptedFolderManager.shared.encryptNote(&updatedNote, to: folder.id)
-        updatedNote.folder = "🔒 " + folder.name
         note = updatedNote
-        Logger.shared.log(.encryption, .info, "Encrypt note [\(noteIDPrefix)] '\(noteTitle)' into encrypted folder '\(folder.name)'")
+        let action = wasEncrypted ? "Move encrypted note" : "Encrypt note"
+        Logger.shared.log(.encryption, .info, "\(action) [\(noteIDPrefix)] '\(noteTitle)' into encrypted folder '\(folder.name)'")
     }
 
     var recurrenceOptions: [(String, String)] {
