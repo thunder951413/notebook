@@ -3,7 +3,7 @@ import SwiftData
 import Combine
 
 struct NoteContentRetentionPolicy {
-    static let maximumLoadedNoteCount = 1
+    static let maximumLoadedNoteCount = 0
 
     static func initialContentIDs(
         existingNoteIDs: Set<UUID>,
@@ -11,9 +11,8 @@ struct NoteContentRetentionPolicy {
         lastSelectedNoteID: UUID?,
         fallbackNoteID: UUID?
     ) -> Set<UUID> {
-        let candidates = recentSelectedNoteIDs + [lastSelectedNoteID, fallbackNoteID].compactMap { $0 }
-        guard let selectedID = candidates.first(where: existingNoteIDs.contains) else { return [] }
-        return [selectedID]
+        // 列表初始化只读取元数据；正文统一在用户选中后异步加载。
+        []
     }
 }
 
@@ -26,6 +25,8 @@ final class NoteStore: ObservableObject {
     @Published var tags: [Tag] = []
     @Published var encryptedFolders: [EncryptedFolder] = []
     @Published private(set) var readingPositions: [UUID: NoteReadingPosition] = [:]
+    @Published private(set) var loadingNoteIDs: Set<UUID> = []
+    @Published private(set) var noteContentLoadErrors: [UUID: String] = [:]
 
     /// 非回收站的笔记
     var activeNotes: [Note] {
@@ -49,6 +50,7 @@ final class NoteStore: ObservableObject {
     /// 上一次 fetchData 拉取的 library ID，用于检测库切换并触发缓存全量清空
     private var lastFetchedLibraryID: UUID?
     private let plainTextDecoder = JSONDecoder()
+    private var contentLoadGenerations: [UUID: UInt64] = [:]
     
     private let encryptedFoldersKey = "encrypted_folders"
     private let persistenceController: PersistenceController
@@ -251,20 +253,36 @@ final class NoteStore: ObservableObject {
         try ensureNoteTagLinksBackfilled(for: noteEntities, libraryID: libraryID, context: context)
 
         let loadedContentIDs = recentNoteContentIDs(from: noteEntities)
+        // 元数据刷新（例如应用重新激活）不能清空当前编辑器已经持有的正文。
+        // 仅保留数据库版本仍一致的完整缓存；同步写入了新版本时自动失效并按需重载。
+        let retainedLoadedNotes = Dictionary(
+            uniqueKeysWithValues: notes
+                .filter(\.isContentLoaded)
+                .map { ($0.id, $0) }
+        )
         // 注意：不再做 searchableTextCache.removeAll()。
         // 单笔记粒度的失效已由 save/delete 路径的 removeValue(forKey:) 处理，
         // 全量清空会让下一次搜索时所有缓存条目全部冷启动，造成不必要的 SQLite 重新拉取。
 
         self.notes = try noteEntities.map { entity in
-            let isContentLoaded = loadedContentIDs.contains(entity.id)
-            let content = isContentLoaded
-                ? try loadFullBlockContent(
+            let retained = retainedLoadedNotes[entity.id].flatMap { cached in
+                cached.version == entity.version ? cached : nil
+            }
+            let shouldLoadFromDatabase = loadedContentIDs.contains(entity.id) && retained == nil
+            let isContentLoaded = retained != nil || shouldLoadFromDatabase
+            let content: NSAttributedString
+            if let retained {
+                content = retained.content
+            } else if shouldLoadFromDatabase {
+                content = try loadFullBlockContent(
                     noteID: entity.id,
                     context: context,
                     // 已迁移过的笔记无需做旧版复选框图片像素检测启发式
                     skipLegacyCheckboxHeuristic: entity.hasLegacyCheckboxMigrated
                 )
-                : NSAttributedString(string: "")
+            } else {
+                content = NSAttributedString(string: "")
+            }
             // 优先用 entity 上持久化的 previewText（写入时一次性算好），
             // 避免对每条笔记额外做一次 blocks fetch（N+1 查询）。
             let contentPreview: String
@@ -606,6 +624,109 @@ final class NoteStore: ObservableObject {
         return notes.first(where: { $0.id == id })
     }
 
+    /// 在独立 SwiftData actor 中抓取不可变快照，并在主线程分批构建富文本。
+    /// 任务取消、版本变化或快速切换时不会把过期正文写回内存。
+    @discardableResult
+    func ensureNoteContentLoadedAsync(
+        id: UUID?,
+        rememberSelection: Bool = false,
+        pruneAfterLoad: Bool = true
+    ) async -> Note? {
+        guard let id else { return nil }
+        if rememberSelection {
+            AppSettings.shared.recordRecentlySelectedNote(id)
+        }
+
+        guard let context = modelContext,
+              let index = notes.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        if notes[index].isContentLoaded {
+            if pruneAfterLoad {
+                pruneLoadedNoteContents(keeping: id)
+            }
+            return notes[index]
+        }
+
+        let generation = (contentLoadGenerations[id] ?? 0) &+ 1
+        contentLoadGenerations[id] = generation
+        loadingNoteIDs.insert(id)
+        noteContentLoadErrors.removeValue(forKey: id)
+        let interval = Logger.shared.beginInterval(
+            .storage,
+            "asyncNoteContentLoad",
+            metadata: "noteID=\(id.uuidString.prefix(8)) expectedVersion=\(notes[index].version)"
+        )
+        defer {
+            if contentLoadGenerations[id] == generation {
+                loadingNoteIDs.remove(id)
+            }
+        }
+
+        do {
+            // ModelActor 的执行器由创建它的上下文决定；必须在 detached 任务中创建，
+            // 否则从主线程创建会让大文档的 SwiftData fetch 仍占用主线程。
+            let container = context.container
+            let loader = await Task.detached(priority: .userInitiated) {
+                BlockDocumentContentLoader(modelContainer: container)
+            }.value
+            let snapshot = try await loader.snapshot(noteID: id)
+            try Task.checkCancellation()
+
+            guard let currentIndex = notes.firstIndex(where: { $0.id == id }),
+                  notes[currentIndex].version == snapshot.version else {
+                interval.end(.warn, "discarded=versionChanged")
+                return nil
+            }
+
+            let attachmentsRoot = try? storageLocationManager.attachmentsDirectoryURL()
+            let content = try await BlockDocumentAttributedStringBuilder(
+                attachmentsRoot: attachmentsRoot,
+                skipLegacyCheckboxHeuristic: snapshot.hasLegacyCheckboxMigrated
+            ).buildIncrementally(
+                blocks: snapshot.blocks,
+                assetsByID: snapshot.assetsByID
+            )
+            try Task.checkCancellation()
+
+            guard contentLoadGenerations[id] == generation,
+                  let applyIndex = notes.firstIndex(where: { $0.id == id }),
+                  notes[applyIndex].version == snapshot.version else {
+                interval.end(.warn, "discarded=staleGeneration")
+                return nil
+            }
+
+            notes[applyIndex].content = Self.fixCheckboxAttachments(in: content)
+            notes[applyIndex].contentPreview = Self.previewText(from: content.string)
+            notes[applyIndex].isContentLoaded = true
+            if pruneAfterLoad {
+                pruneLoadedNoteContents(keeping: id)
+            }
+            interval.end(
+                .info,
+                "blocks=\(snapshot.blocks.count) characters=\(content.length)"
+            )
+            return notes[applyIndex]
+        } catch is CancellationError {
+            interval.end(.debug, "cancelled=true")
+            return nil
+        } catch {
+            noteContentLoadErrors[id] = error.localizedDescription
+            Logger.shared.log(
+                .storage,
+                .error,
+                "异步加载笔记失败 noteID=\(id.uuidString.prefix(8)): \(error.localizedDescription)"
+            )
+            interval.end(.error, "error=\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func retryNoteContentLoad(id: UUID) {
+        noteContentLoadErrors.removeValue(forKey: id)
+        contentLoadGenerations[id] = (contentLoadGenerations[id] ?? 0) &+ 1
+    }
+
     func refreshRecentNoteContentWindow(keeping keepID: UUID? = nil) {
         let selectedID = keepID ?? AppSettings.shared.recentSelectedNoteIDs.first
         _ = ensureNoteContentLoaded(id: selectedID, pruneAfterLoad: false)
@@ -638,6 +759,10 @@ final class NoteStore: ObservableObject {
     }
 
     func markNoteContentUpdated(id: UUID, content: NSAttributedString) {
+        // 任何已保存/编辑的新正文都使后台旧快照失效，防止迟到任务覆盖新内容。
+        contentLoadGenerations[id] = (contentLoadGenerations[id] ?? 0) &+ 1
+        loadingNoteIDs.remove(id)
+        noteContentLoadErrors.removeValue(forKey: id)
         searchableTextCache.removeValue(forKey: id)
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].content = content
@@ -960,6 +1085,95 @@ final class NoteStore: ObservableObject {
         }
 
         return ensureNoteContentLoaded(id: createdNote.id, pruneAfterLoad: false)
+    }
+
+    /// 大文本拖放专用异步路径。块编码、SwiftData 插入和首个历史版本写入都在
+    /// 独立 ModelActor 中完成，主线程只负责创建元数据和最终发布完整正文。
+    @discardableResult
+    func importTextNoteAsync(
+        _ document: ImportedTextNoteFile,
+        target: TextNoteImportTarget
+    ) async -> Note? {
+        guard let context = modelContext else { return nil }
+        guard let createdNote = addNote(
+            title: document.title,
+            folderID: target.folderID,
+            folderName: target.folderName
+        ) else { return nil }
+
+        let interval = Logger.shared.beginInterval(
+            .storage,
+            "asyncTextNoteImport",
+            metadata: "noteID=\(createdNote.id.uuidString.prefix(8)) characters=\(document.content.utf16.count)"
+        )
+        do {
+            // 同上：后台创建 ModelActor，确保数万块的编码和插入不落回主线程。
+            let container = context.container
+            let worker = await Task.detached(priority: .userInitiated) {
+                TextNoteImportPersistenceActor(modelContainer: container)
+            }.value
+            let persisted = try await worker.persist(
+                noteID: createdNote.id,
+                content: document.content,
+                authorDeviceID: BlockDocumentNoteVersionStore.currentDeviceID()
+            )
+            try Task.checkCancellation()
+
+            let idToMatch = createdNote.id
+            let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+            )
+            guard let entity = try context.fetch(descriptor).first else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            entity.version = persisted.version
+            entity.updatedAt = persisted.updatedAt
+            entity.blockCount = persisted.blockCount
+            entity.assetCount = 0
+            entity.documentSchemaVersion = "1.0"
+            entity.documentSource = "TextFileDrop"
+            entity.previewText = NoteSaveManager.previewTextForList(from: persisted.normalizedContent)
+            entity.hasLegacyCheckboxMigrated = true
+            guard context.saveLogging("NoteStore.importTextNoteAsync.refreshMetadata") else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            let content = NSAttributedString(string: persisted.normalizedContent)
+            markNoteContentUpdated(id: createdNote.id, content: content)
+            if let noteIndex = notes.firstIndex(where: { $0.id == createdNote.id }) {
+                notes[noteIndex].version = persisted.version
+                notes[noteIndex].updatedAt = persisted.updatedAt
+            }
+
+            if let encryptedFolderID = target.encryptedFolderID,
+               moveNoteToEncryptedFolder(id: createdNote.id, to: encryptedFolderID) == nil {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            if let tagID = target.tagID {
+                addTagToNote(tagID: tagID, noteID: createdNote.id)
+            }
+            if target.encryptedFolderID == nil, target.tagID == nil {
+                autoSyncCoordinator.noteDidSave(noteID: createdNote.id, reason: "fileDropImport")
+            }
+            interval.end(
+                .info,
+                "blocks=\(persisted.blockCount) characters=\(content.length)"
+            )
+            return notes.first(where: { $0.id == createdNote.id })
+        } catch is CancellationError {
+            rollbackFailedTextImport(noteID: createdNote.id, context: context)
+            interval.end(.debug, "cancelled=true rolledBack=true")
+            return nil
+        } catch {
+            rollbackFailedTextImport(noteID: createdNote.id, context: context)
+            Logger.shared.log(
+                .storage,
+                .error,
+                "异步导入文本笔记失败 noteID=\(createdNote.id.uuidString.prefix(8)): \(error.localizedDescription)"
+            )
+            interval.end(.error, "error=\(error.localizedDescription) rolledBack=true")
+            return nil
+        }
     }
 
     private func rollbackFailedTextImport(noteID: UUID, context: ModelContext) {

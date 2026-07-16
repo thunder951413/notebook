@@ -408,9 +408,10 @@ final class NoteSaveManager {
 
         var converter = try LegacyNoteDocumentConverter(noteID: request.noteID, noteDirectory: temporaryDirectory)
         let conversion = try converter.convert(content: decodedContent)
+        let document = Self.compactLargePlainParagraphRuns(in: conversion.document)
         let attachmentsRoot = try persistentAttachmentsRootDirectory()
         let persistedAssetsByID = try persistBlockAssets(
-            document: conversion.document,
+            document: document,
             noteID: request.noteID,
             originalContent: decodedContent,
             noteDirectory: temporaryDirectory,
@@ -418,7 +419,7 @@ final class NoteSaveManager {
         )
         let normalizedContent = normalizeContentForBlockSave(
             decodedContent,
-            document: conversion.document,
+            document: document,
             persistedAssetsByID: persistedAssetsByID,
             attachmentsRoot: attachmentsRoot
         )
@@ -437,7 +438,7 @@ final class NoteSaveManager {
 
         // 脏检查：计算新内容哈希，与上次保存对比，仅实际变化时递增 version
         let newContentHash = Self.contentHashForDirtyCheck(
-            document: conversion.document,
+            document: document,
             title: request.title,
             folderID: request.folderID,
             folderName: request.folder,
@@ -460,9 +461,9 @@ final class NoteSaveManager {
         entity.recurrenceRule = request.recurrenceRule
         entity.version = newVersion
         entity.lastSavedContentHash = newContentHash
-        entity.documentSchemaVersion = conversion.document.schemaVersion
-        entity.documentSource = conversion.document.source
-        entity.blockCount = conversion.document.blocks.count
+        entity.documentSchemaVersion = document.schemaVersion
+        entity.documentSource = document.source
+        entity.blockCount = document.blocks.count
         entity.assetCount = persistedAssetsByID.count
         // 写入时一次性算好预览文本，避免列表加载时对每条笔记做额外的 blocks fetch
         entity.previewText = Self.previewTextForList(from: request.decodedContent.string)
@@ -470,7 +471,7 @@ final class NoteSaveManager {
         // 后续加载时可跳过昂贵的像素检测启发式
         entity.hasLegacyCheckboxMigrated = true
 
-        let orderedPersistedAssets = conversion.document.blocks
+        let orderedPersistedAssets = document.blocks
             .compactMap(\.asset)
             .compactMap { persistedAssetsByID[$0.id] }
 
@@ -493,7 +494,7 @@ final class NoteSaveManager {
             noteID: noteID,
             noteEntity: entity,
             previousBlocks: previousBlocks,
-            newBlocks: conversion.document.blocks,
+            newBlocks: document.blocks,
             context: context,
             encodeText: encodeTextPayload(_:),
             encodeTable: encodeTablePayload(_:)
@@ -535,9 +536,123 @@ final class NoteSaveManager {
 
         interval.end(
             .info,
-            "blocks=\(conversion.document.blocks.count) assets=\(persistedAssetsByID.count) normalizedLength=\(normalizedContent.length) dirty=\(hasContentChanged)"
+            "blocks=\(document.blocks.count) assets=\(persistedAssetsByID.count) normalizedLength=\(normalizedContent.length) dirty=\(hasContentChanged)"
         )
         return hasContentChanged
+    }
+
+    /// SwiftData 对数万条逐段实体的插入成本很高。长文档中只有普通段落的连续区间
+    /// 可以安全合并为有限窗口；语义块（标题/列表/待办/附件/表格）始终保持原粒度。
+    /// builder 会在块之间补一个换行，块内显式保存段落换行，因此正文可逐字符还原。
+    private static func compactLargePlainParagraphRuns(in document: MigratedDocument) -> MigratedDocument {
+        guard document.blocks.count > 512 else { return document }
+
+        var compacted: [MigratedDocumentBlock] = []
+        compacted.reserveCapacity(document.blocks.count / 4)
+        var run: [MigratedDocumentBlock] = []
+        run.reserveCapacity(256)
+
+        func isPlainParagraph(_ block: MigratedDocumentBlock) -> Bool {
+            block.type == "paragraph"
+                && block.level == nil
+                && block.listStyle == nil
+                && block.order == nil
+                && block.checked == nil
+                && (block.indent ?? 0) == 0
+                && block.asset == nil
+                && block.table == nil
+        }
+
+        func sameFormatting(_ lhs: MigratedInlineText, _ rhs: MigratedInlineText) -> Bool {
+            lhs.bold == rhs.bold
+                && lhs.italic == rhs.italic
+                && lhs.underline == rhs.underline
+                && lhs.strikethrough == rhs.strikethrough
+                && lhs.textColor == rhs.textColor
+                && lhs.backgroundColor == rhs.backgroundColor
+                && lhs.link == rhs.link
+                && lhs.fontFamily == rhs.fontFamily
+                && lhs.fontSize == rhs.fontSize
+                && lhs.kern == rhs.kern
+                && lhs.baselineOffset == rhs.baselineOffset
+                && lhs.paragraphStyle == rhs.paragraphStyle
+        }
+
+        func span(_ template: MigratedInlineText?, text: String) -> MigratedInlineText {
+            MigratedInlineText(
+                text: text,
+                bold: template?.bold ?? false,
+                italic: template?.italic ?? false,
+                underline: template?.underline ?? false,
+                strikethrough: template?.strikethrough ?? false,
+                textColor: template?.textColor,
+                backgroundColor: template?.backgroundColor,
+                link: template?.link,
+                fontFamily: template?.fontFamily,
+                fontSize: template?.fontSize,
+                kern: template?.kern,
+                baselineOffset: template?.baselineOffset,
+                paragraphStyle: template?.paragraphStyle
+            )
+        }
+
+        func flushRun() {
+            guard !run.isEmpty else { return }
+            var combined: [MigratedInlineText] = []
+            combined.reserveCapacity(run.count * 2)
+
+            func append(_ candidate: MigratedInlineText) {
+                if let last = combined.last, sameFormatting(last, candidate) {
+                    combined[combined.count - 1] = span(last, text: last.text + candidate.text)
+                } else {
+                    combined.append(candidate)
+                }
+            }
+
+            for (index, block) in run.enumerated() {
+                if index > 0 {
+                    append(span(combined.last, text: "\n"))
+                }
+                for inline in block.text ?? [] {
+                    append(inline)
+                }
+            }
+            let first = run[0]
+            compacted.append(
+                MigratedDocumentBlock(
+                    id: first.id,
+                    type: "paragraph",
+                    text: combined.isEmpty ? nil : combined,
+                    level: nil,
+                    listStyle: nil,
+                    order: nil,
+                    checked: nil,
+                    indent: 0,
+                    asset: nil,
+                    table: nil
+                )
+            )
+            run.removeAll(keepingCapacity: true)
+        }
+
+        for block in document.blocks {
+            if isPlainParagraph(block) {
+                run.append(block)
+                if run.count == 256 {
+                    flushRun()
+                }
+            } else {
+                flushRun()
+                compacted.append(block)
+            }
+        }
+        flushRun()
+
+        return MigratedDocument(
+            schemaVersion: document.schemaVersion,
+            source: document.source,
+            blocks: compacted
+        )
     }
 
     private func decodeAttributedString(from data: Data) -> NSAttributedString {

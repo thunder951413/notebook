@@ -1,6 +1,6 @@
 import Foundation
 
-struct DocumentMigrationPackage: Codable {
+nonisolated struct DocumentMigrationPackage: Codable {
     let schemaVersion: String
     let exportedAt: Date
     let notes: [NoteItem]
@@ -8,7 +8,7 @@ struct DocumentMigrationPackage: Codable {
     let tags: [TagItem]
     let todoSteps: [TodoStepItem]?
 
-    struct NoteItem: Codable {
+    nonisolated struct NoteItem: Codable {
         let id: UUID
         let title: String
         let createdAt: Date
@@ -34,7 +34,7 @@ struct DocumentMigrationPackage: Codable {
         let linkedNoteIDs: [UUID]?
     }
 
-    struct FolderItem: Codable {
+    nonisolated struct FolderItem: Codable {
         let id: UUID
         let name: String
         let sortOrder: Int
@@ -43,14 +43,14 @@ struct DocumentMigrationPackage: Codable {
         let folderType: String?
     }
 
-    struct TagItem: Codable {
+    nonisolated struct TagItem: Codable {
         let id: UUID
         let name: String
         let color: String
         let createdAt: Date
     }
 
-    struct TodoStepItem: Codable {
+    nonisolated struct TodoStepItem: Codable {
         let id: UUID
         let noteID: UUID
         let text: String
@@ -60,13 +60,13 @@ struct DocumentMigrationPackage: Codable {
     }
 }
 
-struct MigratedDocument: Codable {
+nonisolated struct MigratedDocument: Codable {
     let schemaVersion: String
     let source: String
     let blocks: [MigratedDocumentBlock]
 }
 
-struct MigratedDocumentBlock: Codable {
+nonisolated struct MigratedDocumentBlock: Codable {
     let id: String
     let type: String
     var text: [MigratedInlineText]?
@@ -79,7 +79,7 @@ struct MigratedDocumentBlock: Codable {
     var table: MigratedTable?
 }
 
-struct MigratedInlineText: Codable {
+nonisolated struct MigratedInlineText: Codable {
     let text: String
     let bold: Bool
     let italic: Bool
@@ -95,7 +95,7 @@ struct MigratedInlineText: Codable {
     let paragraphStyle: MigratedParagraphStyle?
 }
 
-struct MigratedParagraphStyle: Codable, Equatable {
+nonisolated struct MigratedParagraphStyle: Codable, Equatable {
     let alignment: Int?
     let lineSpacing: Double?
     let paragraphSpacing: Double?
@@ -105,7 +105,7 @@ struct MigratedParagraphStyle: Codable, Equatable {
     let tailIndent: Double?
 }
 
-struct MigratedAssetReference: Codable {
+nonisolated struct MigratedAssetReference: Codable {
     let id: String
     let kind: String
     let filename: String
@@ -117,7 +117,7 @@ struct MigratedAssetReference: Codable {
     let sidecarFiles: [String]
 }
 
-struct MigratedTable: Codable {
+nonisolated struct MigratedTable: Codable {
     let rows: [[String]]
     let columnWidths: [Double]
     let rowHeights: [Double]

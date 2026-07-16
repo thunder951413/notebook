@@ -48,36 +48,122 @@ struct BlockDocumentAttributedStringBuilder {
         blocks: [BlockDocumentBlockEntity],
         assetsByID: [String: BlockDocumentAssetEntity]
     ) -> NSAttributedString {
+        build(
+            blocks: blocks.map {
+                BlockDocumentBlockRecord(
+                    noteID: $0.noteID,
+                    position: $0.position,
+                    blockID: $0.blockID,
+                    kind: $0.kind,
+                    sourceType: $0.sourceType,
+                    textPayload: $0.textPayload,
+                    level: $0.level,
+                    listStyle: $0.listStyle,
+                    order: $0.order,
+                    checked: $0.checked,
+                    indent: $0.indent,
+                    assetID: $0.assetID,
+                    tablePayload: $0.tablePayload
+                )
+            },
+            assetsByID: assetsByID.mapValues {
+                BlockDocumentAssetRecord(
+                    noteID: $0.noteID,
+                    assetID: $0.assetID,
+                    kind: $0.kind,
+                    filename: $0.filename,
+                    width: $0.width,
+                    height: $0.height,
+                    duration: $0.duration,
+                    createdAt: $0.createdAt,
+                    relativeFilePath: $0.relativeFilePath
+                )
+            }
+        )
+    }
+
+    func build(
+        blocks: [BlockDocumentBlockRecord],
+        assetsByID: [String: BlockDocumentAssetRecord]
+    ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         var index = 0
         var emittedBlockCount = 0
 
         while index < blocks.count {
-            if emittedBlockCount > 0 {
-                result.append(NSAttributedString(string: "\n"))
-            }
-
-            if !skipLegacyCheckboxHeuristic,
-               let recoveredTodo = recoveredLegacyTodoBlock(
-                at: index,
+            appendNextBlock(
+                to: result,
+                index: &index,
+                emittedBlockCount: &emittedBlockCount,
                 blocks: blocks,
                 assetsByID: assetsByID
-            ) {
-                result.append(recoveredTodo)
-                index += 2
-            } else {
-                result.append(attributedBlock(for: blocks[index], assetsByID: assetsByID))
-                index += 1
-            }
-            emittedBlockCount += 1
+            )
         }
 
         return result
     }
 
+    /// 分批构建长文档；每批主动让出主线程，使窗口、列表和取消切换保持响应。
+    @MainActor
+    func buildIncrementally(
+        blocks: [BlockDocumentBlockRecord],
+        assetsByID: [String: BlockDocumentAssetRecord],
+        batchSize: Int = 192
+    ) async throws -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        var index = 0
+        var emittedBlockCount = 0
+        let safeBatchSize = max(1, batchSize)
+
+        while index < blocks.count {
+            try Task.checkCancellation()
+            let batchEnd = min(blocks.count, index + safeBatchSize)
+            while index < batchEnd {
+                appendNextBlock(
+                    to: result,
+                    index: &index,
+                    emittedBlockCount: &emittedBlockCount,
+                    blocks: blocks,
+                    assetsByID: assetsByID
+                )
+            }
+            if index < blocks.count {
+                await Task.yield()
+            }
+        }
+
+        return result
+    }
+
+    private func appendNextBlock(
+        to result: NSMutableAttributedString,
+        index: inout Int,
+        emittedBlockCount: inout Int,
+        blocks: [BlockDocumentBlockRecord],
+        assetsByID: [String: BlockDocumentAssetRecord]
+    ) {
+        if emittedBlockCount > 0 {
+            result.append(NSAttributedString(string: "\n"))
+        }
+
+        if !skipLegacyCheckboxHeuristic,
+           let recoveredTodo = recoveredLegacyTodoBlock(
+            at: index,
+            blocks: blocks,
+            assetsByID: assetsByID
+        ) {
+            result.append(recoveredTodo)
+            index += 2
+        } else {
+            result.append(attributedBlock(for: blocks[index], assetsByID: assetsByID))
+            index += 1
+        }
+        emittedBlockCount += 1
+    }
+
     private func attributedBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
+        for block: BlockDocumentBlockRecord,
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> NSAttributedString {
         switch block.kind {
         case "heading":
@@ -98,7 +184,7 @@ struct BlockDocumentAttributedStringBuilder {
         }
     }
 
-    private func headingBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
+    private func headingBlock(for block: BlockDocumentBlockRecord) -> NSAttributedString {
         let content = NSMutableAttributedString(attributedString: inlineAttributedText(from: block.textPayload))
         let fontSize = headingFontSize(level: block.level ?? 1)
         let range = NSRange(location: 0, length: content.length)
@@ -117,14 +203,14 @@ struct BlockDocumentAttributedStringBuilder {
         return content
     }
 
-    private func listItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
+    private func listItemBlock(for block: BlockDocumentBlockRecord) -> NSAttributedString {
         let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
         result.append(NSAttributedString(string: listMarker(for: block)))
         result.append(sanitizedListInlineText(from: block.textPayload))
         return result
     }
 
-    private func todoItemBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
+    private func todoItemBlock(for block: BlockDocumentBlockRecord) -> NSAttributedString {
         let result = NSMutableAttributedString(string: indentationPrefix(level: block.indent))
         let attachment = CheckboxTextAttachment(checked: block.checked ?? false)
         result.append(NSAttributedString(attachment: attachment))
@@ -135,8 +221,8 @@ struct BlockDocumentAttributedStringBuilder {
 
     private func recoveredLegacyTodoBlock(
         at index: Int,
-        blocks: [BlockDocumentBlockEntity],
-        assetsByID: [String: BlockDocumentAssetEntity]
+        blocks: [BlockDocumentBlockRecord],
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> NSAttributedString? {
         guard index + 1 < blocks.count else { return nil }
         let imageBlock = blocks[index]
@@ -153,8 +239,8 @@ struct BlockDocumentAttributedStringBuilder {
     }
 
     private func isLikelyLegacyCheckboxImageBlock(
-        _ block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
+        _ block: BlockDocumentBlockRecord,
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> Bool {
         guard let asset = block.assetID.flatMap({ assetsByID[$0] }) else { return false }
         guard asset.kind == "image" else { return false }
@@ -170,8 +256,8 @@ struct BlockDocumentAttributedStringBuilder {
     }
 
     private func recoveredLegacyCheckboxState(
-        from block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
+        from block: BlockDocumentBlockRecord,
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> Bool? {
         guard
             let asset = block.assetID.flatMap({ assetsByID[$0] }),
@@ -187,7 +273,7 @@ struct BlockDocumentAttributedStringBuilder {
         return CheckboxTextAttachment.inferCheckedState(from: attachment)
     }
 
-    private func resolvedLegacyAssetImageSize(_ asset: BlockDocumentAssetEntity) -> CGSize {
+    private func resolvedLegacyAssetImageSize(_ asset: BlockDocumentAssetRecord) -> CGSize {
         if let width = asset.width, let height = asset.height, width > 0, height > 0 {
             return CGSize(width: width, height: height)
         }
@@ -202,8 +288,8 @@ struct BlockDocumentAttributedStringBuilder {
     }
 
     private func imageBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
+        for block: BlockDocumentBlockRecord,
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> NSAttributedString {
         guard
             let asset = block.assetID.flatMap({ assetsByID[$0] }),
@@ -237,8 +323,8 @@ struct BlockDocumentAttributedStringBuilder {
     }
 
     private func audioBlock(
-        for block: BlockDocumentBlockEntity,
-        assetsByID: [String: BlockDocumentAssetEntity]
+        for block: BlockDocumentBlockRecord,
+        assetsByID: [String: BlockDocumentAssetRecord]
     ) -> NSAttributedString {
         guard
             let asset = block.assetID.flatMap({ assetsByID[$0] }),
@@ -259,7 +345,7 @@ struct BlockDocumentAttributedStringBuilder {
         return result
     }
 
-    private func tableBlock(for block: BlockDocumentBlockEntity) -> NSAttributedString {
+    private func tableBlock(for block: BlockDocumentBlockRecord) -> NSAttributedString {
         guard
             let payloadData = block.tablePayload,
             let payload = try? decoder.decode(BlockDocumentTablePayload.self, from: payloadData)
@@ -441,7 +527,7 @@ struct BlockDocumentAttributedStringBuilder {
         String(repeating: "    ", count: max(0, level ?? 0))
     }
 
-    private func listMarker(for block: BlockDocumentBlockEntity) -> String {
+    private func listMarker(for block: BlockDocumentBlockRecord) -> String {
         switch block.listStyle {
         case "ordered":
             return "\(block.order ?? 1). "
@@ -452,7 +538,7 @@ struct BlockDocumentAttributedStringBuilder {
         }
     }
 
-    private func assetFileURL(for asset: BlockDocumentAssetEntity) -> URL? {
+    private func assetFileURL(for asset: BlockDocumentAssetRecord) -> URL? {
         attachmentsRoot?.appendingPathComponent(asset.relativeFilePath)
     }
 

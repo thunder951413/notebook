@@ -47,6 +47,7 @@ final class RichTextController: ObservableObject {
     private var noteSearchQuery: String = ""
     private var noteSearchRanges: [NSRange] = []
     private var highlightedSearchRange: NSRange?
+    private var hasDeferredBindingUpdate = false
     private let noteSearchHighlightColor = NSColor.systemYellow.withAlphaComponent(0.35)
 
     /// 启动定期自动保存（每30秒）
@@ -137,11 +138,15 @@ final class RichTextController: ObservableObject {
 
     var requiresCommittedSnapshotOnSwitch: Bool {
         guard let tv = textView else { return false }
-        if hasMarkedText {
+        if hasMarkedText || hasDeferredBindingUpdate {
             return true
         }
         guard let richTextView = tv as? RichTextView else { return false }
         return richTextView.hasActiveTableEditor
+    }
+
+    func setDeferredBindingUpdatePending(_ isPending: Bool) {
+        hasDeferredBindingUpdate = isPending
     }
 
     /// 强制同步内容并获取当前编辑器内容的快照

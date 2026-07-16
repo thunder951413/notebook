@@ -361,7 +361,8 @@ extension NotebookTests {
         let store = NoteStore()
         store.setContext(context)
 
-        let note = try XCTUnwrap(store.activeNotes.first(where: { $0.id == noteID }))
+        XCTAssertFalse(try XCTUnwrap(store.activeNotes.first(where: { $0.id == noteID })).isContentLoaded)
+        let note = try XCTUnwrap(store.ensureNoteContentLoaded(id: noteID))
         XCTAssertTrue(hasCheckboxAttachment(in: note.content), "content=\(note.content.string)")
         XCTAssertFalse(note.content.string.contains("\u{FFFC}\n"), "content=\(note.content.string)")
         XCTAssertTrue(note.content.string.contains("\u{FFFC} 退出重进后仍应同一行"), "content=\(note.content.string)")
@@ -458,7 +459,8 @@ extension NotebookTests {
         let restartedStore = NoteStore()
         restartedStore.setContext(context)
 
-        let restored = try XCTUnwrap(restartedStore.activeNotes.first(where: { $0.id == noteID })?.content)
+        XCTAssertFalse(try XCTUnwrap(restartedStore.activeNotes.first(where: { $0.id == noteID })).isContentLoaded)
+        let restored = try XCTUnwrap(restartedStore.ensureNoteContentLoaded(id: noteID)?.content)
         XCTAssertTrue(hasCheckboxAttachment(in: restored), "restored=\(restored.string)")
         XCTAssertFalse(restored.string.contains("\u{FFFC}\n"), "restored=\(restored.string)")
         XCTAssertTrue(restored.string.contains("\u{FFFC} 重启后不下沉"), "restored=\(restored.string)")
@@ -549,7 +551,8 @@ extension NotebookTests {
 
         let restartedStore = NoteStore()
         restartedStore.setContext(context)
-        let restored = try XCTUnwrap(restartedStore.activeNotes.first(where: { $0.id == noteID })?.content)
+        XCTAssertFalse(try XCTUnwrap(restartedStore.activeNotes.first(where: { $0.id == noteID })).isContentLoaded)
+        let restored = try XCTUnwrap(restartedStore.ensureNoteContentLoaded(id: noteID)?.content)
         XCTAssertFalse(restored.string.contains("• \n"), "restored=\(restored.string)")
         XCTAssertFalse(restored.string.contains("- \n"), "restored=\(restored.string)")
         XCTAssertFalse(restored.string.contains("7. \n"), "restored=\(restored.string)")
@@ -704,7 +707,8 @@ extension NotebookTests {
 
         let store = NoteStore()
         store.setContext(context)
-        let restored = try XCTUnwrap(store.activeNotes.first(where: { $0.id == noteID })?.content)
+        XCTAssertFalse(try XCTUnwrap(store.activeNotes.first(where: { $0.id == noteID })).isContentLoaded)
+        let restored = try XCTUnwrap(store.ensureNoteContentLoaded(id: noteID)?.content)
         XCTAssertFalse(restored.string.contains("• \n"), "restored=\(restored.string)")
         XCTAssertFalse(restored.string.contains("- \n"), "restored=\(restored.string)")
         XCTAssertFalse(restored.string.contains("5. \n"), "restored=\(restored.string)")

@@ -117,4 +117,117 @@ extension NotebookTests {
             document.content
         )
     }
+
+    @MainActor
+    func testAsyncLargeTextImportKeepsMainActorResponsiveAndPersistsEveryCharacter() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let libraryID = UUID()
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: Date(),
+                importedAt: Date(),
+                noteCount: 0,
+                folderCount: 0,
+                tagCount: 0
+            )
+        )
+        try context.save()
+
+        let content = (0..<12_000)
+            .map { "第\($0)行-" + String(repeating: "大文档安全导入", count: 6) }
+            .joined(separator: "\r\n") + "\r\n尾部完整性标记"
+        let expected = content.replacingOccurrences(of: "\r\n", with: "\n")
+        let document = ImportedTextNoteFile(
+            sourceURL: URL(fileURLWithPath: "/tmp/大文档.md"),
+            title: "大文档",
+            content: content
+        )
+        let target = TextNoteImportTarget(
+            folderID: nil,
+            folderName: "未分类",
+            encryptedFolderID: nil,
+            tagID: nil
+        )
+        let store = NoteStore()
+        store.setContext(context)
+
+        var mainActorProgressed = false
+        Task { @MainActor in
+            await Task.yield()
+            mainActorProgressed = true
+        }
+        let importedResult = await store.importTextNoteAsync(document, target: target)
+        let imported = try XCTUnwrap(importedResult)
+
+        XCTAssertTrue(mainActorProgressed)
+        XCTAssertEqual(imported.content.string, expected)
+        XCTAssertTrue(imported.content.string.hasSuffix("尾部完整性标记"))
+        let importedID = imported.id
+        let entity = try XCTUnwrap(
+            context.fetch(
+                FetchDescriptor<BlockDocumentNoteEntity>(
+                    predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == importedID }
+                )
+            ).first
+        )
+        XCTAssertEqual(entity.blockCount, 47)
+        XCTAssertEqual(try BlockDocumentNoteVersionStore.history(for: importedID, context: context).count, 1)
+
+        let restartedStore = NoteStore()
+        restartedStore.setContext(context)
+        XCTAssertFalse(try XCTUnwrap(restartedStore.notes.first(where: { $0.id == importedID })).isContentLoaded)
+        let reloadedResult = await restartedStore.ensureNoteContentLoadedAsync(id: importedID)
+        XCTAssertEqual(try XCTUnwrap(reloadedResult).content.string, expected)
+    }
+
+    @MainActor
+    func testCancelledAsyncTextImportRollsBackMetadataBlocksAndHistory() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let libraryID = UUID()
+        context.insert(
+            BlockDocumentLibraryEntity(
+                id: libraryID,
+                schemaVersion: "1.0",
+                sourceExportedAt: Date(),
+                importedAt: Date(),
+                noteCount: 0,
+                folderCount: 0,
+                tagCount: 0
+            )
+        )
+        try context.save()
+
+        let document = ImportedTextNoteFile(
+            sourceURL: URL(fileURLWithPath: "/tmp/取消导入.md"),
+            title: "取消导入",
+            content: (0..<20_000).map { "第\($0)行" }.joined(separator: "\n")
+        )
+        let target = TextNoteImportTarget(
+            folderID: nil,
+            folderName: "未分类",
+            encryptedFolderID: nil,
+            tagID: nil
+        )
+        let store = NoteStore()
+        store.setContext(context)
+        let task = Task {
+            await store.importTextNoteAsync(document, target: target)
+        }
+        task.cancel()
+
+        let cancelledResult = await task.value
+        XCTAssertNil(cancelledResult)
+        XCTAssertTrue(store.notes.isEmpty)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>()).count, 0)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<BlockDocumentBlockEntity>()).count, 0)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<BlockDocumentNoteVersionEntity>()).count, 0)
+        XCTAssertEqual(
+            try XCTUnwrap(context.fetch(FetchDescriptor<BlockDocumentLibraryEntity>()).first).noteCount,
+            0
+        )
+    }
 }

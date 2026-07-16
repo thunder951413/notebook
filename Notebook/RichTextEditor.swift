@@ -4,6 +4,13 @@ import Foundation
 import Combine
 
 struct RichTextEditor: NSViewRepresentable {
+    static let longDocumentCharacterThreshold = 100_000
+
+    @MainActor
+    static func configureViewportLayout(in textView: RichTextView, contentLength: Int) {
+        textView.layoutManager?.allowsNonContiguousLayout = true
+        textView.isAutomaticLinkDetectionEnabled = contentLength < longDocumentCharacterThreshold
+    }
     @Binding var attributedText: NSAttributedString
     let controller: RichTextController
     let isEditable: Bool
@@ -37,6 +44,9 @@ struct RichTextEditor: NSViewRepresentable {
 
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        // TextKit 只布局视口附近的字形；全文仍保留在 NSTextStorage 中，
+        // 因而滚动条、全文选择和保存语义不变。
+        Self.configureViewportLayout(in: textView, contentLength: attributedText.length)
 
         textView.backgroundColor = NSColor(AppColors.editorBackground(scheme))
         textView.insertionPointColor = (scheme == .dark) ? .white : .black
@@ -113,6 +123,7 @@ struct RichTextEditor: NSViewRepresentable {
             )
             context.coordinator.isProgrammaticUpdate = true
             context.coordinator.lastAppliedNoteID = noteID
+            Self.configureViewportLayout(in: textView, contentLength: attributedText.length)
 
             // 清除撤销管理器，避免切换笔记后撤销操作导致崩溃
             // 先禁用撤销注册并清除所有操作；在所有内容修改完成后再重新启用，
@@ -122,7 +133,11 @@ struct RichTextEditor: NSViewRepresentable {
                 undoManager.removeAllActions()
             }
 
-            textView.textStorage?.setAttributedString(attributedText)
+            if let textStorage = textView.textStorage {
+                textStorage.beginEditing()
+                textStorage.setAttributedString(attributedText)
+                textStorage.endEditing()
+            }
             textView.normalizeAttachmentsAfterLoad()
             if updateDefaultTextColors(in: textView, for: scheme) {
                 context.coordinator.attributedText = NSAttributedString(attributedString: textView.attributedString())
@@ -237,6 +252,7 @@ struct RichTextEditor: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.flushDeferredBindingUpdate()
         coordinator.flushReadingPosition()
         coordinator.unbindAttachmentViewport()
     }
@@ -252,6 +268,7 @@ struct RichTextEditor: NSViewRepresentable {
         private var hasMarkedText = false
         /// 延迟更新的内容
         private var pendingContent: NSAttributedString?
+        private var bindingUpdateWorkItem: DispatchWorkItem?
 
         private var fontChangeCancellable: AnyCancellable?
         private weak var attachmentScrollView: NSScrollView?
@@ -279,6 +296,7 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         deinit {
+            bindingUpdateWorkItem?.cancel()
             for observer in attachmentViewportObservers {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -366,11 +384,13 @@ struct RichTextEditor: NSViewRepresentable {
             let textLength = textView.textStorage?.length ?? 0
             guard textLength > 0 else { return }
             let characterIndex = min(max(position.anchorUTF16Offset, 0), textLength - 1)
+            layoutManager.ensureLayout(
+                forCharacterRange: NSRange(location: characterIndex, length: 1)
+            )
             let glyphRange = layoutManager.glyphRange(
                 forCharacterRange: NSRange(location: characterIndex, length: 1),
                 actualCharacterRange: nil
             )
-            layoutManager.ensureLayout(for: textContainer)
             var anchorRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
             anchorRect.origin.y += textView.textContainerInset.height
 
@@ -501,17 +521,44 @@ struct RichTextEditor: NSViewRepresentable {
         }
         
         private func flushPendingContent(from textView: NSTextView) {
+            bindingUpdateWorkItem?.cancel()
+            bindingUpdateWorkItem = nil
             if let content = textView.attributedString().copy() as? NSAttributedString {
                 self.attributedText = content
             }
             pendingContent = nil
+            controller?.setDeferredBindingUpdatePending(false)
+        }
+
+        func flushDeferredBindingUpdate() {
+            guard let textView = controller?.textView else {
+                bindingUpdateWorkItem?.cancel()
+                bindingUpdateWorkItem = nil
+                controller?.setDeferredBindingUpdatePending(false)
+                return
+            }
+            guard bindingUpdateWorkItem != nil || controller?.requiresCommittedSnapshotOnSwitch == true else {
+                return
+            }
+            flushPendingContent(from: textView)
+        }
+
+        private func scheduleDeferredBindingUpdate(from textView: NSTextView) {
+            bindingUpdateWorkItem?.cancel()
+            controller?.setDeferredBindingUpdatePending(true)
+            let workItem = DispatchWorkItem { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.flushPendingContent(from: textView)
+                self.controller?.refreshNoteSearchResultsIfNeeded()
+            }
+            bindingUpdateWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: workItem)
         }
 
         /// 在非文本编辑场景（如附件缩放）主动同步绑定
         func syncBindingFromTextView(_ textView: NSTextView) {
-            guard !isProgrammaticUpdate,
-                  let content = textView.attributedString().copy() as? NSAttributedString else { return }
-            self.attributedText = content
+            guard !isProgrammaticUpdate else { return }
+            flushPendingContent(from: textView)
         }
 
         func handleMarkedTextFinished(in textView: NSTextView) {
@@ -525,21 +572,32 @@ struct RichTextEditor: NSViewRepresentable {
                 return
             }
             
-            // 使用 copy() 确保这是一个全新的实例，避免多线程竞争和 SwiftUI 更新失效
-            guard let content = tv.attributedString().copy() as? NSAttributedString else { return }
-            
             // 检查是否有输入法正在编辑的 marked text
             if checkHasMarkedText(tv) {
                 // 输入法正在编辑，延迟更新绑定
                 hasMarkedText = true
-                pendingContent = content
+                pendingContent = nil
+                bindingUpdateWorkItem?.cancel()
+                bindingUpdateWorkItem = nil
+                controller?.setDeferredBindingUpdatePending(true)
                 return
             }
+
+            if tv.textStorage?.length ?? 0 >= RichTextEditor.longDocumentCharacterThreshold {
+                hasMarkedText = false
+                pendingContent = nil
+                scheduleDeferredBindingUpdate(from: tv)
+                return
+            }
+
+            // 普通文档立即同步；长文档走上面的短延迟，避免每个按键复制全文。
+            guard let content = tv.attributedString().copy() as? NSAttributedString else { return }
             
             // 没有 marked text，直接更新
             hasMarkedText = false
             pendingContent = nil
             self.attributedText = content
+            controller?.setDeferredBindingUpdatePending(false)
             controller?.refreshNoteSearchResultsIfNeeded()
         }
         

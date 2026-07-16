@@ -235,6 +235,7 @@ struct ContentView: View {
 
         if let oldNoteID = selection, oldNoteID != newSelection {
             let pendingSaveExists = NoteSaveManager.shared.hasPendingSave(for: oldNoteID)
+            let oldContentWasLoaded = store.notes.first(where: { $0.id == oldNoteID })?.isContentLoaded == true
             if !pendingSaveExists {
                 NoteSaveManager.shared.cancelPendingSave(for: oldNoteID)
             }
@@ -254,9 +255,7 @@ struct ContentView: View {
             } else if let oldIndex = store.notes.firstIndex(where: { $0.id == oldNoteID }) {
                 contentToSave = store.notes[oldIndex].content
             } else {
-                if let newSelection {
-                    store.ensureNoteContentLoaded(id: newSelection, rememberSelection: true)
-                }
+                if let newSelection { AppSettings.shared.recordRecentlySelectedNote(newSelection) }
                 selection = newSelection
                 AppSettings.shared.lastSelectedNoteID = newSelection
                 return
@@ -276,23 +275,29 @@ struct ContentView: View {
                     case .success?:
                         richTextController.recordSavedState(noteID: oldNoteID, title: note.title, content: contentToSave)
                     case .failure(let error)?:
-                        Logger.shared.log(.app, .warn, "pending save flush failed, fallback to immediate save: \(error.localizedDescription)")
-                        _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                        if oldContentWasLoaded {
+                            Logger.shared.log(.app, .warn, "pending save flush failed, fallback to immediate save: \(error.localizedDescription)")
+                            _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                        } else {
+                            Logger.shared.log(.app, .error, "pending save flush failed for unloaded note; preserved pending data: \(error.localizedDescription)")
+                        }
                     case nil:
-                        _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                        if oldContentWasLoaded {
+                            _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                        }
                     }
-                } else if isDirty {
+                } else if oldContentWasLoaded && isDirty {
                     Logger.shared.log(.app, .info, "noteSwitch saving dirty note \(oldNoteID.uuidString.prefix(8))")
                     _ = saveNoteContent(noteID: oldNoteID, content: contentToSave, reason: reason)
+                } else if !oldContentWasLoaded {
+                    Logger.shared.log(.app, .debug, "noteSwitch skipped unloaded note \(oldNoteID.uuidString.prefix(8))")
                 } else {
                     Logger.shared.log(.app, .debug, "noteSwitch skipped clean note \(oldNoteID.uuidString.prefix(8))")
                 }
             }
         }
 
-        if let newSelection {
-            store.ensureNoteContentLoaded(id: newSelection, rememberSelection: true)
-        }
+        if let newSelection { AppSettings.shared.recordRecentlySelectedNote(newSelection) }
         selection = newSelection
         AppSettings.shared.lastSelectedNoteID = newSelection
     }
@@ -374,12 +379,35 @@ struct ContentView: View {
                     // 防止具有较大固有宽度的编辑器子视图覆盖笔记列表和侧边栏。
                     .clipped()
                 } else {
-                    ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
+                    if let error = store.noteContentLoadErrors[currentId] {
+                        ContentUnavailableView {
+                            Label("笔记加载失败", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(error)
+                        } actions: {
+                            Button("重试") {
+                                store.retryNoteContentLoad(id: currentId)
+                                Task {
+                                    await store.ensureNoteContentLoadedAsync(
+                                        id: currentId,
+                                        rememberSelection: true
+                                    )
+                                }
+                            }
+                        }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(AppColors.editorBackground(colorScheme))
-                        .onAppear {
-                            store.ensureNoteContentLoaded(id: currentId, rememberSelection: true)
-                        }
+                    } else {
+                        ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(AppColors.editorBackground(colorScheme))
+                            .task(id: currentId) {
+                                await store.ensureNoteContentLoadedAsync(
+                                    id: currentId,
+                                    rememberSelection: true
+                                )
+                            }
+                    }
                 }
             } else {
                 ContentUnavailableView(l10n(L10nKeys.Note.noSelection), systemImage: "note")
@@ -562,9 +590,7 @@ struct ContentView: View {
                     store.deleteNote(id: id)
                     if selection == id {
                         let nextSelection = selectedDestination == .recycleBin ? nil : filteredNotes.first?.id
-                        if let nextSelection {
-                            store.ensureNoteContentLoaded(id: nextSelection, rememberSelection: true)
-                        }
+                        if let nextSelection { AppSettings.shared.recordRecentlySelectedNote(nextSelection) }
                         selection = nextSelection
                     }
                 }
@@ -765,7 +791,7 @@ struct ContentView: View {
             var importedNoteIDs: [UUID] = []
             var failures = batch.failures
             for document in batch.documents {
-                if let note = store.importTextNote(document, target: target) {
+                if let note = await store.importTextNoteAsync(document, target: target) {
                     importedNoteIDs.append(note.id)
                 } else {
                     failures.append(

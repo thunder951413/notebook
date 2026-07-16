@@ -2,13 +2,13 @@ import Foundation
 import SwiftData
 import CryptoKit
 
-struct VersionedNoteAssetSnapshot: Codable {
+nonisolated struct VersionedNoteAssetSnapshot: Codable {
     let reference: MigratedAssetReference
     let relativeFilePath: String
     let sidecarRelativePaths: [String]
 }
 
-struct VersionedTodoStepSnapshot: Codable {
+nonisolated struct VersionedTodoStepSnapshot: Codable {
     let id: UUID
     let noteID: UUID
     let text: String
@@ -17,7 +17,7 @@ struct VersionedTodoStepSnapshot: Codable {
     let createdAt: Date
 }
 
-struct VersionedNoteSnapshot: Codable {
+nonisolated struct VersionedNoteSnapshot: Codable {
     let metadata: DocumentMigrationPackage.NoteItem
     let document: MigratedDocument
     let assets: [VersionedNoteAssetSnapshot]

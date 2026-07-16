@@ -40,7 +40,7 @@ final class NotebookTests: XCTestCase {
         XCTAssertEqual(UUIDListCoding.encode(decoded + [first]), "\(first.uuidString),\(second.uuidString)")
     }
 
-    func testInitialNoteContentPolicyKeepsOnlyMostRecentExistingNote() {
+    func testInitialNoteContentPolicyLoadsOnlyMetadata() {
         let missingID = UUID()
         let recentID = UUID()
         let olderID = UUID()
@@ -52,11 +52,11 @@ final class NotebookTests: XCTestCase {
             fallbackNoteID: nil
         )
 
-        XCTAssertEqual(loadedIDs, [recentID])
+        XCTAssertTrue(loadedIDs.isEmpty)
         XCTAssertEqual(loadedIDs.count, NoteContentRetentionPolicy.maximumLoadedNoteCount)
     }
 
-    func testInitialNoteContentPolicyUsesFallbackWhenHistoryIsUnavailable() {
+    func testInitialNoteContentPolicyDoesNotLoadFallbackContent() {
         let fallbackID = UUID()
 
         let loadedIDs = NoteContentRetentionPolicy.initialContentIDs(
@@ -66,7 +66,7 @@ final class NotebookTests: XCTestCase {
             fallbackNoteID: fallbackID
         )
 
-        XCTAssertEqual(loadedIDs, [fallbackID])
+        XCTAssertTrue(loadedIDs.isEmpty)
     }
 
     func testReadingPositionConflictUsesTimestampThenDeviceID() {
