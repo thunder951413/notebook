@@ -4,6 +4,7 @@ import AppKit
 // MARK: - 笔记 Markdown 预览视图
 
 struct NoteMarkdownPreviewView: View {
+    @ObservedObject private var settings = AppSettings.shared
     let content: NSAttributedString
     let colorScheme: ColorScheme
     let noteID: UUID
@@ -53,7 +54,10 @@ struct NoteMarkdownPreviewView: View {
             noteID: noteID,
             renderAttributedContent: false,
             readingPosition: readingPosition,
-            onReadingPositionChange: onReadingPositionChange
+            onReadingPositionChange: onReadingPositionChange,
+            readerFontSize: settings.readerFontSize,
+            readerLineHeight: settings.readerLineHeight,
+            readerMaxWidth: settings.readerMaxWidth
         )
         .frame(maxHeight: .infinity)
         .padding(.horizontal, 16)

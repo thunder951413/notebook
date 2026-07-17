@@ -309,6 +309,24 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testDismantledEditorCannotLeaveAStaleControllerBinding() {
+        let controller = RichTextController()
+        let oldView = RichTextView()
+        let newView = RichTextView()
+        let oldNoteID = UUID()
+        let newNoteID = UUID()
+
+        controller.bind(textView: oldView, noteID: oldNoteID)
+        controller.bind(textView: newView, noteID: newNoteID)
+        controller.unbind(textView: oldView)
+        XCTAssertTrue(controller.isBoundTo(noteID: newNoteID), "旧视图销毁不能解除新编辑器绑定")
+
+        controller.unbind(textView: newView)
+        XCTAssertNil(controller.boundNoteID)
+        XCTAssertNil(controller.snapshotAttributedString())
+    }
+
+    @MainActor
     func testLargeTextEditSaveAndAsyncReloadPreservesEveryCharacter() async throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

@@ -33,6 +33,9 @@ final class AppSettings: ObservableObject {
         static let editorFontSize = "editor_font_size" // 编辑器字号
         static let tagsFilterMode = "tags_filter_mode" // 标签过滤模式: "current" 当前目录, "all" 所有标签
         static let editorFontColor = "editor_font_color" // 编辑器字体颜色
+        static let readerFontSize = "reader_font_size"
+        static let readerLineHeight = "reader_line_height"
+        static let readerMaxWidth = "reader_max_width"
         static let isFileLoggingEnabled = "logger.file_logging_enabled"
         static let keepHistoricalLogFiles = "logger.keep_historical_files"
         static let githubRepositoryURL = "update.github_repository_url"
@@ -293,6 +296,58 @@ final class AppSettings: ObservableObject {
     static let maxFontSize: CGFloat = 32
     static let defaultFontSize: CGFloat = 15
 
+    static let minReaderFontSize: CGFloat = 12
+    static let maxReaderFontSize: CGFloat = 32
+    static let minReaderLineHeight: CGFloat = 1.1
+    static let maxReaderLineHeight: CGFloat = 2.0
+    static let minReaderMaxWidth: CGFloat = 480
+    static let maxReaderMaxWidth: CGFloat = 1_200
+
+    private static func sanitizedReaderValue(
+        _ value: CGFloat,
+        default defaultValue: CGFloat,
+        range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    @Published var readerFontSize: CGFloat {
+        didSet {
+            let clamped = Self.sanitizedReaderValue(
+                readerFontSize,
+                default: 17,
+                range: Self.minReaderFontSize...Self.maxReaderFontSize
+            )
+            if clamped != readerFontSize { readerFontSize = clamped; return }
+            defaults.set(Double(clamped), forKey: Keys.readerFontSize)
+        }
+    }
+
+    @Published var readerLineHeight: CGFloat {
+        didSet {
+            let clamped = Self.sanitizedReaderValue(
+                readerLineHeight,
+                default: 1.6,
+                range: Self.minReaderLineHeight...Self.maxReaderLineHeight
+            )
+            if clamped != readerLineHeight { readerLineHeight = clamped; return }
+            defaults.set(Double(clamped), forKey: Keys.readerLineHeight)
+        }
+    }
+
+    @Published var readerMaxWidth: CGFloat {
+        didSet {
+            let clamped = Self.sanitizedReaderValue(
+                readerMaxWidth,
+                default: 820,
+                range: Self.minReaderMaxWidth...Self.maxReaderMaxWidth
+            )
+            if clamped != readerMaxWidth { readerMaxWidth = clamped; return }
+            defaults.set(Double(clamped), forKey: Keys.readerMaxWidth)
+        }
+    }
+
     /// 编辑器字体名称
     var editorFontName: String {
         get {
@@ -438,6 +493,25 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
+        let storedReaderFontSize = defaults.double(forKey: Keys.readerFontSize)
+        readerFontSize = Self.sanitizedReaderValue(
+            storedReaderFontSize > 0 ? CGFloat(storedReaderFontSize) : 17,
+            default: 17,
+            range: Self.minReaderFontSize...Self.maxReaderFontSize
+        )
+        let storedReaderLineHeight = defaults.double(forKey: Keys.readerLineHeight)
+        readerLineHeight = Self.sanitizedReaderValue(
+            storedReaderLineHeight > 0 ? CGFloat(storedReaderLineHeight) : 1.6,
+            default: 1.6,
+            range: Self.minReaderLineHeight...Self.maxReaderLineHeight
+        )
+        let storedReaderMaxWidth = defaults.double(forKey: Keys.readerMaxWidth)
+        readerMaxWidth = Self.sanitizedReaderValue(
+            storedReaderMaxWidth > 0 ? CGFloat(storedReaderMaxWidth) : 820,
+            default: 820,
+            range: Self.minReaderMaxWidth...Self.maxReaderMaxWidth
+        )
+
         // 加载 iCloud 同步设置
         isiCloudSyncEnabled = defaults.bool(forKey: Keys.iCloudSyncEnabled)
         

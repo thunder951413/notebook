@@ -7,6 +7,9 @@ struct MarkdownHTMLRenderer {
     let colorScheme: ColorScheme
     let noteID: UUID
     let renderAttributedContent: Bool
+    var readerFontSize: CGFloat = 17
+    var readerLineHeight: CGFloat = 1.6
+    var readerMaxWidth: CGFloat = 820
 
     /// 使用 NSRegularExpression 进行替换，支持 anchorsMatchLines 选项
     private func replaceWithRegex(_ string: String, pattern: String, replacement: String) -> String {
@@ -133,6 +136,8 @@ struct MarkdownHTMLRenderer {
             html = html.replacingOccurrences(of: block.placeholder, with: block.html)
         }
 
+        html = wrapLazyLayoutBlocks(html)
+
         let scriptNonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let mermaidScripts: String
         if markdownSource.contains("```mermaid") {
@@ -159,11 +164,25 @@ struct MarkdownHTMLRenderer {
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                    font-size: 13px;
-                    line-height: 1.5;
+                    font-size: \(readerFontSize)px;
+                    line-height: \(readerLineHeight);
                     color: \(textColor);
                     margin: 0;
-                    padding: 0;
+                    padding: 0 20px 36px;
+                    overflow-wrap: anywhere;
+                }
+                .notebook-reader {
+                    width: 100%;
+                    max-width: \(readerMaxWidth)px;
+                    margin: 0 auto;
+                }
+                .notebook-block {
+                    content-visibility: auto;
+                    contain-intrinsic-block-size: auto 72px;
+                    overflow-wrap: anywhere;
+                }
+                .notebook-block + .notebook-block {
+                    margin-top: 0.8em;
                 }
                 table {
                     border-collapse: collapse;
@@ -184,7 +203,7 @@ struct MarkdownHTMLRenderer {
                     padding: 2px 4px;
                     border-radius: 3px;
                     font-family: "SF Mono", Monaco, monospace;
-                    font-size: 12px;
+                    font-size: 0.86em;
                 }
                 pre {
                     background-color: \(colorScheme == .dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.05)");
@@ -200,11 +219,13 @@ struct MarkdownHTMLRenderer {
                 h1, h2, h3, h4, h5, h6 {
                     margin: 12px 0 8px 0;
                     scroll-margin-top: 20px;
+                    line-height: 1.25;
                 }
-                h1 { font-size: 18px; }
-                h2 { font-size: 16px; }
-                h3 { font-size: 14px; }
-                h4, h5, h6 { font-size: 13px; }
+                h1 { font-size: 1.7em; }
+                h2 { font-size: 1.45em; }
+                h3 { font-size: 1.25em; }
+                h4 { font-size: 1.12em; }
+                h5, h6 { font-size: 1em; }
                 a {
                     color: \(linkColor);
                     text-decoration: none;
@@ -234,17 +255,35 @@ struct MarkdownHTMLRenderer {
                 }
                 .audio-caption {
                     color: \(colorScheme == .dark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.6)");
-                    font-size: 12px;
+                    font-size: 0.8em;
                     margin: 4px 0 8px 0;
                 }
             </style>
             \(mermaidScripts)
         </head>
         <body>
-            \(html)
+            <main class="notebook-reader">\(html)</main>
         </body>
         </html>
         """
+    }
+
+    /// Double Markdown line breaks are semantic paragraph boundaries after protected code and
+    /// attachment placeholders have been restored. Wrapping those regions lets WebKit skip layout
+    /// and painting for offscreen blocks while intrinsic sizes keep the scrollbar stable.
+    private func wrapLazyLayoutBlocks(_ html: String) -> String {
+        guard !html.isEmpty else { return "" }
+        let boundaryPattern = #"(?:<br>\s*){2,}"#
+        guard let regex = try? NSRegularExpression(pattern: boundaryPattern) else {
+            return "<section class=\"notebook-block\">\(html)</section>"
+        }
+        let range = NSRange(html.startIndex..., in: html)
+        let separated = regex.stringByReplacingMatches(
+            in: html,
+            range: range,
+            withTemplate: "</section><section class=\"notebook-block\">"
+        )
+        return "<section class=\"notebook-block\">\(separated)</section>"
     }
 
     private func shouldRenderFromAttributedContent(_ attributed: NSAttributedString) -> Bool {

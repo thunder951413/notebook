@@ -135,8 +135,20 @@ struct ContentView: View {
 
     /// 保存指定笔记的内容
     @discardableResult
-    private func saveNoteContent(noteID: UUID, content: NSAttributedString, reason: String) -> Bool {
-        guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else { return false }
+    private func saveNoteContent(
+        noteID: UUID,
+        content: NSAttributedString,
+        reason: String,
+        contentIsLiveEditorSnapshot: Bool = false
+    ) -> Bool {
+        guard let index = store.notes.firstIndex(where: { $0.id == noteID }) else {
+            Logger.shared.log(.save, .error, "Cannot save missing in-memory note noteID=\(noteID.uuidString.prefix(8)) reason=\(reason)")
+            return false
+        }
+        guard store.notes[index].isContentLoaded || contentIsLiveEditorSnapshot else {
+            Logger.shared.log(.save, .error, "Refused to save metadata-only note noteID=\(noteID.uuidString.prefix(8)) reason=\(reason)")
+            return false
+        }
         
         let note = store.notes[index]
         let preview = String(content.string.prefix(30)).replacingOccurrences(of: "\n", with: "\\n")
@@ -185,17 +197,45 @@ struct ContentView: View {
         Logger.shared.log(.save, .debug, "reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
         
         let targetNoteID: UUID
-        if let boundID = richTextController.boundNoteID {
+        if let boundID = richTextController.boundNoteID,
+           richTextController.isBoundTo(noteID: boundID) {
             if let selID = selection, boundID != selID {
                 // 快照属于编辑器实际绑定的笔记，绝不能写进刚切换到的 selection。
                 Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using bound editor note: \(boundID)")
             }
             targetNoteID = boundID
-        } else if let selID = selection {
-            targetNoteID = selID
         } else {
-            // 没有打开笔记时没有编辑器内容需要保存。
-            Logger.shared.log(.save, .debug, "No target note ID available; nothing to save")
+            // Markdown preview has no NSTextView. Pending NoteSaveManager requests are flushed by
+            // prepareForSync; only save here when the fully loaded selected note actually changed.
+            guard let selectedID = selection,
+                  let selectedNote = store.notes.first(where: { $0.id == selectedID }),
+                  selectedNote.isContentLoaded else {
+                Logger.shared.log(.save, .debug, "No active editor or loaded selected note; nothing to save before sync")
+                return true
+            }
+            guard richTextController.hasUnsavedChanges(
+                noteID: selectedID,
+                title: selectedNote.title,
+                content: selectedNote.content
+            ) else {
+                Logger.shared.log(.save, .debug, "Preview note is unchanged; skipping editor save barrier")
+                return true
+            }
+            Logger.shared.log(.save, .info, "Saving changed loaded preview note before sync noteID=\(selectedID.uuidString.prefix(8))")
+            return saveNoteContent(
+                noteID: selectedID,
+                content: selectedNote.content,
+                reason: reason
+            )
+        }
+
+        guard store.notes.contains(where: { $0.id == targetNoteID && $0.isContentLoaded }) else {
+            Logger.shared.log(.save, .error, "Active editor target is missing or metadata-only noteID=\(targetNoteID.uuidString.prefix(8))")
+            return false
+        }
+
+        guard richTextController.isBoundTo(noteID: targetNoteID) else {
+            Logger.shared.log(.save, .debug, "Editor was dismantled while preparing sync; pending saves remain authoritative")
             return true
         }
         
@@ -220,7 +260,12 @@ struct ContentView: View {
         }
         
         // 执行保存
-        return saveNoteContent(noteID: targetNoteID, content: editorContent, reason: reason)
+        return saveNoteContent(
+            noteID: targetNoteID,
+            content: editorContent,
+            reason: reason,
+            contentIsLiveEditorSnapshot: true
+        )
     }
 
     private func updateSelection(_ newSelection: UUID?, reason: String) {

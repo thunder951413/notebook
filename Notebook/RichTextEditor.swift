@@ -257,6 +257,9 @@ struct RichTextEditor: NSViewRepresentable {
         coordinator.flushDeferredBindingUpdate()
         coordinator.flushReadingPosition()
         coordinator.unbindAttachmentViewport()
+        if let textView = nsView.documentView as? NSTextView {
+            coordinator.controller?.unbind(textView: textView)
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate, PasteCoordinatorProtocol {

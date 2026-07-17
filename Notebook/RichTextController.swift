@@ -121,6 +121,15 @@ final class RichTextController: ObservableObject {
         self.currentNoteID = noteID
     }
 
+    /// Clear only the binding owned by the view being dismantled. SwiftUI can create the next
+    /// editor before destroying the previous one, so an old view must never unbind a newer view.
+    func unbind(textView: NSTextView) {
+        guard self.textView === textView else { return }
+        self.textView = nil
+        self.boundNoteID = nil
+        clearNoteSearch()
+    }
+
     func attachmentTargetNoteID() -> UUID? {
         AttachmentTargetNoteResolver.resolve(
             boundNoteID: boundNoteID,

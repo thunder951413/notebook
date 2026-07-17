@@ -23,6 +23,9 @@ struct MarkdownWebView: NSViewRepresentable {
     var renderAttributedContent: Bool = true
     var readingPosition: NoteReadingPosition? = nil
     var onReadingPositionChange: ((UUID, Int, Double) -> Void)? = nil
+    var readerFontSize: CGFloat = 17
+    var readerLineHeight: CGFloat = 1.6
+    var readerMaxWidth: CGFloat = 820
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -63,43 +66,7 @@ struct MarkdownWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
-        let html = MarkdownHTMLRenderer(
-            markdown: markdown,
-            attributedContent: attributedContent,
-            colorScheme: colorScheme,
-            noteID: noteID,
-            renderAttributedContent: renderAttributedContent
-        ).generateHTML()
-
-        // 避免重复加载同一份 HTML，减少闪烁
-        if context.coordinator.lastLoadedHTML == html {
-            return
-        }
-
-        if context.coordinator.lastLoadedHTML != nil {
-            context.coordinator.captureRelativeScrollProgress(from: webView)
-        }
-
-        // 调试：打印生成的 HTML 内容
-        if markdown.contains("```mermaid") {
-            DebugLog.editor("Generated HTML preview:", level: .debug)
-            DebugLog.editor(String(html.prefix(2000)), level: .debug)
-        }
-
-        context.coordinator.reloadWorkItem?.cancel()
-        let isFirstLoad = context.coordinator.lastLoadedHTML == nil
-        let workItem = DispatchWorkItem { [weak webView, weak coordinator = context.coordinator] in
-            guard let webView, let coordinator else { return }
-            webView.loadHTMLString(html, baseURL: nil)
-            coordinator.lastLoadedHTML = html
-        }
-        context.coordinator.reloadWorkItem = workItem
-
-        if isFirstLoad {
-            workItem.perform()
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
-        }
+        context.coordinator.scheduleRender(for: self, in: webView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -109,6 +76,7 @@ struct MarkdownWebView: NSViewRepresentable {
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
         coordinator.reloadWorkItem?.cancel()
         coordinator.reloadWorkItem = nil
+        coordinator.cancelPendingRender()
         coordinator.flushReadingPosition()
         NotificationCenter.default.removeObserver(coordinator)
         nsView.configuration.userContentController.removeScriptMessageHandler(forName: "readingPosition")
@@ -127,7 +95,10 @@ struct MarkdownWebView: NSViewRepresentable {
             attributedContent: attributed,
             colorScheme: colorScheme,
             noteID: noteID,
-            renderAttributedContent: renderAttributedContent ?? self.renderAttributedContent
+            renderAttributedContent: renderAttributedContent ?? self.renderAttributedContent,
+            readerFontSize: readerFontSize,
+            readerLineHeight: readerLineHeight,
+            readerMaxWidth: readerMaxWidth
         ).generateHTML()
     }
 
@@ -137,12 +108,96 @@ struct MarkdownWebView: NSViewRepresentable {
         var lastLoadedHTML: String?
         var reloadWorkItem: DispatchWorkItem?
         var navigationState = MarkdownPreviewNavigationState()
+        private var requestedRenderKey: String?
+        private var renderCancellationToken: RenderCancellationToken?
+        private static let renderQueue = DispatchQueue(
+            label: "Notebook.MarkdownHTMLRenderer",
+            qos: .userInitiated
+        )
+
+        private final class RenderCancellationToken: @unchecked Sendable {
+            private let lock = NSLock()
+            private var cancelled = false
+
+            func cancel() {
+                lock.lock()
+                cancelled = true
+                lock.unlock()
+            }
+
+            var isCancelled: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return cancelled
+            }
+        }
         private var didRestoreInitialReadingPosition = false
         private var isRestoringReadingPosition = false
         private var suppressReadingPositionUntil = Date.distantPast
 
         init(_ parent: MarkdownWebView) {
             self.parent = parent
+        }
+
+        func scheduleRender(for request: MarkdownWebView, in webView: WKWebView) {
+            var hasher = Hasher()
+            hasher.combine(request.markdown)
+            hasher.combine(request.colorScheme == .dark)
+            hasher.combine(request.renderAttributedContent)
+            hasher.combine(request.readerFontSize)
+            hasher.combine(request.readerLineHeight)
+            hasher.combine(request.readerMaxWidth)
+            let renderKey = "\(request.noteID.uuidString):\(hasher.finalize())"
+            guard requestedRenderKey != renderKey else { return }
+            requestedRenderKey = renderKey
+
+            if lastLoadedHTML != nil {
+                captureRelativeScrollProgress(from: webView)
+            }
+
+            reloadWorkItem?.cancel()
+            renderCancellationToken?.cancel()
+            let cancellationToken = RenderCancellationToken()
+            renderCancellationToken = cancellationToken
+            let renderer = MarkdownHTMLRenderer(
+                markdown: request.markdown,
+                attributedContent: request.renderAttributedContent ? request.attributedContent : nil,
+                colorScheme: request.colorScheme,
+                noteID: request.noteID,
+                renderAttributedContent: request.renderAttributedContent,
+                readerFontSize: request.readerFontSize,
+                readerLineHeight: request.readerLineHeight,
+                readerMaxWidth: request.readerMaxWidth
+            )
+
+            let load: (String) -> Void = { [weak self, weak webView] html in
+                DispatchQueue.main.async {
+                    guard let self, let webView, self.requestedRenderKey == renderKey else { return }
+                    webView.loadHTMLString(html, baseURL: nil)
+                    self.lastLoadedHTML = html
+                }
+            }
+
+            // Attachment conversion touches AppKit objects. Plain Markdown, including imported
+            // long documents, is safe to render off the main thread.
+            if request.renderAttributedContent, request.attributedContent != nil {
+                load(renderer.generateHTML())
+                return
+            }
+
+            let workItem = DispatchWorkItem {
+                guard !cancellationToken.isCancelled else { return }
+                let html = renderer.generateHTML()
+                guard !cancellationToken.isCancelled else { return }
+                load(html)
+            }
+            reloadWorkItem = workItem
+            Self.renderQueue.async(execute: workItem)
+        }
+
+        func cancelPendingRender() {
+            renderCancellationToken?.cancel()
+            renderCancellationToken = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

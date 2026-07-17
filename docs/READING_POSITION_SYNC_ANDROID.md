@@ -117,15 +117,15 @@ fun restorePosition(view: TextView, position: NoteReadingPosition) {
 
 macOS 的 Markdown 纯预览没有与富文本一一对应的 DOM 字符索引，因此该模式按正文 UTF-16 长度映射相对阅读进度；文本/分屏编辑模式使用精确字符锚点。Android 若能给渲染节点保留源文本区间，应优先恢复到精确源偏移。
 
-## 分块/滚动窗口加载
+## Android 当前的语义块/滚动窗口
 
-若 Android 只加载笔记的一段窗口，不要要求先拼出全部正文。为每个块在列表元数据中保留：
+Android 阅读模式已经把已选笔记的 Markdown 在后台解析成语义块，并由 `LazyColumn` 只创建可见块。标题、段落、列表、引用、表格和代码围栏不会被固定字符窗口从中间切断；单个异常超长段落才会在安全边界继续拆分。每块保留：
 
 - `blockID`
 - `utf16Length`（包含与 macOS 一致的块尾换行）
 - 块顺序
 
-用长度前缀和定位 `anchorUTF16Offset` 所在块，只加载该块附近窗口；恢复后把目标块放到 `viewportOffsetFraction` 对应位置。编辑导致块长度变化时应同步更新前缀和。正文内容本身仍然按需读取，列表只需读取这些长度元数据。
+当前 Room 选择笔记时按 64 KiB 安全分段读取正文，解析后用块的 `startUtf16` / `endUtf16` 定位 `anchorUTF16Offset`；恢复时先滚动到目标块，再根据块内排版把锚点放到 `viewportOffsetFraction` 对应位置。块 ID 根据块类型、标题路径和内容生成，前文插入内容后未修改块仍能复用。正式编辑仍加载完整正文，以保证选择、查找和保存语义正确；笔记列表查询始终不携带正文或同步快照。
 
 ## 建议测试
 

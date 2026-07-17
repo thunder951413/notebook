@@ -27,6 +27,49 @@ extension NotebookTests {
         XCTAssertTrue(html.contains("<strong>粗体</strong>"))
         XCTAssertTrue(html.contains("href=\"https://example.com\""))
         XCTAssertFalse(html.contains("# 一级标题"))
+        XCTAssertTrue(html.contains("class=\"notebook-block\""))
+        XCTAssertTrue(html.contains("content-visibility: auto"))
+    }
+
+    func testMarkdownPreviewAppliesReaderTypographyWithoutChangingEscaping() {
+        let markdown = "第一段\n\n<script>alert('x')</script>\n\n第三段"
+        let html = MarkdownWebView(
+            markdown: markdown,
+            attributedContent: nil,
+            colorScheme: .light,
+            height: .constant(0),
+            noteID: UUID(),
+            readerFontSize: 21,
+            readerLineHeight: 1.75,
+            readerMaxWidth: 720
+        ).generateHTML(from: markdown, attributed: nil, colorScheme: .light)
+
+        XCTAssertTrue(html.contains("font-size: 21.0px"))
+        XCTAssertTrue(html.contains("line-height: 1.75"))
+        XCTAssertTrue(html.contains("max-width: 720.0px"))
+        XCTAssertTrue(html.contains("&lt;script&gt;alert('x')&lt;/script&gt;"))
+        XCTAssertFalse(html.contains("<script>alert('x')</script>"))
+        XCTAssertGreaterThanOrEqual(html.components(separatedBy: "class=\"notebook-block\"").count - 1, 3)
+    }
+
+    func testMarkdownPreviewRendersSixHundredKilobytesIntoLazyLayoutBlocks() {
+        let paragraph = "长文窗口测试：中文换行、emoji 🧭、Markdown **粗体** 与稳定滚动条。"
+        let markdown = (0..<6_000)
+            .map { "## 第 \($0) 节\n\n\(paragraph) 编号 \($0)。" }
+            .joined(separator: "\n\n")
+        XCTAssertGreaterThan(markdown.lengthOfBytes(using: .utf8), 600 * 1_024)
+
+        let html = MarkdownHTMLRenderer(
+            markdown: markdown,
+            attributedContent: nil,
+            colorScheme: .light,
+            noteID: UUID(),
+            renderAttributedContent: false
+        ).generateHTML()
+
+        XCTAssertTrue(html.contains("第 5999 节"))
+        XCTAssertGreaterThan(html.components(separatedBy: "class=\"notebook-block\"").count - 1, 5_000)
+        XCTAssertTrue(html.contains("content-visibility: auto"))
     }
 
     func testMarkdownPreviewExplicitMarkdownModeIgnoresAutomaticLinkAttributes() {

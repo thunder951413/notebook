@@ -149,6 +149,7 @@ struct NoteEditorView: View {
                                 readingPosition: store.readingPosition(for: note.id),
                                 onReadingPositionChange: store.recordReadingPosition
                             )
+                                .id(note.id)
                                 .frame(maxHeight: .infinity)
                         case .split:
                             // 分屏预览模式
@@ -179,6 +180,7 @@ struct NoteEditorView: View {
                                     colorScheme: colorScheme,
                                     noteID: note.id
                                 )
+                                    .id(note.id)
                                     .frame(maxHeight: .infinity)
                             }
                         }
@@ -317,23 +319,25 @@ struct NoteEditorView: View {
     }
     
     private func performAutoSave(title: String, noteID: UUID) {
-        // 使用不丢弃 marked text 的方法获取内容
-        // 如果有 marked text（输入法正在编辑），则跳过本次自动保存
-        guard let editorContent = controller.snapshotAttributedStringPreservingMarkedText() else {
-            // 重新调度保存，等待输入法提交后再保存
-            pendingSaveWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [self] in
-                performAutoSave(title: title, noteID: noteID)
+        guard let note = store.notes.first(where: { $0.id == noteID }), note.isContentLoaded else { return }
+        let editorContent: NSAttributedString
+        if controller.isBoundTo(noteID: noteID) {
+            // A nil snapshot here means an IME composition is active; wait for it to commit.
+            guard let snapshot = controller.snapshotAttributedStringPreservingMarkedText() else {
+                pendingSaveWorkItem?.cancel()
+                let workItem = DispatchWorkItem { [self] in
+                    performAutoSave(title: title, noteID: noteID)
+                }
+                pendingSaveWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+                return
             }
-            pendingSaveWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
-            return
+            editorContent = snapshot
+        } else {
+            // Preview mode intentionally has no NSTextView. Its binding already contains the last
+            // committed editor snapshot, so title-only changes can be persisted without retrying.
+            editorContent = note.content
         }
-        
-        // 检查编辑器是否还绑定到正确的笔记
-        guard controller.isBoundTo(noteID: noteID) else { return }
-        
-        guard let note = store.notes.first(where: { $0.id == noteID }) else { return }
         
         guard let request = NoteSaveManager.shared.createRequest(
             noteID: noteID,
@@ -350,6 +354,7 @@ struct NoteEditorView: View {
             guard case .success = result else { return }
             lastSavedTitle = title
             lastSavedContentHash = editorContent.hashValue
+            controller.recordSavedState(noteID: noteID, title: title, content: editorContent)
         }
     }
 }
@@ -357,6 +362,7 @@ struct NoteEditorView: View {
 struct EditorTopBarView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var store: NoteStore
+    @ObservedObject private var appSettings = AppSettings.shared
 
     @ObservedObject var controller: RichTextController
     @ObservedObject var recorder: AudioRecorderManager
@@ -374,6 +380,7 @@ struct EditorTopBarView: View {
     @State private var currentRecordingMode: AudioRecordingMode = .microphone
     @State private var showingInsertTableDialog = false
     @State private var showingNoteSearch = false
+    @State private var showingReaderSettings = false
     @State private var noteSearchText = ""
     @FocusState private var isNoteSearchFieldFocused: Bool
 
@@ -708,6 +715,47 @@ struct EditorTopBarView: View {
                         )
                     }
                 )
+
+                if note.viewMode != .text {
+                    Button {
+                        showingReaderSettings.toggle()
+                    } label: {
+                        Image(systemName: "textformat.size")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(showingReaderSettings ? ThemeManager.shared.accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .notebookHelp("阅读设置")
+                    .popover(isPresented: $showingReaderSettings, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("阅读设置")
+                                .font(.headline)
+
+                            Text("字号 \(Int(appSettings.readerFontSize.rounded()))")
+                            Slider(
+                                value: $appSettings.readerFontSize,
+                                in: AppSettings.minReaderFontSize...AppSettings.maxReaderFontSize,
+                                step: 1
+                            )
+
+                            Text(String(format: "行高 %.2f", appSettings.readerLineHeight))
+                            Slider(
+                                value: $appSettings.readerLineHeight,
+                                in: AppSettings.minReaderLineHeight...AppSettings.maxReaderLineHeight,
+                                step: 0.05
+                            )
+
+                            Text("正文最大宽度 \(Int(appSettings.readerMaxWidth.rounded()))")
+                            Slider(
+                                value: $appSettings.readerMaxWidth,
+                                in: AppSettings.minReaderMaxWidth...AppSettings.maxReaderMaxWidth,
+                                step: 20
+                            )
+                        }
+                        .padding(16)
+                        .frame(width: 280)
+                    }
+                }
 
                 Divider().frame(height: 18)
 
