@@ -101,6 +101,7 @@ extension NotebookTests {
         XCTAssertEqual(imported.folderID, folderID)
         XCTAssertEqual(imported.folder, "写作")
         XCTAssertEqual(imported.content.string, document.content)
+        XCTAssertEqual(imported.viewMode, .preview)
 
         let importedID = imported.id
         let entity = try XCTUnwrap(
@@ -112,6 +113,7 @@ extension NotebookTests {
         )
         XCTAssertGreaterThan(entity.version, 0)
         XCTAssertEqual(entity.blockCount, 3)
+        XCTAssertEqual(entity.viewMode, NoteViewMode.preview.rawValue)
         XCTAssertEqual(
             store.ensureNoteContentLoaded(id: imported.id)?.content.string,
             document.content
@@ -165,6 +167,7 @@ extension NotebookTests {
         XCTAssertTrue(mainActorProgressed)
         XCTAssertEqual(imported.content.string, expected)
         XCTAssertTrue(imported.content.string.hasSuffix("尾部完整性标记"))
+        XCTAssertEqual(imported.viewMode, .preview)
         let importedID = imported.id
         let entity = try XCTUnwrap(
             context.fetch(
@@ -174,11 +177,14 @@ extension NotebookTests {
             ).first
         )
         XCTAssertEqual(entity.blockCount, 47)
+        XCTAssertEqual(entity.viewMode, NoteViewMode.preview.rawValue)
         XCTAssertEqual(try BlockDocumentNoteVersionStore.history(for: importedID, context: context).count, 1)
 
         let restartedStore = NoteStore()
         restartedStore.setContext(context)
-        XCTAssertFalse(try XCTUnwrap(restartedStore.notes.first(where: { $0.id == importedID })).isContentLoaded)
+        let restartedNote = try XCTUnwrap(restartedStore.notes.first(where: { $0.id == importedID }))
+        XCTAssertFalse(restartedNote.isContentLoaded)
+        XCTAssertEqual(restartedNote.viewMode, .preview)
         let reloadedResult = await restartedStore.ensureNoteContentLoadedAsync(id: importedID)
         XCTAssertEqual(try XCTUnwrap(reloadedResult).content.string, expected)
     }

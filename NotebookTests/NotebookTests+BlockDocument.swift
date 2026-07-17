@@ -370,6 +370,38 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testMissingViewModeDefaultsToMarkdownAndSavedModeStillRestores() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let noteID = try insertMinimalBlockLibrary(context: context, title: "模式恢复")
+        let idToMatch = noteID
+        let entity = try XCTUnwrap(
+            context.fetch(
+                FetchDescriptor<BlockDocumentNoteEntity>(
+                    predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+                )
+            ).first
+        )
+        entity.viewMode = ""
+        try context.save()
+
+        let store = NoteStore()
+        store.setContext(context)
+        XCTAssertEqual(
+            try XCTUnwrap(store.notes.first(where: { $0.id == noteID })).viewMode,
+            .preview
+        )
+
+        entity.viewMode = NoteViewMode.split.rawValue
+        try context.save()
+        store.fetchData()
+        XCTAssertEqual(
+            try XCTUnwrap(store.notes.first(where: { $0.id == noteID })).viewMode,
+            .split
+        )
+    }
+
+    @MainActor
     func testBlockDocumentFolderManagementUpdatesEntitiesAndAssociatedNotes() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

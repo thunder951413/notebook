@@ -306,7 +306,9 @@ final class NoteStore: ObservableObject {
                 recurrenceRule: entity.recurrenceRule,
                 version: entity.version,
                 tagIDs: UUIDListCoding.decode(entity.tagIDs),
-                viewMode: NoteViewMode(rawValue: entity.viewMode) ?? .text,
+                // 已保存的有效模式原样恢复；旧数据若确实没有模式记录，则以
+                // Markdown 预览打开，避免导入内容默认落入富文本编辑状态。
+                viewMode: NoteViewMode(rawValue: entity.viewMode) ?? .preview,
                 deletedAt: entity.deletedAt,
                 originalFolderID: entity.originalFolderID,
                 originalFolderName: entity.originalFolderName,
@@ -1040,7 +1042,12 @@ final class NoteStore: ObservableObject {
     }
     
     @discardableResult
-    func addNote(title: String, folderID: UUID? = nil, folderName: String = "未分类") -> Note? {
+    func addNote(
+        title: String,
+        folderID: UUID? = nil,
+        folderName: String = "未分类",
+        initialViewMode: NoteViewMode = .text
+    ) -> Note? {
         guard let context = modelContext else { return nil }
         guard let library = ensureBlockDocumentLibrary(in: context) else { return nil }
         let createdAt = Date()
@@ -1056,7 +1063,7 @@ final class NoteStore: ObservableObject {
             recurrenceRule: "none",
             version: 0,
             tagIDs: "",
-            viewMode: NoteViewMode.text.rawValue,
+            viewMode: initialViewMode.rawValue,
             deletedAt: nil,
             originalFolderID: nil,
             originalFolderName: nil,
@@ -1083,7 +1090,8 @@ final class NoteStore: ObservableObject {
         guard let createdNote = addNote(
             title: document.title,
             folderID: target.folderID,
-            folderName: target.folderName
+            folderName: target.folderName,
+            initialViewMode: .preview
         ) else { return nil }
 
         let content = NSAttributedString(string: document.content)
@@ -1135,7 +1143,8 @@ final class NoteStore: ObservableObject {
         guard let createdNote = addNote(
             title: document.title,
             folderID: target.folderID,
-            folderName: target.folderName
+            folderName: target.folderName,
+            initialViewMode: .preview
         ) else { return nil }
 
         let interval = Logger.shared.beginInterval(
