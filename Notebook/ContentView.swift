@@ -379,34 +379,55 @@ struct ContentView: View {
                     // 防止具有较大固有宽度的编辑器子视图覆盖笔记列表和侧边栏。
                     .clipped()
                 } else {
-                    if let error = store.noteContentLoadErrors[currentId] {
-                        ContentUnavailableView {
-                            Label("笔记加载失败", systemImage: "exclamationmark.triangle")
-                        } description: {
-                            Text(error)
-                        } actions: {
-                            Button("重试") {
-                                store.retryNoteContentLoad(id: currentId)
-                                Task {
-                                    await store.ensureNoteContentLoadedAsync(
-                                        id: currentId,
-                                        rememberSelection: true
-                                    )
+                    Group {
+                        if let error = store.noteContentLoadErrors[currentId] {
+                            ContentUnavailableView {
+                                Label("笔记加载失败", systemImage: "exclamationmark.triangle")
+                            } description: {
+                                Text(error)
+                            } actions: {
+                                Button("重试") {
+                                    store.retryNoteContentLoad(id: currentId)
+                                    Task {
+                                        await store.ensureNoteContentLoadedAsync(
+                                            id: currentId,
+                                            rememberSelection: true
+                                        )
+                                    }
+                                }
+                            }
+                        } else if store.loadingNoteIDs.contains(currentId) {
+                            ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
+                        } else {
+                            ContentUnavailableView {
+                                Label("笔记尚未加载", systemImage: "doc.text")
+                            } description: {
+                                Text("加载任务已结束，但尚未取得正文。")
+                            } actions: {
+                                Button("重新加载") {
+                                    store.retryNoteContentLoad(id: currentId)
+                                    Task {
+                                        await store.ensureNoteContentLoadedAsync(
+                                            id: currentId,
+                                            rememberSelection: true
+                                        )
+                                    }
                                 }
                             }
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(AppColors.editorBackground(colorScheme))
-                    } else {
-                        ContentUnavailableView("正在加载笔记…", systemImage: "doc.text")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(AppColors.editorBackground(colorScheme))
-                            .task(id: currentId) {
-                                await store.ensureNoteContentLoadedAsync(
-                                    id: currentId,
-                                    rememberSelection: true
-                                )
-                            }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(AppColors.editorBackground(colorScheme))
+                    .task(id: currentId) {
+                        guard store.noteContentLoadErrors[currentId] == nil,
+                              !store.loadingNoteIDs.contains(currentId),
+                              store.notes.first(where: { $0.id == currentId })?.isContentLoaded == false else {
+                            return
+                        }
+                        await store.ensureNoteContentLoadedAsync(
+                            id: currentId,
+                            rememberSelection: true
+                        )
                     }
                 }
             } else {

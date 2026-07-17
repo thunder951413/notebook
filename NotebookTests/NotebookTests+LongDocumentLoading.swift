@@ -129,6 +129,74 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testAsyncLoadReconcilesStaleListVersionWithVerifiedDatabaseSnapshot() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let noteID = try insertMinimalBlockLibrary(context: context, title: "异步导入版本协调")
+        let payload = try JSONEncoder().encode([
+            BlockDocumentTextSpanPayload(
+                text: "导入后的完整正文",
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+                textColor: nil,
+                backgroundColor: nil,
+                link: nil,
+                fontFamily: nil,
+                fontSize: nil,
+                kern: nil,
+                baselineOffset: nil,
+                paragraphStyle: nil
+            )
+        ])
+        context.insert(
+            BlockDocumentBlockEntity(
+                noteID: noteID,
+                position: 0,
+                blockID: "imported-0",
+                kind: "paragraph",
+                sourceType: "paragraph",
+                textPayload: payload,
+                level: nil,
+                listStyle: nil,
+                order: nil,
+                checked: nil,
+                indent: 0,
+                assetID: nil,
+                tablePayload: nil
+            )
+        )
+        let idToMatch = noteID
+        let entity = try XCTUnwrap(
+            context.fetch(
+                FetchDescriptor<BlockDocumentNoteEntity>(
+                    predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+                )
+            ).first
+        )
+        entity.version = 2
+        entity.blockCount = 1
+        entity.hasLegacyCheckboxMigrated = true
+        try context.save()
+
+        let store = NoteStore()
+        store.setContext(context)
+        let noteIndex = try XCTUnwrap(store.notes.firstIndex(where: { $0.id == noteID }))
+        store.notes[noteIndex].version = 1
+        XCTAssertFalse(store.notes[noteIndex].isContentLoaded)
+
+        let loadedResult = await store.ensureNoteContentLoadedAsync(id: noteID)
+        let loaded = try XCTUnwrap(loadedResult)
+
+        XCTAssertEqual(loaded.content.string, "导入后的完整正文")
+        XCTAssertEqual(loaded.version, 2)
+        XCTAssertTrue(loaded.isContentLoaded)
+        XCTAssertFalse(store.loadingNoteIDs.contains(noteID))
+        XCTAssertNil(store.noteContentLoadErrors[noteID])
+    }
+
+    @MainActor
     func testMetadataRefreshRetainsLoadedContentUntilDatabaseVersionChanges() async throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

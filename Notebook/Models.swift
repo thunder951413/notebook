@@ -633,8 +633,12 @@ final class NoteStore: ObservableObject {
             AppSettings.shared.recordRecentlySelectedNote(id)
         }
 
-        guard let context = modelContext,
-              let index = notes.firstIndex(where: { $0.id == id }) else {
+        guard let context = modelContext else {
+            noteContentLoadErrors[id] = "数据库尚未就绪，请稍后重试。"
+            return nil
+        }
+        guard let index = notes.firstIndex(where: { $0.id == id }) else {
+            noteContentLoadErrors[id] = "笔记不存在或已被删除。"
             return nil
         }
         if notes[index].isContentLoaded {
@@ -660,49 +664,86 @@ final class NoteStore: ObservableObject {
         }
 
         do {
-            // ModelActor 的执行器由创建它的上下文决定；必须在 detached 任务中创建，
-            // 否则从主线程创建会让大文档的 SwiftData fetch 仍占用主线程。
             let container = context.container
-            let loader = await Task.detached(priority: .userInitiated) {
-                BlockDocumentContentLoader(modelContainer: container)
-            }.value
-            let snapshot = try await loader.snapshot(noteID: id)
-            try Task.checkCancellation()
-
-            guard let currentIndex = notes.firstIndex(where: { $0.id == id }),
-                  notes[currentIndex].version == snapshot.version else {
-                interval.end(.warn, "discarded=versionChanged")
-                return nil
-            }
-
             let attachmentsRoot = try? storageLocationManager.attachmentsDirectoryURL()
-            let content = try await BlockDocumentAttributedStringBuilder(
-                attachmentsRoot: attachmentsRoot,
-                skipLegacyCheckboxHeuristic: snapshot.hasLegacyCheckboxMigrated
-            ).buildIncrementally(
-                blocks: snapshot.blocks,
-                assetsByID: snapshot.assetsByID
-            )
-            try Task.checkCancellation()
+            let maximumSnapshotAttempts = 3
 
-            guard contentLoadGenerations[id] == generation,
-                  let applyIndex = notes.firstIndex(where: { $0.id == id }),
-                  notes[applyIndex].version == snapshot.version else {
-                interval.end(.warn, "discarded=staleGeneration")
-                return nil
-            }
+            for attempt in 1...maximumSnapshotAttempts {
+                // 每次都在后台创建新的 ModelActor/ModelContext，避免复用旧上下文缓存。
+                let loader = await Task.detached(priority: .userInitiated) {
+                    BlockDocumentContentLoader(modelContainer: container)
+                }.value
+                let snapshot = try await loader.snapshot(noteID: id)
+                try Task.checkCancellation()
 
-            notes[applyIndex].content = Self.fixCheckboxAttachments(in: content)
-            notes[applyIndex].contentPreview = Self.previewText(from: content.string)
-            notes[applyIndex].isContentLoaded = true
-            if pruneAfterLoad {
-                pruneLoadedNoteContents(keeping: id)
+                let content = try await BlockDocumentAttributedStringBuilder(
+                    attachmentsRoot: attachmentsRoot,
+                    skipLegacyCheckboxHeuristic: snapshot.hasLegacyCheckboxMigrated
+                ).buildIncrementally(
+                    blocks: snapshot.blocks,
+                    assetsByID: snapshot.assetsByID
+                )
+                try Task.checkCancellation()
+
+                guard contentLoadGenerations[id] == generation else {
+                    interval.end(.debug, "discarded=staleGeneration")
+                    return nil
+                }
+                guard let applyIndex = notes.firstIndex(where: { $0.id == id }) else {
+                    noteContentLoadErrors[id] = "笔记不存在或已被删除。"
+                    interval.end(.warn, "discarded=missingNote")
+                    return nil
+                }
+                if notes[applyIndex].isContentLoaded {
+                    interval.end(.debug, "discarded=alreadyLoaded")
+                    return notes[applyIndex]
+                }
+
+                // 构建富文本期间同步或保存可能写入新版本。用全新的后台上下文复核，
+                // 若已变化则重新抓取，绝不把旧正文覆盖到新版本上。
+                let verifier = await Task.detached(priority: .userInitiated) {
+                    BlockDocumentContentLoader(modelContainer: container)
+                }.value
+                let latestVersion = try await verifier.version(noteID: id)
+                try Task.checkCancellation()
+                if latestVersion != snapshot.version {
+                    Logger.shared.log(
+                        .storage,
+                        .warn,
+                        "笔记加载期间版本变化，重新读取 noteID=\(id.uuidString.prefix(8)) snapshot=\(snapshot.version) latest=\(latestVersion) attempt=\(attempt)"
+                    )
+                    if attempt < maximumSnapshotAttempts {
+                        continue
+                    }
+                    noteContentLoadErrors[id] = "笔记内容正在持续更新，请稍后重试。"
+                    interval.end(.warn, "discarded=databaseVersionChanged attempts=\(attempt)")
+                    return nil
+                }
+
+                let memoryVersion = notes[applyIndex].version
+                if memoryVersion != snapshot.version {
+                    // 未加载的 Note 只持有列表元数据；数据库快照已经过二次版本复核，
+                    // 可以安全修正异步导入/同步后尚未合并到列表的版本号。
+                    notes[applyIndex].version = snapshot.version
+                    Logger.shared.log(
+                        .storage,
+                        .warn,
+                        "已协调列表与数据库版本 noteID=\(id.uuidString.prefix(8)) memory=\(memoryVersion) database=\(snapshot.version)"
+                    )
+                }
+                notes[applyIndex].content = Self.fixCheckboxAttachments(in: content)
+                notes[applyIndex].contentPreview = Self.previewText(from: content.string)
+                notes[applyIndex].isContentLoaded = true
+                if pruneAfterLoad {
+                    pruneLoadedNoteContents(keeping: id)
+                }
+                interval.end(
+                    .info,
+                    "blocks=\(snapshot.blocks.count) characters=\(content.length) attempts=\(attempt)"
+                )
+                return notes[applyIndex]
             }
-            interval.end(
-                .info,
-                "blocks=\(snapshot.blocks.count) characters=\(content.length)"
-            )
-            return notes[applyIndex]
+            return nil
         } catch is CancellationError {
             interval.end(.debug, "cancelled=true")
             return nil

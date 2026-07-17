@@ -92,6 +92,17 @@ struct BlockDocumentContentSnapshot: Sendable {
 
 @ModelActor
 actor BlockDocumentContentLoader {
+    func version(noteID: UUID) throws -> Int64 {
+        let idToMatch = noteID
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == idToMatch }
+        )
+        guard let note = try modelContext.fetch(descriptor).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return note.version
+    }
+
     func snapshot(noteID: UUID) throws -> BlockDocumentContentSnapshot {
         let idToMatch = noteID
         let noteDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
