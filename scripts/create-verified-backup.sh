@@ -23,17 +23,17 @@ trap relaunch_if_needed EXIT
 
 for command in sqlite3 ditto shasum lsof; do
     command -v "$command" >/dev/null || {
-        print -u2 "缺少备份依赖：$command"
+        printf '%s\n' "缺少备份依赖：$command" >&2
         exit 1
     }
 done
 
 [[ -f "$database" ]] || {
-    print -u2 "找不到 Notebook 数据库：$database"
+    printf '%s\n' "找不到 Notebook 数据库：$database" >&2
     exit 1
 }
 [[ "$snapshot" != *"'"* ]] || {
-    print -u2 "备份路径不能包含单引号"
+    printf '%s\n' "备份路径不能包含单引号" >&2
     exit 1
 }
 
@@ -48,14 +48,14 @@ if pgrep -f '/Notebook.app/Contents/MacOS/Notebook' >/dev/null; then
         sleep 1
     done
     if pgrep -f '/Notebook.app/Contents/MacOS/Notebook' >/dev/null; then
-        print -u2 "Notebook 未能正常退出，备份已中止"
+        printf '%s\n' "Notebook 未能正常退出，备份已中止" >&2
         exit 1
     fi
 fi
 
 sqlite3 "$database" 'pragma wal_checkpoint(TRUNCATE);' >/dev/null
 [[ "$(sqlite3 "$database" 'pragma integrity_check;')" == "ok" ]] || {
-    print -u2 "源数据库完整性检查失败，备份已中止"
+    printf '%s\n' "源数据库完整性检查失败，备份已中止" >&2
     exit 1
 }
 
@@ -72,7 +72,7 @@ consistent_database="$snapshot/notebook-consistent.store"
 copied_database="$snapshot/NotebookData/Database/notebook.store"
 for candidate in "$consistent_database" "$copied_database"; do
     [[ "$(sqlite3 "$candidate" 'pragma integrity_check;')" == "ok" ]] || {
-        print -u2 "备份数据库完整性检查失败：$candidate"
+        printf '%s\n' "备份数据库完整性检查失败：$candidate" >&2
         exit 1
     }
 done
@@ -81,7 +81,7 @@ source_dump_hash="$(sqlite3 "$database" '.dump' | shasum -a 256 | awk '{print $1
 backup_dump_hash="$(sqlite3 "$consistent_database" '.dump' | shasum -a 256 | awk '{print $1}')"
 copy_dump_hash="$(sqlite3 "$copied_database" '.dump' | shasum -a 256 | awk '{print $1}')"
 [[ "$source_dump_hash" == "$backup_dump_hash" && "$source_dump_hash" == "$copy_dump_hash" ]] || {
-    print -u2 "数据库逻辑内容哈希不一致，备份已中止"
+    printf '%s\n' "数据库逻辑内容哈希不一致，备份已中止" >&2
     exit 1
 }
 cat > "$snapshot/database-semantic-hashes.txt" <<EOF
@@ -134,19 +134,19 @@ if [[ -x "$app_path/Contents/MacOS/Notebook" ]]; then
     if [[ "$opened" != "1" ]]; then
         kill -TERM "$drill_pid" 2>/dev/null || true
         wait "$drill_pid" 2>/dev/null || true
-        print -u2 "正式应用未能打开隔离恢复副本"
+        printf '%s\n' "正式应用未能打开隔离恢复副本" >&2
         exit 1
     fi
     kill -TERM "$drill_pid"
     wait "$drill_pid" 2>/dev/null || true
     sqlite3 "$drill_database" 'pragma wal_checkpoint(TRUNCATE);' >/dev/null
     [[ "$(sqlite3 "$drill_database" 'pragma integrity_check;')" == "ok" ]] || {
-        print -u2 "隔离恢复副本打开后完整性检查失败"
+        printf '%s\n' "隔离恢复副本打开后完整性检查失败" >&2
         exit 1
     }
     after_open_hash="$(sqlite3 "$drill_database" '.dump' | shasum -a 256 | awk '{print $1}')"
     [[ "$before_open_hash" == "$after_open_hash" ]] || {
-        print -u2 "应用打开隔离恢复副本后数据发生变化"
+        printf '%s\n' "应用打开隔离恢复副本后数据发生变化" >&2
         exit 1
     }
     cat > "$snapshot/restore-drill-hashes.txt" <<EOF
@@ -169,6 +169,6 @@ find "$snapshot" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum 
 chmod 600 "$snapshot/SHA256SUMS"
 
 finished=1
-print "备份与恢复演练通过：$snapshot"
-print "实体统计："
+printf '%s\n' "备份与恢复演练通过：$snapshot"
+printf '%s\n' "实体统计："
 cat "$snapshot/entity-counts.txt"
