@@ -323,7 +323,8 @@ actor TextNoteImportPersistenceActor {
             )
             let snapshotEncoder = JSONEncoder()
             snapshotEncoder.outputFormatting = .sortedKeys
-            let snapshotData = try snapshotEncoder.encode(snapshot)
+            let snapshotJSON = try snapshotEncoder.encode(snapshot)
+            let snapshotData = try VersionedNoteSnapshotCodec.storageData(from: snapshotJSON)
             modelContext.insert(
                 BlockDocumentNoteVersionEntity(
                     noteID: noteID,
@@ -332,7 +333,7 @@ actor TextNoteImportPersistenceActor {
                     updatedAt: importedAt,
                     title: note.title,
                     authorDeviceID: authorDeviceID,
-                    contentHash: SHA256.hash(data: snapshotData)
+                    contentHash: SHA256.hash(data: snapshotJSON)
                         .map { String(format: "%02x", $0) }
                         .joined(),
                     snapshotData: snapshotData

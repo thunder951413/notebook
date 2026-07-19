@@ -156,7 +156,7 @@ enum BlockDocumentNoteVersionStore {
 
         let snapshot = try makeSnapshot(note: note, blocks: blocks, assets: assets, context: context)
         let contentHash = try snapshotFingerprint(snapshot)
-        let snapshotData = try jsonEncoder.encode(snapshot)
+        let snapshotData = try VersionedNoteSnapshotCodec.encode(snapshot, using: jsonEncoder)
         let entry = BlockDocumentNoteVersionEntity(
             noteID: note.id,
             version: note.version,
@@ -191,7 +191,7 @@ enum BlockDocumentNoteVersionStore {
         guard let entry = try context.fetch(versionDescriptor).first else {
             return nil
         }
-        return try jsonDecoder.decode(VersionedNoteSnapshot.self, from: entry.snapshotData)
+        return try VersionedNoteSnapshotCodec.decode(entry.snapshotData, using: jsonDecoder)
     }
 
     static func compare(
@@ -328,7 +328,7 @@ enum BlockDocumentNoteVersionStore {
                 title: $0.title,
                 authorDeviceID: $0.authorDeviceID,
                 contentHash: $0.contentHash,
-                snapshot: try jsonDecoder.decode(VersionedNoteSnapshot.self, from: $0.snapshotData)
+                snapshot: try VersionedNoteSnapshotCodec.decode($0.snapshotData, using: jsonDecoder)
             )
         }
         let syncState = try ensureSyncState(noteID: noteID, backendID: backendID, context: context)
@@ -663,8 +663,8 @@ enum BlockDocumentNoteVersionStore {
         let sorted = allVersions.sorted { $0.version < $1.version }
         var recoveryAnchorVersions = Set<Int64>()
         for (before, after) in zip(sorted, sorted.dropFirst()) {
-            guard let beforeSnapshot = try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: before.snapshotData),
-                  let afterSnapshot = try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: after.snapshotData),
+            guard let beforeSnapshot = try? VersionedNoteSnapshotCodec.decode(before.snapshotData, using: jsonDecoder),
+                  let afterSnapshot = try? VersionedNoteSnapshotCodec.decode(after.snapshotData, using: jsonDecoder),
                   isCatastrophicContentReduction(from: beforeSnapshot, to: afterSnapshot) else {
                 continue
             }
@@ -787,7 +787,7 @@ enum BlockDocumentNoteVersionStore {
                 continue
             }
 
-            let snapshotData = try jsonEncoder.encode(historyEntry.snapshot)
+            let snapshotData = try VersionedNoteSnapshotCodec.encode(historyEntry.snapshot, using: jsonEncoder)
             context.insert(
                 BlockDocumentNoteVersionEntity(
                     id: historyEntry.id,

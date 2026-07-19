@@ -91,6 +91,45 @@ extension NotebookTests {
         XCTAssertTrue(NoteReadingPosition.wins(position, over: nil))
     }
 
+    func testVersionSnapshotCodecCompressesNewDataAndReadsLegacyJSON() throws {
+        let decoder = JSONDecoder()
+        let envelope = try decoder.decode(
+            VersionedNoteSyncEnvelope.self,
+            from: syncContractFixtureData(named: "note-envelope.json")
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let legacyJSON = try encoder.encode(envelope.currentSnapshot)
+        let stored = try VersionedNoteSnapshotCodec.storageData(from: legacyJSON)
+
+        XCTAssertTrue(VersionedNoteSnapshotCodec.isCompressed(stored))
+        XCTAssertLessThan(stored.count, legacyJSON.count)
+        XCTAssertEqual(try VersionedNoteSnapshotCodec.rawJSON(from: stored), legacyJSON)
+        XCTAssertEqual(
+            try BlockDocumentNoteVersionStore.snapshotFingerprint(
+                VersionedNoteSnapshotCodec.decode(stored, using: decoder)
+            ),
+            try BlockDocumentNoteVersionStore.snapshotFingerprint(
+                VersionedNoteSnapshotCodec.decode(legacyJSON, using: decoder)
+            )
+        )
+    }
+
+    func testVersionSnapshotCodecRejectsTruncatedCompressedData() throws {
+        let decoder = JSONDecoder()
+        let envelope = try decoder.decode(
+            VersionedNoteSyncEnvelope.self,
+            from: syncContractFixtureData(named: "note-envelope.json")
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        var stored = try VersionedNoteSnapshotCodec.encode(envelope.currentSnapshot, using: encoder)
+        XCTAssertTrue(VersionedNoteSnapshotCodec.isCompressed(stored))
+        stored.removeLast(max(1, stored.count / 4))
+
+        XCTAssertThrowsError(try VersionedNoteSnapshotCodec.decode(stored, using: decoder))
+    }
+
     private func syncContractFixtureData(named name: String) throws -> Data {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
