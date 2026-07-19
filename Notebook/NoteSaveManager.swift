@@ -297,6 +297,21 @@ final class NoteSaveManager {
             ))
         }
 
+        let blockDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+        )
+        let blockEntities: [BlockDocumentNoteEntity]
+        do {
+            blockEntities = try context.fetch(blockDescriptor)
+        } catch {
+            interval.end(.error, "entityFetchFailed")
+            return .failure(error)
+        }
+        guard let blockEntity = blockEntities.first else {
+            interval.end(.error, "entityMissing")
+            return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
+        }
+
         // 标记为正在保存（用于崩溃检测）
         currentlySaving.insert(noteID)
         BackupManager.shared.markSaveStart(noteID: noteID)
@@ -306,11 +321,10 @@ final class NoteSaveManager {
             BackupManager.shared.markSaveComplete()
         }
 
-        // 先创建备份
-        guard BackupManager.shared.createBackup(
-            noteID: noteID,
-            title: request.title,
-            rtfdData: request.rtfdData,
+        // 先备份数据库中的旧正文，而不是即将写入的新正文。
+        guard BackupManager.shared.createPersistedBackup(
+            note: blockEntity,
+            context: context,
             reason: request.reason
         ) else {
             interval.end(.error, "backupFailed")
@@ -328,21 +342,12 @@ final class NoteSaveManager {
                 return .failure(NSError(domain: "SaveManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Data validation failed"]))
             }
 
-            let blockDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
-                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
-            )
-            let blockEntities = try context.fetch(blockDescriptor)
-            if let blockEntity = blockEntities.first {
-                let hasContentChanged = try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
-                if hasContentChanged {
-                    AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
-                }
-                interval.end(.info, "result=success")
-                return .success
+            let hasContentChanged = try saveBlockDocumentNote(entity: blockEntity, request: request, context: context)
+            if hasContentChanged {
+                AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
             }
-
-            interval.end(.error, "entityMissing")
-            return .failure(NSError(domain: "SaveManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Entity not found"]))
+            interval.end(.info, "result=success")
+            return .success
         } catch {
             context.rollback()
             interval.end(.error, "result=failure error=\(error.localizedDescription)")

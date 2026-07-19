@@ -151,13 +151,16 @@ struct ContentView: View {
         }
         
         let note = store.notes[index]
-        let preview = String(content.string.prefix(30)).replacingOccurrences(of: "\n", with: "\\n")
         let interval = Logger.shared.beginInterval(
             .save,
             "contentViewSaveNote",
-            metadata: "noteID=\(noteID.uuidString.prefix(8)) reason=\(reason) title=\(note.title) contentLength=\(content.length)"
+            metadata: "noteID=\(noteID.uuidString.prefix(8)) reason=\(reason) contentLength=\(content.length)"
         )
-        Logger.shared.log(.save, .info, "'\(note.title)' [\(reason)]: '\(preview)' (\(content.length))")
+        Logger.shared.log(
+            .save,
+            .info,
+            "Saving noteID=\(noteID.uuidString.prefix(8)) reason=\(reason) contentLength=\(content.length)"
+        )
         
         guard let request = NoteSaveManager.shared.createRequest(
             noteID: noteID,
@@ -196,37 +199,48 @@ struct ContentView: View {
         
         Logger.shared.log(.save, .debug, "reason=\(reason), boundNoteID=\(boundIDStr), selection=\(selIDStr)")
         
+        let boundID = richTextController.boundNoteID
+        let selectedNote = selection.flatMap { selectedID in
+            store.notes.first(where: { $0.id == selectedID })
+        }
+        let selectedHasUnsavedChanges = selectedNote.map {
+            richTextController.hasUnsavedChanges(
+                noteID: $0.id,
+                title: $0.title,
+                content: $0.content
+            )
+        } ?? false
+        let plan = EditorSaveBarrierPolicy.plan(
+            boundNoteID: boundID,
+            hasLiveEditor: boundID.map { richTextController.isBoundTo(noteID: $0) } ?? false,
+            selectedNoteID: selection,
+            selectedContentIsLoaded: selectedNote?.isContentLoaded == true,
+            selectedHasUnsavedChanges: selectedHasUnsavedChanges
+        )
+
         let targetNoteID: UUID
-        if let boundID = richTextController.boundNoteID,
-           richTextController.isBoundTo(noteID: boundID) {
+        switch plan {
+        case .liveEditor(let boundID):
             if let selID = selection, boundID != selID {
                 // 快照属于编辑器实际绑定的笔记，绝不能写进刚切换到的 selection。
-                Logger.shared.log(.save, .warn, "boundNoteID and selection mismatch, using bound editor note: \(boundID)")
+                Logger.shared.log(
+                    .save,
+                    .warn,
+                    "boundNoteID and selection mismatch, using bound editor noteID=\(boundID.uuidString.prefix(8))"
+                )
             }
             targetNoteID = boundID
-        } else {
-            // Markdown preview has no NSTextView. Pending NoteSaveManager requests are flushed by
-            // prepareForSync; only save here when the fully loaded selected note actually changed.
-            guard let selectedID = selection,
-                  let selectedNote = store.notes.first(where: { $0.id == selectedID }),
-                  selectedNote.isContentLoaded else {
-                Logger.shared.log(.save, .debug, "No active editor or loaded selected note; nothing to save before sync")
-                return true
-            }
-            guard richTextController.hasUnsavedChanges(
-                noteID: selectedID,
-                title: selectedNote.title,
-                content: selectedNote.content
-            ) else {
-                Logger.shared.log(.save, .debug, "Preview note is unchanged; skipping editor save barrier")
-                return true
-            }
+        case .loadedPreview(let selectedID):
+            guard let selectedNote else { return false }
             Logger.shared.log(.save, .info, "Saving changed loaded preview note before sync noteID=\(selectedID.uuidString.prefix(8))")
             return saveNoteContent(
                 noteID: selectedID,
                 content: selectedNote.content,
                 reason: reason
             )
+        case .noContentSaveRequired:
+            Logger.shared.log(.save, .debug, "No live editor or changed loaded preview; skipping editor content save")
+            return true
         }
 
         guard store.notes.contains(where: { $0.id == targetNoteID && $0.isContentLoaded }) else {

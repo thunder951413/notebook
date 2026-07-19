@@ -81,6 +81,12 @@ struct NoteSyncMergeResult {
     let remoteVersion: Int64
 }
 
+private struct NoteSnapshotMagnitude {
+    let meaningfulBlocks: Int
+    let textCharacters: Int
+    let assets: Int
+}
+
 enum BlockDocumentNoteVersionStore {
     enum Backend {
         static let ssh = "ssh"
@@ -242,6 +248,27 @@ enum BlockDocumentNoteVersionStore {
         )
     }
 
+    /// 检测较完整正文突然缩成近空内容。用户仍可在本机明确保存这种修改；
+    /// 远程快进则转为人工冲突，历史裁剪也会固定缩减前版本。
+    static func isCatastrophicContentReduction(
+        from source: VersionedNoteSnapshot,
+        to destination: VersionedNoteSnapshot
+    ) -> Bool {
+        let before = snapshotMagnitude(source)
+        let after = snapshotMagnitude(destination)
+        let sourceIsSubstantial = before.textCharacters >= 256
+            || before.meaningfulBlocks >= 8
+            || before.assets >= 2
+        guard sourceIsSubstantial else { return false }
+
+        let textCollapsed = before.textCharacters >= 256
+            && after.textCharacters <= max(32, before.textCharacters / 20)
+        let blocksCollapsed = before.meaningfulBlocks >= 8
+            && after.meaningfulBlocks <= max(1, before.meaningfulBlocks / 10)
+        let assetsCollapsed = before.assets >= 2 && after.assets == 0
+        return textCollapsed || blocksCollapsed || assetsCollapsed
+    }
+
     @discardableResult
     static func restore(noteID: UUID, toVersion version: Int64, context: ModelContext) throws -> Int64 {
         guard let targetSnapshot = try snapshot(noteID: noteID, version: version, context: context) else {
@@ -255,10 +282,14 @@ enum BlockDocumentNoteVersionStore {
             throw NSError(domain: "NoteVersionStore", code: 404, userInfo: [NSLocalizedDescriptionKey: "找不到目标笔记"])
         }
 
+        // 回退也必须可撤销：先保证回退前的当前状态已经进入版本历史。
+        _ = try ensureHistoryRecorded(noteID: noteID, context: context)
+        try context.save()
         try apply(snapshot: targetSnapshot, to: note, context: context, restoredAt: Date())
         try context.save()
         _ = try ensureHistoryRecorded(noteID: noteID, context: context)
         try context.save()
+        AutoSyncCoordinator.shared.noteDidSave(noteID: noteID, reason: "versionRestore")
         return note.version
     }
 
@@ -354,14 +385,49 @@ enum BlockDocumentNoteVersionStore {
             // sameDeviceEcho: 远程数据来自本机推送，不是真正的冲突
             let sameDeviceEcho = envelope.deviceID == currentDeviceID()
 
-            if localHasChanges && remoteHasChanged && !sameDeviceEcho {
+            let currentLocalSnapshot: VersionedNoteSnapshot
+            if let recordedSnapshot = try snapshot(
+                noteID: localNote.id,
+                version: localNote.version,
+                context: context
+            ) {
+                currentLocalSnapshot = recordedSnapshot
+            } else {
+                // 兼容尚未建立版本历史的旧库，直接从当前持久化块构造比较基线。
+                let localNoteID = localNote.id
+                let blocks = try context.fetch(
+                    FetchDescriptor<BlockDocumentBlockEntity>(
+                        predicate: #Predicate<BlockDocumentBlockEntity> { $0.noteID == localNoteID },
+                        sortBy: [SortDescriptor(\.position)]
+                    )
+                )
+                let assets = try context.fetch(
+                    FetchDescriptor<BlockDocumentAssetEntity>(
+                        predicate: #Predicate<BlockDocumentAssetEntity> { $0.noteID == localNoteID }
+                    )
+                )
+                currentLocalSnapshot = try makeSnapshot(
+                    note: localNote,
+                    blocks: blocks,
+                    assets: assets,
+                    context: context
+                )
+            }
+            let remoteIsCatastrophicReduction = isCatastrophicContentReduction(
+                from: currentLocalSnapshot,
+                to: envelope.currentSnapshot
+            )
+
+            if remoteHasChanged
+                && !sameDeviceEcho
+                && (localHasChanges || remoteIsCatastrophicReduction) {
                 // 真正的冲突：本地有未推送修改 + 远程有来自其他设备的变化
                 // 不再创建副本，而是在笔记上标记冲突状态并保存远程快照
                 // 用户稍后可通过 diff 视图手动解决冲突
                 Logger.shared.log(.app, .warn, """
                     [SyncConflict] detected noteID=\(envelope.noteID) \
                     localVersion=\(localNote.version) remoteVersion=\(envelope.currentVersion) \
-                    deviceID=\(envelope.deviceID)
+                    deviceID=\(envelope.deviceID) catastrophicReduction=\(remoteIsCatastrophicReduction)
                     """)
 
                 // 保存远程快照数据供 diff 使用
@@ -595,11 +661,20 @@ enum BlockDocumentNoteVersionStore {
         let cutoffDate = Date().addingTimeInterval(-Double(maxAgeDays) * 86400)
         // 按版本号升序排列，最旧的在前面
         let sorted = allVersions.sorted { $0.version < $1.version }
-        // 保留最新的 maxCount 个
-        let keepFromIndex = sorted.count - maxCount
+        var recoveryAnchorVersions = Set<Int64>()
+        for (before, after) in zip(sorted, sorted.dropFirst()) {
+            guard let beforeSnapshot = try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: before.snapshotData),
+                  let afterSnapshot = try? jsonDecoder.decode(VersionedNoteSnapshot.self, from: after.snapshotData),
+                  isCatastrophicContentReduction(from: beforeSnapshot, to: afterSnapshot) else {
+                continue
+            }
+            recoveryAnchorVersions.insert(before.version)
+        }
+        // 保留最新的 maxCount 个。即使调用方误传 0，也至少保留当前版本。
+        let keepFromIndex = max(0, sorted.count - max(1, maxCount))
         let toDelete = sorted.prefix(keepFromIndex).filter { entry in
             // 不删除 30 天内的版本
-            entry.recordedAt < cutoffDate
+            entry.recordedAt < cutoffDate && !recoveryAnchorVersions.contains(entry.version)
         }
 
         for entry in toDelete {
@@ -607,8 +682,36 @@ enum BlockDocumentNoteVersionStore {
         }
         if !toDelete.isEmpty {
             try context.save()
-            Logger.shared.log(.app, .debug, "[PruneHistory] noteID=\(noteID.uuidString.prefix(8)) deleted=\(toDelete.count) remaining=\(sorted.count - toDelete.count)")
+            Logger.shared.log(
+                .app,
+                .debug,
+                "[PruneHistory] noteID=\(noteID.uuidString.prefix(8)) deleted=\(toDelete.count) remaining=\(sorted.count - toDelete.count) recoveryAnchors=\(recoveryAnchorVersions.count)"
+            )
         }
+    }
+
+    private static func snapshotMagnitude(_ snapshot: VersionedNoteSnapshot) -> NoteSnapshotMagnitude {
+        var meaningfulBlocks = 0
+        var textCharacters = 0
+
+        for block in snapshot.document.blocks {
+            let blockTextCount = block.text?.reduce(into: 0) { partial, span in
+                partial += span.text.trimmingCharacters(in: .whitespacesAndNewlines).count
+            } ?? 0
+            let tableTextCount = block.table?.rows.reduce(into: 0) { total, row in
+                total += row.reduce(0) { $0 + $1.count }
+            } ?? 0
+            textCharacters += blockTextCount + tableTextCount
+            if blockTextCount > 0 || tableTextCount > 0 || block.asset != nil || block.type != "paragraph" {
+                meaningfulBlocks += 1
+            }
+        }
+
+        return NoteSnapshotMagnitude(
+            meaningfulBlocks: meaningfulBlocks,
+            textCharacters: textCharacters,
+            assets: snapshot.assets.count
+        )
     }
 
     static func deleteHistory(noteID: UUID, context: ModelContext) throws {

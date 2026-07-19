@@ -261,7 +261,10 @@ struct AIPanelView: View {
 
         // ① 解析 @ 引用，提取被引用的笔记 ID + 展示文本（去掉 mention 标记）
         let (displayContent, mentionedNoteIDs, mentionedImages) = extractMentionedNotes(trimmedText)
-        DebugLog.app("Parsed - display: \(displayContent.prefix(50)), mentioned notes: \(mentionedNoteIDs.count), images: \(mentionedImages.count)", level: .debug)
+        DebugLog.app(
+            "Parsed AI response: displayCharacters=\(displayContent.count), mentionedNotes=\(mentionedNoteIDs.count), images=\(mentionedImages.count)",
+            level: .debug
+        )
 
         // ② 全库检索 Top-K 相关笔记（排除已被 @ 引用的笔记）
         let topK = AppSettings.shared.aiKnowledgeBaseTopK

@@ -71,12 +71,40 @@ final class BackupManager {
         do {
             try saveBackup(backup)
             try cleanupOldBackups(for: noteID)
-            DebugLog.storage("Backup created: \(backup.id) for note \(noteID)", level: .debug)
+            DebugLog.storage(
+                "Backup created: \(backup.id.uuidString.prefix(8)) for noteID=\(noteID.uuidString.prefix(8))",
+                level: .debug
+            )
             return true
         } catch {
             DebugLog.storage("Failed to create backup: \(error)", level: .warn)
             return false
         }
+    }
+
+    /// 覆盖保存前，从数据库当前块内容重建备份。
+    /// 不能备份 SaveRequest 中的新正文，否则误清空时得到的“备份”也会是空的。
+    func createPersistedBackup(
+        note: BlockDocumentNoteEntity,
+        context: ModelContext,
+        reason: String
+    ) -> Bool {
+        guard note.blockCount > 0 || note.assetCount > 0 || !note.previewText.isEmpty else {
+            return true
+        }
+        guard let currentData = currentBlockDocumentRTFDData(for: note, context: context) else {
+            DebugLog.storage(
+                "Failed to rebuild persisted content before save for note \(note.id.uuidString.prefix(8))",
+                level: .warn
+            )
+            return false
+        }
+        return createBackup(
+            noteID: note.id,
+            title: note.title,
+            rtfdData: currentData,
+            reason: "before_\(reason)"
+        )
     }
 
     /// 获取笔记的所有备份
