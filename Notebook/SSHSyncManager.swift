@@ -3,6 +3,12 @@ import SwiftData
 import CryptoKit
 import Dispatch
 
+struct RemoteRepositoryRebuildResult: Sendable {
+    let repositoryPath: String
+    let noteCount: Int
+    let assetCount: Int
+}
+
 /// SSH 同步管理器 - 使用 sshpass 进行密码认证
 ///
 /// ## 并发安全
@@ -340,13 +346,11 @@ final class SSHSyncManager: Sendable {
     /// 确保远程目录存在
     func ensureRemoteDirectory(config: SSHConfig, controlPath: String? = nil) async throws {
         let sshpassPath = try checkSshpassAvailable()
-
-        let quotedRemotePath = config.repositoryPath
-            .replacingOccurrences(of: "'", with: "'\"'\"'")
+        let repositoryPath = try SSHRemotePath.normalizedRepositoryPath(config.repositoryPath)
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(quotedRemotePath)'",
+            command: "mkdir -p \(SSHRemotePath.shellQuoted(repositoryPath))",
             controlPath: controlPath
         )
     }
@@ -356,7 +360,8 @@ final class SSHSyncManager: Sendable {
         context: ModelContext,
         config: SSHConfig,
         controlPath: String? = nil,
-        updateRemoteCatalog: Bool = true
+        updateRemoteCatalog: Bool = true,
+        recordSyncState: Bool = true
     ) async throws {
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
             return
@@ -381,60 +386,29 @@ final class SSHSyncManager: Sendable {
         try payload.write(to: tempFileURL, options: [.atomic])
         defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
-        let remoteTempPath = "\(remoteNoteDirectory)/\(noteID.uuidString).json.tmp"
         let remoteTargetPath = "\(remoteNoteDirectory)/\(noteID.uuidString).json"
 
-        try await runSCPUpload(
+        // Publish dependencies first. If anything fails, the existing note JSON
+        // remains authoritative and newly uploaded assets are only harmless orphans.
+        try await uploadAssetsForNote(
+            envelope: envelope,
             sshpassPath: sshpassPath,
             config: config,
-            localPath: tempFileURL.path,
-            remotePath: remoteTempPath,
             controlPath: controlPath
         )
 
-        // 上传校验：比对本地与远程文件的 sha256 哈希
-        let localHash = Self.payloadDigest(for: payload)
-        var uploadVerifyRetryCount = 0
-        while true {
-            let remoteHashOutput = try await runSSHCommandForOutput(
-                sshpassPath: sshpassPath,
-                config: config,
-                command: "shasum -a 256 \(shellQuotedRemotePath(remoteTempPath)) 2>/dev/null | cut -d' ' -f1",
-                controlPath: controlPath
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            if remoteHashOutput == localHash {
-                break
-            }
-            uploadVerifyRetryCount += 1
-            if uploadVerifyRetryCount >= 2 {
-                Logger.shared.log(.storage, .error, "[SSHSync] 上传校验失败：本地=\(localHash.prefix(16))... 远程=\(remoteHashOutput.prefix(16))... noteID=\(noteID.uuidString.prefix(8))")
-                throw NSError(
-                    domain: "SSHSync",
-                    code: -2002,
-                    userInfo: [NSLocalizedDescriptionKey: "上传校验失败：远程文件哈希与本地不一致"]
-                )
-            }
-            Logger.shared.log(.storage, .warn, "[SSHSync] 上传校验不一致，重试 \(uploadVerifyRetryCount)/2：noteID=\(noteID.uuidString.prefix(8))")
-            try await runSCPUpload(
-                sshpassPath: sshpassPath,
-                config: config,
-                localPath: tempFileURL.path,
-                remotePath: remoteTempPath,
-                controlPath: controlPath
-            )
+        try await uploadVerifiedFileAtomically(
+            localURL: tempFileURL,
+            expectedDigest: Self.payloadDigest(for: payload),
+            remoteTargetPath: remoteTargetPath,
+            sshpassPath: sshpassPath,
+            config: config,
+            controlPath: controlPath
+        )
+
+        if recordSyncState {
+            try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
         }
-
-        try await runSSHCommand(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
-            controlPath: controlPath
-        )
-
-        // 上传附件文件
-        try await uploadAssetsForNote(envelope: envelope, sshpassPath: sshpassPath, config: config, controlPath: controlPath)
-
-        try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
 
         if updateRemoteCatalog {
             try await updateRemoteCatalogForSingleNote(
@@ -449,7 +423,10 @@ final class SSHSyncManager: Sendable {
     func syncAllNotesToRemote(
         context: ModelContext,
         config: SSHConfig,
-        progressHandler: SSHSyncProgressHandler? = nil
+        progressHandler: SSHSyncProgressHandler? = nil,
+        forceUploadAll: Bool = false,
+        recordSyncState: Bool = true,
+        pruneHistoryAfterPush: Bool = true
     ) async throws -> [UUID] {
         try await withSyncOperation(named: "推送笔记") {
             let sshpassPath = try checkSshpassAvailable()
@@ -499,14 +476,15 @@ final class SSHSyncManager: Sendable {
                 let hasPendingChanges = syncState.map {
                     $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
                 } ?? true
-                let shouldSync = !hasUnresolvedConflict && hasPendingChanges
+                let shouldSync = !hasUnresolvedConflict && (forceUploadAll || hasPendingChanges)
                 if shouldSync {
                     try await syncNoteToRemote(
                         noteID: note.id,
                         context: context,
                         config: config,
                         controlPath: controlPath,
-                        updateRemoteCatalog: false
+                        updateRemoteCatalog: false,
+                        recordSyncState: recordSyncState
                     )
                     syncedNoteIDs.append(note.id)
                 }
@@ -534,20 +512,6 @@ final class SSHSyncManager: Sendable {
                 context: context
             )
 
-            await reportProgress(
-                progressHandler,
-                phase: .pushConfig,
-                current: 0,
-                total: 1,
-                message: "正在更新远程索引..."
-            )
-            try await uploadRemoteIndex(entries: indexEntries, deletedEntries: deletedEntries, config: config, controlPath: controlPath)
-
-            // 清理已同步删除记录的 SyncState，避免下次推送重复收集
-            cleanupDeletedSyncStates(
-                deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
-                context: context
-            )
             try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
             await reportProgress(
                 progressHandler,
@@ -558,6 +522,27 @@ final class SSHSyncManager: Sendable {
             )
             try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
             try await syncReadingPositionsToRemote(context: context, config: config, controlPath: controlPath)
+
+            // index.json is the repository publication point. Commit it last so
+            // readers never observe references to files that are not yet present.
+            await reportProgress(
+                progressHandler,
+                phase: .pushConfig,
+                current: 0,
+                total: 1,
+                message: "正在发布远程索引..."
+            )
+            try await uploadRemoteIndex(
+                entries: indexEntries,
+                deletedEntries: deletedEntries,
+                config: config,
+                controlPath: controlPath
+            )
+
+            cleanupDeletedSyncStates(
+                deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
+                context: context
+            )
             await reportProgress(
                 progressHandler,
                 phase: .pushLibrary,
@@ -566,22 +551,144 @@ final class SSHSyncManager: Sendable {
                 message: "文件夹和标签同步完成"
             )
 
-            // 清理远程孤儿文件（已删除笔记的 .json 和附件）
-            let activeNoteIDs = Set(indexEntries.map { $0.noteID })
-            try await cleanupRemoteOrphanFiles(
-                activeNoteIDs: activeNoteIDs,
-                deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
-                config: config,
-                controlPath: controlPath
-            )
-
-            // 裁剪历史版本，避免无限增长
-            for note in notes {
-                try? BlockDocumentNoteVersionStore.pruneHistory(noteID: note.id, context: context)
+            if pruneHistoryAfterPush {
+                // 裁剪历史版本，避免无限增长
+                for note in notes {
+                    try? BlockDocumentNoteVersionStore.pruneHistory(noteID: note.id, context: context)
+                }
             }
 
             return syncedNoteIDs
         }
+    }
+
+    /// Rebuilds the repository in a new sibling directory, validates the remote
+    /// catalog, and leaves the current repository untouched. The caller switches
+    /// the persisted SSH configuration only after this method returns success.
+    func rebuildRemoteRepository(
+        context: ModelContext,
+        config: SSHConfig,
+        destinationPath: String,
+        progressHandler: SSHSyncProgressHandler? = nil
+    ) async throws -> RemoteRepositoryRebuildResult {
+        let normalizedCurrentPath = try SSHRemotePath.normalizedRepositoryPath(config.repositoryPath)
+        let normalizedDestinationPath = try SSHRemotePath.normalizedRepositoryPath(destinationPath)
+        guard normalizedDestinationPath != normalizedCurrentPath else {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2010,
+                userInfo: [NSLocalizedDescriptionKey: "无损重建必须使用新的远程目录"]
+            )
+        }
+
+        // Merge the current remote repository first so a note created only on
+        // another device is not omitted from the new repository.
+        _ = try await syncAllNotesFromRemote(
+            context: context,
+            config: config,
+            progressHandler: progressHandler
+        )
+
+        let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
+        let tombstonedNoteIDs = Set(
+            try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID)
+        )
+        let activeNotes = notes.filter { !tombstonedNoteIDs.contains($0.id) }
+        guard !activeNotes.contains(where: \.hasConflict) else {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2011,
+                userInfo: [NSLocalizedDescriptionKey: "存在尚未解决的同步冲突，请先处理冲突再重建远程仓库"]
+            )
+        }
+
+        var destinationConfig = SSHConfig(
+            host: config.host,
+            port: config.port,
+            username: config.username,
+            password: config.password,
+            repositoryPath: normalizedDestinationPath
+        )
+        destinationConfig.password = config.password
+
+        let sshpassPath = try checkSshpassAvailable()
+        let existence = try await runSSHCommandForOutput(
+            sshpassPath: sshpassPath,
+            config: destinationConfig,
+            command: "if [ -e \(SSHRemotePath.shellQuoted(normalizedDestinationPath)) ]; then echo EXISTS; else echo MISSING; fi"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard existence == "MISSING" else {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2012,
+                userInfo: [NSLocalizedDescriptionKey: "新的远程目录已经存在，未覆盖任何数据"]
+            )
+        }
+
+        _ = try await syncAllNotesToRemote(
+            context: context,
+            config: destinationConfig,
+            progressHandler: progressHandler,
+            forceUploadAll: true,
+            recordSyncState: false,
+            pruneHistoryAfterPush: false
+        )
+
+        let expectedEntries = try activeNotes.reduce(into: [UUID: RemoteNoteIndexEntry]()) { result, note in
+            if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                result[note.id] = entry
+            }
+        }
+        let remoteIndex = try await downloadRemoteIndexBundle(config: destinationConfig, controlPath: nil).index
+        let remoteEntries = (remoteIndex?.entries ?? []).reduce(into: [UUID: RemoteNoteIndexEntry]()) {
+            $0[$1.noteID] = $1
+        }
+        guard remoteEntries.count == expectedEntries.count,
+              expectedEntries.allSatisfy({ pair in
+                  guard let actual = remoteEntries[pair.key] else { return false }
+                  return actual.version == pair.value.version && actual.contentHash == pair.value.contentHash
+              }) else {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2013,
+                userInfo: [NSLocalizedDescriptionKey: "新远程目录的笔记索引校验失败，原目录和配置均未改变"]
+            )
+        }
+
+        var expectedAssets: [String: AssetsManifestEntry] = [:]
+        for note in activeNotes {
+            if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
+                for entry in try collectAssetsManifestEntries(from: envelope) {
+                    expectedAssets[entry.relativePath] = entry
+                }
+            }
+        }
+        let remoteManifest = try await downloadAssetsManifestBundle(config: destinationConfig, controlPath: nil).manifest
+        let remoteAssets = (remoteManifest?.entries ?? []).reduce(into: [String: AssetsManifestEntry]()) {
+            $0[$1.relativePath] = $1
+        }
+        guard remoteAssets.count == expectedAssets.count,
+              expectedAssets.allSatisfy({ pair in
+                  guard let actual = remoteAssets[pair.key] else { return false }
+                  return actual.contentHash == pair.value.contentHash && actual.size == pair.value.size
+              }) else {
+            throw NSError(
+                domain: "SSHSync",
+                code: -2014,
+                userInfo: [NSLocalizedDescriptionKey: "新远程目录的附件清单校验失败，原目录和配置均未改变"]
+            )
+        }
+
+        for note in activeNotes {
+            if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
+                try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+            }
+        }
+        return RemoteRepositoryRebuildResult(
+            repositoryPath: normalizedDestinationPath,
+            noteCount: expectedEntries.count,
+            assetCount: expectedAssets.count
+        )
     }
 
     func syncNoteFromRemote(noteID: UUID, context: ModelContext, config: SSHConfig) async throws -> NoteSyncMergeResult {
@@ -680,32 +787,31 @@ final class SSHSyncManager: Sendable {
 
             let didRemoteIndexChange = remoteIndexBundle.payloadHash == nil || remoteIndexBundle.payloadHash != cachedSyncState?.noteIndexHash
 
-            // 处理远程已删除的笔记：对本地存在的笔记执行软删除
-            if didRemoteIndexChange {
-                try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
-            }
+            // Tombstones are idempotent and must also be applied when a local
+            // restore reintroduces an old note while the cached index hash stays
+            // unchanged.
+            try applyRemoteDeletedEntries(remoteIndex.deletedEntries, context: context)
 
             // 过滤出需要拉取的笔记（排除已在 deletedEntries 中的）
-            let noteIDs: [UUID]
-            if didRemoteIndexChange {
-                let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
-                noteIDs = remoteIndex.entries
-                    .filter { entry in
-                        // 跳过已删除的笔记
-                        guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
-                        guard let syncState = try? fetchSyncState(noteID: entry.noteID, context: context) else {
-                            return true
-                        }
-                        if entry.version > syncState.lastRemoteVersion {
-                            return true
-                        }
-                        return entry.contentHash != syncState.remoteFingerprint
-                    }
-                    .map(\.noteID)
-                    .sorted { $0.uuidString < $1.uuidString }
-            } else {
-                noteIDs = []
-            }
+            let remoteDeletedIDs = Set(remoteIndex.deletedEntries.map { $0.noteID })
+            let localNoteIDs = Set(
+                try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>()).map(\.id)
+            )
+            let noteIDs = remoteIndex.entries
+                .filter { entry in
+                    guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
+                    let syncState = try? fetchSyncState(noteID: entry.noteID, context: context)
+                    return RemoteNoteFetchPolicy.shouldFetch(
+                        isLocallyPresent: localNoteIDs.contains(entry.noteID),
+                        didRemoteIndexChange: didRemoteIndexChange,
+                        remoteVersion: entry.version,
+                        lastRemoteVersion: syncState?.lastRemoteVersion,
+                        remoteContentHash: entry.contentHash,
+                        lastRemoteFingerprint: syncState?.remoteFingerprint
+                    )
+                }
+                .map(\.noteID)
+                .sorted { $0.uuidString < $1.uuidString }
             let totalNotes = max(noteIDs.count, 1)
 
             await reportProgress(
@@ -1013,19 +1119,13 @@ final class SSHSyncManager: Sendable {
         try data.write(to: temporaryURL, options: .atomic)
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
 
-        let remoteTemporaryPath = "\(remoteDirectory)/reading_positions.json.tmp.\(UUID().uuidString)"
         let remoteTargetPath = "\(remoteDirectory)/reading_positions.json"
-        try await runSCPUpload(
+        try await uploadVerifiedFileAtomically(
+            localURL: temporaryURL,
+            expectedDigest: Self.payloadDigest(for: data),
+            remoteTargetPath: remoteTargetPath,
             sshpassPath: sshpassPath,
             config: config,
-            localPath: temporaryURL.path,
-            remotePath: remoteTemporaryPath,
-            controlPath: controlPath
-        )
-        try await runSSHCommand(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "mv \(shellQuotedRemotePath(remoteTemporaryPath)) \(shellQuotedRemotePath(remoteTargetPath))",
             controlPath: controlPath
         )
     }
@@ -1162,19 +1262,13 @@ final class SSHSyncManager: Sendable {
             try payload.write(to: tempFileURL, options: [.atomic])
             defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
-            let remoteTempPath = "\(remoteNoteDirectory)/index.json.tmp.\(UUID().uuidString)"
             let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
-            try await runSCPUpload(
+            try await uploadVerifiedFileAtomically(
+                localURL: tempFileURL,
+                expectedDigest: Self.payloadDigest(for: payload),
+                remoteTargetPath: remoteTargetPath,
                 sshpassPath: sshpassPath,
                 config: config,
-                localPath: tempFileURL.path,
-                remotePath: remoteTempPath,
-                controlPath: controlPath
-            )
-            try await runSSHCommand(
-                sshpassPath: sshpassPath,
-                config: config,
-                command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
                 controlPath: controlPath
             )
             try await runSSHCommand(sshpassPath: sshpassPath, config: config, command: "rmdir \(quotedLockPath)", controlPath: controlPath)
@@ -1279,7 +1373,7 @@ final class SSHSyncManager: Sendable {
         let rawListing = try await runSSHCommandForOutput(
             sshpassPath: sshpassPath,
             config: config,
-            command: "if [ -d '\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\(escapeSingleQuoted(remoteNoteDirectory))'; fi",
+            command: "if [ -d \(SSHRemotePath.shellQuoted(remoteNoteDirectory)) ]; then ls \(SSHRemotePath.shellQuoted(remoteNoteDirectory)); fi",
             controlPath: controlPath
         )
         return rawListing
@@ -1404,6 +1498,71 @@ final class SSHSyncManager: Sendable {
         }
     }
 
+    /// Uploads to a unique temporary path, verifies the remote bytes, and only
+    /// then atomically publishes the file. Existing remote data is never removed
+    /// before a complete replacement has been verified.
+    private func uploadVerifiedFileAtomically(
+        localURL: URL,
+        expectedDigest: String,
+        remoteTargetPath: String,
+        sshpassPath: String,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        let remoteTemporaryPath = "\(remoteTargetPath).tmp.\(UUID().uuidString)"
+        var lastRemoteDigest: String?
+
+        for attempt in 1...2 {
+            try Task.checkCancellation()
+            try await runSCPUpload(
+                sshpassPath: sshpassPath,
+                config: config,
+                localPath: localURL.path,
+                remotePath: remoteTemporaryPath,
+                controlPath: controlPath
+            )
+            let probe = try await probeRemoteFileDigest(
+                sshpassPath: sshpassPath,
+                config: config,
+                remotePath: remoteTemporaryPath,
+                controlPath: controlPath
+            )
+            lastRemoteDigest = probe.digest
+            if probe.exists, probe.digest == expectedDigest {
+                try await runSSHCommand(
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    command: "mv \(shellQuotedRemotePath(remoteTemporaryPath)) \(shellQuotedRemotePath(remoteTargetPath))",
+                    controlPath: controlPath
+                )
+                return
+            }
+            Logger.shared.log(
+                .storage,
+                .warn,
+                "[SSHSync] 远程临时文件校验失败，重试 \(attempt)/2：target=\(URL(fileURLWithPath: remoteTargetPath).lastPathComponent)"
+            )
+        }
+
+        // Only the unique, unpublished temporary file is safe to remove.
+        try? await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "rm -f \(shellQuotedRemotePath(remoteTemporaryPath))",
+            controlPath: controlPath
+        )
+        Logger.shared.log(
+            .storage,
+            .error,
+            "[SSHSync] 上传校验失败：expected=\(expectedDigest.prefix(16)) remote=\((lastRemoteDigest ?? "unavailable").prefix(16))"
+        )
+        throw NSError(
+            domain: "SSHSync",
+            code: -2002,
+            userInfo: [NSLocalizedDescriptionKey: "上传校验失败，远程原文件已保留"]
+        )
+    }
+
     private func sshArguments(config: SSHConfig, command: String, controlPath: String? = nil) -> [String] {
         SSHProcessTransport.sshArguments(config: config, command: command, controlPath: controlPath)
     }
@@ -1446,19 +1605,8 @@ final class SSHSyncManager: Sendable {
         )
     }
 
-    private func escapeSingleQuoted(_ value: String) -> String {
-        value.replacingOccurrences(of: "'", with: "'\"'\"'")
-    }
-
     private func shellQuotedRemotePath(_ path: String) -> String {
-        if path == "~" {
-            return "~"
-        }
-        if path.hasPrefix("~/") {
-            let suffix = String(path.dropFirst(2))
-            return "~/" + "'\(escapeSingleQuoted(suffix))'"
-        }
-        return "'\(escapeSingleQuoted(path))'"
+        SSHRemotePath.shellQuoted(path)
     }
 
     /// 判断错误是否为远程文件不存在
@@ -1521,60 +1669,6 @@ final class SSHSyncManager: Sendable {
             ))
         }
         return deletedEntries
-    }
-
-    /// 清理远程孤儿文件（已删除笔记的 .json 和附件目录）
-    private func cleanupRemoteOrphanFiles(activeNoteIDs: Set<UUID>, deletedNoteIDs: Set<UUID>, config: SSHConfig, controlPath: String? = nil) async throws {
-        let sshpassPath = try checkSshpassAvailable()
-        let remoteNoteDirectory = "\(config.repositoryPath)/notes"
-
-        // 列出远程 notes/ 目录下所有 .json 文件
-        let listing = try await runSSHCommandForOutput(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "if [ -d '\\(escapeSingleQuoted(remoteNoteDirectory))' ]; then ls '\\(escapeSingleQuoted(remoteNoteDirectory))'; else echo ''; fi",
-            controlPath: controlPath
-        )
-
-        let remoteFiles = listing.split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.hasSuffix(".json") && $0 != "index.json" && $0 != "assets_manifest.json" }
-
-        for filename in remoteFiles {
-            let idString = filename.replacingOccurrences(of: ".json", with: "")
-            guard let noteID = UUID(uuidString: idString) else { continue }
-
-            // 仅删除明确在已删除列表中的远程文件，避免误删未同步过的笔记
-            if deletedNoteIDs.contains(noteID) {
-                let remotePath = "\(remoteNoteDirectory)/\(filename)"
-                Logger.shared.log(.storage, .info, "[SSHSync] 清理远程孤儿笔记文件：\(remotePath)")
-                try? await runSSHCommand(
-                    sshpassPath: sshpassPath,
-                    config: config,
-                    command: "rm -f '\\(escapeSingleQuoted(remotePath))'",
-                    controlPath: controlPath
-                )
-            }
-        }
-
-        // 清理已删除笔记的远程附件目录
-        // 通过 assets_manifest.json 确定哪些附件属于已删除笔记
-        if !deletedNoteIDs.isEmpty {
-            // 获取附件清单中属于已删除笔记的附件路径
-            let remoteAttachmentsDir = "\(config.repositoryPath)/attachments"
-            // 简单策略：删除以笔记ID为路径前缀的附件目录
-            // 附件路径格式通常为 {noteID}/... 或直接文件名
-            for deletedID in deletedNoteIDs {
-                let noteAttachmentDir = "\(remoteAttachmentsDir)/\(deletedID.uuidString)"
-                // 检查目录是否存在，存在则删除
-                _ = try? await runSSHCommandForOutput(
-                    sshpassPath: sshpassPath,
-                    config: config,
-                    command: "if [ -d '\(escapeSingleQuoted(noteAttachmentDir))' ]; then rm -rf '\(escapeSingleQuoted(noteAttachmentDir))'; echo DELETED; else echo SKIP; fi",
-                    controlPath: controlPath
-                )
-            }
-        }
     }
 
     /// 清理本地已同步删除记录（避免每次推送都重复收集）
@@ -1643,7 +1737,7 @@ final class SSHSyncManager: Sendable {
         for asset in envelope.currentSnapshot.assets {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
-                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                let localURL = try SyncRelativePath.resolvedURL(relativePath, under: attachmentsRoot)
                 guard FileManager.default.fileExists(atPath: localURL.path) else {
                     missingRelativePaths.append(relativePath)
                     continue
@@ -1658,11 +1752,12 @@ final class SSHSyncManager: Sendable {
                     command: "mkdir -p \(shellQuotedRemotePath(remoteDir))",
                     controlPath: controlPath
                 )
-                try await runSCPUpload(
+                try await uploadVerifiedFileAtomically(
+                    localURL: localURL,
+                    expectedDigest: try Self.fileDigest(at: localURL),
+                    remoteTargetPath: remotePath,
                     sshpassPath: sshpassPath,
                     config: config,
-                    localPath: localURL.path,
-                    remotePath: remotePath,
                     controlPath: controlPath
                 )
             }
@@ -1706,7 +1801,7 @@ final class SSHSyncManager: Sendable {
         for asset in envelope.currentSnapshot.assets {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
-                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                let localURL = try SyncRelativePath.resolvedURL(relativePath, under: attachmentsRoot)
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: localURL.path),
                    let fileSize = attrs[.size] as? Int, fileSize > 0 {
                     if let remoteEntry = remoteAssetMap[relativePath],
@@ -1757,14 +1852,20 @@ final class SSHSyncManager: Sendable {
         for asset in envelope.currentSnapshot.assets {
             let paths = [asset.relativeFilePath] + asset.sidecarRelativePaths
             for relativePath in paths {
-                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
-                guard FileManager.default.fileExists(atPath: localURL.path),
-                      let data = try? Data(contentsOf: localURL) else { continue }
-                let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                let localURL = try SyncRelativePath.resolvedURL(relativePath, under: attachmentsRoot)
+                guard FileManager.default.fileExists(atPath: localURL.path) else {
+                    throw NSError(
+                        domain: "SSHSync",
+                        code: -2003,
+                        userInfo: [NSLocalizedDescriptionKey: "本地附件文件缺失，已取消发布远程附件清单"]
+                    )
+                }
+                let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+                let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
                 entries.append(AssetsManifestEntry(
                     relativePath: relativePath,
-                    contentHash: hash,
-                    size: data.count
+                    contentHash: try Self.fileDigest(at: localURL),
+                    size: size
                 ))
             }
         }
@@ -1784,20 +1885,14 @@ final class SSHSyncManager: Sendable {
         try payload.write(to: tempFileURL, options: [.atomic])
         defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
-        let remoteTempPath = "\(config.repositoryPath)/notes/assets_manifest.json.tmp"
         let remoteTargetPath = "\(config.repositoryPath)/notes/assets_manifest.json"
 
-        try await runSCPUpload(
+        try await uploadVerifiedFileAtomically(
+            localURL: tempFileURL,
+            expectedDigest: Self.payloadDigest(for: payload),
+            remoteTargetPath: remoteTargetPath,
             sshpassPath: sshpassPath,
             config: config,
-            localPath: tempFileURL.path,
-            remotePath: remoteTempPath,
-            controlPath: controlPath
-        )
-        try await runSSHCommand(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "mv \(shellQuotedRemotePath(remoteTempPath)) \(shellQuotedRemotePath(remoteTargetPath))",
             controlPath: controlPath
         )
     }
@@ -1913,7 +2008,7 @@ final class SSHSyncManager: Sendable {
             let paths = [asset.relativeFilePath] + sidecarPaths
 
             for relativePath in paths {
-                let localURL = attachmentsRoot.appendingPathComponent(relativePath)
+                let localURL = try SyncRelativePath.resolvedURL(relativePath, under: attachmentsRoot)
 
                 // 检查本地文件是否存在且有效
                 let shouldDownload = try await shouldDownloadAsset(
@@ -2041,6 +2136,16 @@ final class SSHSyncManager: Sendable {
 
     private static func payloadDigest(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func fileDigest(at url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// 判断是否需要下载某个附件
@@ -2178,20 +2283,14 @@ final class SSHSyncManager: Sendable {
         try payload.write(to: tempFileURL, options: [.atomic])
         defer { try? FileManager.default.removeItem(at: tempFileURL) }
 
-        let remoteTempPath = "\(config.repositoryPath)/library.json.tmp"
         let remoteTargetPath = "\(config.repositoryPath)/library.json"
 
-        try await runSCPUpload(
+        try await uploadVerifiedFileAtomically(
+            localURL: tempFileURL,
+            expectedDigest: Self.payloadDigest(for: payload),
+            remoteTargetPath: remoteTargetPath,
             sshpassPath: sshpassPath,
             config: config,
-            localPath: tempFileURL.path,
-            remotePath: remoteTempPath,
-            controlPath: controlPath
-        )
-        try await runSSHCommand(
-            sshpassPath: sshpassPath,
-            config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'",
             controlPath: controlPath
         )
     }

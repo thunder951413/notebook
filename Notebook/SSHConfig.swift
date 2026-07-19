@@ -11,6 +11,112 @@ enum SSHHostKeyPolicy {
     ]
 }
 
+/// Centralized handling for repository paths used by remote shell commands.
+///
+/// A leading `~` must remain outside quotes so the remote login shell can expand
+/// it. Every remaining character is single-quoted to prevent command injection
+/// and to preserve spaces or other shell metacharacters in user configured paths.
+enum SSHRemotePath {
+    static func shellQuoted(_ path: String) -> String {
+        if path == "~" {
+            return "~"
+        }
+        if path.hasPrefix("~/") {
+            return "~/" + singleQuoted(String(path.dropFirst(2)))
+        }
+        return singleQuoted(path)
+    }
+
+    static func normalizedRepositoryPath(_ path: String) throws -> String {
+        var normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw NSError(
+                domain: "SSHRemotePath",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "远程仓库路径不能为空"]
+            )
+        }
+        guard normalized.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            throw NSError(
+                domain: "SSHRemotePath",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "远程仓库路径不能包含控制字符"]
+            )
+        }
+        while normalized.count > 1, normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        return normalized
+    }
+
+    /// A rebuild always targets a sibling directory. The previous repository is
+    /// intentionally left untouched so it remains available for recovery.
+    static func timestampedRebuildPath(from repositoryPath: String, date: Date = Date()) throws -> String {
+        let base = try normalizedRepositoryPath(repositoryPath)
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "\(base).rebuild-\(formatter.string(from: date))"
+    }
+
+    private static func singleQuoted(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+}
+
+/// Resolves attachment paths without allowing an imported/synchronized payload
+/// to escape the managed attachments directory.
+enum SyncRelativePath {
+    static func resolvedURL(_ relativePath: String, under rootURL: URL) throws -> URL {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.hasPrefix("~"),
+              !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+              relativePath.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            throw NSError(
+                domain: "SyncRelativePath",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "同步附件路径不安全"]
+            )
+        }
+
+        let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = root
+            .appendingPathComponent(relativePath, isDirectory: false)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard candidate.path.hasPrefix(rootPrefix) else {
+            throw NSError(
+                domain: "SyncRelativePath",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "同步附件路径越过了附件目录"]
+            )
+        }
+        return candidate
+    }
+}
+
+enum RemoteNoteFetchPolicy {
+    static func shouldFetch(
+        isLocallyPresent: Bool,
+        didRemoteIndexChange: Bool,
+        remoteVersion: Int64,
+        lastRemoteVersion: Int64?,
+        remoteContentHash: String,
+        lastRemoteFingerprint: String?
+    ) -> Bool {
+        guard isLocallyPresent else { return true }
+        guard didRemoteIndexChange else { return false }
+        guard let lastRemoteVersion, let lastRemoteFingerprint else { return true }
+        return remoteVersion > lastRemoteVersion || remoteContentHash != lastRemoteFingerprint
+    }
+}
+
 /// SSH 与配置同步共用的进程参数构造器。
 /// 密码只通过 SSHPASS 环境变量传递，绝不能出现在可被系统进程列表读取的参数中。
 enum SSHProcessTransport {

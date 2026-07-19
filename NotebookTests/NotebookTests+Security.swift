@@ -84,6 +84,69 @@ extension NotebookTests {
         XCTAssertFalse(SSHHostKeyPolicy.options.contains("GlobalKnownHostsFile=/dev/null"))
     }
 
+    func testSSHRemotePathPreservesTildeExpansionAndQuotesMetacharacters() {
+        XCTAssertEqual(SSHRemotePath.shellQuoted("~"), "~")
+        XCTAssertEqual(SSHRemotePath.shellQuoted("~/notebook backup"), "~/'notebook backup'")
+        XCTAssertEqual(
+            SSHRemotePath.shellQuoted("~/owner's notebook;$HOME"),
+            "~/'owner'\"'\"'s notebook;$HOME'"
+        )
+        XCTAssertEqual(SSHRemotePath.shellQuoted("/srv/notebook backup"), "'/srv/notebook backup'")
+    }
+
+    func testSSHRemotePathNormalizesAndCreatesSiblingRebuildPath() throws {
+        XCTAssertEqual(try SSHRemotePath.normalizedRepositoryPath("  ~/notebook_backup///  "), "~/notebook_backup")
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(
+            try SSHRemotePath.timestampedRebuildPath(from: "~/notebook_backup/", date: date),
+            "~/notebook_backup.rebuild-20231114-221320"
+        )
+        XCTAssertThrowsError(try SSHRemotePath.normalizedRepositoryPath("\n"))
+        XCTAssertThrowsError(try SSHRemotePath.normalizedRepositoryPath("~/bad\npath"))
+    }
+
+    func testSynchronizedAttachmentPathCannotEscapeManagedRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sync-path-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertEqual(
+            try SyncRelativePath.resolvedURL("note-id/image.png", under: root).path,
+            root.appendingPathComponent("note-id/image.png").path
+        )
+        XCTAssertThrowsError(try SyncRelativePath.resolvedURL("../outside", under: root))
+        XCTAssertThrowsError(try SyncRelativePath.resolvedURL("/tmp/outside", under: root))
+        XCTAssertThrowsError(try SyncRelativePath.resolvedURL("note-id//image.png", under: root))
+    }
+
+    func testUnchangedCachedRemoteIndexStillRepairsLocallyMissingNote() {
+        XCTAssertTrue(RemoteNoteFetchPolicy.shouldFetch(
+            isLocallyPresent: false,
+            didRemoteIndexChange: false,
+            remoteVersion: 4,
+            lastRemoteVersion: 4,
+            remoteContentHash: "same",
+            lastRemoteFingerprint: "same"
+        ))
+        XCTAssertFalse(RemoteNoteFetchPolicy.shouldFetch(
+            isLocallyPresent: true,
+            didRemoteIndexChange: false,
+            remoteVersion: 4,
+            lastRemoteVersion: 4,
+            remoteContentHash: "same",
+            lastRemoteFingerprint: "same"
+        ))
+        XCTAssertTrue(RemoteNoteFetchPolicy.shouldFetch(
+            isLocallyPresent: true,
+            didRemoteIndexChange: true,
+            remoteVersion: 5,
+            lastRemoteVersion: 4,
+            remoteContentHash: "new",
+            lastRemoteFingerprint: "old"
+        ))
+    }
+
     @MainActor
     func testSSHTransportKeepsPasswordOutOfProcessArguments() {
         var config = SSHConfig.default

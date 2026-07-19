@@ -729,6 +729,18 @@ struct DataManagementView: View {
                                 }
                             }
                         }
+
+                        HStack(spacing: 8) {
+                            Button("无损重建远程仓库") {
+                                confirmRemoteRepositoryRebuild()
+                            }
+                            .disabled(isSyncing)
+                            .notebookHelp("完整上传到新的带时间戳目录；校验成功后才切换配置，旧目录不会删除")
+
+                            Text("日常推送仅上传有变动的笔记；阅读位置保存在 notes/reading_positions.json。")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     // 同步进度
@@ -1253,6 +1265,60 @@ struct DataManagementView: View {
     }
 
     // MARK: - SSH 同步
+
+    private func confirmRemoteRepositoryRebuild() {
+        let config = SSHConfigManager.shared.config
+        let destinationPath: String
+        do {
+            destinationPath = try SSHRemotePath.timestampedRebuildPath(from: config.repositoryPath)
+        } catch {
+            syncResult = .failure(error.localizedDescription)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "无损重建远程仓库？"
+        alert.informativeText = "将先拉取并合并当前远程内容，再完整上传到新目录：\n\(destinationPath)\n\n只有笔记索引和附件清单全部校验成功后才会切换同步配置。当前远程目录会原样保留；如产生同步冲突，重建会停止。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "开始重建")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        performRemoteRepositoryRebuild(destinationPath: destinationPath)
+    }
+
+    private func performRemoteRepositoryRebuild(destinationPath: String) {
+        runSync { [self] in
+            let config = SSHConfigManager.shared.config
+            guard let container = self.persistence.modelContainer else {
+                throw NSError(domain: "SSHSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "数据容器未配置"])
+            }
+            let progressHandler: SSHSyncProgressHandler = { progress in
+                await MainActor.run {
+                    self.syncProgress = progress
+                }
+            }
+            let result = try await SSHSyncManager.shared.rebuildRemoteRepository(
+                context: container.mainContext,
+                config: config,
+                destinationPath: destinationPath,
+                progressHandler: progressHandler
+            )
+
+            let updatedConfig = SSHConfig(
+                host: config.host,
+                port: config.port,
+                username: config.username,
+                password: config.password,
+                repositoryPath: result.repositoryPath
+            )
+            await MainActor.run {
+                SSHConfigManager.shared.config = updatedConfig
+                AutoSyncCoordinator.shared.markLocalChangesPushed()
+            }
+            return "无损重建完成并已切换到 \(result.repositoryPath)，验证 \(result.noteCount) 条笔记、\(result.assetCount) 个附件文件；原目录仍保留"
+        }
+    }
 
     private func performPushSync() {
         runSync { [self] in

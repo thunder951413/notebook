@@ -153,7 +153,13 @@ struct SSHSettingsView: View {
     private func testAndSaveConnection() {
         let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedRepositoryPath = repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedRepositoryPath: String
+        do {
+            normalizedRepositoryPath = try SSHRemotePath.normalizedRepositoryPath(repositoryPath)
+        } catch {
+            testResult = .failure(error.localizedDescription)
+            return
+        }
         let normalizedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedPassword = password.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
 

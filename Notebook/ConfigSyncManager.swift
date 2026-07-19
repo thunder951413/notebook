@@ -598,7 +598,7 @@ class ConfigSyncManager {
         try await ensureRemoteDirectory(config: config)
 
         // 上传配置
-        let remoteTempPath = "\(config.repositoryPath)/config.json.tmp"
+        let remoteTempPath = "\(config.repositoryPath)/config.json.tmp.\(UUID().uuidString)"
         let remoteTargetPath = "\(config.repositoryPath)/config.json"
 
         try await runSCPUpload(
@@ -611,7 +611,7 @@ class ConfigSyncManager {
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mv '\(escapeSingleQuoted(remoteTempPath))' '\(escapeSingleQuoted(remoteTargetPath))'"
+            command: "mv \(SSHRemotePath.shellQuoted(remoteTempPath)) \(SSHRemotePath.shellQuoted(remoteTargetPath))"
         )
 
         DebugLog.storage("配置同步完成：已上传到 \(remoteTargetPath)", level: .debug)
@@ -664,12 +664,11 @@ class ConfigSyncManager {
 
     private func ensureRemoteDirectory(config: SSHConfig) async throws {
         let sshpassPath = try findSshpassPath()
-        let quotedRemotePath = config.repositoryPath
-            .replacingOccurrences(of: "'", with: "'\"'\"'")
+        let repositoryPath = try SSHRemotePath.normalizedRepositoryPath(config.repositoryPath)
         try await runSSHCommand(
             sshpassPath: sshpassPath,
             config: config,
-            command: "mkdir -p '\(quotedRemotePath)'"
+            command: "mkdir -p \(SSHRemotePath.shellQuoted(repositoryPath))"
         )
     }
 
@@ -756,10 +755,6 @@ class ConfigSyncManager {
     }
 
     private typealias ProcessExecutionResult = ProcessExecutionOutput
-
-    private func escapeSingleQuoted(_ value: String) -> String {
-        value.replacingOccurrences(of: "'", with: "'\"'\"'")
-    }
 
     private func sanitizeLog(_ text: String, password: String) -> String {
         guard !password.isEmpty else { return text }
