@@ -17,6 +17,7 @@ DerivedData
 *.hmap
 *.ipa
 *.xcuserstate
+*.profraw
 
 # Swift Package Manager
 #
@@ -29,3 +30,7 @@ DerivedData
 
 # Local build artifacts and verification logs
 output/
+
+# Nested platform workspace and sensitive local recovery artifacts
+notebook_android/
+recovery/

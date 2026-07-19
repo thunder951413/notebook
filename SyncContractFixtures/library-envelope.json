@@ -1,0 +1,28 @@
+{
+  "contractFixtureVersion": 1,
+  "exportedAt": 800000100,
+  "deviceID": "fixture-macos",
+  "folders": [{
+    "id": "22222222-2222-4222-8222-222222222222",
+    "name": "Fixture Folder",
+    "sortOrder": 1,
+    "isSystem": false,
+    "createdAt": 800000000,
+    "folderType": "noteFolder",
+    "updatedAt": 800000100
+  }],
+  "tags": [{
+    "id": "33333333-3333-4333-8333-333333333333",
+    "name": "Fixture Tag",
+    "color": "blue",
+    "createdAt": 800000000,
+    "updatedAt": 800000100
+  }],
+  "encryptedData": {
+    "encryptedFolders": [{"id": "55555555-5555-4555-8555-555555555555", "name": "Locked Fixture", "order": 0}],
+    "encryptedNoteIDs": ["66666666-6666-4666-8666-666666666666"],
+    "noteToFolderMapping": {"66666666-6666-4666-8666-666666666666": "55555555-5555-4555-8555-555555555555"}
+  },
+  "deletedFolders": [{"id": "77777777-7777-4777-8777-777777777777", "deletedAt": 800000080, "deletedByDeviceID": "fixture-android"}],
+  "deletedTags": [{"id": "88888888-8888-4888-8888-888888888888", "deletedAt": 800000081, "deletedByDeviceID": "fixture-android"}]
+}

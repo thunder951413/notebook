@@ -1,0 +1,111 @@
+{
+  "contractFixtureVersion": 1,
+  "noteID": "11111111-1111-4111-8111-111111111111",
+  "deviceID": "fixture-macos",
+  "exportedAt": 800000100,
+  "currentVersion": 7,
+  "currentSnapshot": {
+    "metadata": {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "title": "Fixture Note",
+      "createdAt": 800000000,
+      "updatedAt": 800000100,
+      "folderID": "22222222-2222-4222-8222-222222222222",
+      "folderName": "Fixture Folder",
+      "reminderAt": 800086400,
+      "recurrenceRule": "daily",
+      "version": 7,
+      "tagIDs": ["33333333-3333-4333-8333-333333333333"],
+      "viewMode": "preview",
+      "blockCount": 5,
+      "assetCount": 1,
+      "documentPath": "Notes/11111111-1111-4111-8111-111111111111/document.json",
+      "itemType": "note",
+      "todoIsImportant": false,
+      "todoOrder": 0,
+      "linkedNoteIDs": []
+    },
+    "document": {
+      "schemaVersion": "1.0",
+      "source": "contract-fixture",
+      "blocks": [
+        {
+          "id": "block-heading",
+          "type": "heading",
+          "level": 2,
+          "text": [{"text": "Fixture Heading", "bold": true, "italic": false, "underline": false, "strikethrough": false}]
+        },
+        {
+          "id": "block-paragraph",
+          "type": "paragraph",
+          "text": [{"text": "Unicode 内容", "bold": false, "italic": true, "underline": false, "strikethrough": false, "link": "https://example.invalid/fixture"}]
+        },
+        {
+          "id": "block-todo",
+          "type": "todo_item",
+          "checked": true,
+          "text": [{"text": "Completed fixture item", "bold": false, "italic": false, "underline": false, "strikethrough": true}]
+        },
+        {
+          "id": "block-table",
+          "type": "table",
+          "table": {"rows": [["A1", "B1"], ["A2", "B2"]], "columnWidths": [120, 140], "rowHeights": [28, 30]}
+        },
+        {
+          "id": "block-asset",
+          "type": "attachment",
+          "asset": {
+            "id": "asset-fixture-1",
+            "kind": "image",
+            "filename": "fixture.png",
+            "mimeType": "image/png",
+            "width": 640,
+            "height": 480,
+            "createdAt": 800000050,
+            "sidecarFiles": []
+          }
+        }
+      ]
+    },
+    "assets": [{
+      "reference": {
+        "id": "asset-fixture-1",
+        "kind": "image",
+        "filename": "fixture.png",
+        "mimeType": "image/png",
+        "width": 640,
+        "height": 480,
+        "createdAt": 800000050,
+        "sidecarFiles": []
+      },
+      "relativeFilePath": "11111111-1111-4111-8111-111111111111/asset-fixture-1-fixture.png",
+      "sidecarRelativePaths": []
+    }],
+    "todoSteps": [{
+      "id": "44444444-4444-4444-8444-444444444444",
+      "noteID": "11111111-1111-4111-8111-111111111111",
+      "text": "Fixture step",
+      "checked": false,
+      "order": 0,
+      "createdAt": 800000020
+    }]
+  },
+  "history": [],
+  "syncState": {
+    "lastRecordedVersion": 7,
+    "lastSyncedVersion": 6,
+    "lastCommonVersion": 6,
+    "lastRemoteVersion": 6,
+    "lastSyncAt": 800000090,
+    "lastRemoteDeviceID": "fixture-android",
+    "remoteFingerprint": "fixture-fingerprint",
+    "pendingHistoryCount": 1
+  },
+  "readingPosition": {
+    "noteID": "11111111-1111-4111-8111-111111111111",
+    "anchorUTF16Offset": 321,
+    "viewportOffsetFraction": 0.25,
+    "updatedAt": 800000095,
+    "deviceID": "fixture-macos"
+  }
+}
