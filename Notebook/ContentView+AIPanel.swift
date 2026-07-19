@@ -8,7 +8,7 @@ struct AIPanelView: View {
     @Binding var isExpanded: Bool
     @Binding var panelWidth: CGFloat
     @StateObject private var themeManager = ThemeManager.shared
-    @StateObject private var aiService = AIService.shared
+    private let aiService = AIService.shared
     @StateObject private var configManager = AIConfigManager.shared
     
     // 拖动状态

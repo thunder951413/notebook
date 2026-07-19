@@ -1,18 +1,11 @@
 import Foundation
-import SwiftUI
-import Combine
 
 // MARK: - AI 服务
 
 @MainActor
-class AIService: ObservableObject {
+final class AIService {
     static let shared = AIService()
-    
-    @Published var isLoading = false
-    @Published var error: Error?
-    
-    private var cancellables = Set<AnyCancellable>()
-    
+
     private init() {}
     
     // MARK: - 发送消息

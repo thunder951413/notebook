@@ -355,16 +355,144 @@ final class SSHSyncManager: Sendable {
         )
     }
 
+    private func withRemoteRepositoryWriteLock<T>(
+        config: SSHConfig,
+        controlPath: String?,
+        _ body: (RemoteRepositoryWriteLock) async throws -> T
+    ) async throws -> T {
+        let sshpassPath = try checkSshpassAvailable()
+        try await ensureRemoteDirectory(config: config, controlPath: controlPath)
+        try await runSSHCommand(
+            sshpassPath: sshpassPath,
+            config: config,
+            command: "mkdir -p \(shellQuotedRemotePath("\(config.repositoryPath)/notes"))",
+            controlPath: controlPath
+        )
+
+        let lock = RemoteRepositoryWriteLock.make(repositoryPath: config.repositoryPath)
+        do {
+            try await runSSHCommand(
+                sshpassPath: sshpassPath,
+                config: config,
+                command: lock.acquireCommand,
+                controlPath: controlPath
+            )
+        } catch {
+            // Acquisition may have reached the server just before local task
+            // cancellation. Owner-aware cleanup is safe even if mkdir failed.
+            try? await releaseRemoteRepositoryWriteLock(
+                lock,
+                sshpassPath: sshpassPath,
+                config: config,
+                controlPath: controlPath
+            )
+            let nsError = error as NSError
+            if nsError.domain == "SSHSync", nsError.code == 75 {
+                throw NSError(
+                    domain: "SSHSync",
+                    code: -2020,
+                    userInfo: [NSLocalizedDescriptionKey: "另一个设备正在发布远程数据，请稍后重试"]
+                )
+            }
+            throw error
+        }
+
+        do {
+            let result = try await body(lock)
+            try await releaseRemoteRepositoryWriteLock(
+                lock,
+                sshpassPath: sshpassPath,
+                config: config,
+                controlPath: controlPath
+            )
+            return result
+        } catch {
+            do {
+                try await releaseRemoteRepositoryWriteLock(
+                    lock,
+                    sshpassPath: sshpassPath,
+                    config: config,
+                    controlPath: controlPath
+                )
+            } catch {
+                Logger.shared.log(.storage, .error, "[SSHSync] 释放远程发布锁失败：\(error.localizedDescription)")
+            }
+            throw error
+        }
+    }
+
+    private func releaseRemoteRepositoryWriteLock(
+        _ lock: RemoteRepositoryWriteLock,
+        sshpassPath: String,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        // A cancelled parent task must still release its owned lease. The
+        // detached cleanup does not inherit cancellation, but is awaited so the
+        // next sync cannot race ahead of lock cleanup.
+        let cleanup = Task.detached {
+            try await self.runSSHCommand(
+                sshpassPath: sshpassPath,
+                config: config,
+                command: lock.releaseCommand,
+                controlPath: controlPath
+            )
+        }
+        try await cleanup.value
+    }
+
+    private func refreshRemoteRepositoryWriteLock(
+        _ lock: RemoteRepositoryWriteLock,
+        config: SSHConfig,
+        controlPath: String?
+    ) async throws {
+        try await runSSHCommand(
+            sshpassPath: try checkSshpassAvailable(),
+            config: config,
+            command: lock.refreshCommand,
+            controlPath: controlPath
+        )
+    }
+
+    @discardableResult
     func syncNoteToRemote(
         noteID: UUID,
         context: ModelContext,
         config: SSHConfig,
         controlPath: String? = nil,
         updateRemoteCatalog: Bool = true,
-        recordSyncState: Bool = true
-    ) async throws {
+        recordSyncState: Bool = true,
+        remoteLockAlreadyHeld: Bool = false,
+        remotePublicationValidated: Bool = false
+    ) async throws -> VersionedNoteSyncEnvelope? {
+        if !remoteLockAlreadyHeld {
+            return try await withRemoteRepositoryWriteLock(config: config, controlPath: controlPath) { _ in
+                try await syncNoteToRemote(
+                    noteID: noteID,
+                    context: context,
+                    config: config,
+                    controlPath: controlPath,
+                    updateRemoteCatalog: updateRemoteCatalog,
+                    recordSyncState: recordSyncState,
+                    remoteLockAlreadyHeld: true,
+                    remotePublicationValidated: remotePublicationValidated
+                )
+            }
+        }
+
         guard let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: noteID, context: context) else {
-            return
+            return nil
+        }
+
+        let localEntry = RemoteNoteIndexEntry(
+            noteID: noteID,
+            version: envelope.currentVersion,
+            contentHash: try BlockDocumentNoteVersionStore.snapshotFingerprint(envelope.currentSnapshot),
+            historyCount: envelope.history.count
+        )
+        if !remotePublicationValidated {
+            let remoteIndex = try await downloadRemoteIndexBundle(config: config, controlPath: controlPath).index
+            try validateRemotePublication(localEntry: localEntry, remoteIndex: remoteIndex)
         }
 
         let sshpassPath = try checkSshpassAvailable()
@@ -406,10 +534,6 @@ final class SSHSyncManager: Sendable {
             controlPath: controlPath
         )
 
-        if recordSyncState {
-            try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
-        }
-
         if updateRemoteCatalog {
             try await updateRemoteCatalogForSingleNote(
                 envelope: envelope,
@@ -418,6 +542,38 @@ final class SSHSyncManager: Sendable {
                 controlPath: controlPath
             )
         }
+
+        // Only mark the exact uploaded envelope as synced after the catalog
+        // publication point has succeeded. A failed index write must remain dirty.
+        if recordSyncState {
+            try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+        }
+        return envelope
+    }
+
+    private func validateRemotePublication(
+        localEntry: RemoteNoteIndexEntry,
+        remoteIndex: RemoteNoteIndex?
+    ) throws {
+        guard let rejection = RemoteNotePublicationGuard.rejection(
+            localEntry: localEntry,
+            remoteIndex: remoteIndex
+        ) else { return }
+
+        let message: String
+        switch rejection {
+        case .remoteVersionIsNewer(let version):
+            message = "远程笔记已有较新版本（v\(version)），已停止推送，请先拉取并处理冲突"
+        case .sameVersionHasDifferentContent:
+            message = "远程笔记与本地笔记版本号相同但内容不同，已停止推送以防覆盖"
+        case .remotelyDeleted:
+            message = "远程笔记已有删除记录，已停止推送，请先拉取确认"
+        }
+        throw NSError(
+            domain: "SSHSync",
+            code: -2021,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     func syncAllNotesToRemote(
@@ -442,14 +598,39 @@ final class SSHSyncManager: Sendable {
                 Task { await closeControlMasterConnection(config: config) }
             }
 
+            return try await withRemoteRepositoryWriteLock(config: config, controlPath: controlPath) { remoteLock in
             let notes = try context.fetch(FetchDescriptor<BlockDocumentNoteEntity>())
                 .sorted { $0.updatedAt > $1.updatedAt }
             let existingNoteIDs = Set(notes.map { $0.id })
             let tombstonedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
             var syncedNoteIDs: [UUID] = []
+            var uploadedEnvelopes: [VersionedNoteSyncEnvelope] = []
             var indexEntries: [RemoteNoteIndexEntry] = []
             var allAssetEntries: [AssetsManifestEntry] = []
             let totalNotes = max(notes.count, 1)
+            let publishableNoteIDs = Set(notes.lazy.filter {
+                !tombstonedNoteIDs.contains($0.id) && !$0.hasConflict
+            }.map(\.id))
+            let remoteIndexForValidation = try await downloadRemoteIndexBundle(
+                config: config,
+                controlPath: controlPath
+            ).index
+            var noteIDsToUpload: Set<UUID> = []
+
+            // Validate every candidate before changing any remote note payload.
+            // This prevents a later conflict from leaving earlier payloads ahead
+            // of the still-unpublished index.
+            for note in notes where publishableNoteIDs.contains(note.id) {
+                let syncState = try fetchSyncState(noteID: note.id, context: context)
+                let hasPendingChanges = syncState.map {
+                    $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
+                } ?? true
+                guard forceUploadAll || hasPendingChanges else { continue }
+                if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                    try validateRemotePublication(localEntry: entry, remoteIndex: remoteIndexForValidation)
+                    noteIDsToUpload.insert(note.id)
+                }
+            }
 
             await reportProgress(
                 progressHandler,
@@ -460,6 +641,7 @@ final class SSHSyncManager: Sendable {
             )
 
             for (index, note) in notes.enumerated() {
+                try await refreshRemoteRepositoryWriteLock(remoteLock, config: config, controlPath: controlPath)
                 guard !tombstonedNoteIDs.contains(note.id) else {
                     await reportProgress(
                         progressHandler,
@@ -471,29 +653,30 @@ final class SSHSyncManager: Sendable {
                     continue
                 }
 
-                let syncState = try fetchSyncState(noteID: note.id, context: context)
-                let hasUnresolvedConflict = note.hasConflict
-                let hasPendingChanges = syncState.map {
-                    $0.lastSyncedVersion < note.version || $0.pendingHistoryCount > 0
-                } ?? true
-                let shouldSync = !hasUnresolvedConflict && (forceUploadAll || hasPendingChanges)
+                let shouldSync = noteIDsToUpload.contains(note.id)
                 if shouldSync {
-                    try await syncNoteToRemote(
+                    if let uploadedEnvelope = try await syncNoteToRemote(
                         noteID: note.id,
                         context: context,
                         config: config,
                         controlPath: controlPath,
                         updateRemoteCatalog: false,
-                        recordSyncState: recordSyncState
-                    )
+                        recordSyncState: false,
+                        remoteLockAlreadyHeld: true,
+                        remotePublicationValidated: true
+                    ) {
+                        uploadedEnvelopes.append(uploadedEnvelope)
+                    }
                     syncedNoteIDs.append(note.id)
                 }
-                if let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
+                if publishableNoteIDs.contains(note.id),
+                   let entry = try makeRemoteIndexEntry(noteID: note.id, context: context) {
                     indexEntries.append(entry)
                 }
 
                 // 收集附件清单
-                if let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
+                if publishableNoteIDs.contains(note.id),
+                   let envelope = try BlockDocumentNoteVersionStore.exportEnvelope(noteID: note.id, context: context) {
                     allAssetEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
                 }
 
@@ -512,7 +695,13 @@ final class SSHSyncManager: Sendable {
                 context: context
             )
 
-            try await uploadAssetsManifest(entries: allAssetEntries, config: config, controlPath: controlPath)
+            try await refreshRemoteRepositoryWriteLock(remoteLock, config: config, controlPath: controlPath)
+            try await uploadAssetsManifest(
+                entries: allAssetEntries,
+                replacingEntriesForNoteIDs: publishableNoteIDs,
+                config: config,
+                controlPath: controlPath
+            )
             await reportProgress(
                 progressHandler,
                 phase: .pushLibrary,
@@ -521,6 +710,7 @@ final class SSHSyncManager: Sendable {
                 message: "正在同步文件夹和标签..."
             )
             try await syncLibraryToRemote(context: context, config: config, controlPath: controlPath)
+            try await refreshRemoteRepositoryWriteLock(remoteLock, config: config, controlPath: controlPath)
             try await syncReadingPositionsToRemote(context: context, config: config, controlPath: controlPath)
 
             // index.json is the repository publication point. Commit it last so
@@ -532,12 +722,20 @@ final class SSHSyncManager: Sendable {
                 total: 1,
                 message: "正在发布远程索引..."
             )
+            try await refreshRemoteRepositoryWriteLock(remoteLock, config: config, controlPath: controlPath)
             try await uploadRemoteIndex(
                 entries: indexEntries,
                 deletedEntries: deletedEntries,
                 config: config,
-                controlPath: controlPath
+                controlPath: controlPath,
+                remoteLockAlreadyHeld: true
             )
+
+            if recordSyncState {
+                for envelope in uploadedEnvelopes {
+                    try BlockDocumentNoteVersionStore.markSynced(envelope: envelope, context: context)
+                }
+            }
 
             cleanupDeletedSyncStates(
                 deletedNoteIDs: Set(deletedEntries.map { $0.noteID }),
@@ -559,6 +757,7 @@ final class SSHSyncManager: Sendable {
             }
 
             return syncedNoteIDs
+            }
         }
     }
 
@@ -1181,6 +1380,20 @@ final class SSHSyncManager: Sendable {
         config: SSHConfig,
         controlPath: String?
     ) async throws {
+        let manifestBundle = try await downloadAssetsManifestBundle(config: config, controlPath: controlPath)
+        var manifestEntries = manifestBundle.manifest?.entries ?? []
+        manifestEntries.removeAll { entry in
+            entry.relativePath.split(separator: "/", maxSplits: 1).first.map(String.init) == envelope.noteID.uuidString
+        }
+        manifestEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
+        try await uploadAssetsManifest(
+            entries: manifestEntries,
+            config: config,
+            controlPath: controlPath
+        )
+
+        // index.json remains the final publication point after every referenced
+        // payload and manifest has been verified remotely.
         let remoteIndexBundle = try await downloadRemoteIndexBundle(config: config, controlPath: controlPath)
         var indexEntries = remoteIndexBundle.index?.entries ?? []
         if let entry = try makeRemoteIndexEntry(noteID: envelope.noteID, context: context) {
@@ -1193,22 +1406,31 @@ final class SSHSyncManager: Sendable {
             entries: indexEntries,
             deletedEntries: deletedEntries,
             config: config,
-            controlPath: controlPath
-        )
-
-        let manifestBundle = try await downloadAssetsManifestBundle(config: config, controlPath: controlPath)
-        var manifestEntries = manifestBundle.manifest?.entries ?? []
-        let noteAssetPaths = Set(envelope.currentSnapshot.assets.flatMap { [$0.relativeFilePath] + $0.sidecarRelativePaths })
-        manifestEntries.removeAll { noteAssetPaths.contains($0.relativePath) }
-        manifestEntries.append(contentsOf: try collectAssetsManifestEntries(from: envelope))
-        try await uploadAssetsManifest(
-            entries: manifestEntries,
-            config: config,
-            controlPath: controlPath
+            controlPath: controlPath,
+            remoteLockAlreadyHeld: true
         )
     }
 
-    private func uploadRemoteIndex(entries: [RemoteNoteIndexEntry], deletedEntries: [RemoteDeletedEntry] = [], config: SSHConfig, controlPath: String? = nil) async throws {
+    private func uploadRemoteIndex(
+        entries: [RemoteNoteIndexEntry],
+        deletedEntries: [RemoteDeletedEntry] = [],
+        config: SSHConfig,
+        controlPath: String? = nil,
+        remoteLockAlreadyHeld: Bool = false
+    ) async throws {
+        if !remoteLockAlreadyHeld {
+            try await withRemoteRepositoryWriteLock(config: config, controlPath: controlPath) { _ in
+                try await uploadRemoteIndex(
+                    entries: entries,
+                    deletedEntries: deletedEntries,
+                    config: config,
+                    controlPath: controlPath,
+                    remoteLockAlreadyHeld: true
+                )
+            }
+            return
+        }
+
         let sshpassPath = try checkSshpassAvailable()
         try await ensureRemoteDirectory(config: config, controlPath: controlPath)
         let remoteNoteDirectory = "\(config.repositoryPath)/notes"
@@ -1219,63 +1441,50 @@ final class SSHSyncManager: Sendable {
             controlPath: controlPath
         )
 
-        // 多设备可能同时改写目录索引。远端 mkdir 是原子的：持锁期间重新读取并合并，
-        // 避免两个客户端都基于旧 index.json 写回而丢掉另一端刚上传的笔记。
-        let lockPath = "\(remoteNoteDirectory)/.index-write.lock"
-        let quotedLockPath = shellQuotedRemotePath(lockPath)
-        try await runSSHCommand(
+        let current = try? await downloadRemoteIndexBundle(config: config, controlPath: controlPath).index
+        var mergedEntries = Dictionary(uniqueKeysWithValues: (current?.entries ?? []).map { ($0.noteID, $0) })
+        for entry in entries {
+            if let existing = mergedEntries[entry.noteID] {
+                if existing.version > entry.version { continue }
+                if existing.version == entry.version,
+                   existing.contentHash != entry.contentHash {
+                    continue
+                }
+            }
+            mergedEntries[entry.noteID] = entry
+        }
+        var mergedDeleted = Dictionary(uniqueKeysWithValues: (current?.deletedEntries ?? []).map { ($0.noteID, $0) })
+        for deleted in deletedEntries {
+            if let existing = mergedDeleted[deleted.noteID], existing.deletedAt > deleted.deletedAt {
+                continue
+            }
+            mergedDeleted[deleted.noteID] = deleted
+        }
+        for noteID in mergedDeleted.keys {
+            mergedEntries.removeValue(forKey: noteID)
+        }
+
+        let index = RemoteNoteIndex(
+            generatedAt: Date(),
+            deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
+            entries: mergedEntries.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
+            deletedEntries: mergedDeleted.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+        )
+        let payload = try encodeRemoteNoteIndex(index)
+        let tempFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
+        try payload.write(to: tempFileURL, options: [.atomic])
+        defer { try? FileManager.default.removeItem(at: tempFileURL) }
+
+        let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
+        try await uploadVerifiedFileAtomically(
+            localURL: tempFileURL,
+            expectedDigest: Self.payloadDigest(for: payload),
+            remoteTargetPath: remoteTargetPath,
             sshpassPath: sshpassPath,
             config: config,
-            command: "i=0; while ! mkdir \(quotedLockPath) 2>/dev/null; do i=$((i+1)); [ $i -ge 30 ] && exit 75; find \(quotedLockPath) -maxdepth 0 -mmin +5 -exec rm -rf {} + 2>/dev/null || true; sleep 1; done",
             controlPath: controlPath
         )
-
-        do {
-            let current = try? await downloadRemoteIndexBundle(config: config, controlPath: controlPath).index
-            var mergedEntries = Dictionary(uniqueKeysWithValues: (current?.entries ?? []).map { ($0.noteID, $0) })
-            for entry in entries {
-                if let existing = mergedEntries[entry.noteID], existing.version > entry.version {
-                    continue
-                }
-                mergedEntries[entry.noteID] = entry
-            }
-            var mergedDeleted = Dictionary(uniqueKeysWithValues: (current?.deletedEntries ?? []).map { ($0.noteID, $0) })
-            for deleted in deletedEntries {
-                if let existing = mergedDeleted[deleted.noteID], existing.deletedAt > deleted.deletedAt {
-                    continue
-                }
-                mergedDeleted[deleted.noteID] = deleted
-            }
-            for noteID in mergedDeleted.keys {
-                mergedEntries.removeValue(forKey: noteID)
-            }
-
-            let index = RemoteNoteIndex(
-                generatedAt: Date(),
-                deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
-                entries: mergedEntries.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
-                deletedEntries: mergedDeleted.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
-            )
-            let payload = try encodeRemoteNoteIndex(index)
-            let tempFileURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("note_sync_index_\(UUID().uuidString).json")
-            try payload.write(to: tempFileURL, options: [.atomic])
-            defer { try? FileManager.default.removeItem(at: tempFileURL) }
-
-            let remoteTargetPath = "\(remoteNoteDirectory)/index.json"
-            try await uploadVerifiedFileAtomically(
-                localURL: tempFileURL,
-                expectedDigest: Self.payloadDigest(for: payload),
-                remoteTargetPath: remoteTargetPath,
-                sshpassPath: sshpassPath,
-                config: config,
-                controlPath: controlPath
-            )
-            try await runSSHCommand(sshpassPath: sshpassPath, config: config, command: "rmdir \(quotedLockPath)", controlPath: controlPath)
-        } catch {
-            try? await runSSHCommand(sshpassPath: sshpassPath, config: config, command: "rmdir \(quotedLockPath)", controlPath: controlPath)
-            throw error
-        }
     }
 
     private func resolveRemoteIndexBundle(
@@ -1872,12 +2081,36 @@ final class SSHSyncManager: Sendable {
         return entries
     }
 
-    private func uploadAssetsManifest(entries: [AssetsManifestEntry], config: SSHConfig, controlPath: String? = nil) async throws {
+    private func uploadAssetsManifest(
+        entries: [AssetsManifestEntry],
+        replacingEntriesForNoteIDs noteIDs: Set<UUID>? = nil,
+        config: SSHConfig,
+        controlPath: String? = nil
+    ) async throws {
         let sshpassPath = try checkSshpassAvailable()
+        var publishedEntries = entries
+        if let noteIDs {
+            let remoteEntries = try await downloadAssetsManifestBundle(
+                config: config,
+                controlPath: controlPath
+            ).manifest?.entries ?? []
+            var entriesByPath = Dictionary(uniqueKeysWithValues: remoteEntries.map { ($0.relativePath, $0) })
+            entriesByPath = entriesByPath.filter { relativePath, _ in
+                guard let component = relativePath.split(separator: "/", maxSplits: 1).first,
+                      let noteID = UUID(uuidString: String(component)) else {
+                    return true
+                }
+                return !noteIDs.contains(noteID)
+            }
+            for entry in entries {
+                entriesByPath[entry.relativePath] = entry
+            }
+            publishedEntries = Array(entriesByPath.values)
+        }
         let manifest = AssetsManifest(
             generatedAt: Date(),
             deviceID: BlockDocumentNoteVersionStore.currentDeviceID(),
-            entries: entries.sorted { $0.relativePath < $1.relativePath }
+            entries: publishedEntries.sorted { $0.relativePath < $1.relativePath }
         )
         let payload = try encodeAssetsManifest(manifest)
         let tempFileURL = FileManager.default.temporaryDirectory
