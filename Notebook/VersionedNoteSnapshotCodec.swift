@@ -23,9 +23,9 @@ enum VersionedNoteSnapshotCodec {
         }
     }
 
-    private static let magic = Data("NBKSNPZ1".utf8)
-    private static let sizeFieldLength = MemoryLayout<UInt64>.size
-    private static let maximumUncompressedBytes = 512 * 1024 * 1024
+    nonisolated private static let magic = Data("NBKSNPZ1".utf8)
+    nonisolated private static let sizeFieldLength = MemoryLayout<UInt64>.size
+    nonisolated private static let maximumUncompressedBytes = 512 * 1024 * 1024
 
     static func encode(
         _ snapshot: VersionedNoteSnapshot,
@@ -41,7 +41,7 @@ enum VersionedNoteSnapshotCodec {
         try decoder.decode(VersionedNoteSnapshot.self, from: rawJSON(from: storedData))
     }
 
-    static func storageData(from rawJSON: Data) throws -> Data {
+    nonisolated static func storageData(from rawJSON: Data) throws -> Data {
         guard let compressed = compress(rawJSON) else { return rawJSON }
         let headerLength = magic.count + sizeFieldLength
         guard compressed.count + headerLength < rawJSON.count else {
@@ -56,7 +56,7 @@ enum VersionedNoteSnapshotCodec {
         return result
     }
 
-    static func rawJSON(from storedData: Data) throws -> Data {
+    nonisolated static func rawJSON(from storedData: Data) throws -> Data {
         guard storedData.starts(with: magic) else { return storedData }
         let headerLength = magic.count + sizeFieldLength
         guard storedData.count > headerLength else { throw CodecError.invalidHeader }
@@ -96,11 +96,11 @@ enum VersionedNoteSnapshotCodec {
         return decoded
     }
 
-    static func isCompressed(_ data: Data) -> Bool {
+    nonisolated static func isCompressed(_ data: Data) -> Bool {
         data.starts(with: magic)
     }
 
-    private static func compress(_ data: Data) -> Data? {
+    nonisolated private static func compress(_ data: Data) -> Data? {
         guard !data.isEmpty else { return nil }
         var capacity = max(256, data.count + data.count / 8 + 64)
 
