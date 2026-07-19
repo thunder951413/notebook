@@ -5,6 +5,77 @@ import AppKit
 
 extension NotebookTests {
     @MainActor
+    func testFirstSaveAfterPersistedEmptyPlaceholderCreatesVerifiedBackupAndSucceeds() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let noteID = try insertMinimalBlockLibrary(context: context, title: "首次保存")
+        let note = try XCTUnwrap(context.fetch(
+            FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+            )
+        ).first)
+        note.blockCount = 1
+        let placeholder = BlockDocumentBlockEntity(
+            noteID: noteID,
+            position: 0,
+            blockID: "empty-placeholder",
+            kind: "paragraph",
+            sourceType: "paragraph",
+            textPayload: nil,
+            level: nil,
+            listStyle: nil,
+            order: nil,
+            checked: nil,
+            indent: nil,
+            assetID: nil,
+            tablePayload: nil
+        )
+        placeholder.note = note
+        context.insert(placeholder)
+        try context.save()
+
+        let baseDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotebookFirstSave-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        StorageLocationManager.shared.setBaseDirectoryForTesting(baseDirectory)
+        let backupDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notebook/Backups/\(noteID.uuidString)", isDirectory: true)
+        defer {
+            StorageLocationManager.shared.setBaseDirectoryForTesting(nil)
+            try? FileManager.default.removeItem(at: baseDirectory)
+            try? FileManager.default.removeItem(at: backupDirectory)
+        }
+        try StorageLocationManager.shared.ensureDirectoryStructureExists()
+        NoteSaveManager.shared.setContext(context)
+
+        let request = try XCTUnwrap(NoteSaveManager.shared.createRequest(
+            noteID: noteID,
+            title: note.title,
+            folderID: nil,
+            folder: note.folderName,
+            reminderAt: nil,
+            recurrenceRule: "none",
+            content: NSAttributedString(string: "第一段可靠正文"),
+            reason: "explicit"
+        ))
+        guard case .success = NoteSaveManager.shared.saveImmediately(request: request) else {
+            return XCTFail("首次正文保存不应被空占位块的备份校验拦截")
+        }
+
+        let backup = try XCTUnwrap(BackupManager.shared.getBackups(for: noteID).first)
+        let backedUpContent = try NSAttributedString(
+            data: backup.rtfdData,
+            options: [.documentType: NSAttributedString.DocumentType.rtfd],
+            documentAttributes: nil
+        )
+        XCTAssertEqual(backedUpContent.string, "")
+
+        let restored = NoteStore()
+        restored.setContext(context)
+        XCTAssertEqual(restored.ensureNoteContentLoaded(id: noteID)?.content.string, "第一段可靠正文")
+    }
+
+    @MainActor
     func testAutomaticEmptySnapshotCannotOverwritePersistedContent() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

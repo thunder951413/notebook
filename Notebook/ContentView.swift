@@ -171,7 +171,7 @@ struct ContentView: View {
             recurrenceRule: note.recurrenceRule,
             content: content,
             reason: reason,
-            allowsDestructiveEmptySave: reason == "shortcut"
+            allowsDestructiveEmptySave: reason == "shortcut" || reason == "explicit"
         ) else {
             interval.end(.error, "createRequestFailed")
             return false
@@ -508,6 +508,15 @@ struct ContentView: View {
                     Label(selectedDestination.isTodoDestination ? "新建任务" : l10n(L10nKeys.Note.new), systemImage: "plus")
                 }
                 .accessibilityIdentifier("notebook.newItem")
+
+                Button {
+                    _ = saveCurrentEditorContent(reason: "explicit")
+                } label: {
+                    Label(l10n(L10nKeys.common.save), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                .accessibilityIdentifier("notebook.saveItem")
+                .disabled(selection == nil || selectedDestination.isTodoDestination || selectedDestination == .recycleBin)
 
                 Button {
                     if selectedDestination.isTodoDestination {

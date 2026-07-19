@@ -46,9 +46,19 @@ final class NotebookUITests: XCTestCase {
 
         let bodyEditor = app.textViews["notebook.noteBody"]
         XCTAssertTrue(bodyEditor.waitForExistence(timeout: 10))
+        app.activate()
+        bodyEditor.click()
+        // macOS 测试进程首次请求输入法时可能把系统设置置于前台。
+        // 重新激活并聚焦正文，避免按键被发送到系统设置而产生假性保存失败。
+        app.activate()
         bodyEditor.click()
         bodyEditor.typeText(body)
-        app.typeKey("s", modifierFlags: .command)
+        XCTAssertTrue((bodyEditor.value as? String)?.contains(body) == true, "正文输入应先在编辑器中可见")
+        let saveButton = app.buttons["notebook.saveItem"]
+        XCTAssertTrue(saveButton.waitForExistence(timeout: 5))
+        // 输入法设置窗口可能在 XCUI 合成首次正文输入后抢到前台，保存前显式切回。
+        app.activate()
+        saveButton.click()
         let savedTitle = try XCTUnwrap(titleField.value as? String)
         XCTAssertTrue(savedTitle.contains("UI Regression Note"))
 

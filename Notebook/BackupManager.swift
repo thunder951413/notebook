@@ -195,13 +195,35 @@ final class BackupManager {
 
         let content = BlockDocumentAttributedStringBuilder(attachmentsRoot: attachmentsRoot)
             .build(blocks: blocks, assetsByID: assetsByID)
-        guard content.length > 0 else {
-            return nil
+        if content.length == 0 {
+            // 新建笔记会持久化一个空 paragraph 占位块。它是完整、可验证的空状态，
+            // 不能因为构建出的 NSAttributedString 长度为 0 就把后续第一次正文保存拦截掉。
+            // 若块里含有任何无法解释或非空语义，则仍然失败关闭，避免绕过备份保护。
+            let isVerifiedEmptyState = assetsByID.isEmpty && blocks.allSatisfy(isVerifiedEmptyBlock(_:))
+            guard isVerifiedEmptyState else { return nil }
         }
         return try? content.data(
             from: NSRange(location: 0, length: content.length),
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
         )
+    }
+
+    private func isVerifiedEmptyBlock(_ block: BlockDocumentBlockEntity) -> Bool {
+        guard block.kind == "paragraph",
+              block.level == nil,
+              block.listStyle == nil,
+              block.order == nil,
+              block.checked == nil,
+              (block.indent ?? 0) == 0,
+              block.assetID == nil,
+              block.tablePayload == nil else {
+            return false
+        }
+        guard let payload = block.textPayload else { return true }
+        guard let spans = try? JSONDecoder().decode([MigratedInlineText].self, from: payload) else {
+            return false
+        }
+        return spans.allSatisfy { $0.text.isEmpty }
     }
 
     /// 标记保存开始（用于崩溃检测）
