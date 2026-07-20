@@ -181,6 +181,7 @@ struct ContentView: View {
         case .success:
             store.markNoteContentUpdated(id: noteID, content: content)
             richTextController.recordSavedState(noteID: noteID, title: note.title, content: content)
+            NoteEditorSessionRegistry.shared.markSaved(noteID: noteID)
             interval.end(.info, "result=success")
             return true
         case .failure(let error):
@@ -434,6 +435,7 @@ struct ContentView: View {
                         controller: richTextController,
                         isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked
                     )
+                    .id(currentId)
                     // 纯 SwiftUI 三栏布局不会像 NavigationSplitView 一样自动裁剪详情栏。
                     // 防止具有较大固有宽度的编辑器子视图覆盖笔记列表和侧边栏。
                     .clipped()
@@ -551,9 +553,17 @@ struct ContentView: View {
             }
             editorSaveHandlerID = NoteSaveManager.shared.registerEditorSaveHandler(
                 revisionProvider: {
-                    guard let noteID = richTextController.boundNoteID,
-                          let note = store.notes.first(where: { $0.id == noteID }) else { return nil }
-                    return richTextController.revisionFingerprint(title: note.title)
+                    let sessionFingerprint = NoteEditorSessionRegistry.shared.currentFingerprint
+                    let richTextFingerprint: String?
+                    if let noteID = richTextController.boundNoteID,
+                       let note = store.notes.first(where: { $0.id == noteID }) {
+                        richTextFingerprint = richTextController.revisionFingerprint(title: note.title)
+                    } else {
+                        richTextFingerprint = nil
+                    }
+                    return [sessionFingerprint, richTextFingerprint]
+                        .compactMap { $0 }
+                        .joined(separator: "|")
                 },
                 { saveCurrentEditorContent(reason: "syncBarrier") }
             )

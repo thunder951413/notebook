@@ -67,6 +67,10 @@ struct SaveRequest {
     let allowsDestructiveEmptySave: Bool
     let reason: String
     let timestamp: Date
+    /// Database version the editor was based on. Draft recovery only applies
+    /// automatically when this still matches, so a remote update can never be
+    /// overwritten by a stale local crash journal.
+    let baseVersion: Int64?
 }
 
 /// 笔记保存管理器 - 单例，串行处理所有保存操作
@@ -92,6 +96,7 @@ final class NoteSaveManager {
     private var editorSaveHandler: (() -> Bool)?
     private var editorSaveHandlerID: UUID?
     private var editorRevisionProvider: (() -> String?)?
+    private let draftJournal = EditorDraftJournal.shared
     
     private init() {}
     
@@ -118,6 +123,15 @@ final class NoteSaveManager {
     /// 立即同步保存 - 阻塞直到保存完成
     func saveImmediately(request: SaveRequest) -> SaveResult {
         cancelPendingSave(for: request.noteID)
+        do {
+            try draftJournal.persist(request)
+        } catch {
+            Logger.shared.log(
+                .save,
+                .error,
+                "无法写入加密草稿，将立即尝试正式保存：noteID=\(request.noteID.uuidString.prefix(8)) error=\(error.localizedDescription)"
+            )
+        }
         return performSave(request: request)
     }
     
@@ -129,6 +143,20 @@ final class NoteSaveManager {
     ) {
         let noteID = request.noteID
         cancelPendingSave(for: noteID)
+
+        do {
+            try draftJournal.persist(request)
+        } catch {
+            // Never leave the only copy in a debounce timer. If the independent
+            // draft journal cannot be written, synchronously commit to SwiftData.
+            Logger.shared.log(
+                .save,
+                .error,
+                "加密草稿写入失败，自动保存已降级为立即提交：noteID=\(noteID.uuidString.prefix(8)) error=\(error.localizedDescription)"
+            )
+            completion?(performSave(request: request))
+            return
+        }
         pendingSaves[noteID] = request
         pendingSaveCompletions[noteID] = completion
         
@@ -258,6 +286,44 @@ final class NoteSaveManager {
 
         return firstError.map(SaveResult.failure) ?? .success
     }
+
+    /// Restores drafts whose database base version still matches. Drafts based
+    /// on an older version are deliberately retained for manual recovery and
+    /// never overwrite a note changed by sync or another successful save.
+    func recoverPersistedDrafts() -> EditorDraftRecoverySummary {
+        var summary = EditorDraftRecoverySummary()
+        guard let context = modelContext else { return summary }
+        let loaded = draftJournal.loadAll()
+        summary.unreadableFiles = loaded.unreadableFiles
+
+        for draft in loaded.records {
+            let noteID = draft.noteID
+            let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+                predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == noteID }
+            )
+            guard let entity = try? context.fetch(descriptor).first else {
+                summary.deferredNoteIDs.append(noteID)
+                continue
+            }
+            guard let baseVersion = draft.baseVersion, baseVersion == entity.version else {
+                summary.deferredNoteIDs.append(noteID)
+                continue
+            }
+
+            do {
+                let request = try draft.makeSaveRequest()
+                switch performSave(request: request) {
+                case .success:
+                    summary.recoveredNoteIDs.append(noteID)
+                case .failure:
+                    summary.deferredNoteIDs.append(noteID)
+                }
+            } catch {
+                summary.deferredNoteIDs.append(noteID)
+            }
+        }
+        return summary
+    }
     
     // MARK: - 私有方法
 
@@ -346,6 +412,7 @@ final class NoteSaveManager {
             if hasContentChanged {
                 AutoSyncCoordinator.shared.noteDidSave(noteID: request.noteID, reason: request.reason)
             }
+            draftJournal.remove(noteID: request.noteID)
             interval.end(.info, "result=success")
             return .success
         } catch {
@@ -468,7 +535,11 @@ final class NoteSaveManager {
         entity.version = newVersion
         entity.lastSavedContentHash = newContentHash
         entity.documentSchemaVersion = document.schemaVersion
-        entity.documentSource = document.source
+        // Markdown-origin notes keep their editor identity across ordinary
+        // saves. The persisted blocks remain the same interoperable format.
+        if entity.documentSource != "TextFileDrop" && entity.documentSource != "MuyaMarkdown" {
+            entity.documentSource = document.source
+        }
         entity.blockCount = document.blocks.count
         entity.assetCount = persistedAssetsByID.count
         // 写入时一次性算好预览文本，避免列表加载时对每条笔记做额外的 blocks fetch
@@ -1399,7 +1470,17 @@ extension NoteSaveManager {
             decodedContent: cleaned,
             allowsDestructiveEmptySave: allowsDestructiveEmptySave,
             reason: reason,
-            timestamp: Date()
+            timestamp: Date(),
+            baseVersion: currentPersistedVersion(for: noteID)
         )
+    }
+
+    private func currentPersistedVersion(for noteID: UUID) -> Int64? {
+        guard let context = modelContext else { return nil }
+        let id = noteID
+        let descriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == id }
+        )
+        return try? context.fetch(descriptor).first?.version
     }
 }

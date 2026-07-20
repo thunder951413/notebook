@@ -66,10 +66,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 AutoSyncCoordinator.shared.configure(store: store)
             }
             if let container = persistence.modelContainer {
-                store.setContext(container.mainContext)
-                // 同时设置 NoteSaveManager 的 context
                 NoteSaveManager.shared.setContext(container.mainContext)
+                let draftRecovery = NoteSaveManager.shared.recoverPersistedDrafts()
+                // 草稿恢复必须先于列表加载，避免界面先展示旧正文又被恢复结果刷新。
+                store.setContext(container.mainContext)
                 if !isRunningTests {
+                    presentDraftRecoverySummaryIfNeeded(draftRecovery)
                     presentIncompleteSaveWarningIfNeeded()
                     AutoSyncCoordinator.shared.handleApplicationLaunched()
                 }
@@ -102,6 +104,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 }
             }
         }
+    }
+
+    @MainActor
+    private func presentDraftRecoverySummaryIfNeeded(_ summary: EditorDraftRecoverySummary) {
+        guard !summary.isEmpty else { return }
+
+        let alert = NSAlert()
+        if summary.deferredNoteIDs.isEmpty && summary.unreadableFiles.isEmpty {
+            alert.alertStyle = .informational
+            alert.messageText = "已恢复未提交的编辑内容"
+            alert.informativeText = "应用从加密草稿日志恢复了 \(summary.recoveredNoteIDs.count) 条笔记，并已安全写入数据库。"
+        } else {
+            alert.alertStyle = .warning
+            alert.messageText = "发现需要核对的编辑草稿"
+            alert.informativeText = "已自动恢复 \(summary.recoveredNoteIDs.count) 条；另有 \(summary.deferredNoteIDs.count) 条因数据库版本已变化而没有覆盖，\(summary.unreadableFiles.count) 个文件无法解密。原草稿均已保留，请先备份数据并查看日志。"
+        }
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
     }
 
     @MainActor

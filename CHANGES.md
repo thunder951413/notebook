@@ -1,4 +1,17 @@
-# CHANGES — 阶段二规范清理（评审版）
+# CHANGES
+
+## 1.1.14 — macOS 安全编辑与大文档 Markdown
+
+- 新增加密编辑草稿日志：Keychain 密钥、AES-GCM、原子替换、`fsync` 和 SHA-256 回读校验；数据库成功后才删除草稿。
+- 新增单调 revision 编辑会话，统一展示未保存、保存中、已保存和失败，旧保存完成事件不会覆盖新输入状态。
+- Markdown/TXT 来源笔记使用离线 Muya；超过 250,000 UTF-16 字符默认使用 CodeMirror 6 视口虚拟化源码模式。
+- Markdown 编辑器、Mermaid、字体和脚本全部随应用发布，CSP 禁止 WebView 发起网络连接；远程 block/asset/history 协议不变。
+- 保留 Markdown `documentSource`，避免普通保存后退回富文本编辑器；继续同步既有 UTF-16 阅读锚点和相对滚动位置。
+- 新增 macOS 设计说明和 Android Muya/安全保存实施路线。
+
+---
+
+## 阶段二规范清理（历史记录）
 
 > **本次提交目标**：在不改变功能的前提下，按 OPTIMIZATION.md 阶段二（规范清理）+ P4 并发安全做一轮"零风险"重构。
 >

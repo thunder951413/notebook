@@ -14,6 +14,7 @@ struct NoteEditorView: View {
     
     @StateObject private var recorder = AudioRecorderManager()
     @StateObject private var mixedRecorder = MixedAudioRecorder()
+    @StateObject private var editorSession: NoteEditorSession
     @State private var showingReminderPopover = false
     @State private var showingRecordingMenu = false
     
@@ -22,6 +23,26 @@ struct NoteEditorView: View {
     @State private var pendingSaveWorkItem: DispatchWorkItem?
     @State private var showingConflictDiff = false
     @State private var saveErrorMessage: String?
+    @State private var markdownEditingMode: MarkdownEditingMode
+
+    init(
+        note: Binding<Note>,
+        controller: RichTextController,
+        isEncryptedFolderUnlocked: Binding<Bool>
+    ) {
+        self._note = note
+        self.controller = controller
+        self._isEncryptedFolderUnlocked = isEncryptedFolderUnlocked
+        self._editorSession = StateObject(
+            wrappedValue: NoteEditorSession(noteID: note.wrappedValue.id)
+        )
+        self._markdownEditingMode = State(
+            initialValue: MarkdownEditorPreferenceStore.mode(
+                noteID: note.wrappedValue.id,
+                contentLength: note.wrappedValue.content.length
+            )
+        )
+    }
     
     // 窗口状态管理
     @StateObject private var windowState = WindowStateManager.shared
@@ -51,6 +72,12 @@ struct NoteEditorView: View {
                         showingReminderPopover: $showingReminderPopover,
                         showingRecordingMenu: $showingRecordingMenu,
                         isEncryptedFolderUnlocked: $isEncryptedFolderUnlocked,
+                        persistenceState: editorSession.state,
+                        markdownEditingMode: $markdownEditingMode,
+                        onSave: {
+                            pendingSaveWorkItem?.cancel()
+                            saveImmediatelyFromEditor(reason: "toolbarSave")
+                        },
                         onSelectViewMode: applyViewMode
                     )
 
@@ -93,6 +120,7 @@ struct NoteEditorView: View {
                             .padding(.bottom, 10)
                             .onChange(of: note.title) { _, newTitle in
                                 store.updateNoteTitleInMemory(id: note.id, title: newTitle)
+                                editorSession.recordChange()
                                 debouncedScheduleAutoSave(title: newTitle, content: note.content)
                             }
 
@@ -126,20 +154,7 @@ struct NoteEditorView: View {
 
                         switch note.viewMode {
                         case .text:
-                            // 富文本编辑模式
-                            RichTextEditor(
-                                attributedText: $note.content,
-                                controller: controller,
-                                isEditable: true,
-                                noteID: note.id,
-                                readingPosition: store.readingPosition(for: note.id),
-                                onReadingPositionChange: store.recordReadingPosition
-                            )
-                            .id(note.id)
-                            .frame(maxHeight: .infinity)
-                            .onChange(of: note.content) { _, newContent in
-                                debouncedScheduleAutoSave(title: note.title, content: newContent)
-                            }
+                            editorPane
                         case .preview:
                             // Markdown 预览模式
                             NoteMarkdownPreviewView(
@@ -155,19 +170,7 @@ struct NoteEditorView: View {
                             // 分屏预览模式
                             HStack(spacing: 0) {
                                 // 左侧编辑器
-                                RichTextEditor(
-                                    attributedText: $note.content,
-                                    controller: controller,
-                                    isEditable: true,
-                                    noteID: note.id,
-                                    readingPosition: store.readingPosition(for: note.id),
-                                    onReadingPositionChange: store.recordReadingPosition
-                                )
-                                .id(note.id)
-                                .frame(maxHeight: .infinity)
-                                .onChange(of: note.content) { _, newContent in
-                                    debouncedScheduleAutoSave(title: note.title, content: newContent)
-                                }
+                                editorPane
 
                                 // 中间分割线
                                 Rectangle()
@@ -200,11 +203,13 @@ struct NoteEditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppColors.editorBackground(colorScheme))
         .onAppear {
+            NoteEditorSessionRegistry.shared.activate(editorSession)
             lastSavedTitle = note.title
             lastSavedContentHash = note.content.hashValue
             controller.recordSavedState(noteID: note.id, title: note.title, content: note.content)
         }
         .onDisappear {
+            NoteEditorSessionRegistry.shared.deactivate(editorSession)
             pendingSaveWorkItem?.cancel()
         }
         .sheet(isPresented: $showingConflictDiff) {
@@ -249,14 +254,59 @@ struct NoteEditorView: View {
         }
     }
 
-    private func saveImmediatelyFromEditor(reason: String) {
-        guard controller.isBoundTo(noteID: note.id) else {
-            saveErrorMessage = "编辑器状态尚未就绪，请稍后重试"
-            return
+    @ViewBuilder
+    private var editorPane: some View {
+        if note.prefersMarkdownEditor {
+            MuyaMarkdownEditorView(
+                attributedText: $note.content,
+                editingMode: $markdownEditingMode,
+                noteID: note.id,
+                readingPosition: store.readingPosition(for: note.id),
+                onReadingPositionChange: store.recordReadingPosition,
+                onExplicitSave: {
+                    saveImmediatelyFromEditor(reason: "commandSave")
+                }
+            )
+            .id(note.id)
+            .frame(maxHeight: .infinity)
+            .onChange(of: note.content) { _, newContent in
+                editorSession.recordChange()
+                debouncedScheduleAutoSave(title: note.title, content: newContent)
+            }
+        } else {
+            RichTextEditor(
+                attributedText: $note.content,
+                controller: controller,
+                isEditable: true,
+                noteID: note.id,
+                readingPosition: store.readingPosition(for: note.id),
+                onReadingPositionChange: store.recordReadingPosition
+            )
+            .id(note.id)
+            .frame(maxHeight: .infinity)
+            .onChange(of: note.content) { _, newContent in
+                editorSession.recordChange()
+                debouncedScheduleAutoSave(title: note.title, content: newContent)
+            }
         }
-        guard let content = controller.snapshotAttributedString() else {
-            saveErrorMessage = "无法读取当前编辑内容"
-            return
+    }
+
+    private func saveImmediatelyFromEditor(reason: String) {
+        let content: NSAttributedString
+        if note.prefersMarkdownEditor {
+            content = note.content
+        } else {
+            guard controller.isBoundTo(noteID: note.id) else {
+                editorSession.markFailed(message: "编辑器状态尚未就绪")
+                saveErrorMessage = "编辑器状态尚未就绪，请稍后重试"
+                return
+            }
+            guard let snapshot = controller.snapshotAttributedString() else {
+                editorSession.markFailed(message: "无法读取当前编辑内容")
+                saveErrorMessage = "无法读取当前编辑内容"
+                return
+            }
+            content = snapshot
         }
         guard let request = NoteSaveManager.shared.createRequest(
             noteID: note.id,
@@ -267,12 +317,14 @@ struct NoteEditorView: View {
             recurrenceRule: note.recurrenceRule,
             content: content,
             reason: reason,
-            allowsDestructiveEmptySave: reason == "commandSave"
+            allowsDestructiveEmptySave: reason == "commandSave" || reason == "toolbarSave"
         ) else {
+            editorSession.markFailed(message: "无法创建保存数据")
             saveErrorMessage = "无法创建保存数据"
             return
         }
 
+        let savingRevision = editorSession.beginSave()
         switch NoteSaveManager.shared.saveImmediately(request: request) {
         case .success:
             note.content = content
@@ -280,7 +332,9 @@ struct NoteEditorView: View {
             lastSavedContentHash = content.hashValue
             store.markNoteContentUpdated(id: note.id, content: content)
             controller.recordSavedState(noteID: note.id, title: note.title, content: content)
+            editorSession.markSaved(revision: savingRevision)
         case .failure(let error):
+            editorSession.markFailed(error)
             saveErrorMessage = error.localizedDescription
         }
     }
@@ -315,7 +369,9 @@ struct NoteEditorView: View {
         }
         pendingSaveWorkItem = workItem
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        // Persist the encrypted write-ahead draft quickly. The database write
+        // remains debounced separately by NoteSaveManager.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
     }
     
     private func performAutoSave(title: String, noteID: UUID) {
@@ -350,11 +406,18 @@ struct NoteEditorView: View {
             reason: "autoSave"
         ) else { return }
         
-        NoteSaveManager.shared.scheduleSave(request: request, delay: 1.0) { result in
-            guard case .success = result else { return }
-            lastSavedTitle = title
-            lastSavedContentHash = editorContent.hashValue
-            controller.recordSavedState(noteID: noteID, title: title, content: editorContent)
+        let savingRevision = editorSession.beginSave()
+        NoteSaveManager.shared.scheduleSave(request: request, delay: 0.75) { result in
+            switch result {
+            case .success:
+                lastSavedTitle = title
+                lastSavedContentHash = editorContent.hashValue
+                controller.recordSavedState(noteID: noteID, title: title, content: editorContent)
+                editorSession.markSaved(revision: savingRevision)
+            case .failure(let error):
+                editorSession.markFailed(error)
+                saveErrorMessage = error.localizedDescription
+            }
         }
     }
 }
@@ -373,6 +436,9 @@ struct EditorTopBarView: View {
     @StateObject private var windowState = WindowStateManager.shared
     @EnvironmentObject private var themeManager: ThemeManager
     @Binding var isEncryptedFolderUnlocked: Bool
+    let persistenceState: NoteEditorSession.PersistenceState
+    @Binding var markdownEditingMode: MarkdownEditingMode
+    let onSave: () -> Void
     let onSelectViewMode: (NoteViewMode) -> Void
 
     @State private var tempReminderAt: Date = Date()
@@ -441,8 +507,10 @@ struct EditorTopBarView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbarViewport {
-                // 格式菜单（合并所有文本样式）
-                Menu {
+                if !note.prefersMarkdownEditor {
+                    // 原生富文本工具。Markdown 编辑器使用 Muya 自己的
+                    // 选区工具栏和快捷插入，避免对隐藏的 NSTextView 发命令。
+                    Menu {
                     Button {
                         controller.toggleBold()
                     } label: {
@@ -596,12 +664,13 @@ struct EditorTopBarView: View {
                 .frame(minWidth: 20)
 
                 // 减少缩进
-                Button { controller.decreaseIndent() } label: {
-                    Image(systemName: "decrease.indent")
+                    Button { controller.decreaseIndent() } label: {
+                        Image(systemName: "decrease.indent")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 20)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 20)
 
                 // 文件夹选择
                 Menu {
@@ -699,6 +768,15 @@ struct EditorTopBarView: View {
                 }
 
                 Spacer()
+
+                Button(action: onSave) {
+                    Label(persistenceState.label, systemImage: persistenceState.systemImage)
+                        .font(.caption)
+                        .foregroundStyle(saveStateColor)
+                }
+                .buttonStyle(.plain)
+                .notebookHelp(persistenceState.label)
+                .disabled(persistenceState == .saving)
                 
                 Divider().frame(height: 18)
 
@@ -760,6 +838,33 @@ struct EditorTopBarView: View {
                 Divider().frame(height: 18)
 
                 // Markdown 预览模式选择菜单
+                if note.prefersMarkdownEditor && note.viewMode != .preview {
+                    Menu {
+                        ForEach(MarkdownEditingMode.allCases, id: \.self) { mode in
+                            Button {
+                                markdownEditingMode = mode
+                                MarkdownEditorPreferenceStore.setMode(mode, noteID: note.id)
+                            } label: {
+                                if markdownEditingMode == mode {
+                                    Label(mode.label, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(
+                            markdownEditingMode.label,
+                            systemImage: markdownEditingMode == .source ? "chevron.left.forwardslash.chevron.right" : "text.word.spacing"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .notebookHelp("Markdown 编辑模式")
+
+                    Divider().frame(height: 18)
+                }
+
                 Menu {
                     ForEach(NoteViewMode.allCases, id: \.self) { mode in
                         Button {
@@ -834,6 +939,19 @@ struct EditorTopBarView: View {
             if newMode == .preview && showingNoteSearch {
                 closeNoteSearch()
             }
+        }
+    }
+
+    private var saveStateColor: Color {
+        switch persistenceState {
+        case .saved:
+            return .green
+        case .dirty:
+            return .orange
+        case .failed:
+            return .red
+        case .saving, .clean:
+            return .secondary
         }
     }
     

@@ -6,6 +6,23 @@ import SwiftUI
 
 
 extension NotebookTests {
+    @MainActor
+    func testMarkdownPreviewUsesBundledMermaidAndBlocksNetworkScripts() {
+        let renderer = MarkdownHTMLRenderer(
+            markdown: "```mermaid\ngraph TD; A-->B\n```",
+            attributedContent: nil,
+            colorScheme: .light,
+            noteID: UUID(),
+            renderAttributedContent: false
+        )
+
+        let html = renderer.generateHTML()
+        XCTAssertTrue(html.contains("MarkdownPreviewAssets.bundle/Contents/Resources/mermaid.min.js"))
+        XCTAssertTrue(html.contains("connect-src 'none'"))
+        XCTAssertFalse(html.contains("cdn.jsdelivr.net"))
+        XCTAssertFalse(html.contains("https://cdn"))
+    }
+
 
     func testMarkdownPreviewKeepsMarkdownSyntaxWhenAttributedRenderingIsDisabled() {
         let markdown = "# 一级标题\n\n这是 **粗体** 和 [链接](https://example.com)。"

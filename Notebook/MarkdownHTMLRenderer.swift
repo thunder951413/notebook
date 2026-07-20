@@ -142,7 +142,7 @@ struct MarkdownHTMLRenderer {
         let mermaidScripts: String
         if markdownSource.contains("```mermaid") {
             mermaidScripts = """
-            <script nonce="\(scriptNonce)" src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script nonce="\(scriptNonce)" src="MarkdownPreviewAssets.bundle/Contents/Resources/mermaid.min.js"></script>
             <script nonce="\(scriptNonce)">
                 mermaid.initialize({
                     startOnLoad: true,
@@ -160,7 +160,7 @@ struct MarkdownHTMLRenderer {
         <html>
         <head>
             <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src data: file: blob:; media-src data: file: blob:; style-src 'unsafe-inline'; script-src 'nonce-\(scriptNonce)' https://cdn.jsdelivr.net; connect-src 'none'">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src data: file: blob:; media-src data: file: blob:; style-src 'unsafe-inline'; script-src 'nonce-\(scriptNonce)' file:; connect-src 'none'">
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;

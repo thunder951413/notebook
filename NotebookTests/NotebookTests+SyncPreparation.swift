@@ -54,7 +54,8 @@ extension NotebookTests {
             decodedContent: NSAttributedString(string: "Unsaved content"),
             allowsDestructiveEmptySave: false,
             reason: "test",
-            timestamp: Date()
+            timestamp: Date(),
+            baseVersion: nil
         )
         NoteSaveManager.shared.scheduleSave(request: request, delay: 60)
 

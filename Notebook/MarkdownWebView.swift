@@ -173,7 +173,7 @@ struct MarkdownWebView: NSViewRepresentable {
             let load: (String) -> Void = { [weak self, weak webView] html in
                 DispatchQueue.main.async {
                     guard let self, let webView, self.requestedRenderKey == renderKey else { return }
-                    webView.loadHTMLString(html, baseURL: nil)
+                    webView.loadHTMLString(html, baseURL: Bundle.main.resourceURL)
                     self.lastLoadedHTML = html
                 }
             }

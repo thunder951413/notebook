@@ -124,6 +124,9 @@ struct Note: Identifiable, Hashable {
     var version: Int64
     var tagIDs: [UUID]
     var viewMode: NoteViewMode
+    /// Local editor hint. It is stored in the existing document metadata and
+    /// does not change the cross-platform note/block sync contract.
+    var documentSource: String
 
     /// 回收站：删除时间（非空表示在回收站）
     var deletedAt: Date?
@@ -158,6 +161,7 @@ struct Note: Identifiable, Hashable {
         version: Int64 = 0,
         tagIDs: [UUID] = [],
         viewMode: NoteViewMode = .text,
+        documentSource: String = "app",
         deletedAt: Date? = nil,
         originalFolderID: UUID? = nil,
         originalFolderName: String? = nil,
@@ -177,10 +181,15 @@ struct Note: Identifiable, Hashable {
         self.version = version
         self.tagIDs = tagIDs
         self.viewMode = viewMode
+        self.documentSource = documentSource
         self.deletedAt = deletedAt
         self.originalFolderID = originalFolderID
         self.originalFolderName = originalFolderName
         self.hasConflict = hasConflict
+    }
+
+    var prefersMarkdownEditor: Bool {
+        documentSource == "TextFileDrop" || documentSource == "MuyaMarkdown"
     }
     
     func hash(into hasher: inout Hasher) {

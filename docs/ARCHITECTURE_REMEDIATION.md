@@ -29,3 +29,11 @@
 4. Markdown 双向 AST、附件统一协议和 JSON Schema 代码生成属于协议演进，需要单独版本、双端兼容期和恢复演练。
 
 禁止为了降低行数一次性重写保存或同步核心。每个阶段必须先生成可验证备份，并通过 macOS 全量测试、Android 单测/Lint/编译和共享契约门禁。
+
+## 2026-07-20 macOS 编辑器阶段
+
+- 加入独立于 SwiftData 的 AES-GCM 加密编辑草稿日志；原子落盘并校验后才进入数据库去抖，数据库成功后才清理草稿。
+- 编辑状态统一为单调 revision 状态机，避免旧保存完成事件误报新输入已保存。
+- Markdown 来源标记跨普通保存保留；Muya/CodeMirror 只改变本地编辑前端，不改变远端 block/asset/history 协议。
+- Markdown 编辑器和 Mermaid 改为随包离线资源，CSP 禁止联网；大文档默认使用 CodeMirror 视口虚拟化源码模式。
+- Android 对照实施见 `ANDROID_MARKDOWN_EDITOR_ROADMAP.md`，macOS 设计与恢复链路见 `MACOS_MARKDOWN_EDITOR.md`。

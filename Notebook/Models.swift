@@ -309,6 +309,7 @@ final class NoteStore: ObservableObject {
                 // 已保存的有效模式原样恢复；旧数据若确实没有模式记录，则以
                 // Markdown 预览打开，避免导入内容默认落入富文本编辑状态。
                 viewMode: NoteViewMode(rawValue: entity.viewMode) ?? .preview,
+                documentSource: entity.documentSource,
                 deletedAt: entity.deletedAt,
                 originalFolderID: entity.originalFolderID,
                 originalFolderName: entity.originalFolderName,
@@ -1112,6 +1113,14 @@ final class NoteStore: ObservableObject {
         guard case .success = noteSaveManager.saveImmediately(request: request) else {
             rollbackFailedTextImport(noteID: createdNote.id, context: context)
             return nil
+        }
+        let importedNoteID = createdNote.id
+        let importedDescriptor = FetchDescriptor<BlockDocumentNoteEntity>(
+            predicate: #Predicate<BlockDocumentNoteEntity> { $0.id == importedNoteID }
+        )
+        if let entity = try? context.fetch(importedDescriptor).first {
+            entity.documentSource = "TextFileDrop"
+            _ = context.saveLogging("NoteStore.importTextNote.markDocumentSource")
         }
         markNoteContentUpdated(id: createdNote.id, content: content)
 
