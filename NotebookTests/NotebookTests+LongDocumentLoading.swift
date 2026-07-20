@@ -275,6 +275,94 @@ extension NotebookTests {
     }
 
     @MainActor
+    func testRegularDocumentUsesStableContiguousLayout() {
+        let textView = RichTextView()
+        RichTextEditor.configureViewportLayout(
+            in: textView,
+            contentLength: RichTextEditor.longDocumentCharacterThreshold - 1
+        )
+
+        XCTAssertEqual(textView.layoutManager?.allowsNonContiguousLayout, false)
+        XCTAssertEqual(textView.isAutomaticLinkDetectionEnabled, true)
+    }
+
+    @MainActor
+    func testLongDocumentBottomCaptureDoesNotFallBackToDocumentStart() async throws {
+        let content = String(
+            repeating: "long document bottom capture regression line\n",
+            count: 3_000
+        )
+        try await assertBottomReadingPositionCapture(for: content)
+    }
+
+    @MainActor
+    func testShortMultilineDocumentBottomCaptureDoesNotFallBackToDocumentStart() async throws {
+        // 加密文件夹中的普通短笔记也可能有很多行；字符数很少时仍必须准确记录底部位置。
+        let content = String(repeating: "short line\n", count: 155)
+        XCTAssertLessThan(content.utf16.count, RichTextEditor.longDocumentCharacterThreshold)
+        try await assertBottomReadingPositionCapture(for: content)
+    }
+
+    @MainActor
+    private func assertBottomReadingPositionCapture(for content: String) async throws {
+        let noteID = UUID()
+        let controller = RichTextController()
+        var boundContent = NSAttributedString(string: "")
+        let coordinator = RichTextEditor.Coordinator(
+            attributedText: Binding(
+                get: { boundContent },
+                set: { boundContent = $0 }
+            ),
+            controller: controller
+        )
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 320))
+        scrollView.hasVerticalScroller = true
+        let textView = RichTextView(frame: scrollView.bounds)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: .greatestFiniteMagnitude
+        )
+
+        textView.textStorage?.setAttributedString(NSAttributedString(string: content))
+        RichTextEditor.configureViewportLayout(in: textView, contentLength: content.utf16.count)
+        scrollView.documentView = textView
+        controller.bind(textView: textView, noteID: noteID)
+        coordinator.bindAttachmentViewport(scrollView: scrollView, textView: textView)
+
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        let lastCharacter = max(textView.textStorage?.length ?? 1, 1) - 1
+        layoutManager.ensureLayout(forCharacterRange: NSRange(location: lastCharacter, length: 1))
+        let lastGlyph = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: lastCharacter, length: 1),
+            actualCharacterRange: nil
+        )
+        let lastRect = layoutManager.boundingRect(forGlyphRange: lastGlyph, in: textContainer)
+        textView.frame.size.height = max(
+            scrollView.contentSize.height,
+            lastRect.maxY + textView.textContainerInset.height
+        )
+        let maximumY = max(0, textView.frame.height - scrollView.contentView.bounds.height)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: maximumY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+
+        let captured = expectation(description: "bottom reading position captured")
+        var capturedAnchor = 0
+        coordinator.configureReadingPosition(noteID: noteID, position: nil) { _, anchor, _ in
+            capturedAnchor = anchor
+            captured.fulfill()
+        }
+        coordinator.flushReadingPosition()
+        await fulfillment(of: [captured], timeout: 2)
+
+        XCTAssertGreaterThan(capturedAnchor, content.utf16.count / 2)
+    }
+
+    @MainActor
     func testLongDocumentTypingDefersFullBindingCopyButSwitchCanFlushIt() {
         let noteID = UUID()
         let controller = RichTextController()

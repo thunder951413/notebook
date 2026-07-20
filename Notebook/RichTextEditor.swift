@@ -8,8 +8,11 @@ struct RichTextEditor: NSViewRepresentable {
 
     @MainActor
     static func configureViewportLayout(in textView: RichTextView, contentLength: Int) {
-        textView.layoutManager?.allowsNonContiguousLayout = true
-        textView.isAutomaticLinkDetectionEnabled = contentLength < longDocumentCharacterThreshold
+        let usesLongDocumentLayout = contentLength >= longDocumentCharacterThreshold
+        // 非连续布局只用于真正的大文档。中小文档启用它会让 TextKit 在尚未布局的
+        // 底部区域返回错误的可见 glyph 范围，进而把阅读位置误记为开头并在刷新时跳回。
+        textView.layoutManager?.allowsNonContiguousLayout = usesLongDocumentLayout
+        textView.isAutomaticLinkDetectionEnabled = !usesLongDocumentLayout
     }
     @Binding var attributedText: NSAttributedString
     let controller: RichTextController
@@ -432,8 +435,16 @@ struct RichTextEditor: NSViewRepresentable {
 
             let clipBounds = scrollView.contentView.bounds
             let topInContainer = max(0, clipBounds.minY - textView.textContainerInset.height)
-            let probeRect = NSRect(x: 0, y: topInContainer, width: max(textContainer.containerSize.width, 1), height: 1)
-            let glyphRange = layoutManager.glyphRange(forBoundingRect: probeRect, in: textContainer)
+            let viewportRect = NSRect(
+                x: 0,
+                y: topInContainer,
+                width: max(textContainer.containerSize.width, 1),
+                height: max(clipBounds.height, 1)
+            )
+            // allowsNonContiguousLayout 开启时，直接查询尚未布局的底部矩形可能返回文档
+            // 开头的 glyph。先保证当前视口已布局，再取第一个可见字符作为锚点。
+            layoutManager.ensureLayout(forBoundingRect: viewportRect, in: textContainer)
+            let glyphRange = layoutManager.glyphRange(forBoundingRect: viewportRect, in: textContainer)
             guard glyphRange.location != NSNotFound, glyphRange.length > 0 else { return }
             let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
             guard characterRange.location != NSNotFound else { return }
