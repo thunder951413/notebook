@@ -194,6 +194,19 @@ extension NotebookTests {
             remoteIndex: RemoteNoteIndex(generatedAt: .now, deviceID: "remote", entries: [matching])
         ))
 
+        XCTAssertEqual(
+            RemoteNotePublicationGuard.rejection(
+                localEntry: local,
+                remoteIndex: RemoteNoteIndex(
+                    generatedAt: .now,
+                    deviceID: "remote",
+                    entries: [matching, newer, divergent]
+                )
+            ),
+            .remoteVersionIsNewer(5),
+            "all duplicate rows must participate in overwrite protection"
+        )
+
         let deletedAt = Date(timeIntervalSince1970: 1_700_000_000)
         XCTAssertEqual(
             RemoteNotePublicationGuard.rejection(
@@ -211,6 +224,41 @@ extension NotebookTests {
             ),
             .remotelyDeleted(deletedAt)
         )
+    }
+
+    func testMalformedRemoteIndexIsNormalizedWithoutTrapping() {
+        let noteID = UUID()
+        let deletedNoteID = UUID()
+        let old = RemoteNoteIndexEntry(noteID: noteID, version: 2, contentHash: "old", historyCount: 2)
+        let newest = RemoteNoteIndexEntry(noteID: noteID, version: 3, contentHash: "new", historyCount: 3)
+        let deletedEntry = RemoteNoteIndexEntry(noteID: deletedNoteID, version: 8, contentHash: "stale", historyCount: 8)
+        let earlierDeletion = RemoteDeletedEntry(
+            noteID: deletedNoteID,
+            deletedAt: Date(timeIntervalSince1970: 100),
+            deletedByDeviceID: "a"
+        )
+        let latestDeletion = RemoteDeletedEntry(
+            noteID: deletedNoteID,
+            deletedAt: Date(timeIntervalSince1970: 200),
+            deletedByDeviceID: "b"
+        )
+
+        let normalization = RemoteNoteIndex(
+            generatedAt: .now,
+            deviceID: "remote",
+            entries: [old, deletedEntry, newest, old],
+            deletedEntries: [earlierDeletion, latestDeletion]
+        ).normalizedForSafety()
+
+        XCTAssertTrue(normalization.requiresRepair)
+        XCTAssertEqual(normalization.duplicateEntryNoteIDs, Set([noteID]))
+        XCTAssertEqual(normalization.duplicateDeletedNoteIDs, Set([deletedNoteID]))
+        XCTAssertEqual(normalization.entryDeletionConflictNoteIDs, Set([deletedNoteID]))
+        XCTAssertEqual(normalization.index.entries.count, 1)
+        XCTAssertEqual(normalization.index.entries.first?.version, 3)
+        XCTAssertEqual(normalization.index.entries.first?.contentHash, "new")
+        XCTAssertEqual(normalization.index.deletedEntries.count, 1)
+        XCTAssertEqual(normalization.index.deletedEntries.first?.deletedAt, latestDeletion.deletedAt)
     }
 
     private func runShell(_ command: String) throws {

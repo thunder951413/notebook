@@ -61,17 +61,22 @@ enum RemoteNotePublicationGuard {
         remoteIndex: RemoteNoteIndex?
     ) -> Rejection? {
         guard let remoteIndex else { return nil }
-        if let deletion = remoteIndex.deletedEntries.first(where: { $0.noteID == localEntry.noteID }) {
+        if let deletion = remoteIndex.deletedEntries
+            .filter({ $0.noteID == localEntry.noteID })
+            .max(by: { $0.deletedAt < $1.deletedAt }) {
             return .remotelyDeleted(deletion.deletedAt)
         }
-        guard let remoteEntry = remoteIndex.entries.first(where: { $0.noteID == localEntry.noteID }) else {
+        let remoteEntries = remoteIndex.entries.filter { $0.noteID == localEntry.noteID }
+        guard !remoteEntries.isEmpty else {
             return nil
         }
-        if remoteEntry.version > localEntry.version {
-            return .remoteVersionIsNewer(remoteEntry.version)
+        if let newestRemoteVersion = remoteEntries.map(\.version).max(),
+           newestRemoteVersion > localEntry.version {
+            return .remoteVersionIsNewer(newestRemoteVersion)
         }
-        if remoteEntry.version == localEntry.version,
-           remoteEntry.contentHash != localEntry.contentHash {
+        if remoteEntries.contains(where: {
+            $0.version == localEntry.version && $0.contentHash != localEntry.contentHash
+        }) {
             return .sameVersionHasDifferentContent
         }
         return nil

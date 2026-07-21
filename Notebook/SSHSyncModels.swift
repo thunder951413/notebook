@@ -22,6 +22,95 @@ struct RemoteNoteIndex: Codable {
     }
 }
 
+/// A remote index is mutable shared state and older clients or interrupted
+/// publications may leave duplicate rows behind.  Keep normalization explicit
+/// instead of relying on `Dictionary(uniqueKeysWithValues:)`, which traps on
+/// malformed remote input.
+struct RemoteNoteIndexNormalization {
+    let index: RemoteNoteIndex
+    let duplicateEntryNoteIDs: Set<UUID>
+    let duplicateDeletedNoteIDs: Set<UUID>
+    let entryDeletionConflictNoteIDs: Set<UUID>
+
+    var affectedNoteIDs: Set<UUID> {
+        duplicateEntryNoteIDs
+            .union(duplicateDeletedNoteIDs)
+            .union(entryDeletionConflictNoteIDs)
+    }
+
+    var requiresRepair: Bool { !affectedNoteIDs.isEmpty }
+}
+
+extension RemoteNoteIndex {
+    func normalizedForSafety() -> RemoteNoteIndexNormalization {
+        var entriesByID: [UUID: RemoteNoteIndexEntry] = [:]
+        var duplicateEntryNoteIDs = Set<UUID>()
+        for entry in entries {
+            if let existing = entriesByID[entry.noteID] {
+                duplicateEntryNoteIDs.insert(entry.noteID)
+                entriesByID[entry.noteID] = Self.preferred(existing, entry)
+            } else {
+                entriesByID[entry.noteID] = entry
+            }
+        }
+
+        var deletedByID: [UUID: RemoteDeletedEntry] = [:]
+        var duplicateDeletedNoteIDs = Set<UUID>()
+        for deletion in deletedEntries {
+            if let existing = deletedByID[deletion.noteID] {
+                duplicateDeletedNoteIDs.insert(deletion.noteID)
+                deletedByID[deletion.noteID] = Self.preferred(existing, deletion)
+            } else {
+                deletedByID[deletion.noteID] = deletion
+            }
+        }
+
+        // A published tombstone always wins over an entry. This is the same
+        // resurrection-prevention rule used by the normal publisher.
+        let entryDeletionConflictNoteIDs = Set(entriesByID.keys).intersection(deletedByID.keys)
+        for noteID in deletedByID.keys {
+            entriesByID.removeValue(forKey: noteID)
+        }
+
+        return RemoteNoteIndexNormalization(
+            index: RemoteNoteIndex(
+                generatedAt: generatedAt,
+                deviceID: deviceID,
+                entries: entriesByID.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString },
+                deletedEntries: deletedByID.values.sorted { $0.noteID.uuidString < $1.noteID.uuidString }
+            ),
+            duplicateEntryNoteIDs: duplicateEntryNoteIDs,
+            duplicateDeletedNoteIDs: duplicateDeletedNoteIDs,
+            entryDeletionConflictNoteIDs: entryDeletionConflictNoteIDs
+        )
+    }
+
+    private static func preferred(
+        _ lhs: RemoteNoteIndexEntry,
+        _ rhs: RemoteNoteIndexEntry
+    ) -> RemoteNoteIndexEntry {
+        if lhs.version != rhs.version {
+            return lhs.version > rhs.version ? lhs : rhs
+        }
+        if lhs.historyCount != rhs.historyCount {
+            return lhs.historyCount > rhs.historyCount ? lhs : rhs
+        }
+        // Stable tie-breaker makes every device repair the same malformed
+        // index. The note payload remains authoritative during the pull.
+        return lhs.contentHash >= rhs.contentHash ? lhs : rhs
+    }
+
+    private static func preferred(
+        _ lhs: RemoteDeletedEntry,
+        _ rhs: RemoteDeletedEntry
+    ) -> RemoteDeletedEntry {
+        if lhs.deletedAt != rhs.deletedAt {
+            return lhs.deletedAt > rhs.deletedAt ? lhs : rhs
+        }
+        return lhs.deletedByDeviceID >= rhs.deletedByDeviceID ? lhs : rhs
+    }
+}
+
 struct RemoteNoteIndexEntry: Codable {
     let noteID: UUID
     let version: Int64

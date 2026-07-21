@@ -953,7 +953,7 @@ final class SSHSyncManager: Sendable {
             let finalAssetsManifestHash = remoteManifestBundle.payloadHash
             let finalAssetsManifestPayload = remoteManifestBundle.payload
 
-            guard let remoteIndex = remoteIndexBundle.index else {
+            guard let downloadedRemoteIndex = remoteIndexBundle.index else {
                 // index.json 不存在视为空仓库，不做任何拉取
                 // 但仍需处理本地已有笔记的补充附件下载
                 Logger.shared.log(.storage, .info, "[SSHSync] 远程 index.json 不存在，视为空仓库")
@@ -984,6 +984,16 @@ final class SSHSyncManager: Sendable {
                 return []
             }
 
+            let normalization = downloadedRemoteIndex.normalizedForSafety()
+            let remoteIndex = normalization.index
+            if normalization.requiresRepair {
+                Logger.shared.log(
+                    .storage,
+                    .warn,
+                    "[SSHSync] 远程索引包含重复或冲突记录，已安全归一化：\(normalization.affectedNoteIDs.count) 条"
+                )
+            }
+
             let didRemoteIndexChange = remoteIndexBundle.payloadHash == nil || remoteIndexBundle.payloadHash != cachedSyncState?.noteIndexHash
 
             // Tombstones are idempotent and must also be applied when a local
@@ -1000,7 +1010,10 @@ final class SSHSyncManager: Sendable {
                 .filter { entry in
                     guard !remoteDeletedIDs.contains(entry.noteID) else { return false }
                     let syncState = try? fetchSyncState(noteID: entry.noteID, context: context)
-                    return RemoteNoteFetchPolicy.shouldFetch(
+                    // Duplicate metadata cannot be trusted even when the cache
+                    // hash is unchanged. Download its single authoritative note
+                    // payload once, never one task per duplicate index row.
+                    return normalization.duplicateEntryNoteIDs.contains(entry.noteID) || RemoteNoteFetchPolicy.shouldFetch(
                         isLocallyPresent: localNoteIDs.contains(entry.noteID),
                         didRemoteIndexChange: didRemoteIndexChange,
                         remoteVersion: entry.version,
@@ -1034,6 +1047,25 @@ final class SSHSyncManager: Sendable {
             )
             let results = syncOutcome.results
             let missingRemoteNoteIDs = syncOutcome.missingRemoteNoteIDs
+
+            if normalization.requiresRepair {
+                do {
+                    // The publisher re-downloads the current index while holding
+                    // the cross-device write lock, normalizes it again, and then
+                    // atomically replaces the catalog. Note payloads are untouched.
+                    try await uploadRemoteIndex(
+                        entries: remoteIndex.entries,
+                        deletedEntries: remoteIndex.deletedEntries,
+                        config: config,
+                        controlPath: controlPath
+                    )
+                    finalNoteIndexHash = nil
+                    finalNoteIndexPayload = nil
+                    Logger.shared.log(.storage, .info, "[SSHSync] 远程重复索引记录自愈完成")
+                } catch {
+                    Logger.shared.log(.storage, .error, "[SSHSync] 远程重复索引记录自愈失败：\(error.localizedDescription)")
+                }
+            }
 
             if !missingRemoteNoteIDs.isEmpty {
                 do {
@@ -1116,7 +1148,10 @@ final class SSHSyncManager: Sendable {
                 config: config,
                 controlPath: controlPath
             )
-            let downloadMap = Dictionary(uniqueKeysWithValues: downloads.map { ($0.noteID, $0) })
+            var downloadMap: [UUID: RemoteNotePayloadDownload] = [:]
+            for download in downloads {
+                downloadMap[download.noteID] = download
+            }
 
             for noteID in batchNoteIDs {
                 guard let download = downloadMap[noteID] else { continue }
@@ -1167,7 +1202,8 @@ final class SSHSyncManager: Sendable {
         controlPath: String?
     ) async throws -> [RemoteNotePayloadDownload] {
         try await withThrowingTaskGroup(of: RemoteNotePayloadDownload.self) { group in
-            for noteID in noteIDs {
+            var scheduledNoteIDs = Set<UUID>()
+            for noteID in noteIDs where scheduledNoteIDs.insert(noteID).inserted {
                 group.addTask {
                     do {
                         let payload = try await self.downloadRemoteNotePayload(
@@ -1233,7 +1269,10 @@ final class SSHSyncManager: Sendable {
             return
         }
         let deletedNoteIDs = Set(try BlockDocumentNoteVersionStore.deletedTombstones(context: context).map(\.noteID))
-        var merged = Dictionary(uniqueKeysWithValues: localPositions.map { ($0.noteID, $0) })
+        var merged: [UUID: NoteReadingPosition] = [:]
+        for position in localPositions where NoteReadingPosition.wins(position, over: merged[position.noteID]) {
+            merged[position.noteID] = position
+        }
         for position in remoteEnvelope?.positions ?? []
         where !deletedNoteIDs.contains(position.noteID) && NoteReadingPosition.wins(position, over: merged[position.noteID]) {
             merged[position.noteID] = position
@@ -1340,6 +1379,18 @@ final class SSHSyncManager: Sendable {
         controlPath: String? = nil
     ) async throws -> NoteSyncMergeResult {
         let envelope = try JSONDecoder().decode(VersionedNoteSyncEnvelope.self, from: payload)
+        guard envelope.noteID == noteID else {
+            Logger.shared.log(
+                .storage,
+                .error,
+                "[SSHSync] 远程笔记文件身份不匹配：expected=\(noteID.uuidString) actual=\(envelope.noteID.uuidString)"
+            )
+            throw NSError(
+                domain: "SSHSync",
+                code: -2022,
+                userInfo: [NSLocalizedDescriptionKey: "远程笔记文件与索引标识不一致，已停止导入以防写错笔记"]
+            )
+        }
 
         try await downloadAssetsForNote(
             envelope: envelope,
@@ -1442,7 +1493,11 @@ final class SSHSyncManager: Sendable {
         )
 
         let current = try? await downloadRemoteIndexBundle(config: config, controlPath: controlPath).index
-        var mergedEntries = Dictionary(uniqueKeysWithValues: (current?.entries ?? []).map { ($0.noteID, $0) })
+        let normalizedCurrent = current?.normalizedForSafety().index
+        var mergedEntries: [UUID: RemoteNoteIndexEntry] = [:]
+        for entry in normalizedCurrent?.entries ?? [] {
+            mergedEntries[entry.noteID] = entry
+        }
         for entry in entries {
             if let existing = mergedEntries[entry.noteID] {
                 if existing.version > entry.version { continue }
@@ -1453,7 +1508,10 @@ final class SSHSyncManager: Sendable {
             }
             mergedEntries[entry.noteID] = entry
         }
-        var mergedDeleted = Dictionary(uniqueKeysWithValues: (current?.deletedEntries ?? []).map { ($0.noteID, $0) })
+        var mergedDeleted: [UUID: RemoteDeletedEntry] = [:]
+        for deletion in normalizedCurrent?.deletedEntries ?? [] {
+            mergedDeleted[deletion.noteID] = deletion
+        }
         for deleted in deletedEntries {
             if let existing = mergedDeleted[deleted.noteID], existing.deletedAt > deleted.deletedAt {
                 continue
@@ -2094,7 +2152,15 @@ final class SSHSyncManager: Sendable {
                 config: config,
                 controlPath: controlPath
             ).manifest?.entries ?? []
-            var entriesByPath = Dictionary(uniqueKeysWithValues: remoteEntries.map { ($0.relativePath, $0) })
+            var entriesByPath: [String: AssetsManifestEntry] = [:]
+            for entry in remoteEntries {
+                if let existing = entriesByPath[entry.relativePath],
+                   existing.contentHash == entry.contentHash,
+                   existing.size >= entry.size {
+                    continue
+                }
+                entriesByPath[entry.relativePath] = entry
+            }
             entriesByPath = entriesByPath.filter { relativePath, _ in
                 guard let component = relativePath.split(separator: "/", maxSplits: 1).first,
                       let noteID = UUID(uuidString: String(component)) else {
