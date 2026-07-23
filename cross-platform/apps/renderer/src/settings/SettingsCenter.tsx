@@ -123,7 +123,7 @@ export function SettingsCenter({ theme, syncState, syncError, currentPageTitle, 
           {page === 'services' && <>
             <SettingsSection title="SSH/SFTP 同步" description="网页、Electron 桌面版和 Android 共用同一套 SSH JSON 仓库。">
               <div className="sync-settings-form">
-                <Switch checked={syncSettings.enabled} onChange={(_, data) => setSyncSettings((current) => ({ ...current, enabled: data.checked }))} label="启用自动同步（关闭后仍可手动同步）" />
+                <Switch aria-label="启用自动同步" checked={syncSettings.enabled} onChange={(_, data) => setSyncSettings((current) => ({ ...current, enabled: data.checked }))} label="启用自动同步（关闭后仍可手动同步）" />
                 {!desktop && <div className="sync-settings-result">浏览器通过 127.0.0.1:8787 的本机 Python SSH 助手连接；使用 ./ctl start 会同时启动它。密码仅保存在当前标签会话。</div>}
                   <div className="sync-ssh-grid">
                     <label><span>SSH 服务器</span><Input value={sshSettings.host} onChange={(_, data) => setSshSettings((current) => ({ ...current, host: data.value }))} placeholder="服务器 IP" aria-label="SSH 服务器" /></label>

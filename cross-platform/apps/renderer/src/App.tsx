@@ -195,7 +195,9 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       const context = [{ id: currentPage.id, title: currentPage.title, excerpt: currentPage.preview }, ...visibleSemantic, ...matches.map((page) => ({ id: page.id, title: page.title, excerpt: page.preview }))].filter((page, index, all) => all.findIndex((item) => item.id === page.id) === index).slice(0, 8)
       return streamNotebookAnswer(normalized, context, (token) => setAiAnswer((current) => current + token))
     }).then(() => setAiState('idle')).catch((error: unknown) => {
-      setAiAnswer(error instanceof Error ? error.message : 'AI 服务暂时不可用')
+      setAiAnswer(error instanceof TypeError || (error instanceof Error && error.message === 'Failed to fetch')
+        ? 'AI 服务暂时不可用。请确认本机 AI 服务已启动，或稍后再试。'
+        : error instanceof Error ? error.message : 'AI 服务暂时不可用，请稍后再试。')
       setAiState('error')
     })
   }
