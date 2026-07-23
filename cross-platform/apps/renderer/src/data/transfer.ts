@@ -4,6 +4,8 @@ import type { NotebookDataBundle } from '@notebook/domain'
 import {
   importLegacyBundle,
   importDocumentMigrationPackage,
+  markdownToEditorCache,
+  migrateLegacyPageDocument,
   libraryEnvelopeSchema,
   migratedDocumentSchema,
   migrationManifestSchema,
@@ -33,6 +35,15 @@ function expandFiles(files: ImportFile[]): ImportFile[] {
 }
 
 export interface DecodedImport { bundle: NotebookDataBundle; assetContents: Map<string, Uint8Array> }
+
+function documentPlainText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.map(documentPlainText).join(' ')
+  if (!value || typeof value !== 'object') return ''
+  const node = value as { type?: unknown; text?: unknown; content?: unknown }
+  if (typeof node.text === 'string') return node.text
+  return documentPlainText(node.content)
+}
 
 function verified(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>): DecodedImport {
   for (const asset of bundle.assets) {
@@ -77,7 +88,31 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
   if (current) {
     const value = JSON.parse(strFromU8(current.data)) as { schemaVersion?: number; bundle?: NotebookDataBundle }
     if (value.schemaVersion !== 1 || !value.bundle) throw new Error('不支持的 Notebook Next 备份版本')
-    const bundle = { ...value.bundle, revisions: value.bundle.revisions ?? [], comments: value.bundle.comments ?? [] }
+    const changedPageIds = new Set(value.bundle.documents
+      .filter((document) => document.schemaVersion < 3 || document.markdown === undefined)
+      .map((document) => document.pageId))
+    const documents = value.bundle.documents.map(migrateLegacyPageDocument)
+    const documentByPage = new Map(documents.map((document) => [document.pageId, document]))
+    const publicInbox = value.bundle.sections.find((section) => section.id === 'inbox')
+      ?? value.bundle.sections.find((section) => !value.bundle!.notebooks.find((notebook) => notebook.id === section.notebookId)?.locked)
+    const bundle: NotebookDataBundle = {
+      ...value.bundle,
+      pages: value.bundle.pages.map((page) => ({
+        ...page,
+        title: page.title.trim(),
+        preview: documentByPage.get(page.id)?.markdown !== undefined
+          ? documentPlainText(markdownToEditorCache(documentByPage.get(page.id)!.markdown!)).replace(/\s+/g, ' ').trim().slice(0, 240)
+          : page.preview,
+        ...(!page.sectionId && !page.locked && publicInbox ? { sectionId: publicInbox.id } : {}),
+        ...(changedPageIds.has(page.id) ? { syncStatus: 'pending' as const } : {}),
+      })),
+      documents,
+      revisions: (value.bundle.revisions ?? []).map((revision) => ({
+        ...revision,
+        document: migrateLegacyPageDocument(revision.document),
+      })),
+      comments: value.bundle.comments ?? [],
+    }
     const assetContents = new Map(bundle.assets.flatMap((asset) => {
       const file = expanded.find((item) => item.name === `assets/${asset.id}`)
       return file ? [[asset.id, file.data] as const] : []

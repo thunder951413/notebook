@@ -1,5 +1,6 @@
 import type { Asset, Notebook, Page, PageDocument, PageLink, PageRevision, ReadingPosition, Section, Tag, TaskStep, Tombstone } from '@notebook/domain'
 import type { LegacyEncryptedData, LegacyLibraryEnvelope, LegacyNoteEnvelope, LegacyNoteIndex, LegacyReadingPositions, MigratedDocumentPayload, MigrationManifest } from './schema'
+import { migrateLegacyPageDocument } from './markdown'
 
 const appleReferenceDateMs = Date.UTC(2001, 0, 1)
 export const appleReferenceSecondsToIso = (value: number) => new Date(appleReferenceDateMs + value * 1000).toISOString()
@@ -31,9 +32,19 @@ function legacyBlockToTiptap(block: SourceBlock, assetId = (value: string) => va
         content: row.map((cell) => ({ type: 'tableCell', content: [{ type: 'paragraph', content: cell ? [{ type: 'text', text: cell }] : [] }] })),
       })),
     }
-    case 'attachment': return block.asset?.kind === 'image'
-      ? { type: 'image', attrs: { legacyAssetId: assetId(block.asset.id), alt: block.asset.filename, title: block.asset.filename } }
-      : { type: 'attachment', attrs: { legacyAssetId: block.asset ? assetId(block.asset.id) : undefined, filename: block.asset?.filename, mimeType: block.asset?.mimeType } }
+    case 'attachment': {
+      const id = block.asset ? assetId(block.asset.id) : ''
+      return block.asset?.kind === 'image'
+        ? { type: 'image', attrs: { src: `notebook-asset:${id}`, legacyAssetId: id, alt: block.asset.filename, title: block.asset.filename } }
+        : {
+            type: 'paragraph',
+            content: block.asset ? [{
+              type: 'text',
+              text: block.asset.filename,
+              marks: [{ type: 'link', attrs: { href: `notebook-asset:${id}` } }],
+            }] : [],
+          }
+    }
     case 'code': return { type: 'codeBlock', content }
     case 'blockquote': return { type: 'blockquote', content: [{ type: 'paragraph', content }] }
     default: return { type: 'paragraph', content }
@@ -87,15 +98,16 @@ export function importLegacyNote(envelope: LegacyNoteEnvelope, workspaceId: stri
     legacyVersion: metadata.version,
     legacyMetadata: { ...(metadata as unknown as Record<string, unknown>), syncState: envelope.syncState },
   }
+  const legacyDocument: PageDocument = {
+    pageId: page.id,
+    schemaVersion: 1,
+    tiptapJson: legacyDocumentToTiptap(snapshot.document),
+    legacySource: snapshot.document as unknown as Record<string, unknown>,
+    updatedAt,
+  }
   return {
     page,
-    document: {
-      pageId: page.id,
-      schemaVersion: 1,
-      tiptapJson: legacyDocumentToTiptap(snapshot.document),
-      legacySource: snapshot.document as unknown as Record<string, unknown>,
-      updatedAt,
-    },
+    document: migrateLegacyPageDocument(legacyDocument),
     assets: snapshot.assets.flatMap(({ reference, relativeFilePath, sidecarRelativePaths }) => [{
       id: reference.id, pageId: page.id, kind: reference.kind, filename: reference.filename, mimeType: reference.mimeType,
       width: reference.width, height: reference.height, duration: reference.duration, sidecarPaths: reference.sidecarFiles,
@@ -223,7 +235,7 @@ export function importLegacyBundle(input: { library: LegacyLibraryEnvelope; note
     if (!snapshot?.document?.blocks) return []
     return [{
       id: entry.id, pageId: note.noteID, createdAt: appleReferenceSecondsToIso(entry.recordedAt), reason: 'import' as const,
-      document: { pageId: note.noteID, schemaVersion: 1, tiptapJson: legacyDocumentToTiptap(snapshot.document), legacySource: snapshot.document as unknown as Record<string, unknown>, updatedAt: appleReferenceSecondsToIso(entry.updatedAt) },
+      document: migrateLegacyPageDocument({ pageId: note.noteID, schemaVersion: 1, tiptapJson: legacyDocumentToTiptap(snapshot.document), legacySource: snapshot.document as unknown as Record<string, unknown>, updatedAt: appleReferenceSecondsToIso(entry.updatedAt) }),
     }]
   }))
   return {
@@ -286,7 +298,7 @@ export function importDocumentMigrationPackage(manifest: MigrationManifest, docu
       important: note.todoIsImportant ?? false, syncStatus: 'local', legacyVersion: note.version, locked,
       legacyMetadata: { ...(note as unknown as Record<string, unknown>), ...(privateSectionId ? { legacyEncryptedFolderId: privateSectionId } : {}) },
     })
-    pageDocuments.push({ pageId: note.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: document.blocks.map((block) => legacyBlockToTiptap(block, importedAssetId)) }, legacySource: document as unknown as Record<string, unknown>, updatedAt: note.updatedAt })
+    pageDocuments.push(migrateLegacyPageDocument({ pageId: note.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: document.blocks.map((block) => legacyBlockToTiptap(block, importedAssetId)) }, legacySource: document as unknown as Record<string, unknown>, updatedAt: note.updatedAt }))
     for (const block of document.blocks) if (block.asset) assets.push({
       id: importedAssetId(block.asset.id), pageId: note.id, kind: block.asset.kind, filename: block.asset.filename.split('/').pop() ?? block.asset.filename,
       mimeType: block.asset.mimeType, width: block.asset.width ?? undefined, height: block.asset.height ?? undefined,

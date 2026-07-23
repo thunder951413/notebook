@@ -4,7 +4,7 @@ import { build as buildPlist } from 'plist'
 import type { NotebookDataBundle } from '@notebook/domain'
 import { decodeImport, encodeExport } from './transfer'
 
-test('imports the macOS document migration package without dropping rich source data or assets', async () => {
+test('imports the macOS document migration package as canonical Markdown without dropping assets', async () => {
   const noteId = '11111111-1111-4111-8111-111111111111'
   const folderId = '22222222-2222-4222-8222-222222222222'
   const tagId = '33333333-3333-4333-8333-333333333333'
@@ -26,7 +26,10 @@ test('imports the macOS document migration package without dropping rich source 
   const decoded = await decodeImport([{ name: 'legacy.zip', data: zip }], 'workspace-a')
   const migratedAssetId = `legacy-asset:${noteId}:image`
   expect(decoded.bundle.pages[0]).toMatchObject({ id: noteId, kind: 'task', dueAt: '2026-07-30T00:00:00Z', important: true, legacyVersion: 9 })
-  expect(decoded.bundle.documents[0]?.legacySource).toMatchObject({ source: 'NotebookBlockDocument' })
+  expect(decoded.bundle.documents[0]).toMatchObject({ schemaVersion: 3, tiptapJson: { type: 'doc', content: [] } })
+  expect(decoded.bundle.documents[0]?.markdown).toContain('**Styled**')
+  expect(decoded.bundle.documents[0]?.markdown).toContain(`notebook-asset:${migratedAssetId}`)
+  expect(decoded.bundle.documents[0]?.legacySource).toBeUndefined()
   expect(decoded.bundle.assets[0]).toMatchObject({ id: migratedAssetId, filename: 'image_photo.png', width: 120 })
   expect(decoded.assetContents.get(migratedAssetId)).toEqual(new Uint8Array([1, 2, 3]))
   expect(decoded.bundle.taskSteps[0]?.id).toBe(stepId)
@@ -54,7 +57,7 @@ test('restores privacy mappings from the old macOS configuration files', async (
   expect(decoded.bundle.pages[0]).toMatchObject({ id: noteId, sectionId: folderId, locked: true })
 })
 
-test('complete backup round trip preserves history tombstones privacy and attachment bytes', async () => {
+test('complete backup restore canonicalizes legacy bodies and preserves history tombstones privacy and attachment bytes', async () => {
   const workspaceId = '00000000-0000-4000-8000-000000000001'
   const notebookId = '10000000-0000-4000-8000-000000000001'
   const sectionId = '20000000-0000-4000-8000-000000000001'
@@ -76,7 +79,24 @@ test('complete backup round trip preserves history tombstones privacy and attach
   const bytes = new Uint8Array([137, 80, 78, 71])
   const archive = encodeExport(bundle, new Map([[assetId, bytes]]))
   const decoded = await decodeImport([{ name: 'backup.zip', data: archive }], workspaceId)
-  expect(decoded.bundle).toEqual(bundle)
+  expect(decoded.bundle).toMatchObject({
+    notebooks: bundle.notebooks,
+    sections: bundle.sections,
+    assets: bundle.assets,
+    tombstones: bundle.tombstones,
+  })
+  expect(decoded.bundle.pages[0]).toMatchObject({ id: pageId, locked: true, syncStatus: 'pending' })
+  expect(decoded.bundle.documents[0]).toMatchObject({
+    pageId,
+    schemaVersion: 3,
+    markdown: '当前正文',
+    tiptapJson: { type: 'doc', content: [] },
+  })
+  expect(decoded.bundle.revisions[0]?.document).toMatchObject({
+    schemaVersion: 3,
+    markdown: '历史正文',
+    tiptapJson: { type: 'doc', content: [] },
+  })
   expect(decoded.assetContents.get(assetId)).toEqual(bytes)
 })
 

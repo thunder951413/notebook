@@ -216,6 +216,7 @@ button { color: inherit; }
 .inline-image-node { display: grid; justify-items: start; max-width: 100%; margin: 18px 0; }
 .inline-image-node img { display: block; max-width: min(100%, 920px); height: auto; border-radius: 8px; box-shadow: 0 1px 5px rgba(30, 20, 35, .12); }
 .inline-image-placeholder { display: inline-flex; min-height: 72px; align-items: center; padding: 12px 18px; color: #746d77; border: 1px dashed #cfc6d4; border-radius: 8px; background: #faf8fb; }
+.inline-image-placeholder[hidden] { display: none; }
 .task-detail { width: min(820px, calc(100% - 52px)); margin: 0 auto; padding: 38px 20px 45vh; }
 .task-heading { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: start; gap: 14px; }
 .task-heading h1 { margin: 0; font-size: 30px; line-height: 1.2; }

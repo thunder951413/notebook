@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { expect, test } from 'vitest'
-import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, readingPositionsSchema, verifyPrivacyKeyCheck, type MarkdownNoteEnvelope, type PrivacyKeyCheck } from './index'
+import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, legacyTiptapToCanonicalMarkdown, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, normalizeLegacyMarkdownSyntax, readingPositionsSchema, verifyPrivacyKeyCheck, type MarkdownNoteEnvelope, type PrivacyKeyCheck } from './index'
 import type { NotebookDataBundle } from '@notebook/domain'
 
 test('parses the shared macOS/Android fixture and preserves identity and rich blocks', async () => {
@@ -11,8 +11,9 @@ test('parses the shared macOS/Android fixture and preserves identity and rich bl
   expect(imported.page.id).toBe('11111111-1111-4111-8111-111111111111')
   expect(imported.page.title).toBe('Fixture Note')
   expect(imported.page.legacyVersion).toBe(7)
-  expect(imported.document.tiptapJson).toMatchObject({ type: 'doc' })
-  expect((imported.document.tiptapJson.content as unknown[])).toHaveLength(5)
+  expect(imported.document).toMatchObject({ schemaVersion: 3, tiptapJson: { type: 'doc', content: [] } })
+  expect(imported.document.markdown).toContain('Fixture')
+  expect(imported.document.markdown).toContain('notebook-asset:asset-fixture-1')
   expect(imported.assets[0]).toMatchObject({ id: 'asset-fixture-1', kind: 'image' })
   expect(imported.taskSteps[0]).toMatchObject({ text: 'Fixture step', checked: false })
   expect(imported.tagIds).toEqual(['33333333-3333-4333-8333-333333333333'])
@@ -89,6 +90,54 @@ test('rebuilds from legacy blocks when an Android edit leaves stale Tiptap conte
   expect(result.content.flatMap((node) => node.content?.map((child) => child.text) ?? [])).toEqual(['Web original', 'Android edit'])
 })
 
+test('normalizes unambiguous Markdown pasted into a legacy plain paragraph', () => {
+  const markdown = legacyTiptapToCanonicalMarkdown({
+    type: 'doc',
+    content: [{
+      type: 'paragraph',
+      content: [{
+        type: 'text',
+        text: '# 标题\n\n正文和 **重点**\n\n- 第一项\n- 第二项\n\n[资料] (https://example.com)',
+      }],
+    }],
+  })
+  expect(markdown).toContain('# 标题')
+  expect(markdown).toContain('**重点**')
+  expect(markdown).toContain('- 第一项')
+  expect(markdown).toContain('[资料](https://example.com)')
+})
+
+test('keeps ambiguous dialogue literal and preserves legacy line breaks', () => {
+  const markdown = legacyTiptapToCanonicalMarkdown({
+    type: 'doc',
+    content: [{
+      type: 'paragraph',
+      content: [{ type: 'text', text: '- 这只是单行对白\n下一行仍属于正文' }],
+    }],
+  })
+  expect(markdown).toContain('\\- 这只是单行对白')
+  expect(markdown).not.toContain('\n- 这只是单行对白')
+  const rendered = JSON.stringify(markdownToEditorCache(markdown))
+  expect(rendered).toContain('hardBreak')
+  expect(rendered).toContain('下一行仍属于正文')
+})
+
+test('repairs only safe legacy link spellings and removes unsupported underline marks', () => {
+  expect(normalizeLegacyMarkdownSyntax('[页面] (https://example.com)')).toBe('[页面](https://example.com)')
+  expect(normalizeLegacyMarkdownSyntax('[页面]([https://example.com](https://example.com))')).toBe('[页面](https://example.com)')
+  expect(normalizeLegacyMarkdownSyntax('\\[目录\\](#section)')).toBe('[目录](#section)')
+  expect(normalizeLegacyMarkdownSyntax('\\[空链接\\](#)')).toBe('[空链接](#)')
+  expect(normalizeLegacyMarkdownSyntax('    \\[型号链接\\]("[https://example.com](https://example.com)")')).toBe('[型号链接](https://example.com)')
+  expect(normalizeLegacyMarkdownSyntax('正文\n\n\n&nbsp;\n\n下一段')).toBe('正文\n\n下一段')
+  expect(normalizeLegacyMarkdownSyntax('```\n\n&nbsp;\n```')).toBe('```\n\n&nbsp;\n```')
+  expect(normalizeLegacyMarkdownSyntax('[页面]([https://one.example](https://two.example))')).toContain('[https://one.example]')
+  const markdown = legacyTiptapToCanonicalMarkdown({
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text: '保留正文', marks: [{ type: 'underline' }] }] }],
+  })
+  expect(markdown).toBe('保留正文')
+})
+
 test('imports and re-exports legacy encrypted folders without exposing their pages as ordinary folders', async () => {
   const fixture = async (name: string) => JSON.parse(await readFile(resolve(import.meta.dirname, `../../../../SyncContractFixtures/${name}`), 'utf8'))
   const library = libraryEnvelopeSchema.parse(await fixture('library-envelope.json'))
@@ -144,7 +193,8 @@ test('namespaces page-local asset ids in document migration packages', () => {
     'legacy-asset:22222222-2222-4222-8222-222222222222:asset-1',
   ])
   expect(new Set(imported.assets.map((item) => item.id)).size).toBe(2)
-  expect((imported.documents[0]?.tiptapJson.content as Array<{ attrs: { legacyAssetId: string } }>)[0]?.attrs.legacyAssetId).toBe(imported.assets[0]?.id)
+  expect(imported.documents[0]).toMatchObject({ schemaVersion: 3, tiptapJson: { type: 'doc', content: [] } })
+  expect(imported.documents[0]?.markdown).toContain(`notebook-asset:${imported.assets[0]?.id}`)
 })
 
 test('exports Notebook Next data as an Android-compatible SSH repository without losing Tiptap content', async () => {
@@ -171,7 +221,9 @@ test('exports Notebook Next data as an Android-compatible SSH repository without
   const encoded = await encodeLegacyRepository(bundle, new Map([[assetId, new Uint8Array([1, 2, 3])]]), 'web-device')
   const envelope = noteEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))))
   const imported = importLegacyNote(envelope, workspaceId)
-  expect(imported.document.tiptapJson).toEqual(tiptapJson)
+  expect(imported.document).toMatchObject({ schemaVersion: 3, tiptapJson: { type: 'doc', content: [] } })
+  expect(imported.document.markdown).toContain('## 混排页面')
+  expect(imported.document.markdown).toContain(`notebook-asset:${assetId}`)
   expect(envelope.history).toHaveLength(120)
   expect((envelope.history[0]?.snapshot as { document: { notebookNextTiptap: unknown } }).document.notebookNextTiptap).toEqual(revisions[0]?.document.tiptapJson)
   expect(encoded.files.get(`attachments/${pageId}/${assetId}-image.png`)).toEqual(new Uint8Array([1, 2, 3]))

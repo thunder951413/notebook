@@ -1,4 +1,5 @@
 import 'fake-indexeddb/auto'
+import Dexie from 'dexie'
 import { afterEach, expect, test } from 'vitest'
 import type { Page, PageDocument } from '@notebook/domain'
 import { DexieNotebookRepository, NotebookRendererDatabase } from './index'
@@ -34,6 +35,76 @@ test('atomically saves and loads a page with its document', async () => {
   await repository.savePage(value, document)
   expect(await repository.getPage(value.id)).toEqual(value)
   expect(await repository.getPageDocument(value.id)).toEqual(document)
+})
+
+test('upgrades legacy rich-text bodies to canonical Markdown with a recovery revision and sync baseline', async () => {
+  const name = `legacy-upgrade-${crypto.randomUUID()}`
+  const legacy = new Dexie(name)
+  legacy.version(9).stores({
+    notebooks: 'id, workspaceId, sortOrder, updatedAt, deletedAt',
+    sections: 'id, notebookId, parentSectionId, sortOrder, updatedAt, deletedAt',
+    pages: 'id, workspaceId, sectionId, kind, updatedAt, deletedAt, syncStatus, *title',
+    documents: 'pageId, updatedAt',
+    tags: 'id, workspaceId, name, updatedAt, deletedAt',
+    taskSteps: 'id, pageId, sortOrder',
+    pageLinks: 'id, workspaceId, sourcePageId, targetPageId, kind',
+    knowledgeEntities: 'id, workspaceId, name, type, *sourcePageIds, updatedAt',
+    knowledgeRelations: 'id, workspaceId, sourceEntityId, targetEntityId, type, evidencePageId, updatedAt',
+    assets: 'id, pageId, kind, checksum',
+    pageTags: '[pageId+tagId], pageId, tagId',
+    readingPositions: 'id, pageId, updatedAt',
+    tombstones: 'id, workspaceId, entityType, entityId, deletedAt',
+    syncOutbox: 'id, workspaceId, createdAt, [entityType+entityId]',
+    syncCursors: 'workspaceId',
+    syncVersions: 'id',
+    assetContents: 'id',
+    revisions: 'id, pageId, createdAt',
+    comments: 'id, workspaceId, pageId, createdAt, resolvedAt',
+    drafts: 'pageId, createdAt',
+  })
+  await legacy.open()
+  const value = page('legacy-page', 'Legacy body')
+  const document: PageDocument = {
+    pageId: value.id,
+    schemaVersion: 1,
+    tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '# 标题\n\n[资料] (https://example.com)' }] }] },
+    legacySource: { source: 'NotebookBlockDocument' },
+    updatedAt: value.updatedAt,
+  }
+  await legacy.table('pages').put(value)
+  await legacy.table('documents').put(document)
+  await legacy.table('revisions').put({
+    id: 'legacy-revision',
+    pageId: value.id,
+    document: {
+      ...document,
+      tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '较早正文' }] }] },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+    createdAt: '2026-01-01T00:00:00.000Z',
+    reason: 'autosave',
+  })
+  legacy.close()
+
+  const db = new NotebookRendererDatabase(name)
+  opened.push(db)
+  await db.open()
+  expect(await db.documents.get(value.id)).toMatchObject({
+    schemaVersion: 3,
+    markdown: '# 标题\n\n[资料](https://example.com)',
+    tiptapJson: { type: 'doc', content: [] },
+  })
+  const revisions = await db.revisions.where('pageId').equals(value.id).toArray()
+  expect(revisions).toHaveLength(1)
+  expect(revisions[0]?.document).toMatchObject({
+    schemaVersion: 3,
+    markdown: '较早正文',
+    tiptapJson: { type: 'doc', content: [] },
+  })
+  expect(await db.pages.get(value.id)).toMatchObject({
+    syncStatus: 'pending',
+    legacyMetadata: { syncBaselineHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+  })
 })
 
 test('coalesces repeated pending changes for the same entity', async () => {
@@ -272,6 +343,26 @@ test('removes consecutive duplicate imported revisions and a revision identical 
     pages: [value], documents: [document('current', 5)], revisions,
   })
   expect((await repository.listRevisions(value.id)).map((item) => item.document.markdown).sort()).toEqual(['A', 'B'])
+})
+
+test('history compaction is idempotent when revisions share a timestamp', async () => {
+  const repository = makeRepository()
+  const value = page('page-same-time-history', 'Same timestamp')
+  const document = (text: string): PageDocument => ({ pageId: value.id, schemaVersion: 3, markdown: text, tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt })
+  const revisions = [
+    { id: 'revision-z', text: 'A' },
+    { id: 'revision-a', text: 'A' },
+    { id: 'revision-y', text: 'B' },
+    { id: 'revision-b', text: 'current' },
+  ].map(({ id, text }) => ({ id, pageId: value.id, document: document(text), createdAt: value.updatedAt, reason: 'import' as const }))
+  const bundle = {
+    notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
+    pages: [value], documents: [document('current')], revisions,
+  }
+  await repository.importData(bundle)
+  const first = await repository.exportData(value.workspaceId)
+  await repository.importData(first)
+  expect((await repository.listRevisions(value.id)).map((item) => item.id).sort()).toEqual(first.revisions.map((item) => item.id).sort())
 })
 
 test('re-import replaces stale attachment children for imported pages', async () => {
