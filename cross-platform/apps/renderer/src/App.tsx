@@ -65,6 +65,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? 'vision')
   const [recentPageIds, setRecentPageIds] = useState<string[]>(() => readRecentPageIds())
   const [mode, setMode] = useState<WorkspaceMode>('document')
+  const [vimEnabled, setVimEnabled] = useState(readVimEnabled)
   const [aiOpen, setAiOpen] = useState(() => readLayout().aiOpen ?? (typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 1301px)').matches))
   const [navOpen, setNavOpen] = useState(() => readLayout().navOpen ?? true)
   const [pagesOpen, setPagesOpen] = useState(() => readLayout().pagesOpen ?? true)
@@ -164,6 +165,9 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   useEffect(() => {
     globalThis.localStorage?.setItem(LAYOUT_KEY, JSON.stringify({ navOpen, pagesOpen, aiOpen, notebookWidth, pageWidth, aiWidth }))
   }, [aiOpen, aiWidth, navOpen, notebookWidth, pageWidth, pagesOpen])
+  useEffect(() => {
+    globalThis.localStorage?.setItem(VIM_MODE_KEY, vimEnabled ? 'true' : 'false')
+  }, [vimEnabled])
 
   useEffect(() => {
     if (window.matchMedia('(max-width: 1180px)').matches) setNavOpen(false)
@@ -469,8 +473,11 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           </div>
           <div className="editor-toolbar">
             <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span><ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
-            {activeArea === 'notes' && hasActivePage ? <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
-              {(Object.keys(modeLabels) as WorkspaceMode[]).map((item) => <Button key={item} className={mode === item ? 'selected' : ''} appearance="subtle" aria-pressed={mode === item} size="small" icon={item === 'document' ? <Edit20Regular /> : <Document20Regular />} onClick={() => setMode(item)}>{modeLabels[item]}</Button>)}
+            {activeArea === 'notes' && hasActivePage ? <div className="editor-mode-controls">
+              <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
+                {(Object.keys(modeLabels) as WorkspaceMode[]).map((item) => <Button key={item} className={mode === item ? 'selected' : ''} appearance="subtle" aria-pressed={mode === item} size="small" title={item === 'document' ? '实时渲染 Markdown' : '查看和编辑原始 Markdown'} icon={item === 'document' ? <Edit20Regular /> : <Document20Regular />} onClick={() => setMode(item)}>{modeLabels[item]}</Button>)}
+              </div>
+              <Button className={`vim-toggle ${vimEnabled ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title="Vim 模式：Esc 普通模式，i 插入模式" onClick={() => setVimEnabled((value) => !value)}>Vim</Button>
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">{activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /><Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) }} /></>}<Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} /><Button appearance="subtle" icon={aiOpen ? <Bot20Filled /> : <Bot20Regular />} aria-label={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} title={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} aria-pressed={aiOpen} onClick={() => setAiOpen((value) => !value)} /></div>
           </div>
@@ -493,11 +500,11 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               onDraft={(json) => stageDocument(currentPage.id, json)}
               onChange={(json) => saveDocument(currentPage.id, json)}
               loadAsset={getAssetContent}
-              saveImage={(file) => saveAsset(currentPage.id, file)}
               forceRestore={restoreToken.startsWith(`${currentPage.id}:`)}
+              vimEnabled={vimEnabled}
             />}
             <Suspense fallback={<ModePlaceholder icon={<Document20Regular />} title="正在加载 Markdown" description="正在准备源码编辑器。" />}>
-              {mode === 'source' && <MarkdownSourceEditor key={currentPage.id} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onDraft={(json) => stageDocument(currentPage.id, json)} onChange={(json) => saveDocument(currentPage.id, json)} />}
+              {mode === 'source' && <MarkdownSourceEditor key={`${currentPage.id}:${vimEnabled}`} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onDraft={(json) => stageDocument(currentPage.id, json)} onChange={(json) => saveDocument(currentPage.id, json)} saveImage={(file) => saveAsset(currentPage.id, file)} vimEnabled={vimEnabled} />}
             </Suspense>
             </>}
           </section>
@@ -575,6 +582,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
 
 const LAYOUT_KEY = 'notebook-layout-v1'
 const RECENT_PAGES_KEY = 'notebook-recent-pages-v1'
+const VIM_MODE_KEY = 'notebook-vim-mode-v1'
 type SavedLayout = { navOpen?: boolean; pagesOpen?: boolean; aiOpen?: boolean; notebookWidth?: number; pageWidth?: number; aiWidth?: number }
 
 function readLayout(): SavedLayout {
@@ -586,6 +594,10 @@ function readRecentPageIds(): string[] {
     const value = JSON.parse(globalThis.localStorage?.getItem(RECENT_PAGES_KEY) ?? '[]') as unknown
     return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string').slice(-12) : []
   } catch { return [] }
+}
+
+function readVimEnabled() {
+  try { return globalThis.localStorage?.getItem(VIM_MODE_KEY) === 'true' } catch { return false }
 }
 
 function PanelResizer({ label, value, min, max, resetValue, onChange, side = 'right' }: { label: string; value: number; min: number; max: number; resetValue: number; onChange: (value: number) => void; side?: 'left' | 'right' }) {

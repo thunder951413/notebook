@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { App } from './App'
 
@@ -32,10 +32,28 @@ test('renders the OneNote-style workspace and editor', async () => {
   const sourceMode = screen.getByRole('button', { name: /^源码$/ })
   expect(markdownMode).toHaveAttribute('aria-pressed', 'true')
   expect(sourceMode).toHaveAttribute('aria-pressed', 'false')
+  expect(screen.queryByRole('toolbar', { name: 'Markdown 源码格式' })).not.toBeInTheDocument()
+  const vimToggle = screen.getByRole('button', { name: 'Vim' })
+  fireEvent.click(vimToggle)
+  expect(vimToggle).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByText('NORMAL')).toBeInTheDocument()
+  fireEvent.keyDown(screen.getByLabelText('页面正文'), { key: '/' })
+  expect(screen.getByRole('search')).toBeInTheDocument()
+  expect(screen.getByLabelText('Vim 搜索')).toBeInTheDocument()
+  fireEvent.keyDown(screen.getByLabelText('Vim 搜索'), { key: 'Escape' })
+  fireEvent.keyDown(screen.getByLabelText('页面正文'), { key: 'i' })
+  expect(screen.getByText('INSERT')).toBeInTheDocument()
+  fireEvent.keyDown(screen.getByLabelText('页面正文'), { key: 'Escape' })
+  expect(screen.getByText('NORMAL')).toBeInTheDocument()
+  fireEvent.click(vimToggle)
   fireEvent.click(sourceMode)
   expect(sourceMode).toHaveAttribute('aria-pressed', 'true')
   expect(markdownMode).toHaveAttribute('aria-pressed', 'false')
+  expect(await screen.findByRole('toolbar', { name: 'Markdown 源码格式' })).toBeInTheDocument()
+  fireEvent.click(within(screen.getByRole('toolbar', { name: 'Markdown 源码格式' })).getByRole('button', { name: '粗体' }))
+  await waitFor(() => expect(container.querySelector('.cm-content')?.textContent).toContain('**粗体文字**'))
   fireEvent.click(markdownMode)
+  expect(screen.queryByRole('toolbar', { name: 'Markdown 源码格式' })).not.toBeInTheDocument()
   const attachmentButton = screen.getByRole('button', { name: /^附件/ })
   const trashButton = screen.getByRole('button', { name: '移到回收站' })
   expect(attachmentButton.compareDocumentPosition(trashButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()

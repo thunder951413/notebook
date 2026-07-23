@@ -102,10 +102,13 @@ button { color: inherit; }
 .breadcrumb-title-input.fui-Input { min-height: 30px; border: 0; background: transparent; box-shadow: none; font-weight: 600; }
 .breadcrumb-title-input.fui-Input::after { display: none; }
 .breadcrumb-title-input input { padding-inline: 4px; text-overflow: ellipsis; }
+.editor-mode-controls { display: flex; align-items: center; gap: 5px; }
 .view-switcher { display: flex; align-items: center; padding: 2px; border: 1px solid #e5dfe8; border-radius: 6px; background: #f7f4f8; }
 .view-switcher .fui-Button { flex: none; min-width: auto; white-space: nowrap; }
 .view-switcher .fui-Button.selected { color: white; background: #1676c2; }
 .view-switcher .fui-Button.selected:hover { color: white; background: #1269ad; }
+.vim-toggle.fui-Button { min-width: 42px; border: 1px solid #ddd6e1; }
+.vim-toggle.fui-Button.selected { color: #fff; border-color: #6d28d9; background: #6d28d9; }
 .editor-actions, .page-utilities { display: flex; align-items: center; justify-content: flex-end; gap: 1px; min-width: 0; white-space: nowrap; }
 .editor-action-divider { width: 1px; height: 22px; margin: 0 4px; background: #ddd7e0; }
 .attachment-panel { display: flex; align-items: center; gap: 4px; }
@@ -221,8 +224,16 @@ button { color: inherit; }
 .mode-placeholder > div svg { width: 28px; height: 28px; }
 .mode-placeholder h2 { margin: 18px 0 5px; color: #2e2831; }
 .mode-placeholder p { max-width: 480px; margin: 0 0 18px; line-height: 1.6; }
+.source-editor-shell { width: 100%; height: 100%; min-height: 480px; display: grid; grid-template-rows: auto minmax(0,1fr); }
+.source-format-toolbar { position: relative; top: auto; padding-right: 12px; }
 .source-editor { width: 100%; height: 100%; min-height: 0; }
 .source-editor .cm-editor { color: inherit; }
+.source-editor .cm-panels-bottom { padding: 5px 12px; border-top: 1px solid #ddd6e1; color: #5f3a78; background: #f7f1fa; font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.vim-status { position: sticky; z-index: 3; bottom: 0; display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 14px; border-top: 1px solid #ded7e2; color: #6b6470; background: rgba(250,248,251,.96); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.vim-status strong { color: #6d28d9; letter-spacing: .04em; }
+.vim-search { position: sticky; z-index: 4; bottom: 28px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 7px; padding: 7px 14px; border-top: 1px solid #d8d0dd; background: #fff; box-shadow: 0 -5px 18px rgba(35,22,40,.08); }
+.vim-search input { min-width: 0; padding: 5px 7px; border: 1px solid #bdb4c2; border-radius: 5px; color: inherit; background: transparent; font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.vim-search button { padding: 5px 9px; border: 1px solid #cfc6d4; border-radius: 5px; color: inherit; background: #f5f1f7; cursor: pointer; }
 .inline-image-node { display: grid; justify-items: start; max-width: 100%; margin: 18px 0; }
 .inline-image-node img { display: block; max-width: min(100%, 920px); height: auto; border-radius: 8px; box-shadow: 0 1px 5px rgba(30, 20, 35, .12); }
 .inline-image-placeholder { display: inline-flex; min-height: 72px; align-items: center; padding: 12px 18px; color: #746d77; border: 1px dashed #cfc6d4; border-radius: 8px; background: #faf8fb; }
@@ -301,7 +312,7 @@ body.resizing-panel .workspace-grid { transition: none; }
     padding-block: 2px;
   }
   .breadcrumb { grid-column: 1 / -1; }
-  .view-switcher, .area-toolbar-label { grid-column: 1; grid-row: 2; justify-self: start; }
+  .editor-mode-controls, .area-toolbar-label { grid-column: 1; grid-row: 2; justify-self: start; }
   .editor-actions { grid-column: 2; grid-row: 2; }
   .version-popover { right: -78px; width: min(680px, calc(100cqw - 24px)); }
 }
@@ -327,6 +338,7 @@ body.resizing-panel .workspace-grid { transition: none; }
     overflow: hidden;
     font-size: 0;
   }
+  .editor-mode-controls { gap: 3px; }
   .breadcrumb > span:first-child, .breadcrumb > svg { display: none; }
   .breadcrumb-title-input { width: 100%; }
 }
@@ -374,6 +386,7 @@ body.resizing-panel .workspace-grid { transition: none; }
   .document-editor-content .lead, .page-card p { color: #aaa2ad; }
   .document-editor-content blockquote { color: #d6cadc; background: #31273a; }
   .format-toolbar { border-color: #3b363e; background: rgba(33,31,35,.94); }
+  .vim-status, .vim-search, .source-editor .cm-panels-bottom { color: #cfc6d4; border-color: #403942; background: rgba(36,32,38,.98); }
   .document-editor-content th { background: #302a36; }
   .context-card, .suggestion-grid button, .ai-composer { border-color: #454047; }
   .version-popover { color: #eee9f0; border-color: #514a55; background: #2b282d; }
@@ -403,6 +416,7 @@ body.resizing-panel .workspace-grid { transition: none; }
 .theme-dark .inline-image-placeholder { color: #c9c1cc; border-color: #514a55; background: #2b282d; }
 .theme-dark .document-editor-content, .theme-dark .document-editor-content h1, .theme-dark .mode-placeholder h2, .theme-dark .trash-detail h2 { color: #ece8ee; }
 .theme-dark .format-toolbar { border-color: #3b363e; background: rgba(33,31,35,.94); }
+.theme-dark .vim-status, .theme-dark .vim-search, .theme-dark .source-editor .cm-panels-bottom { color: #cfc6d4; border-color: #403942; background: rgba(36,32,38,.98); }
 .theme-dark .document-editor-content blockquote { color: #d6cadc; background: #31273a; }
 .theme-dark .settings-dialog { color: #eee9f0; border-color: #514a55; background: #2b282d; }
 .theme-dark .settings-center-header, .theme-dark .settings-section + .settings-section { border-color: #49434c; }
