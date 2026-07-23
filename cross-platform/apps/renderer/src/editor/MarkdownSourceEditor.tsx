@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { EditorState, Transaction } from '@codemirror/state'
 import { EditorView, drawSelection, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -53,6 +53,7 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
   const dirty = useRef(false)
   const applyingExternal = useRef(false)
   const pendingExternal = useRef<string | undefined>(undefined)
+  const [ready, setReady] = useState(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   onChangeRef.current = onChange
@@ -118,6 +119,7 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
       }),
     })
     viewRef.current = view
+    setReady(true)
     const cm = vimEnabled ? getCM(view) : null
     const handleVimModeChange = (event: { mode?: string }) => onVimCommandModeChangeRef.current?.(event.mode !== 'insert' && event.mode !== 'replace')
     if (cm) {
@@ -198,7 +200,7 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
   }
 
   return <div className="source-editor-shell">
-    <div className="format-toolbar source-format-toolbar" role="toolbar" aria-label="Markdown 源码格式">
+    {ready && <div className="format-toolbar source-format-toolbar" role="toolbar" aria-label="Markdown 源码格式">
       <div className="format-group" aria-label="文本样式">
         <Button size="small" appearance="subtle" icon={<TextBold20Regular />} title="用 Markdown 标记粗体" onClick={() => replaceSelection('**', '**', '粗体文字')}>粗体</Button>
         <Button size="small" appearance="subtle" icon={<TextItalic20Regular />} title="用 Markdown 标记斜体" onClick={() => replaceSelection('*', '*', '斜体文字')}>斜体</Button>
@@ -211,7 +213,7 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
         <Button size="small" appearance="subtle" icon={<MathFormula20Regular />} title="插入块公式" onClick={() => insertBlock('$$\nE = mc^2\n$$')}>公式</Button>
         <Button size="small" appearance="subtle" icon={<Code20Regular />} title="插入代码块" onClick={() => replaceSelection('```\n', '\n```', '代码')}>代码</Button>
       </div>
-    </div>
+    </div>}
     <div ref={host} className="source-editor" aria-label="Markdown 源码编辑器" />
   </div>
 }

@@ -26,6 +26,7 @@ declare global {
       }
       events: {
         onQuickCapture(callback: () => void): () => void
+        onCommandPalette(callback: () => void): () => void
         onFlushRequested(callback: () => void | Promise<void>): () => void
       }
     }

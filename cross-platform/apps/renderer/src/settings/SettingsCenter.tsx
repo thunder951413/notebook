@@ -7,6 +7,7 @@ type SettingsPage = 'general' | 'data' | 'services'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
 
 interface SettingsCenterProps {
+  initialPage?: SettingsPage
   theme: 'light' | 'dark'
   syncState: SyncState
   syncError?: string
@@ -40,8 +41,8 @@ const syncLabels: Record<SyncState, string> = {
   error: '同步失败',
 }
 
-export function SettingsCenter({ theme, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
-  const [page, setPage] = useState<SettingsPage>('general')
+export function SettingsCenter({ initialPage = 'general', theme, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
+  const [page, setPage] = useState<SettingsPage>(initialPage)
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => loadSyncSettings())
   const [sshSettings, setSshSettings] = useState<LegacySshSettings>(() => loadLegacySshSettings())
   const [sshPassword, setSshPassword] = useState('')
@@ -49,6 +50,7 @@ export function SettingsCenter({ theme, syncState, syncError, currentPageTitle, 
   const [savingSync, setSavingSync] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string>()
 
+  useEffect(() => setPage(initialPage), [initialPage])
   useEffect(() => { void hasLegacySshPassword().then(setStoredSshPassword) }, [])
 
   const saveAndSync = async () => {

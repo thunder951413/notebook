@@ -110,7 +110,7 @@ app.whenReady().then(() => {
   createTray()
   configureUpdates()
   const menu = Menu.buildFromTemplate([
-    { label: 'Notebook', submenu: [{ role: 'about' }, { label: '检查更新', enabled: hasUpdateMetadata(), click: () => { if (hasUpdateMetadata()) void autoUpdater.checkForUpdatesAndNotify().catch((error) => console.error('Update metadata unavailable', error)) } }, { type: 'separator' }, { role: 'quit' }] },
+    { label: 'Notebook', submenu: [{ role: 'about' }, { label: '命令面板…', accelerator: process.platform === 'darwin' ? 'Command+P' : 'Control+Shift+P', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:command-palette') } }, { label: '检查更新', enabled: hasUpdateMetadata(), click: () => { if (hasUpdateMetadata()) void autoUpdater.checkForUpdatesAndNotify().catch((error) => console.error('Update metadata unavailable', error)) } }, { type: 'separator' }, { role: 'quit' }] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: '视图', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
   ])

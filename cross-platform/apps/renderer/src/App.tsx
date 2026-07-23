@@ -41,6 +41,7 @@ import { SettingsCenter } from './settings/SettingsCenter'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
 import { publishPreparedLegacyArchive } from './sync/legacySshSync'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
+import { CommandPalette, type PaletteItem } from './CommandPalette'
 
 const MarkdownSourceEditor = lazy(() => import('./editor/MarkdownSourceEditor'))
 
@@ -83,6 +84,8 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [transferMessage, setTransferMessage] = useState<string>()
   const [restoreToken, setRestoreToken] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsPage, setSettingsPage] = useState<'general' | 'data' | 'services'>('general')
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [dataRoot, setDataRoot] = useState<{ path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }>()
   const [createRequest, setCreateRequest] = useState<'notebook' | 'section'>()
   const [renameRequest, setRenameRequest] = useState<{ kind: 'notebook' | 'section'; id: string; name: string }>()
@@ -177,6 +180,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      const editingWithVim = Boolean(target?.closest('.document-editor-content, .source-editor'))
+      const paletteShortcut = event.key.toLocaleLowerCase() === 'p' && (event.metaKey || (event.ctrlKey && (event.shiftKey || !editingWithVim)))
+      if (paletteShortcut) {
+        event.preventDefault()
+        setCommandPaletteOpen((value) => !value)
+        return
+      }
       if (event.key === 'Escape' && focusMode) setFocusMode(false)
       if (event.key === 'F11') {
         event.preventDefault()
@@ -194,6 +205,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     setMode('document')
     void createPage('inbox').then(setActivePage)
   }), [createPage])
+  useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
 
   const askAI = (prompt = aiPrompt) => {
     const normalized = prompt.trim()
@@ -354,6 +366,55 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     if (fallbackNotebook) activateNotebook(fallbackNotebook.id)
   }
 
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    const commands: Array<PaletteItem | false | undefined> = [
+      currentSection && activeArea === 'notes' && { id: 'command:new-page', group: 'command', title: '新建页面', subtitle: currentSection.name, keywords: '笔记 新建 markdown', run: () => { void createPage(currentSection.id).then(setActivePage) } },
+      currentSection && { id: 'command:new-task', group: 'command', title: '新建任务', subtitle: currentSection.name, keywords: '待办 todo', run: () => { selectArea('tasks'); void createPage(currentSection.id, 'task').then(setActivePage) } },
+      { id: 'command:new-notebook', group: 'command', title: '新建笔记本', keywords: '工作区', run: () => setCreateRequest('notebook') },
+      currentNotebook && (!currentNotebook.locked || privacyUnlocked) && { id: 'command:new-section', group: 'command', title: '新建分区', subtitle: currentNotebook.name, keywords: '文件夹 分类', run: () => setCreateRequest('section') },
+      { id: 'command:sync', group: 'command', title: syncState === 'syncing' ? '正在同步' : '立即同步', subtitle: syncLabels[syncState], keywords: 'ssh sftp 服务器 推送 拉取', run: () => { if (syncState !== 'syncing') void syncNow({ force: true }) } },
+      { id: 'command:notes', group: 'command', title: '打开笔记', keywords: '页面', run: () => selectArea('notes') },
+      { id: 'command:tasks', group: 'command', title: '打开任务', keywords: '待办 todo', run: () => selectArea('tasks') },
+      { id: 'command:trash', group: 'command', title: '打开回收站', keywords: '删除 恢复', run: () => selectArea('trash') },
+      hasActivePage && activeArea === 'notes' && { id: 'command:markdown', group: 'command', title: '切换到 Markdown 实时渲染', keywords: '编辑 预览', run: () => setMode('document') },
+      hasActivePage && activeArea === 'notes' && { id: 'command:source', group: 'command', title: '切换到 Markdown 源码', keywords: '原始文本 source', run: () => setMode('source') },
+      hasActivePage && activeArea === 'notes' && { id: 'command:vim', group: 'command', title: vimEnabled ? '关闭 Vim 模式' : '启用 Vim 模式', keywords: 'normal insert esc', run: () => setVimEnabled((value) => !value) },
+      { id: 'command:navigation', group: 'command', title: navigationOpen ? '隐藏导航窗格' : '显示导航窗格', keywords: '侧栏 左侧', run: toggleNavigation },
+      { id: 'command:pages-pane', group: 'command', title: pagesOpen ? '隐藏页面列表' : '显示页面列表', keywords: '侧栏 列表', run: () => setPagesOpen((value) => !value) },
+      hasActivePage && { id: 'command:ai', group: 'command', title: aiOpen ? '关闭 AI 助手' : '打开 AI 助手', keywords: '智能 总结', run: () => setAiOpen((value) => !value) },
+      hasActivePage && activeArea === 'notes' && { id: 'command:focus', group: 'command', title: focusMode ? '退出聚焦模式' : '进入聚焦模式', keywords: '全屏 最大化', run: () => setFocusMode((value) => !value) },
+      { id: 'command:settings', group: 'command', title: '打开设置', keywords: '偏好 配置', run: () => { setSettingsPage('general'); setSettingsOpen(true) } },
+      { id: 'command:import', group: 'command', title: '导入文件或备份', keywords: '迁移 markdown zip nbx', run: chooseImport },
+      { id: 'command:export', group: 'command', title: '导出完整备份', keywords: '备份 zip', run: () => { void runExport() } },
+      hasActivePage && activeArea !== 'trash' && { id: 'command:delete-page', group: 'command', title: '将当前页面移到回收站', subtitle: currentPage.title, keywords: '删除 笔记 任务', dangerous: true, confirmDescription: `“${currentPage.title}”将移到回收站，之后仍可恢复。`, confirmLabel: '移到回收站', run: () => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) } },
+      hasActivePage && activeArea === 'trash' && { id: 'command:restore-page', group: 'command', title: '恢复当前页面', subtitle: currentPage.title, keywords: '撤销 删除', run: () => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) } },
+      hasActivePage && activeArea === 'trash' && { id: 'command:purge-page', group: 'command', title: '永久删除当前页面', subtitle: currentPage.title, keywords: '彻底 清除', dangerous: true, confirmDescription: `“${currentPage.title}”及其历史和附件引用将被永久删除，无法恢复。`, confirmLabel: '永久删除', run: () => { void purgePage(currentPage.id).then(() => setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')) } },
+      currentNotebook && activeArea === 'notes' && (!currentNotebook.locked || privacyUnlocked) && { id: 'command:delete-notebook', group: 'command', title: '删除当前笔记本及全部内容', subtitle: currentNotebook.name, keywords: '工作区 永久', dangerous: true, confirmDescription: `“${currentNotebook.name}”中的全部分区、页面、任务、附件和历史版本都会被删除，无法撤销。`, confirmLabel: '删除整个笔记本', run: () => { void deleteNotebook(currentNotebook.id) } },
+    ]
+    const recentOrder = new Map([...recentPageIds].reverse().map((id, index) => [id, index]))
+    const pageItems = [...accessiblePages].sort((left, right) => (recentOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (recentOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER)).map<PaletteItem>((page) => ({
+      id: `page:${page.id}`,
+      group: 'page',
+      title: page.title,
+      subtitle: `${page.kind === 'task' ? '任务' : '页面'} · ${notebooks.flatMap((notebook) => notebook.sections).find((section) => section.id === page.sectionId)?.name ?? '未分类'}`,
+      keywords: `${page.preview} ${page.tags.join(' ')}`,
+      recent: recentOrder.has(page.id),
+      run: () => {
+        if (page.kind === 'task') { setActiveArea('tasks'); setActivePage(page.id); setPagesOpen(true) }
+        else openRecentPage(page.id)
+      },
+    }))
+    const openSettings = (page: 'general' | 'data' | 'services') => { setSettingsPage(page); setSettingsOpen(true) }
+    const settings: PaletteItem[] = [
+      { id: 'setting:general', group: 'setting', title: '常规设置', subtitle: '外观、主题和工作状态', keywords: '颜色 深色 浅色 快速记录', run: () => openSettings('general') },
+      { id: 'setting:data', group: 'setting', title: '数据与备份', subtitle: '导入、导出和数据目录', keywords: '迁移 markdown html pdf nbx zip', run: () => openSettings('data') },
+      { id: 'setting:sync', group: 'setting', title: '同步与连接', subtitle: 'SSH/SFTP 服务器设置', keywords: '远端 地址 端口 密码 主机指纹 android', run: () => openSettings('services') },
+      { id: 'setting:privacy', group: 'setting', title: '隐私笔记本', subtitle: '解锁、密码与加密说明', keywords: '安全 锁定 AES', run: () => openSettings('services') },
+      { id: 'setting:ai', group: 'setting', title: 'AI 与协作服务', subtitle: '查看本机服务状态', keywords: '智能 hocuspocus yjs', run: () => openSettings('services') },
+    ]
+    return [...commands.filter((item): item is PaletteItem => Boolean(item)), ...pageItems, ...settings]
+  }, [accessiblePages, accessibleTrashPages, activeArea, aiOpen, createPage, currentNotebook, currentPage.id, currentPage.title, currentSection, deleteNotebook, focusMode, hasActivePage, navigationOpen, notebooks, pagesOpen, privacyUnlocked, purgePage, recentPageIds, restorePage, syncNow, syncState, vimEnabled])
+
   return (
     <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`}>
       <header className="titlebar">
@@ -374,7 +435,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
             </div>
             <ActionMenuDivider />
             <button disabled={syncState === 'syncing'} onClick={() => void syncNow({ force: true })}>{syncState === 'syncing' ? '正在同步…' : '立即同步'}</button>
-            <button onClick={() => setSettingsOpen(true)}>打开同步设置</button>
+            <button onClick={() => { setSettingsPage('services'); setSettingsOpen(true) }}>打开同步设置</button>
           </ActionMenu>
         </div>
         <input ref={importInput} hidden type="file" accept=".md,.markdown,.txt,.html,.htm,.json,.zip,.nbx,application/json,application/zip" multiple onChange={(event) => { const selected = [...(event.target.files ?? [])]; void Promise.all(selected.map(async (file) => ({ name: file.name, data: new Uint8Array(await file.arrayBuffer()) }))).then(runImport); event.target.value = '' }} />
@@ -386,7 +447,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           <RailButton label="任务" selected={activeArea === 'tasks'} icon={<CheckmarkCircle20Regular />} onClick={() => selectArea('tasks')} />
           <RailButton label="回收站" selected={activeArea === 'trash'} icon={<Delete20Regular />} onClick={() => selectArea('trash')} />
           <span className="rail-spacer" />
-          <RailButton label="设置" selected={settingsOpen} icon={<Settings20Regular />} onClick={() => setSettingsOpen(true)} />
+          <RailButton label="设置" selected={settingsOpen} icon={<Settings20Regular />} onClick={() => { setSettingsPage('general'); setSettingsOpen(true) }} />
         </aside>
 
         {showNotebookPane && (
@@ -522,6 +583,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       </div>
       {focusMode && <Button className="focus-exit" appearance="primary" shape="circular" icon={<FullScreenMinimize20Regular />} aria-label="退出聚焦模式" title="退出聚焦模式（Esc）" onClick={() => setFocusMode(false)} />}
       {settingsOpen && <SettingsCenter
+        initialPage={settingsPage}
         theme={theme}
         syncState={syncState}
         syncError={syncError}
@@ -546,6 +608,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         onChooseDataRoot={window.notebookDesktop ? () => { void window.notebookDesktop?.storage.chooseDataRoot().catch((error: unknown) => setTransferMessage(error instanceof Error ? error.message : '数据目录更改失败')) } : undefined}
         onPrivacyAction={() => { if (privacyUnlocked) lockPrivacy(); else { setSettingsOpen(false); requestPrivacyAccess() } }}
       />}
+      <CommandPalette open={commandPaletteOpen} items={paletteItems} onClose={() => setCommandPaletteOpen(false)} />
       {createRequest && <CreateItemDialog kind={createRequest} onClose={() => setCreateRequest(undefined)} onCreate={async (name) => {
         if (createRequest === 'notebook') { const notebookId = await createNotebook(name); setActiveNotebook(notebookId); setExpandedNotebook(notebookId) }
         else setActiveSection(await createSection(activeNotebook, name))

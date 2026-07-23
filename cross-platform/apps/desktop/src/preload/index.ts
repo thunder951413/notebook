@@ -24,6 +24,7 @@ export interface NotebookDesktopApi {
   }
   events: {
     onQuickCapture(callback: () => void): () => void
+    onCommandPalette(callback: () => void): () => void
     onFlushRequested(callback: () => void | Promise<void>): () => void
   }
 }
@@ -55,6 +56,11 @@ const api: NotebookDesktopApi = Object.freeze({
       const listener = () => callback()
       ipcRenderer.on('notebook:quick-capture', listener)
       return () => ipcRenderer.removeListener('notebook:quick-capture', listener)
+    },
+    onCommandPalette: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('notebook:command-palette', listener)
+      return () => ipcRenderer.removeListener('notebook:command-palette', listener)
     },
     onFlushRequested: (callback: () => void | Promise<void>) => {
       const listener = (_event: Electron.IpcRendererEvent, requestId: string) => {
