@@ -1,0 +1,63 @@
+import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
+import { describe, expect, test, vi } from 'vitest'
+import { mergeBundles } from './legacySshSync'
+
+const workspaceId = '10000000-0000-4000-8000-000000000001'
+const notebookId = '20000000-0000-4000-8000-000000000001'
+const pageId = '30000000-0000-4000-8000-000000000001'
+const timestamp = '2026-07-22T00:00:00.000Z'
+
+function page(overrides: Partial<Page> = {}): Page {
+  return { id: pageId, workspaceId, kind: 'document', title: '页面', preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp, syncStatus: 'synced', legacyVersion: 1, ...overrides }
+}
+
+function document(text: string, updatedAt = timestamp): PageDocument {
+  return { pageId, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] }, updatedAt }
+}
+
+function bundle(currentPage?: Page, currentDocument?: PageDocument): NotebookDataBundle {
+  return {
+    notebooks: [{ id: notebookId, workspaceId, name: '迁移的笔记', sortOrder: 0, createdAt: timestamp, updatedAt: timestamp }],
+    sections: [], pages: currentPage ? [currentPage] : [], documents: currentDocument ? [currentDocument] : [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], revisions: [], comments: [], tombstones: [],
+  }
+}
+
+describe('legacy SSH conflict merge', () => {
+  test('keeps a pending local edit when the remote legacy version has not advanced', () => {
+    const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2, title: '本地编辑' }), document('local'))
+    const remote = bundle(page({ legacyVersion: 2, title: '远端旧值' }), document('remote'))
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.pages[0]!.title).toBe('本地编辑')
+    expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
+  })
+
+  test('accepts a newer remote version and archives the overwritten local document', () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'revision-id' })
+    const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2, title: '本地编辑' }), document('local'))
+    const remote = bundle(page({ legacyVersion: 3, updatedAt: '2026-07-22T01:00:00.000Z', title: 'Android 编辑' }), document('remote', '2026-07-22T01:00:00.000Z'))
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.pages[0]!.title).toBe('Android 编辑')
+    expect(merged.bundle.revisions).toHaveLength(1)
+    expect(merged.bundle.revisions[0]!.document.tiptapJson).toEqual(document('local').tiptapJson)
+    vi.unstubAllGlobals()
+  })
+
+  test('honors a newer remote tombstone instead of resurrecting a deleted note', () => {
+    const local = bundle(page({ updatedAt: '2026-07-22T01:00:00.000Z' }), document('local'))
+    const remote = bundle()
+    remote.tombstones.push({ id: `page:${pageId}`, workspaceId, entityType: 'page', entityId: pageId, deletedAt: '2026-07-22T02:00:00.000Z', deviceId: 'android' })
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.pages[0]!.deletedAt).toBe('2026-07-22T02:00:00.000Z')
+    expect(merged.bundle.pages[0]!.syncStatus).toBe('synced')
+  })
+
+  test('keeps the newest reading position independently from the winning page body', () => {
+    const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2 }), document('local'))
+    const remote = bundle(page({ legacyVersion: 1 }), document('remote'))
+    local.readingPositions.push({ id: pageId, pageId, anchorUtf16Offset: 10, viewportOffsetFraction: 0.1, updatedAt: '2026-07-22T01:00:00.000Z', deviceId: 'web' })
+    remote.readingPositions.push({ id: pageId, pageId, anchorUtf16Offset: 90, viewportOffsetFraction: 0.9, updatedAt: '2026-07-22T02:00:00.000Z', deviceId: 'android' })
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
+    expect(merged.bundle.readingPositions[0]).toMatchObject({ anchorUtf16Offset: 90, deviceId: 'android' })
+  })
+})

@@ -23,6 +23,20 @@ DerivedData
 #
 .build/
 Tools/MarkdownEditor/node_modules
+cross-platform/node_modules/
+cross-platform/**/node_modules/
+cross-platform/**/dist/
+cross-platform/**/out/
+cross-platform/**/release/
+cross-platform/**/.venv/
+cross-platform/**/__pycache__/
+cross-platform/**/.pytest_cache/
+cross-platform/**/data/
+cross-platform/**/.env
+cross-platform/**/*.tsbuildinfo
+cross-platform/**/*.db
+cross-platform/**/*.egg-info/
+!cross-platform/**/.env.example
 
 # OS X
 #

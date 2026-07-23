@@ -1,0 +1,4 @@
+{$NOTEBOOK_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy notebook-api:8787
+}

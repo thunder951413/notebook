@@ -1,0 +1,24 @@
+{
+  "name": "@notebook/storage-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@notebook/domain": "workspace:*",
+    "@notebook/sync-contract": "workspace:*",
+    "dexie": "^4.4.4",
+    "minisearch": "^7.2.0"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.0"
+  }
+}

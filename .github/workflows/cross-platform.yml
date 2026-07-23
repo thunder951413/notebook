@@ -1,0 +1,79 @@
+name: Cross-platform Next
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
+  pull_request:
+    branches: [master]
+    paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.9.0 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: cross-platform/pnpm-lock.yaml }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12', cache: pip, cache-dependency-path: cross-platform/services/ai/pyproject.toml }
+      - name: Install web and desktop dependencies
+        working-directory: cross-platform
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck, test and build
+        working-directory: cross-platform
+        run: pnpm typecheck && pnpm test && pnpm build
+      - name: Test Python AI service
+        working-directory: cross-platform/services/ai
+        run: |
+          python -m pip install -e '.[test]'
+          pytest -q
+
+  desktop-package:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.9.0 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: cross-platform/pnpm-lock.yaml }
+      - name: Install dependencies
+        working-directory: cross-platform
+        run: pnpm install --frozen-lockfile
+      - name: Package desktop application
+        working-directory: cross-platform
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: pnpm --filter @notebook/desktop dist
+      - uses: actions/upload-artifact@v5
+        with:
+          name: notebook-next-${{ matrix.os }}
+          path: cross-platform/apps/desktop/release/
+          if-no-files-found: error
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: desktop-package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/**/* --draft --generate-notes --title "Notebook Next $GITHUB_REF_NAME"

@@ -1,0 +1,24 @@
+[project]
+name = "notebook-ai-service"
+version = "0.1.0"
+description = "AI, retrieval and synchronization service for Notebook Next"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "litellm>=1.77,<2",
+  "orjson>=3.11,<4",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "aiosqlite>=0.21,<1",
+  "python-jose[cryptography]>=3.5,<4",
+  "paramiko>=4.0,<5",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.28,<1", "pytest>=8.4,<9", "pytest-asyncio>=1.1,<2"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,31 @@
+services:
+  notebook-api:
+    build: .
+    restart: unless-stopped
+    env_file: ${NOTEBOOK_ENV_FILE:-.env}
+    environment:
+      NOTEBOOK_AI_DATABASE_URL: sqlite+aiosqlite:////data/notebook-next.db
+    volumes:
+      - notebook-data:/data
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - notebook-api
+    environment:
+      NOTEBOOK_DOMAIN: ${NOTEBOOK_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  notebook-data:
+  caddy-data:
+  caddy-config:

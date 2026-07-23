@@ -1,0 +1,13 @@
+{
+  "name": "notebook-next",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @notebook/web dev",
+    "dev:desktop": "pnpm --filter @notebook/desktop dev",
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint"
+  }
+}

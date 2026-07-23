@@ -112,7 +112,7 @@ enum ConfigurationTransferHelper {
 
     static func exportEncryptedFolders(to directory: URL) throws {
         // 从 UserDefaults 导出加密文件夹列表
-        let foldersKey = "encryptedFolders"
+        let foldersKey = "encrypted_folders"
         let folderNamesKey = "encrypted_folder_names"
         
         var config: [String: Any] = [:]
@@ -284,7 +284,7 @@ enum ConfigurationTransferHelper {
         // 导入加密文件夹列表
         if let foldersDataString = config["foldersData"] as? String,
            let foldersData = Data(base64Encoded: foldersDataString) {
-            NotebookDefaults.shared.set(foldersData, forKey: "encryptedFolders")
+            NotebookDefaults.shared.set(foldersData, forKey: "encrypted_folders")
         }
 
         // 导入文件夹名称映射

@@ -1,0 +1,22 @@
+packages:
+  - apps/*
+  - packages/*
+  - services/*
+
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  better-sqlite3: true
+  # ssh2 has a complete JavaScript implementation; the optional native CPU
+  # feature probe is deliberately disabled for deterministic desktop packages.
+  cpu-features: false
+  ssh2: false
+
+minimumReleaseAgeExclude:
+  - better-sqlite3@13.0.1
