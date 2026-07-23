@@ -89,7 +89,9 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   }
   const tombstones = latestById(local.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt })), remote.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt }))).map(({ updatedAt: _, ...item }) => item)
   const deletedAt = new Map(tombstones.filter((item) => item.entityType === 'page').map((item) => [item.entityId, item.deletedAt]))
+  const deletedSections = new Map(tombstones.filter((item) => item.entityType === 'section').map((item) => [item.entityId, item.deletedAt]))
   const mergedPages = pages.map((page) => deletedAt.get(page.id) && deletedAt.get(page.id)! >= page.updatedAt ? { ...page, deletedAt: deletedAt.get(page.id), syncStatus: 'synced' as const } : page)
+  const mergedSections = latestById(local.sections, normalizedRemoteSections).filter((section) => !deletedSections.get(section.id) || section.updatedAt > deletedSections.get(section.id)!)
   const effectiveTombstones = tombstones.filter((item) => {
     if (item.entityType !== 'page') return true
     const page = mergedPages.find((candidate) => candidate.id === item.entityId)
@@ -97,7 +99,7 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   })
   const bundle: NotebookDataBundle = {
     notebooks: importedPrivateNotebook && !localPrivateNotebook ? [...local.notebooks, importedPrivateNotebook] : local.notebooks,
-    sections: latestById(local.sections, normalizedRemoteSections),
+    sections: mergedSections,
     pages: mergedPages,
     documents: [...sources].flatMap(([pageId, source]) => (source === 'remote' ? remoteDocuments : localDocuments).get(pageId) ?? []),
     tags: latestById(local.tags, remote.tags),

@@ -196,6 +196,30 @@ test('only deletes empty sections and queues a compatible tombstone', async () =
   expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'section')).toMatchObject({ operation: 'delete', entityId: 'section-full' })
 })
 
+test('deletes a notebook together with non-empty sections and all page data', async () => {
+  const repository = makeRepository()
+  const notebook = { id: 'notebook-cascade', workspaceId: 'workspace-a', name: 'Cascade', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
+  await repository.saveNotebook(notebook)
+  await repository.saveSection({ id: 'section-cascade', notebookId: notebook.id, name: 'Full', sortOrder: 0, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt })
+  const cascadePage = page('page-cascade', 'Page', 'section-cascade')
+  await repository.savePage(cascadePage, { pageId: cascadePage.id, schemaVersion: 3, markdown: 'Body', tiptapJson: { type: 'doc', content: [] }, updatedAt: cascadePage.updatedAt })
+  await repository.saveAsset({ id: 'asset-cascade', pageId: 'page-cascade', kind: 'file', filename: 'file.txt', mimeType: 'text/plain', createdAt: notebook.createdAt }, new Blob(['content']))
+
+  await repository.deleteNotebook(notebook.id, '2026-01-04T00:00:00.000Z', 'test-device')
+
+  expect(await repository.listNotebooks('workspace-a')).toEqual([])
+  expect(await repository.listSections(notebook.id)).toEqual([])
+  expect(await repository.getPage('page-cascade')).toBeUndefined()
+  expect(await repository.getPageDocument('page-cascade')).toBeUndefined()
+  expect(await repository.listAssets('page-cascade')).toEqual([])
+  const exported = await repository.exportData('workspace-a')
+  expect(exported.tombstones).toEqual(expect.arrayContaining([
+    expect.objectContaining({ entityType: 'page', entityId: 'page-cascade' }),
+    expect.objectContaining({ entityType: 'section', entityId: 'section-cascade' }),
+  ]))
+  expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'notebook')).toMatchObject({ operation: 'delete', entityId: notebook.id })
+})
+
 test('synchronizes page-tag membership as composite entities', async () => {
   const repository = makeRepository()
   await repository.savePage(page('page-tags', 'Tagged'))

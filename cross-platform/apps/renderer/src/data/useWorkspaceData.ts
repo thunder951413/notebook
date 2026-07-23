@@ -116,7 +116,7 @@ export function useWorkspaceData() {
     let cancelled = false
     void (async () => {
       await repository.recoverDrafts()
-      if ((await repository.listNotebooks(WORKSPACE_ID)).length === 0) {
+      if ((await repository.listNotebooks(WORKSPACE_ID)).length === 0 && await db.tombstones.count() === 0) {
         await db.transaction('rw', db.notebooks, db.sections, db.pages, async () => {
           await db.notebooks.bulkPut(seedNotebooks)
           await db.sections.bulkPut(seedSections)
@@ -165,7 +165,7 @@ export function useWorkspaceData() {
       id: section.id,
       name: section.name,
       color: section.color ?? '#7c3aed',
-      pageCount: pageRecords.filter((page) => page.sectionId === section.id && !page.deletedAt).length,
+      pageCount: pageRecords.filter((page) => page.sectionId === section.id && page.kind !== 'task' && !page.deletedAt).length,
     })),
   })), [notebookRecords, sectionRecords, pageRecords])
 
@@ -229,6 +229,11 @@ export function useWorkspaceData() {
     await repository.saveNotebook({ ...notebook, name, updatedAt: new Date().toISOString() })
     await reload()
   }, [notebookRecords, reload])
+
+  const deleteNotebook = useCallback(async (notebookId: string) => {
+    await repository.deleteNotebook(notebookId, new Date().toISOString(), legacyDeviceId())
+    await reload()
+  }, [reload])
 
   const renameSection = useCallback(async (sectionId: string, name: string) => {
     const section = sectionRecords.find((item) => item.id === sectionId)
@@ -325,7 +330,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function extractDocumentText(value: unknown): string {

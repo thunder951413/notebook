@@ -239,6 +239,7 @@ export interface NotebookRepository {
   listPageLinks(pageId: UUID): Promise<PageLink[]>
   replacePageLinks(pageId: UUID, links: PageLink[]): Promise<void>
   saveNotebook(notebook: Notebook): Promise<void>
+  deleteNotebook(notebookId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   saveSection(section: Section): Promise<void>
   deleteSection(sectionId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   duplicatePage(pageId: UUID, newPageId: UUID, createdAt: IsoDate): Promise<Page>

@@ -33,10 +33,10 @@ interface SettingsCenterProps {
 }
 
 const syncLabels: Record<SyncState, string> = {
-  offline: '离线可用',
+  offline: '仅保存在本机',
   syncing: '正在同步',
-  synced: '已同步',
-  conflict: '存在同步冲突',
+  synced: '同步完成',
+  conflict: '同步冲突',
   error: '同步失败',
 }
 

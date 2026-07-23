@@ -74,6 +74,16 @@ describe('legacy SSH conflict merge', () => {
     expect(merged.bundle.pages[0]!.syncStatus).toBe('synced')
   })
 
+  test('does not resurrect a section deleted with a notebook cascade', () => {
+    const sectionId = '40000000-0000-4000-8000-000000000001'
+    const local = bundle()
+    local.tombstones.push({ id: `section:${sectionId}`, workspaceId, entityType: 'section', entityId: sectionId, deletedAt: '2026-07-22T02:00:00.000Z', deviceId: 'electron' })
+    const remote = bundle()
+    remote.sections.push({ id: sectionId, notebookId, name: '远端旧分区', sortOrder: 0, createdAt: timestamp, updatedAt: '2026-07-22T01:00:00.000Z' })
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.sections).toEqual([])
+  })
+
   test('keeps the newest reading position independently from the winning page body', () => {
     const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2 }), document('local'))
     const remote = bundle(page({ legacyVersion: 1 }), document('remote'))

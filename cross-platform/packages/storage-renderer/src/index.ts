@@ -397,6 +397,20 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.enqueueChange(notebook.workspaceId, 'notebook', notebook.id, 'upsert', { ...notebook })
     })
   }
+  async deleteNotebook(notebookId: string, deletedAt: string, deviceId: string) {
+    const notebook = await this.db.notebooks.get(notebookId)
+    if (!notebook) return
+    const sections = await this.db.sections.where('notebookId').equals(notebookId).toArray()
+    const sectionIds = sections.map((section) => section.id)
+    const pages = sectionIds.length ? await this.db.pages.where('sectionId').anyOf(sectionIds).toArray() : []
+    for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
+    for (const section of sections) await this.deleteSection(section.id, deletedAt, deviceId)
+    await this.db.transaction('rw', [this.db.notebooks, this.db.syncOutbox, this.db.syncVersions], async () => {
+      await this.db.notebooks.delete(notebookId)
+      await this.enqueueChange(notebook.workspaceId, 'notebook', notebookId, 'delete', {})
+    })
+    this.searchCache.delete(notebook.workspaceId)
+  }
   async saveSection(section: Section) {
     await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
       const notebook = await this.db.notebooks.get(section.notebookId)

@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import {
-  Badge,
   Button,
   Input,
   Text,
@@ -49,11 +48,13 @@ const modeLabels: Record<WorkspaceMode, string> = {
   document: 'Markdown',
   source: '源码',
 }
+const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
+const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
 
 export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
 
 export function App({ theme = 'light', onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const importInput = useRef<HTMLInputElement>(null)
   const documentSurface = useRef<HTMLElement>(null)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -107,19 +108,25 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     return pageSort === 'title' ? [...filtered].sort((left, right) => left.title.localeCompare(right.title, 'zh-CN')) : filtered
   }, [accessiblePages, accessibleTrashPages, activeArea, activeSection, globalResultIds, pageSort, query])
 
-  const currentPage = [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0]!
+  const currentPage = [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0] ?? emptyPage
+  const hasCurrentPage = Boolean(currentPage.id)
   const currentDocumentReady = Boolean(documents[currentPage.id])
   const currentNotebook = notebooks.find((notebook) => notebook.id === activeNotebook) ?? notebooks[0]
   const currentSection = notebooks.flatMap((notebook) => notebook.sections).find((section) => section.id === activeSection)
-  const sectionIsEmpty = activeArea === 'notes' && !accessiblePages.some((page) => page.kind !== 'task' && page.sectionId === activeSection)
+  const sectionIsEmpty = activeArea === 'notes' && (!currentSection || !accessiblePages.some((page) => page.kind !== 'task' && page.sectionId === activeSection))
+  const hasActivePage = hasCurrentPage && (activeArea === 'notes'
+    ? accessiblePages.some((page) => page.id === currentPage.id && page.kind !== 'task' && page.sectionId === activeSection)
+    : activeArea === 'tasks'
+      ? accessiblePages.some((page) => page.id === currentPage.id && page.kind === 'task')
+      : accessibleTrashPages.some((page) => page.id === currentPage.id))
   const showNotebookPane = activeArea === 'notes' && navOpen
   const showPagePane = pagesOpen
   const navigationOpen = showNotebookPane || showPagePane
   const recentPages = useMemo(() => recentPageIds.map((id) => accessiblePages.find((page) => page.id === id && page.kind !== 'task')).filter((page): page is NonNullable<typeof page> => Boolean(page)), [accessiblePages, recentPageIds])
 
-  useEffect(() => { void loadDocument(currentPage.id) }, [currentPage.id, loadDocument])
+  useEffect(() => { if (hasCurrentPage) void loadDocument(currentPage.id) }, [currentPage.id, hasCurrentPage, loadDocument])
   useEffect(() => {
-    if (activeArea !== 'notes') return
+    if (activeArea !== 'notes' || !hasCurrentPage) return
     let cancelled = false
     void loadReadingPosition(currentPage.id).then((position) => {
       if (cancelled || !position) return
@@ -129,16 +136,16 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       }))
     })
     return () => { cancelled = true }
-  }, [activeArea, currentDocumentReady, currentPage.id, loadReadingPosition, mode])
+  }, [activeArea, currentDocumentReady, currentPage.id, hasCurrentPage, loadReadingPosition, mode])
   useEffect(() => {
-    if (activeArea !== 'notes' || currentPage.kind === 'task') return
+    if (activeArea !== 'notes' || !hasCurrentPage || currentPage.kind === 'task') return
     setRecentPageIds((current) => {
       if (current.includes(currentPage.id)) return current
       const next = [...current, currentPage.id].slice(-12)
       globalThis.localStorage?.setItem(RECENT_PAGES_KEY, JSON.stringify(next))
       return next
     })
-  }, [activeArea, currentPage.id, currentPage.kind])
+  }, [activeArea, currentPage.id, currentPage.kind, hasCurrentPage])
   useEffect(() => {
     if (settingsOpen && window.notebookDesktop) void window.notebookDesktop.storage.getInfo().then(setDataRoot)
   }, [settingsOpen])
@@ -185,7 +192,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
 
   const askAI = (prompt = aiPrompt) => {
     const normalized = prompt.trim()
-    if (!normalized || aiState === 'streaming') return
+    if (!normalized || aiState === 'streaming' || !hasCurrentPage) return
     setAiPrompt(normalized)
     setAiAnswer('')
     setAiState('streaming')
@@ -203,7 +210,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   }
 
   const applyAiAnswer = async (replace: boolean) => {
-    if (!aiAnswer.trim() || aiState === 'streaming') return
+    if (!aiAnswer.trim() || aiState === 'streaming' || !hasCurrentPage) return
     const current = documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }
     const markdown = replace ? aiAnswer.trim() : `${documentToMarkdown(current).trimEnd()}\n\n${aiAnswer.trim()}`.trim()
     await saveDocument(currentPage.id, markdownToDocument(markdown))
@@ -317,6 +324,18 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     if (firstPage) setActivePage(firstPage.id)
   }
 
+  useEffect(() => {
+    if (notebooks.some((notebook) => notebook.id === activeNotebook) || !notebooks[0]) return
+    const notebook = notebooks[0]
+    setActiveNotebook(notebook.id)
+    setExpandedNotebook(notebook.id)
+    const section = notebook.sections[0]
+    if (!section) return
+    setActiveSection(section.id)
+    const page = pages.find((candidate) => candidate.kind !== 'task' && candidate.sectionId === section.id)
+    setActivePage(page?.id ?? '')
+  }, [activeNotebook, notebooks, pages])
+
   const requestPrivacyAccess = (notebookId?: string) => {
     if (privacyUnlocked) { if (notebookId) activateNotebook(notebookId); return }
     setPrivacyPrompt({ mode: privacyConfigured ? 'unlock' : 'setup', notebookId })
@@ -342,7 +361,16 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           <Input value={globalQuery} onChange={(_, data) => setGlobalQuery(data.value)} contentBefore={<Search20Regular />} placeholder="搜索页面和内容" aria-label="全局搜索" />
         </div>
         <div className="titlebar-actions">
-          <Badge appearance="tint" color={syncState === 'error' || syncState === 'conflict' ? 'danger' : syncState === 'offline' ? 'informative' : 'success'} icon={<CheckmarkCircle20Regular />}>{{ offline: '离线可用', syncing: '同步中', synced: '已同步', conflict: '有冲突', error: '同步失败' }[syncState]}</Badge>
+          <ActionMenu label="同步状态详情" trigger={<Button className={`sync-status-trigger ${syncState}`} appearance="subtle" size="small" aria-label={`同步状态：${syncLabels[syncState]}`}><span className="sync-status-dot" />{syncLabels[syncState]}</Button>}>
+            <div className="sync-status-detail">
+              <strong>{syncLabels[syncState]}</strong>
+              <span>{syncState === 'offline' ? '尚未启用或配置 SSH 同步，当前修改只保存在本机。' : syncState === 'syncing' ? '正在与 SSH 服务器交换最新数据。' : syncState === 'synced' ? '本机与远端服务器已完成最近一次同步。' : syncState === 'conflict' ? '检测到多设备同时修改，请打开相关笔记的版本历史处理。' : '最近一次同步没有完成。'}</span>
+              {(syncState === 'error' || syncState === 'conflict') && <code>{syncError ?? (syncState === 'conflict' ? accessiblePages.filter((page) => page.syncStatus === 'conflict').map((page) => page.title).join('、') || '存在尚未处理的同步冲突。' : '没有提供更详细的错误信息。')}</code>}
+            </div>
+            <ActionMenuDivider />
+            <button disabled={syncState === 'syncing'} onClick={() => void syncNow({ force: true })}>{syncState === 'syncing' ? '正在同步…' : '立即同步'}</button>
+            <button onClick={() => setSettingsOpen(true)}>打开同步设置</button>
+          </ActionMenu>
         </div>
         <input ref={importInput} hidden type="file" accept=".md,.markdown,.txt,.html,.htm,.json,.zip,.nbx,application/json,application/zip" multiple onChange={(event) => { const selected = [...(event.target.files ?? [])]; void Promise.all(selected.map(async (file) => ({ name: file.name, data: new Uint8Array(await file.arrayBuffer()) }))).then(runImport); event.target.value = '' }} />
       </header>
@@ -351,7 +379,6 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         <aside className="app-rail" aria-label="主要功能">
           <RailButton label="笔记" selected={activeArea === 'notes'} icon={activeArea === 'notes' ? <Document20Filled /> : <Document20Regular />} onClick={() => selectArea('notes')} />
           <RailButton label="任务" selected={activeArea === 'tasks'} icon={<CheckmarkCircle20Regular />} onClick={() => selectArea('tasks')} />
-          <RailButton label="AI 助手" selected={aiOpen} icon={aiOpen ? <Bot20Filled /> : <Bot20Regular />} onClick={() => setAiOpen((value) => !value)} />
           <RailButton label="回收站" selected={activeArea === 'trash'} icon={<Delete20Regular />} onClick={() => selectArea('trash')} />
           <span className="rail-spacer" />
           <RailButton label="设置" selected={settingsOpen} icon={<Settings20Regular />} onClick={() => setSettingsOpen(true)} />
@@ -375,7 +402,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
                       {expanded ? <ChevronDown16Regular /> : <ChevronRight16Regular />}
                       <span>{notebook.emoji}</span><span>{notebook.name}</span>{notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen20Regular /> : <LockClosed20Regular />}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('section') }}>新建分区</button></>}
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('section') }}>新建分区</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { if (window.confirm(`删除笔记本“${notebook.name}”及其中全部分区、页面、任务、附件和历史版本？此操作无法撤销。`)) void deleteNotebook(notebook.id).catch((error: unknown) => window.alert(error instanceof Error ? error.message : '无法删除笔记本')) }}>删除笔记本及全部内容</button></>}
                     </ActionMenu>
                     {expanded && notebook.sections.map((section) => (
                       <ActionMenu openOnContext key={section.id} label={`${section.name}分区操作`} trigger={<button className={`tree-row section-row ${activeSection === section.id ? 'selected' : ''}`} onClick={() => { setActiveSection(section.id); const firstPage = pages.find((page) => page.kind !== 'task' && page.sectionId === section.id); if (firstPage) setActivePage(firstPage.id); if (window.matchMedia('(max-width: 1180px)').matches) setNavOpen(false); if (window.matchMedia('(max-width: 680px)').matches) setPagesOpen(true) }}>
@@ -392,14 +419,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
                 )
               })}
             </nav>
-            <div className="pane-footer"><Button appearance="subtle" icon={<Add20Regular />} onClick={() => setCreateRequest('section')}>新建分区</Button><Button appearance="subtle" icon={<Add20Regular />} onClick={() => setCreateRequest('notebook')}>新建笔记本</Button></div>
+            <div className="pane-footer"><Button appearance="subtle" icon={<Add20Regular />} disabled={!currentNotebook} onClick={() => setCreateRequest('section')}>新建分区</Button><Button appearance="subtle" icon={<Add20Regular />} onClick={() => setCreateRequest('notebook')}>新建笔记本</Button></div>
             <PanelResizer label="调整笔记本导航宽度" value={notebookWidth} min={180} max={380} onChange={setNotebookWidth} resetValue={236} />
           </aside>
         )}
 
         {showPagePane && <aside className="page-pane panel-border" aria-label="页面列表">
           <div className="page-pane-header">
-            <div className="page-title-row"><Text size={500} weight="semibold">{activeArea === 'tasks' ? '所有任务' : activeArea === 'trash' ? '回收站' : currentSection?.name ?? '页面'}</Text><div className="page-header-actions">{activeArea !== 'trash' && <Button appearance="subtle" size="small" icon={<Add20Regular />} aria-label={activeArea === 'tasks' ? '新建任务' : '新建页面'} onClick={() => { void createPage(activeSection, activeArea === 'tasks' ? 'task' : 'document').then(setActivePage) }} />}<ActionMenu label="页面列表操作" trigger={<Button appearance="subtle" size="small" icon={<MoreHorizontal20Regular />} aria-label="页面列表菜单" />}><button onClick={() => setPageSort(pageSort === 'recent' ? 'title' : 'recent')}>{pageSort === 'recent' ? '按标题排序' : '恢复原始顺序'}</button><button onClick={() => setCompactPages((value) => !value)}>{compactPages ? '显示页面摘要' : '使用紧凑列表'}</button><button onClick={() => setPagesOpen(false)}>隐藏页面列表</button></ActionMenu></div></div>
+            <div className="page-title-row"><Text size={500} weight="semibold">{activeArea === 'tasks' ? '所有任务' : activeArea === 'trash' ? '回收站' : currentSection?.name ?? '页面'}</Text><div className="page-header-actions">{activeArea !== 'trash' && currentSection && <Button appearance="subtle" size="small" icon={<Add20Regular />} aria-label={activeArea === 'tasks' ? '新建任务' : '新建页面'} onClick={() => { void createPage(activeSection, activeArea === 'tasks' ? 'task' : 'document').then(setActivePage) }} />}<ActionMenu label="页面列表操作" trigger={<Button appearance="subtle" size="small" icon={<MoreHorizontal20Regular />} aria-label="页面列表菜单" />}><button onClick={() => setPageSort(pageSort === 'recent' ? 'title' : 'recent')}>{pageSort === 'recent' ? '按标题排序' : '恢复原始顺序'}</button><button onClick={() => setCompactPages((value) => !value)}>{compactPages ? '显示页面摘要' : '使用紧凑列表'}</button><button onClick={() => setPagesOpen(false)}>隐藏页面列表</button></ActionMenu></div></div>
             <Input value={query} onChange={(_, data) => setQuery(data.value)} contentBefore={<Search20Regular />} placeholder={activeArea === 'tasks' ? '搜索任务' : activeArea === 'trash' ? '搜索回收站' : '搜索此分区'} aria-label={activeArea === 'tasks' ? '搜索任务' : activeArea === 'trash' ? '搜索回收站' : '搜索此分区'} />
           </div>
           <div className={`page-list ${compactPages ? 'compact' : ''}`}>
@@ -441,14 +468,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
             {activeArea === 'notes' ? <div className="recent-page-tabs" role="tablist" aria-label="最近打开的笔记"><span className="recent-tabs-label">最近</span>{recentPages.map((page) => { const selected = page.id === currentPage.id && !sectionIsEmpty; return <button key={page.id} role="tab" aria-selected={selected} className={selected ? 'selected' : ''} title={page.title} onClick={() => openRecentPage(page.id)}>{page.title}</button> })}</div> : <div className="area-heading"><span>{activeArea === 'tasks' ? '任务' : '回收站'}</span><small>{activeArea === 'tasks' ? '集中管理全部笔记本中的任务' : '恢复或永久删除页面'}</small></div>}
           </div>
           <div className="editor-toolbar">
-            <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '笔记本' : '我的知识库'}</span><ChevronRight16Regular />{activeArea === 'notes' ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
-            {activeArea === 'notes' ? <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
+            <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span><ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
+            {activeArea === 'notes' && hasActivePage ? <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
               {(Object.keys(modeLabels) as WorkspaceMode[]).map((item) => <Button key={item} className={mode === item ? 'selected' : ''} appearance="subtle" aria-pressed={mode === item} size="small" icon={item === 'document' ? <Edit20Regular /> : <Document20Regular />} onClick={() => setMode(item)}>{modeLabels[item]}</Button>)}
-            </div> : <div className="area-toolbar-label">{activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
-            <div className="editor-actions">{activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /><Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) }} /></>}<Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} /></div>
+            </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
+            <div className="editor-actions">{activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /><Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) }} /></>}<Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} /><Button appearance="subtle" icon={aiOpen ? <Bot20Filled /> : <Bot20Regular />} aria-label={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} title={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} aria-pressed={aiOpen} onClick={() => setAiOpen((value) => !value)} /></div>
           </div>
           <section ref={documentSurface} className="document-surface" onScroll={(event) => {
-            if (activeArea !== 'notes') return
+            if (activeArea !== 'notes' || !hasCurrentPage) return
             const surface = event.currentTarget
             const fraction = surface.scrollTop / Math.max(1, surface.scrollHeight - surface.clientHeight)
             const pageId = currentPage.id
@@ -456,7 +483,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
             readingPositionTimer.current = setTimeout(() => { void saveReadingPosition(pageId, fraction) }, 450)
           }}>
             {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>检测到其他设备也修改了此笔记</strong><span>当前正文保持本机版本，远端版本已安全保存在“版本”中。继续编辑可保留本机版本；从版本历史恢复远端版本可采用远端内容。</span></div>}
-            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { if (window.confirm('永久删除后无法恢复，确定继续吗？')) void purgePage(currentPage.id).then(() => setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')) }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (visiblePages.length ? <TaskDetail task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title="还没有任务" description="创建任务后，可以在这里集中跟踪状态、截止时间和步骤。" actionLabel="新建任务" onAction={() => { void createPage(activeSection, 'task').then(setActivePage) }} />) : sectionIsEmpty ? <ModePlaceholder icon={<Document20Regular />} title="这个分区还没有页面" description="创建一篇新页面，开始记录会议、想法或资料。" actionLabel="新建页面" onAction={() => { void createPage(activeSection).then(setActivePage) }} /> : <>
+            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { if (window.confirm('永久删除后无法恢复，确定继续吗？')) void purgePage(currentPage.id).then(() => setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')) }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (visiblePages.length ? <TaskDetail task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title="还没有任务" description="创建任务后，可以在这里集中跟踪状态、截止时间和步骤。" {...(currentSection ? { actionLabel: '新建任务', onAction: () => { void createPage(activeSection, 'task').then(setActivePage) } } : {})} />) : !currentSection ? <ModePlaceholder icon={<Document20Regular />} title="工作区是空的" description="新建一个笔记本后，再创建分区和页面。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : sectionIsEmpty ? <ModePlaceholder icon={<Document20Regular />} title="这个分区还没有页面" description="创建一篇新页面，开始记录会议、想法或资料。" actionLabel="新建页面" onAction={() => { void createPage(activeSection).then(setActivePage) }} /> : <>
             {mode === 'document' && <DocumentEditor
               key={`${currentPage.id}:${restoreToken.startsWith(`${currentPage.id}:`) ? restoreToken : ''}`}
               workspaceId={WORKSPACE_ID}
@@ -479,7 +506,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         {aiOpen && <aside className="ai-pane panel-border" aria-label="AI 助手">
           <PanelResizer label="调整 AI 面板宽度" value={aiWidth} min={280} max={520} onChange={setAiWidth} resetValue={320} side="left" />
           <div className="ai-header"><div className="ai-title"><span className="ai-orb"><Bot20Filled /></span><div><Text weight="semibold">Notebook AI</Text><Text size={200}>基于当前页面</Text></div></div><div className="ai-header-actions"><ActionMenu label="AI 操作" trigger={<Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="AI 菜单" />}><button onClick={() => { setAiAnswer(''); setAiPrompt(''); setAiState('idle') }}>新建对话</button><button onClick={() => { setAiAnswer(''); setAiPrompt('') }}>清空上下文</button></ActionMenu><Button appearance="subtle" icon={<PanelRight20Regular />} aria-label="关闭 AI 助手" title="关闭 AI 助手" onClick={() => setAiOpen(false)} /></div></div>
-          <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{currentPage.title}</strong><small>页面 · {currentSection?.name ?? '当前分区'}</small></span></div></div>
+          <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{hasActivePage ? currentPage.title : '未选择页面'}</strong><small>{hasActivePage ? `页面 · ${currentSection?.name ?? '当前分区'}` : '请先新建或选择页面'}</small></span></div></div>
           <div className="ai-conversation"><div className="ai-message"><div className="ai-message-icon"><Bot20Filled /></div><div><p>{aiAnswer || '我可以基于这篇页面帮助你继续工作。'}</p>{!aiAnswer && <div className="suggestion-grid"><button onClick={() => askAI('把当前页面总结为执行计划')}>总结为执行计划</button><button onClick={() => askAI('找出当前方案缺失的风险')}>找出缺失的风险</button><button onClick={() => askAI('整理当前页面的关键概念和大纲')}>整理关键概念</button><button onClick={() => askAI('把当前页面改写为结构清晰的产品文档')}>改写为产品文档</button></div>}{aiState === 'streaming' && <span className="streaming-indicator">正在生成…</span>}{aiAnswer && aiState === 'idle' && <div className="ai-writeback"><Button size="small" onClick={() => void applyAiAnswer(false)}>追加到笔记</Button><Button size="small" appearance="subtle" onClick={() => { if (window.confirm('这会用 AI 结果替换当前正文，并自动保留一个历史版本。确定继续吗？')) void applyAiAnswer(true) }}>替换正文</Button></div>}</div></div></div>
           <div className="ai-composer"><textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askAI() } }} placeholder="询问此页面，输入 @ 引用其他内容…" aria-label="询问 Notebook AI" /><div><Text size={200}>当前页面作为引用来源</Text><Button appearance="primary" icon={<Bot20Regular />} disabled={aiState === 'streaming' || !aiPrompt.trim()} onClick={() => askAI()}>{aiState === 'streaming' ? '生成中' : '发送'}</Button></div></div>
         </aside>}

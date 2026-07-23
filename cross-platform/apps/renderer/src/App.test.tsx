@@ -10,6 +10,10 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(await screen.findByLabelText('页面正文')).toBeInTheDocument()
   expect(screen.getByRole('complementary', { name: 'AI 助手' })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '任务' })).toHaveAttribute('title', '任务')
+  expect(within(screen.getByLabelText('主要功能')).queryByRole('button', { name: 'AI 助手' })).not.toBeInTheDocument()
+  const editorActions = container.querySelector('.editor-actions') as HTMLElement
+  expect(within(editorActions).getByRole('button', { name: '关闭 AI 助手' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '同步状态：仅保存在本机' })).toBeInTheDocument()
   expect(screen.queryByRole('img', { name: '闫延' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '文件与数据' })).not.toBeInTheDocument()
   expect(screen.queryByText('评论')).not.toBeInTheDocument()
@@ -49,6 +53,9 @@ test('renders the OneNote-style workspace and editor', async () => {
   fireEvent.keyDown(document, { key: 'Escape' })
 
   const notebookTree = screen.getByRole('navigation')
+  fireEvent.contextMenu(within(notebookTree).getByRole('button', { name: '我的笔记本' }))
+  expect(await within(container).findByRole('button', { name: '删除笔记本及全部内容' })).toBeInTheDocument()
+  fireEvent.keyDown(document, { key: 'Escape' })
   fireEvent.contextMenu(within(notebookTree).getByRole('button', { name: /^产品设计/ }))
   const sectionActions = await within(container).findByRole('dialog', { name: '产品设计分区操作' })
   expect(within(sectionActions).getByRole('button', { name: '重命名分区' })).toBeInTheDocument()
@@ -108,10 +115,9 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(screen.getByLabelText('笔记本和分区')).toBeInTheDocument()
   expect(screen.getByLabelText('页面列表')).toBeInTheDocument()
 
-  const rail = screen.getByLabelText('主要功能')
-  fireEvent.click(within(rail).getByRole('button', { name: 'AI 助手' }))
+  fireEvent.click(within(editorActions).getByRole('button', { name: '关闭 AI 助手' }))
   expect(screen.queryByRole('complementary', { name: 'AI 助手' })).not.toBeInTheDocument()
-  fireEvent.click(within(rail).getByRole('button', { name: 'AI 助手' }))
+  fireEvent.click(within(editorActions).getByRole('button', { name: '打开 AI 助手' }))
   expect(screen.getByRole('complementary', { name: 'AI 助手' })).toBeInTheDocument()
 
   fireEvent.click(screen.getByRole('button', { name: '进入聚焦模式' }))
