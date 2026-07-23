@@ -22,7 +22,10 @@ export interface NotebookDesktopApi {
     pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string }>
     push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
   }
-  events: { onQuickCapture(callback: () => void): () => void }
+  events: {
+    onQuickCapture(callback: () => void): () => void
+    onFlushRequested(callback: () => void | Promise<void>): () => void
+  }
 }
 
 const api: NotebookDesktopApi = Object.freeze({
@@ -52,6 +55,16 @@ const api: NotebookDesktopApi = Object.freeze({
       const listener = () => callback()
       ipcRenderer.on('notebook:quick-capture', listener)
       return () => ipcRenderer.removeListener('notebook:quick-capture', listener)
+    },
+    onFlushRequested: (callback: () => void | Promise<void>) => {
+      const listener = (_event: Electron.IpcRendererEvent, requestId: string) => {
+        void Promise.resolve(callback()).then(
+          () => ipcRenderer.send('renderer:flush-complete', requestId),
+          (error: unknown) => ipcRenderer.send('renderer:flush-complete', requestId, error instanceof Error ? error.message : '保存失败'),
+        )
+      }
+      ipcRenderer.on('notebook:flush-request', listener)
+      return () => ipcRenderer.removeListener('notebook:flush-request', listener)
     },
   }),
 })

@@ -24,7 +24,10 @@ declare global {
         pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string }>
         push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
       }
-      events: { onQuickCapture(callback: () => void): () => void }
+      events: {
+        onQuickCapture(callback: () => void): () => void
+        onFlushRequested(callback: () => void | Promise<void>): () => void
+      }
     }
   }
 }

@@ -7,6 +7,7 @@ Notebook Next 是面向 Windows、Linux 和 macOS 的 Electron 桌面笔记应�
 - Markdown/GFM 是唯一持久正文格式，支持标题、粗体、斜体、链接、代码、表格、任务列表和引用。
 - 图片、附件和录音作为内容寻址资源保存，不写入正文或历史快照。
 - 本地优先编辑、版本历史、回收站、提醒、任务、导入导出和隐私笔记本访问锁。
+- 即时崩溃草稿、退出前保存握手、原子数据目录切换和 Markdown-only 历史压缩。
 - 通过 SSH/SFTP 与 Android 共享 Markdown repository v3。
 - Electron 打包目标：Windows NSIS/portable、Linux AppImage/deb、macOS dmg/zip。
 
@@ -54,7 +55,7 @@ pnpm --filter @notebook/desktop dist
 
 Electron 数据目录与旧 SwiftData 数据库不兼容，旧数据必须通过导出包导入。不要把旧 `NotebookData` 或 `notebook.store` 直接设为 Electron 数据目录。具体见 [数据迁移说明](docs/DATA_MIGRATION_READINESS.md) 和 [SSH Markdown v3](docs/SSH_MARKDOWN_SYNC_V3.md)。
 
-隐私笔记本提供应用内访问控制。通过 SSH 同步时，其标题、正文、历史和笔记内元数据使用由 SSH 密码派生的 AES-256-GCM 密钥加密，Electron 与 Android 使用相同格式；附件二进制仍依赖 SSH 账户和服务器磁盘保护。
+隐私笔记本提供应用内访问控制。通过 SSH 同步时，其标题、正文、历史和笔记内元数据使用由 SSH 密码派生的 AES-256-GCM 密钥加密，Electron 与 Android 使用相同格式，并在导入前通过协议级密钥探针验证密码一致性；附件二进制仍依赖 SSH 账户和服务器磁盘保护。
 
 ## 许可
 

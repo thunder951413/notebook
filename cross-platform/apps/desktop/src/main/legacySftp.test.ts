@@ -5,13 +5,24 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { afterAll, beforeAll, expect, test } from 'vitest'
-import { pullLegacyRepository, pushLegacyRepository } from './legacySftp'
+import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository } from './legacySftp'
 
 const enabled = process.env.NOTEBOOK_SFTP_E2E === '1'
 let root = ''
 let port = 0
 let fingerprint = ''
 let server: ReturnType<typeof spawn> | undefined
+
+test('normalizes duplicate index rows by highest version and newest deletion', () => {
+  const noteId = '30000000-0000-4000-8000-000000000001'
+  const normalized = JSON.parse(normalizeRepositoryIndex(Buffer.from(JSON.stringify({
+    repositoryFormat: { version: 3 },
+    entries: [{ noteID: noteId, version: 9, contentHash: 'new' }, { noteID: noteId, version: 2, contentHash: 'old' }],
+    deletedEntries: [{ noteID: noteId, deletedAt: '2026-01-01T00:00:00.000Z' }, { noteID: noteId, deletedAt: '2026-02-01T00:00:00.000Z' }],
+  }))).toString('utf8'))
+  expect(normalized.entries).toEqual([{ noteID: noteId, version: 9, contentHash: 'new' }])
+  expect(normalized.deletedEntries).toEqual([{ noteID: noteId, deletedAt: '2026-02-01T00:00:00.000Z' }])
+})
 
 async function availablePort() {
   const socket = createServer()

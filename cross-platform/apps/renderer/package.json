@@ -21,6 +21,7 @@
     "@tiptap/core": "^3.28.0",
     "@tiptap/extension-collaboration": "^3.28.0",
     "@tiptap/extension-collaboration-caret": "^3.28.0",
+    "@tiptap/extension-code-block-lowlight": "^3.28.0",
     "@tiptap/extension-image": "^3.28.0",
     "@tiptap/extension-list": "^3.28.0",
     "@tiptap/extension-mathematics": "^3.28.0",
@@ -32,11 +33,13 @@
     "@tiptap/starter-kit": "^3.28.0",
     "eventsource-parser": "^3.1.0",
     "fflate": "^0.8.3",
+    "dompurify": "^3.3.3",
+    "highlight.js": "^11.11.1",
     "katex": "^0.18.1",
+    "lowlight": "^3.3.0",
     "plist": "3.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "y-indexeddb": "^9.0.12",
     "yjs": "^13.6.31"
   },
   "devDependencies": {

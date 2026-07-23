@@ -4,8 +4,7 @@ import { encodeMarkdownRepository, sha256Hex } from '@notebook/sync-contract'
 import { decodeImport, type ImportFile } from '../data/transfer'
 import { getLegacySshPassword, legacyDeviceId, loadLegacySshSettings, saveLegacySshSettings } from './legacySshSettings'
 import { loadSyncSettings } from './syncSettings'
-import { getSyncToken } from './syncSettings'
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { unzipSync } from 'fflate'
 
 const bytesToBase64 = (value: Uint8Array) => {
   let result = ''
@@ -123,39 +122,38 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   return { bundle, contents, conflicts }
 }
 
+export function publicationBundleWithRemoteConflicts(merged: NotebookDataBundle, remote: NotebookDataBundle, conflictIds: Set<string>): NotebookDataBundle {
+  const replaceByPage = <T extends { pageId: string }>(local: T[], upstream: T[]) => [
+    ...local.filter((item) => !conflictIds.has(item.pageId)),
+    ...upstream.filter((item) => conflictIds.has(item.pageId)),
+  ]
+  return {
+    ...merged,
+    pages: [...merged.pages.filter((item) => !conflictIds.has(item.id)), ...remote.pages.filter((item) => conflictIds.has(item.id))],
+    documents: replaceByPage(merged.documents, remote.documents),
+    pageTags: replaceByPage(merged.pageTags, remote.pageTags),
+    taskSteps: replaceByPage(merged.taskSteps, remote.taskSteps),
+    assets: replaceByPage(merged.assets, remote.assets),
+    readingPositions: replaceByPage(merged.readingPositions, remote.readingPositions),
+    revisions: replaceByPage(merged.revisions, remote.revisions),
+    comments: replaceByPage(merged.comments, remote.comments),
+    pageLinks: [
+      ...merged.pageLinks.filter((item) => !conflictIds.has(item.sourcePageId)),
+      ...remote.pageLinks.filter((item) => conflictIds.has(item.sourcePageId)),
+    ],
+  }
+}
+
 export async function synchronizeLegacySsh(repository: DexieNotebookRepository, workspaceId: string, force = false) {
   if (!force && !loadSyncSettings().enabled) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
   const settings = loadLegacySshSettings()
   if (!settings.host || !settings.username || !settings.remotePath) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
   const password = await getLegacySshPassword()
   if (!password) throw new Error('请在设置中填写并保存 SSH 密码')
+  if (!window.notebookDesktop) throw new Error('SSH/SFTP 同步仅在 Notebook Next Electron 桌面版中提供')
   const connection = { ...settings, password }
-  const bridgeUrl = ((import.meta.env.VITE_NOTEBOOK_LOCAL_BRIDGE_URL as string | undefined) ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
-  const bridgeHeaders = async (): Promise<Record<string, string>> => {
-    const token = await getSyncToken()
-    return token ? { Authorization: `Bearer ${token}` } : {}
-  }
-  const pullArchive = async () => {
-    const response = await fetch(`${bridgeUrl}/v1/local-sftp/pull-archive`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await bridgeHeaders()) }, body: JSON.stringify({ settings: connection }) })
-    if (!response.ok) { const value = await response.json().catch(() => undefined) as { detail?: string } | undefined; throw new Error(value?.detail ?? `本地 SSH 助手连接失败：${response.status}`) }
-    const archive = unzipSync(new Uint8Array(await response.arrayBuffer()))
-    const metadataFile = archive['sync-result.json']
-    if (!metadataFile) throw new Error('本地 SSH 助手返回的归档缺少同步元数据')
-    const metadata = JSON.parse(strFromU8(metadataFile)) as { indexHash: string; fingerprint: string }
-    const remoteFiles: ImportFile[] = Object.entries(archive).filter(([name]) => name.startsWith('repository/')).map(([name, data]) => ({ name: name.slice('repository/'.length), data }))
-    return { metadata, remoteFiles }
-  }
-  let pulled: { indexHash: string; fingerprint: string }
-  let remoteFiles: ImportFile[]
-  if (window.notebookDesktop) {
-    const result = await window.notebookDesktop.legacySftp.pull(connection)
-    pulled = result
-    remoteFiles = result.files.map((file) => ({ name: file.name, data: base64ToBytes(file.dataBase64) }))
-  } else {
-    const result = await pullArchive()
-    pulled = result.metadata
-    remoteFiles = result.remoteFiles
-  }
+  const pulled = await window.notebookDesktop.legacySftp.pull(connection)
+  const remoteFiles: ImportFile[] = pulled.files.map((file) => ({ name: file.name, data: base64ToBytes(file.dataBase64) }))
   let trustedSettings = settings
   if (!settings.fingerprint && pulled.fingerprint) trustedSettings = await saveLegacySshSettings({ ...settings, fingerprint: pulled.fingerprint })
   const hasRemoteNotes = remoteFiles.some((file) => /^notes\/[0-9a-f-]{36}\.json$/i.test(file.name))
@@ -163,26 +161,25 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
   const localContents = await repository.exportAssetContents(new Set(localBundle.pages.map((page) => page.id)))
   const decodedRemote = hasRemoteNotes ? await decodeImport(remoteFiles, workspaceId, password) : undefined
   const merged = decodedRemote ? mergeBundles(localBundle, decodedRemote.bundle, localContents, decodedRemote.assetContents) : { bundle: localBundle, contents: localContents, conflicts: [] }
-  await repository.importData(merged.bundle)
-  await repository.importAssetContents(merged.contents)
-  if (merged.conflicts.length) return { state: 'conflict' as const, skipped: 0, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }
-  const encoded = await encodeMarkdownRepository(merged.bundle, merged.contents, legacyDeviceId(), password)
-  if (window.notebookDesktop) {
-    const files = [...encoded.files].map(([name, data]) => ({ name, dataBase64: bytesToBase64(data) }))
-    await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash)
-  }
-  else {
-    const archiveEntries: Record<string, Uint8Array> = {
-      'sync-request.json': strToU8(JSON.stringify({ settings: { ...trustedSettings, password }, expectedIndexHash: pulled.indexHash })),
+  const conflictIds = new Set(merged.conflicts)
+  const publicationBundle = decodedRemote && conflictIds.size
+    ? publicationBundleWithRemoteConflicts(merged.bundle, decodedRemote.bundle, conflictIds)
+    : merged.bundle
+  const publicationContents = new Map(merged.contents)
+  if (decodedRemote && conflictIds.size) {
+    for (const asset of decodedRemote.bundle.assets.filter((item) => conflictIds.has(item.pageId))) {
+      const content = decodedRemote.assetContents.get(asset.id)
+      if (content) publicationContents.set(asset.id, content)
     }
-    for (const [name, data] of encoded.files) archiveEntries[`repository/${name}`] = data
-    const response = await fetch(`${bridgeUrl}/v1/local-sftp/push-archive`, { method: 'POST', headers: { 'Content-Type': 'application/zip', ...(await bridgeHeaders()) }, body: zipSync(archiveEntries, { level: 1 }) })
-    if (!response.ok) { const value = await response.json().catch(() => undefined) as { detail?: string } | undefined; throw new Error(value?.detail ?? `本地 SSH 助手连接失败：${response.status}`) }
   }
+  const encoded = await encodeMarkdownRepository(publicationBundle, publicationContents, legacyDeviceId(), password)
+  const files = [...encoded.files].map(([name, data]) => ({ name, dataBase64: bytesToBase64(data) }))
+  await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash)
   const documents = new Map(merged.bundle.documents.map((document) => [document.pageId, document]))
-  const syncedBundle: NotebookDataBundle = { ...merged.bundle, pages: merged.bundle.pages.map((page) => encoded.pageVersions.has(page.id) ? { ...page, legacyVersion: encoded.pageVersions.get(page.id), syncStatus: 'synced', legacyMetadata: { ...page.legacyMetadata, ...(documents.get(page.id) ? { syncBaselineHash: sha256Hex(documentSignature(documents.get(page.id)!)) } : {}) } } : page) }
-  await repository.importData(syncedBundle)
-  await repository.clearOutbox(workspaceId)
+  const syncedBundle: NotebookDataBundle = { ...merged.bundle, pages: merged.bundle.pages.map((page) => !conflictIds.has(page.id) && encoded.pageVersions.has(page.id) ? { ...page, legacyVersion: encoded.pageVersions.get(page.id), syncStatus: 'synced', legacyMetadata: { ...page.legacyMetadata, ...(documents.get(page.id) ? { syncBaselineHash: sha256Hex(documentSignature(documents.get(page.id)!)) } : {}) } } : page) }
+  await repository.importAssetContents(merged.contents)
+  await repository.importSyncResult(syncedBundle, localBundle)
+  if (merged.conflicts.length) return { state: 'conflict' as const, skipped: encoded.skippedPageIds.length, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }
   return { state: 'synced' as const, skipped: encoded.skippedPageIds.length, fingerprint: pulled.fingerprint }
 }
 
@@ -190,14 +187,15 @@ export async function publishPreparedLegacyArchive(file: File) {
   const settings = loadLegacySshSettings()
   const password = await getLegacySshPassword()
   if (!settings.host || !settings.username || !settings.remotePath || !password) throw new Error('请先完整填写并保存 SSH 设置和密码')
-  const token = await getSyncToken()
-  const bridgeUrl = ((import.meta.env.VITE_NOTEBOOK_LOCAL_BRIDGE_URL as string | undefined) ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
-  const connection = bytesToBase64(strToU8(JSON.stringify({ ...settings, password })))
-  const response = await fetch(`${bridgeUrl}/v1/local-sftp/publish-prepared-archive`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/zip', 'X-Notebook-Ssh-Settings': connection, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: file,
-  })
-  if (!response.ok) { const value = await response.json().catch(() => undefined) as { detail?: string } | undefined; throw new Error(value?.detail ?? `迁移仓库发布失败：${response.status}`) }
-  return response.json() as Promise<{ fingerprint: string }>
+  if (!window.notebookDesktop) throw new Error('迁移仓库发布仅在 Notebook Next Electron 桌面版中提供')
+  const connection = { ...settings, password }
+  const pulled = await window.notebookDesktop.legacySftp.pull(connection)
+  const trustedSettings = !settings.fingerprint && pulled.fingerprint ? await saveLegacySshSettings({ ...settings, fingerprint: pulled.fingerprint }) : settings
+  const archive = unzipSync(new Uint8Array(await file.arrayBuffer()))
+  const files = Object.entries(archive).filter(([name]) => name && !name.endsWith('/')).map(([name, data]) => ({
+    name: name.startsWith('repository/') ? name.slice('repository/'.length) : name,
+    dataBase64: bytesToBase64(data),
+  }))
+  if (!files.some((item) => item.name === 'notes/index.json')) throw new Error('迁移仓库 ZIP 缺少 notes/index.json')
+  return window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash)
 }

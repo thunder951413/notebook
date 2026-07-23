@@ -51,11 +51,31 @@ test('queues page bodies and applies remote body updates and deletes', async () 
   const value = { ...page('page-body', 'Body'), syncStatus: 'pending' as const }
   const document: PageDocument = { pageId: value.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'paragraph' }] }, updatedAt: value.updatedAt }
   await repository.savePage(value, document)
-  expect((await repository.listOutbox('workspace-a')).map((item) => item.entityType).sort()).toEqual(['document', 'page'])
+  const queued = await repository.listOutbox('workspace-a')
+  expect(queued.map((item) => item.entityType).sort()).toEqual(['document', 'page'])
+  await repository.acknowledgeSync('workspace-a', queued.map((item, index) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: index + 1 })))
   await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'document', entityId: value.id, version: 1, operation: 'upsert', payload: { ...document, tiptapJson: { type: 'doc', content: [] } } }], 1)
   expect((await repository.getPageDocument(value.id))?.tiptapJson).toEqual({ type: 'doc', content: [] })
   await repository.applyRemoteChanges('workspace-a', [{ cursor: 2, entityType: 'document', entityId: value.id, version: 2, operation: 'delete', payload: {} }], 2)
   expect(await repository.getPageDocument(value.id)).toBeUndefined()
+})
+
+test('rejects malformed remote payloads and never overwrites a pending local body', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-protected', 'Local'), syncStatus: 'pending' as const }
+  const document: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: 'local', tiptapJson: { type: 'doc' }, updatedAt: value.updatedAt }
+  await repository.savePage(value, document)
+  await repository.applyRemoteChanges('workspace-a', [{
+    cursor: 1, entityType: 'document', entityId: value.id, version: 1, operation: 'upsert',
+    payload: { ...document, markdown: 'remote' },
+  }], 1)
+  expect(await repository.getPageDocument(value.id)).toMatchObject({ markdown: 'local' })
+  expect(await repository.getPage(value.id)).toMatchObject({ syncStatus: 'conflict' })
+  await expect(repository.applyRemoteChanges('workspace-a', [{
+    cursor: 2, entityType: 'page', entityId: value.id, version: 2, operation: 'upsert',
+    payload: { id: value.id, title: 'broken' },
+  }], 2)).rejects.toThrow()
+  expect(await repository.getPage(value.id)).toMatchObject({ title: 'Local' })
 })
 
 test('queues notebook hierarchy and task steps for cross-device sync', async () => {
@@ -143,6 +163,17 @@ test('searches, soft deletes, restores and purges without leaking children', asy
   expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityId: 'page-a' }))
 })
 
+test('reuses the search index and invalidates it after a canonical Markdown edit', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-search-cache', 'Search cache'), syncStatus: 'pending' as const }
+  const document: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: 'alpha-only phrase', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt }
+  await repository.savePage(value, document)
+  expect((await repository.searchWorkspace('workspace-a', 'alpha-only')).map((item) => item.id)).toEqual([value.id])
+  await repository.savePage({ ...value, updatedAt: '2026-01-03T00:00:00.000Z' }, { ...document, markdown: 'beta-only phrase', updatedAt: '2026-01-03T00:00:00.000Z' })
+  expect(await repository.searchWorkspace('workspace-a', 'alpha-only')).toEqual([])
+  expect((await repository.searchWorkspace('workspace-a', 'beta-only')).map((item) => item.id)).toEqual([value.id])
+})
+
 test('recovers a newer staged draft after an interrupted save and clears it after commit', async () => {
   const repository = makeRepository()
   const value = page('page-draft', 'Draft')
@@ -153,6 +184,29 @@ test('recovers a newer staged draft after an interrupted save and clears it afte
   expect(await repository.recoverDrafts()).toEqual([value.id])
   expect((await repository.getPageDocument(value.id))?.markdown).toBe('recovered')
   expect(await repository.recoverDrafts()).toEqual([])
+})
+
+test('preserves edits made while an SSH publication is in flight', async () => {
+  const repository = makeRepository()
+  const snapshotPage = { ...page('page-sync-window', 'Before sync'), syncStatus: 'pending' as const }
+  const snapshotDocument: PageDocument = { pageId: snapshotPage.id, schemaVersion: 3, markdown: 'before', tiptapJson: { type: 'doc' }, updatedAt: snapshotPage.updatedAt }
+  await repository.savePage(snapshotPage, snapshotDocument)
+  const snapshot = await repository.exportData('workspace-a')
+
+  const editTime = '2026-01-03T00:00:00.000Z'
+  await repository.savePage(
+    { ...snapshotPage, title: 'Edited during sync', updatedAt: editTime, syncStatus: 'pending' },
+    { ...snapshotDocument, markdown: 'edited during sync', updatedAt: editTime },
+  )
+
+  const published = {
+    ...snapshot,
+    pages: snapshot.pages.map((item) => ({ ...item, title: 'Published snapshot', syncStatus: 'synced' as const })),
+  }
+  await repository.importSyncResult(published, snapshot)
+  expect(await repository.getPage(snapshotPage.id)).toMatchObject({ title: 'Edited during sync', syncStatus: 'pending' })
+  expect(await repository.getPageDocument(snapshotPage.id)).toMatchObject({ markdown: 'edited during sync' })
+  expect((await repository.listOutbox('workspace-a')).some((item) => item.entityId === snapshotPage.id)).toBe(true)
 })
 
 test('imports and exports a versioned workspace bundle without losing metadata', async () => {
@@ -217,7 +271,7 @@ test('removes consecutive duplicate imported revisions and a revision identical 
     notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
     pages: [value], documents: [document('current', 5)], revisions,
   })
-  expect((await repository.listRevisions(value.id)).map((item) => (item.document.tiptapJson.content as Array<{ text: string }>)[0]?.text).sort()).toEqual(['A', 'B'])
+  expect((await repository.listRevisions(value.id)).map((item) => item.document.markdown).sort()).toEqual(['A', 'B'])
 })
 
 test('re-import replaces stale attachment children for imported pages', async () => {

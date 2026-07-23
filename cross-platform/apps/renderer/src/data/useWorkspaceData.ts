@@ -198,6 +198,11 @@ export function useWorkspaceData() {
     })
   }, [privateSectionIds])
 
+  const stageDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
+    const updatedAt = new Date().toISOString()
+    await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt })
+  }, [])
+
   const createPage = useCallback(async (sectionId: string, kind: Page['kind'] = 'document') => {
     const now = new Date().toISOString()
     const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, kind, title: kind === 'task' ? '新任务' : '无标题页面', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
@@ -320,7 +325,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function extractDocumentText(value: unknown): string {

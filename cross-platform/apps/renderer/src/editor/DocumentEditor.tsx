@@ -17,6 +17,7 @@ import {
   Image20Regular,
 } from '@fluentui/react-icons'
 import type { Asset } from '@notebook/domain'
+import { registerFlushHandler } from '../data/flushCoordinator'
 
 export const initialContent = `
   <h1>Notebook Next 产品愿景</h1>
@@ -40,7 +41,8 @@ export interface DocumentEditorProps {
   pageId: string
   pageTitle: string
   content?: Record<string, unknown> | string
-  onChange?: (json: Record<string, unknown>) => void
+  onChange?: (json: Record<string, unknown>) => void | Promise<void>
+  onDraft?: (json: Record<string, unknown>) => void | Promise<void>
   forceRestore?: boolean
   loadAsset?: AssetLoader
   saveImage?: (file: File) => Promise<Asset>
@@ -48,36 +50,41 @@ export interface DocumentEditorProps {
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, forceRestore, loadAsset, saveImage }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveImage }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageTitle={pageTitle} content={content} onChange={onChange} forceRestore={forceRestore} loadAsset={loadAsset} saveImage={saveImage} />
+  return <ReadyDocumentEditor session={session} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveImage={saveImage} />
 }
 
-function ReadyDocumentEditor({ session, pageTitle, content, onChange, forceRestore, loadAsset, saveImage }: Pick<DocumentEditorProps, 'pageTitle' | 'content' | 'onChange' | 'forceRestore' | 'loadAsset' | 'saveImage'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveImage }: Pick<DocumentEditorProps, 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveImage'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const imageInput = useRef<HTMLInputElement>(null)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
   const onChangeRef = useRef(onChange)
+  const onDraftRef = useRef(onDraft)
   onChangeRef.current = onChange
+  onDraftRef.current = onDraft
+  const collaborative = Boolean(session.provider)
   const editor = useEditor({
     extensions: [
-      ...createContentExtensions(true, loadAsset),
+      ...createContentExtensions(collaborative, loadAsset),
       Placeholder.configure({ placeholder: '开始记录，或输入 / 插入内容…' }),
-      Collaboration.configure({ document: session.document }),
+      ...(collaborative ? [Collaboration.configure({ document: session.document })] : []),
       ...(session.provider ? [CollaborationCaret.configure({
         provider: session.provider,
         user: { name: '本机用户', color: '#7c3aed' },
       })] : []),
     ],
+    content: collaborative ? undefined : content,
     onCreate: ({ editor: currentEditor }) => {
       // Hydration is not a user edit. Emitting an update here would mark every
       // opened page as pending and could make an old local copy beat a newer
       // Android/SSH revision during the next merge.
-      if ((forceRestore || session.document.getXmlFragment('default').length === 0) && content) currentEditor.commands.setContent(content, { emitUpdate: false })
+      if (collaborative && (forceRestore || session.document.getXmlFragment('default').length === 0) && content) currentEditor.commands.setContent(content, { emitUpdate: false })
     },
     onUpdate: ({ editor: currentEditor }) => {
       latestJson.current = currentEditor.getJSON()
+      void Promise.resolve(onDraftRef.current?.(latestJson.current)).catch(() => undefined)
       clearTimeout(saveTimer.current)
       saveTimer.current = setTimeout(() => {
         if (latestJson.current) onChangeRef.current?.(latestJson.current)
@@ -110,6 +117,11 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, forceResto
     clearTimeout(saveTimer.current)
     if (latestJson.current) onChangeRef.current?.(latestJson.current)
   }, [])
+
+  useEffect(() => registerFlushHandler(async () => {
+    clearTimeout(saveTimer.current)
+    if (latestJson.current) await onChangeRef.current?.(latestJson.current)
+  }), [])
 
   const firstNode = editor?.state.doc.firstChild
   const duplicateTitle = firstNode?.type.name === 'heading' && firstNode.attrs.level === 1 && firstNode.textContent.trim() === pageTitle.trim()

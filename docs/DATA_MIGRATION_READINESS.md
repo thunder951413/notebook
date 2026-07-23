@@ -25,7 +25,7 @@ NOTEBOOK_NEXT_DATA_DIR=/absolute/path Notebook Next
 - Linux：通常为 `$XDG_CONFIG_HOME/Notebook Next` 或 `~/.config/Notebook Next`
 - macOS：通常为 `~/Library/Application Support/Notebook Next`
 
-更改目录只改变 Notebook Next 下次启动的位置，不会搬运已有数据，也不会转换旧数据库。已有新端数据应先“导出完整备份”，切换后再导入。
+选择已有 Notebook Next 数据目录时会直接挂载该目录，不覆盖其中内容。选择全新空目录时，当前 Electron profile 会在退出前完成编辑器保存，并在下一次启动、IndexedDB 尚未打开时迁移到新目录；迁移失败会停止启动而不会静默回退到空库。该功能不会转换旧 SwiftData 数据库。
 
 ## 已核对的旧库
 
@@ -66,7 +66,7 @@ NOTEBOOK_NEXT_DATA_DIR=/absolute/path Notebook Next
 - 无附件内容时阻止“只有元数据”的不完整推送；
 - 断网时保持离线队列，不把失败当成功。
 
-Yjs 实时协作和元数据同步是两条互补通道：正文会进入普通同步，在线编辑时还可通过 Yjs 获得实时合并和光标状态。
+Dexie 中的 Markdown 是唯一耐久正文。编辑输入先立即写入轻量草稿，随后提交 Markdown；退出或切换数据目录前主进程会等待 renderer 的保存确认。Y.Doc 只在配置在线协作服务时作为会话内实时合并状态，不再建立第二套本地 IndexedDB 正文。
 
 ## 推荐接入顺序
 

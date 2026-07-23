@@ -1,12 +1,14 @@
-import { app, BrowserWindow, globalShortcut, Menu, nativeImage, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, Menu, nativeImage, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { registerPlatformHandlers } from './platform'
+import { flushRenderer, registerPlatformHandlers } from './platform'
 import { resolveDataRoot } from './dataRoot'
 import electronUpdater from 'electron-updater'
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
+let quitAfterFlush = false
+let flushInProgress = false
 const { autoUpdater } = electronUpdater
 const defaultUserDataPath = app.getPath('userData')
 const dataRoot = resolveDataRoot(defaultUserDataPath)
@@ -47,6 +49,21 @@ function createWindow() {
   window.webContents.on('will-navigate', (event, url) => {
     const current = window.webContents.getURL()
     if (current && new URL(url).origin !== new URL(current).origin) event.preventDefault()
+  })
+  let closeAfterFlush = false
+  let closeFlushInProgress = false
+  window.on('close', (event) => {
+    if (quitAfterFlush || closeAfterFlush) return
+    event.preventDefault()
+    if (closeFlushInProgress) return
+    closeFlushInProgress = true
+    void flushRenderer(window.webContents).then(() => {
+      closeAfterFlush = true
+      window.close()
+    }).catch((error) => {
+      closeFlushInProgress = false
+      dialog.showErrorBox('无法安全关闭窗口', error instanceof Error ? error.message : '编辑内容尚未保存')
+    })
   })
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
@@ -108,6 +125,20 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', (event) => {
+  if (quitAfterFlush) return
+  event.preventDefault()
+  if (flushInProgress) return
+  flushInProgress = true
+  void Promise.all(BrowserWindow.getAllWindows().map((window) => flushRenderer(window.webContents))).then(() => {
+    quitAfterFlush = true
+    app.quit()
+  }).catch((error) => {
+    flushInProgress = false
+    dialog.showErrorBox('无法安全退出', error instanceof Error ? error.message : '编辑内容尚未保存')
+  })
 })
 
 app.on('will-quit', () => {

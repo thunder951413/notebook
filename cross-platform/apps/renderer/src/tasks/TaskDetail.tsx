@@ -14,7 +14,9 @@ interface TaskDetailProps {
 export function TaskDetail({ task, loadSteps, saveSteps, updateTask }: TaskDetailProps) {
   const [steps, setSteps] = useState<TaskStep[]>([])
   const [newStep, setNewStep] = useState('')
+  const [description, setDescription] = useState(task.preview)
   useEffect(() => { void loadSteps(task.id).then(setSteps) }, [loadSteps, task.id])
+  useEffect(() => { setDescription(task.preview) }, [task.id, task.preview])
 
   const commitSteps = (next: TaskStep[]) => {
     setSteps(next)
@@ -37,7 +39,7 @@ export function TaskDetail({ task, loadSteps, saveSteps, updateTask }: TaskDetai
       <Field label="截止时间"><Input type="datetime-local" value={task.dueAt ? task.dueAt.slice(0, 16) : ''} onChange={(_, data) => void updateTask({ dueAt: data.value ? new Date(data.value).toISOString() : undefined })} /></Field>
       <Field label="提醒时间"><Input type="datetime-local" value={task.reminderAt ? task.reminderAt.slice(0, 16) : ''} onChange={(_, data) => { if (!window.notebookDesktop && 'Notification' in window && Notification.permission === 'default') void Notification.requestPermission(); void updateTask({ reminderAt: data.value ? new Date(data.value).toISOString() : undefined }) }} /></Field>
       <Field label="重复"><select className="task-select" value={task.recurrenceRule ?? 'none'} onChange={(event) => void updateTask({ recurrenceRule: event.target.value })}><option value="none">不重复</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></Field>
-      <Field label="任务说明"><Textarea defaultValue={task.preview} resize="vertical" onBlur={(event) => void updateTask({ preview: event.target.value })} /></Field>
+      <Field label="任务说明"><Textarea value={description} resize="vertical" onChange={(_, data) => setDescription(data.value)} onBlur={() => void updateTask({ preview: description })} /></Field>
     </div>
     <section className="task-steps"><h2>步骤</h2>
       {steps.map((step) => <div className="task-step" key={step.id}><Checkbox checked={step.checked} onChange={(_, data) => commitSteps(steps.map((item) => item.id === step.id ? { ...item, checked: Boolean(data.checked) } : item))} label={step.text} /><Button appearance="subtle" icon={<Delete20Regular />} aria-label={`删除 ${step.text}`} onClick={() => commitSteps(steps.filter((item) => item.id !== step.id))} /></div>)}

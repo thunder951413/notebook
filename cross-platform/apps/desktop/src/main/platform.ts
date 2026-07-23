@@ -1,5 +1,6 @@
-import { app, dialog, ipcMain, Notification, safeStorage, shell, type IpcMainInvokeEvent } from 'electron'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { app, dialog, ipcMain, Notification, safeStorage, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
 import { pullLegacyRepository, pushLegacyRepository, type LegacySftpFile, type LegacySshConnection } from './legacySftp'
@@ -18,6 +19,54 @@ function assertTrustedSender(event: IpcMainInvokeEvent) {
 
 const credentialsPath = () => join(app.getPath('userData'), 'credentials.v1.json')
 
+async function atomicWriteFile(target: string, data: string | Uint8Array, mode?: number) {
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
+  await mkdir(dirname(target), { recursive: true })
+  try {
+    const handle = await open(temporary, 'w', mode)
+    try {
+      await handle.writeFile(data)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await rename(temporary, target)
+    try {
+      const directory = await open(dirname(target), 'r')
+      try { await directory.sync() } finally { await directory.close() }
+    } catch {
+      // Directory handles cannot be flushed on Windows. The temporary file was
+      // still flushed before the atomic rename.
+    }
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+export function flushRenderer(contents: WebContents, timeoutMs = 5_000): Promise<void> {
+  if (contents.isDestroyed()) return Promise.resolve()
+  const requestId = randomUUID()
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer)
+      ipcMain.removeListener('renderer:flush-complete', listener)
+    }
+    const listener = (event: Electron.IpcMainEvent, responseId: string, error?: string) => {
+      if (event.sender !== contents || responseId !== requestId) return
+      cleanup()
+      if (error) reject(new Error(error))
+      else resolve()
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error('保存编辑内容超时，已取消退出或重启'))
+    }, timeoutMs)
+    ipcMain.on('renderer:flush-complete', listener)
+    contents.send('notebook:flush-request', requestId)
+  })
+}
+
 async function readCredentialStore(): Promise<Record<string, string>> {
   try { return JSON.parse(await readFile(credentialsPath(), 'utf8')) as Record<string, string> }
   catch (error) {
@@ -27,11 +76,7 @@ async function readCredentialStore(): Promise<Record<string, string>> {
 }
 
 async function writeCredentialStore(store: Record<string, string>) {
-  const target = credentialsPath()
-  const temporary = `${target}.tmp`
-  await mkdir(dirname(target), { recursive: true })
-  await writeFile(temporary, JSON.stringify(store), { mode: 0o600 })
-  await rename(temporary, target)
+  await atomicWriteFile(credentialsPath(), JSON.stringify(store), 0o600)
 }
 
 function requireEncryption() {
@@ -76,9 +121,7 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     if (result.canceled || !result.filePath) return false
     const data = Buffer.from(value.dataBase64, 'base64')
     if (data.byteLength > MAX_IMPORT_BYTES) throw new Error('Export exceeds the 100 MB bridge limit')
-    const temporary = `${result.filePath}.tmp`
-    await writeFile(temporary, data)
-    await rename(temporary, result.filePath)
+    await atomicWriteFile(result.filePath, data)
     return true
   })
 
@@ -91,7 +134,8 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     assertTrustedSender(event)
     const result = await dialog.showOpenDialog({ title: '选择 Notebook Next 数据目录', properties: ['openDirectory', 'createDirectory'] })
     if (result.canceled || !result.filePaths[0]) return undefined
-    const path = saveDataRoot(options.defaultUserDataPath, result.filePaths[0])
+    await flushRenderer(event.sender)
+    const path = saveDataRoot(options.defaultUserDataPath, result.filePaths[0], app.getPath('userData'))
     app.relaunch()
     app.quit()
     return path

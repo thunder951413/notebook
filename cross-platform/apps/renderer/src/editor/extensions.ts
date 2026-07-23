@@ -4,11 +4,28 @@ import { TableKit } from '@tiptap/extension-table'
 import { Mathematics } from '@tiptap/extension-mathematics'
 import Image from '@tiptap/extension-image'
 import { Markdown, MarkdownManager } from '@tiptap/markdown'
+import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
+import { createLowlight } from 'lowlight'
+import bash from 'highlight.js/lib/languages/bash'
+import css from 'highlight.js/lib/languages/css'
+import java from 'highlight.js/lib/languages/java'
+import javascript from 'highlight.js/lib/languages/javascript'
+import json from 'highlight.js/lib/languages/json'
+import kotlin from 'highlight.js/lib/languages/kotlin'
+import markdownLanguage from 'highlight.js/lib/languages/markdown'
+import python from 'highlight.js/lib/languages/python'
+import sql from 'highlight.js/lib/languages/sql'
+import swift from 'highlight.js/lib/languages/swift'
+import typescript from 'highlight.js/lib/languages/typescript'
+import xml from 'highlight.js/lib/languages/xml'
 import type { JSONContent } from '@tiptap/core'
 import { generateHTML, generateJSON } from '@tiptap/html'
+import DOMPurify from 'dompurify'
 import 'katex/dist/katex.min.css'
 
 export type AssetLoader = (assetId: string) => Promise<Blob | undefined>
+const lowlight = createLowlight()
+lowlight.register({ bash, css, java, javascript, json, kotlin, markdown: markdownLanguage, python, sql, swift, typescript, xml })
 
 function notebookImage(loadAsset?: AssetLoader) {
   return Image.extend({
@@ -61,7 +78,11 @@ function notebookImage(loadAsset?: AssetLoader) {
               objectUrl = URL.createObjectURL(blob)
               setReady(objectUrl)
             }).catch(() => { if (currentGeneration === generation) placeholder.textContent = image.alt || '图片载入失败' })
-          } else if (stableSource && !stableSource.startsWith('notebook-asset:')) setReady(stableSource)
+          } else if (stableSource && !stableSource.startsWith('notebook-asset:')) {
+            image.hidden = true
+            placeholder.hidden = false
+            placeholder.textContent = image.alt ? `${image.alt}（外部图片未自动加载）` : '外部图片未自动加载'
+          }
           else {
             image.hidden = true
             placeholder.hidden = false
@@ -85,7 +106,8 @@ function notebookImage(loadAsset?: AssetLoader) {
 
 export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader) {
   return [
-    StarterKit.configure({ undoRedo: collaborative ? false : undefined }),
+    StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false }),
+    CodeBlockLowlight.configure({ lowlight }),
     TaskList,
     TaskItem.configure({ nested: true }),
     TableKit.configure({ table: { resizable: true } }),
@@ -108,5 +130,10 @@ export function documentToHtml(document: Record<string, unknown>) {
 }
 
 export function htmlToDocument(html: string) {
-  return generateJSON(html, createContentExtensions()) as Record<string, unknown>
+  const sanitized = DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
+    FORBID_ATTR: ['style'],
+  })
+  return generateJSON(sanitized, createContentExtensions()) as Record<string, unknown>
 }

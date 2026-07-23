@@ -36,7 +36,7 @@ import { base64ToBytes, bytesToBase64, type ImportFile } from './data/transfer'
 import { AttachmentPanel } from './assets/AttachmentPanel'
 import { useReminders } from './tasks/useReminders'
 import { VersionHistory } from './history/VersionHistory'
-import { documentToHtml, documentToMarkdown } from './editor/extensions'
+import { documentToHtml, documentToMarkdown, markdownToDocument } from './editor/extensions'
 import { decryptBackup, encryptBackup } from './crypto/encryptedBackup'
 import { SettingsCenter } from './settings/SettingsCenter'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
@@ -53,7 +53,7 @@ const modeLabels: Record<WorkspaceMode, string> = {
 export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
 
 export function App({ theme = 'light', onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const importInput = useRef<HTMLInputElement>(null)
   const documentSurface = useRef<HTMLElement>(null)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -93,7 +93,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [privacyPrompt, setPrivacyPrompt] = useState<{ mode: 'setup' | 'unlock'; notebookId?: string }>()
   const accessiblePages = useMemo(() => privacyUnlocked ? pages : pages.filter((page) => !page.locked), [pages, privacyUnlocked])
   const accessibleTrashPages = useMemo(() => privacyUnlocked ? trashPages : trashPages.filter((page) => !page.locked), [privacyUnlocked, trashPages])
-  useReminders(accessiblePages)
+  useReminders(accessiblePages, (pageId, patch) => updatePage(pageId, patch))
 
   const visiblePages = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
@@ -198,6 +198,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       setAiAnswer(error instanceof Error ? error.message : 'AI 服务暂时不可用')
       setAiState('error')
     })
+  }
+
+  const applyAiAnswer = async (replace: boolean) => {
+    if (!aiAnswer.trim() || aiState === 'streaming') return
+    const current = documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }
+    const markdown = replace ? aiAnswer.trim() : `${documentToMarkdown(current).trimEnd()}\n\n${aiAnswer.trim()}`.trim()
+    await saveDocument(currentPage.id, markdownToDocument(markdown))
+    setMode('document')
   }
 
   const runImport = async (files: ImportFile[]) => {
@@ -453,13 +461,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               pageId={currentPage.id}
               pageTitle={currentPage.title}
               content={documents[currentPage.id] ?? (currentPage.id === 'vision' ? undefined : { type: 'doc', content: [{ type: 'paragraph' }] })}
-              onChange={(json) => { void saveDocument(currentPage.id, json) }}
+              onDraft={(json) => stageDocument(currentPage.id, json)}
+              onChange={(json) => saveDocument(currentPage.id, json)}
               loadAsset={getAssetContent}
               saveImage={(file) => saveAsset(currentPage.id, file)}
               forceRestore={restoreToken.startsWith(`${currentPage.id}:`)}
             />}
             <Suspense fallback={<ModePlaceholder icon={<Document20Regular />} title="正在加载 Markdown" description="正在准备源码编辑器。" />}>
-              {mode === 'source' && <MarkdownSourceEditor key={currentPage.id} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onChange={(json) => { void saveDocument(currentPage.id, json) }} />}
+              {mode === 'source' && <MarkdownSourceEditor key={currentPage.id} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onDraft={(json) => stageDocument(currentPage.id, json)} onChange={(json) => saveDocument(currentPage.id, json)} />}
             </Suspense>
             </>}
           </section>
@@ -469,7 +478,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           <PanelResizer label="调整 AI 面板宽度" value={aiWidth} min={280} max={520} onChange={setAiWidth} resetValue={320} side="left" />
           <div className="ai-header"><div className="ai-title"><span className="ai-orb"><Bot20Filled /></span><div><Text weight="semibold">Notebook AI</Text><Text size={200}>基于当前页面</Text></div></div><div className="ai-header-actions"><ActionMenu label="AI 操作" trigger={<Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="AI 菜单" />}><button onClick={() => { setAiAnswer(''); setAiPrompt(''); setAiState('idle') }}>新建对话</button><button onClick={() => { setAiAnswer(''); setAiPrompt('') }}>清空上下文</button></ActionMenu><Button appearance="subtle" icon={<PanelRight20Regular />} aria-label="关闭 AI 助手" title="关闭 AI 助手" onClick={() => setAiOpen(false)} /></div></div>
           <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{currentPage.title}</strong><small>页面 · {currentSection?.name ?? '当前分区'}</small></span></div></div>
-          <div className="ai-conversation"><div className="ai-message"><div className="ai-message-icon"><Bot20Filled /></div><div><p>{aiAnswer || '我可以基于这篇页面帮助你继续工作。'}</p>{!aiAnswer && <div className="suggestion-grid"><button onClick={() => askAI('把当前页面总结为执行计划')}>总结为执行计划</button><button onClick={() => askAI('找出当前方案缺失的风险')}>找出缺失的风险</button><button onClick={() => askAI('整理当前页面的关键概念和大纲')}>整理关键概念</button><button onClick={() => askAI('把当前页面改写为结构清晰的产品文档')}>改写为产品文档</button></div>}{aiState === 'streaming' && <span className="streaming-indicator">正在生成…</span>}</div></div></div>
+          <div className="ai-conversation"><div className="ai-message"><div className="ai-message-icon"><Bot20Filled /></div><div><p>{aiAnswer || '我可以基于这篇页面帮助你继续工作。'}</p>{!aiAnswer && <div className="suggestion-grid"><button onClick={() => askAI('把当前页面总结为执行计划')}>总结为执行计划</button><button onClick={() => askAI('找出当前方案缺失的风险')}>找出缺失的风险</button><button onClick={() => askAI('整理当前页面的关键概念和大纲')}>整理关键概念</button><button onClick={() => askAI('把当前页面改写为结构清晰的产品文档')}>改写为产品文档</button></div>}{aiState === 'streaming' && <span className="streaming-indicator">正在生成…</span>}{aiAnswer && aiState === 'idle' && <div className="ai-writeback"><Button size="small" onClick={() => void applyAiAnswer(false)}>追加到笔记</Button><Button size="small" appearance="subtle" onClick={() => { if (window.confirm('这会用 AI 结果替换当前正文，并自动保留一个历史版本。确定继续吗？')) void applyAiAnswer(true) }}>替换正文</Button></div>}</div></div></div>
           <div className="ai-composer"><textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askAI() } }} placeholder="询问此页面，输入 @ 引用其他内容…" aria-label="询问 Notebook AI" /><div><Text size={200}>当前页面作为引用来源</Text><Button appearance="primary" icon={<Bot20Regular />} disabled={aiState === 'streaming' || !aiPrompt.trim()} onClick={() => askAI()}>{aiState === 'streaming' ? '生成中' : '发送'}</Button></div></div>
         </aside>}
       </div>

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -29,4 +29,23 @@ test('rejects a legacy NotebookData directory', () => {
   mkdirSync(join(legacy, 'NotebookData', 'Database'), { recursive: true })
   writeFileSync(join(legacy, 'NotebookData', 'Database', 'notebook.store'), '')
   expect(() => resolveDataRoot(defaultPath, ['electron', `--data-dir=${legacy}`], {})).toThrow(/legacy SwiftData/)
+})
+
+test('migrates the active Electron profile into a newly selected empty root on next launch', () => {
+  const defaultPath = temporary()
+  const current = temporary()
+  const selected = temporary()
+  mkdirSync(join(current, 'IndexedDB'), { recursive: true })
+  writeFileSync(join(current, 'IndexedDB', 'notes.leveldb'), 'durable notes')
+  saveDataRoot(defaultPath, selected, current)
+  expect(existsSync(join(selected, 'IndexedDB', 'notes.leveldb'))).toBe(false)
+  expect(resolveDataRoot(defaultPath, ['electron'], {})).toEqual({ path: selected, source: 'saved' })
+  expect(existsSync(join(selected, 'IndexedDB', 'notes.leveldb'))).toBe(true)
+})
+
+test('rejects nested migration roots that could recursively copy the active profile', () => {
+  const defaultPath = temporary()
+  const current = temporary()
+  const nested = join(current, 'nested-root')
+  expect(() => saveDataRoot(defaultPath, nested, current)).toThrow(/父子目录/)
 })

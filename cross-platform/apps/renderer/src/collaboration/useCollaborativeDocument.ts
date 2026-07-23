@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { HocuspocusProvider } from '@hocuspocus/provider'
-import { IndexeddbPersistence } from 'y-indexeddb'
 import * as Y from 'yjs'
 
 export type CollaborationStatus = 'loading' | 'offline' | 'connecting' | 'connected' | 'error'
@@ -24,17 +23,10 @@ export function useCollaborativeDocument(workspaceId: string, pageId: string) {
     let disposed = false
     const document = new Y.Doc()
     const documentName = `${workspaceId}:page:${pageId}`
-    const persistence = new IndexeddbPersistence(`notebook-next:${documentName}`, document)
     let provider: HocuspocusProvider | undefined
 
-    setSession({ document, status: 'loading' })
-    void persistence.whenSynced.then(async () => {
-      if (disposed) return
-      if (!collaborationUrl) {
-        setSession({ document, status: 'offline' })
-        return
-      }
-
+    if (!collaborationUrl) setSession({ document, status: 'offline' })
+    else void (async () => {
       const token = await getAccessToken()
       if (disposed) return
       provider = new HocuspocusProvider({
@@ -50,14 +42,13 @@ export function useCollaborativeDocument(workspaceId: string, pageId: string) {
         },
       })
       setSession({ document, provider, status: 'connecting' })
-    }).catch(() => {
+    })().catch(() => {
       if (!disposed) setSession({ document, status: 'error' })
     })
 
     return () => {
       disposed = true
       provider?.destroy()
-      void persistence.destroy()
       document.destroy()
     }
   }, [pageId, workspaceId])

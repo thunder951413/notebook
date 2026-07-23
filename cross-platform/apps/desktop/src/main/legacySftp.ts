@@ -53,7 +53,7 @@ function safeRelativePath(value: string) {
 
 function isAllowedRepositoryFile(value: string) {
   const name = safeRelativePath(value)
-  if (['library.json', 'notes/index.json', 'notes/reading_positions.json', 'notes/assets_manifest.json'].includes(name)) return true
+  if (['library.json', 'notes/index.json', 'notes/reading_positions.json', 'notes/assets_manifest.json', 'notes/privacy.json'].includes(name)) return true
   if (/^notes\/[0-9a-f-]{36}\.json$/i.test(name)) return uuidPattern.test(name.slice('notes/'.length, -'.json'.length))
   if (/^objects\/[0-9a-f]{2}\/[0-9a-f]{64}$/i.test(name)) return true
   return name.startsWith('attachments/') && name.length > 'attachments/'.length
@@ -67,6 +67,35 @@ function usesCompressedNotes(index: Buffer | undefined) {
   } catch {
     return false
   }
+}
+
+export function normalizeRepositoryIndex(value: Buffer): Buffer {
+  const parsed = JSON.parse(value.toString('utf8')) as {
+    entries?: Array<{ noteID?: string; version?: number; [key: string]: unknown }>
+    deletedEntries?: Array<{ noteID?: string; deletedAt?: string | number; [key: string]: unknown }>
+    [key: string]: unknown
+  }
+  const entries = new Map<string, NonNullable<typeof parsed.entries>[number]>()
+  for (const entry of parsed.entries ?? []) {
+    if (!isUuid(entry.noteID)) continue
+    const current = entries.get(entry.noteID)
+    const version = Number.isFinite(entry.version) ? Number(entry.version) : 0
+    const currentVersion = Number.isFinite(current?.version) ? Number(current?.version) : 0
+    if (!current || version > currentVersion || (version === currentVersion && JSON.stringify(entry) > JSON.stringify(current))) entries.set(entry.noteID, entry)
+  }
+  const deletedEntries = new Map<string, NonNullable<typeof parsed.deletedEntries>[number]>()
+  for (const entry of parsed.deletedEntries ?? []) {
+    if (!isUuid(entry.noteID)) continue
+    const current = deletedEntries.get(entry.noteID)
+    const deletedAt = typeof entry.deletedAt === 'number' ? entry.deletedAt : Date.parse(String(entry.deletedAt ?? ''))
+    const currentDeletedAt = typeof current?.deletedAt === 'number' ? current.deletedAt : Date.parse(String(current?.deletedAt ?? ''))
+    if (!current || (Number.isFinite(deletedAt) ? deletedAt : 0) >= (Number.isFinite(currentDeletedAt) ? currentDeletedAt : 0)) deletedEntries.set(entry.noteID, entry)
+  }
+  return Buffer.from(JSON.stringify({
+    ...parsed,
+    entries: [...entries.values()].sort((left, right) => left.noteID!.localeCompare(right.noteID!)),
+    deletedEntries: [...deletedEntries.values()].sort((left, right) => left.noteID!.localeCompare(right.noteID!)),
+  }))
 }
 
 function compactJson(value: Buffer) {
@@ -232,8 +261,10 @@ export async function pullLegacyRepository(settings: LegacySshConnection): Promi
       const value = transform ? transform(remoteValue) : remoteValue
       addValue(name, value)
     }
-    await add('library.json'); await add('notes/index.json'); await add('notes/reading_positions.json'); await add('notes/assets_manifest.json')
-    const index = files.get('notes/index.json')
+    await add('library.json'); await add('notes/index.json'); await add('notes/reading_positions.json'); await add('notes/assets_manifest.json'); await add('notes/privacy.json')
+    const remoteIndex = files.get('notes/index.json')
+    const index = remoteIndex ? normalizeRepositoryIndex(remoteIndex) : undefined
+    if (index) files.set('notes/index.json', index)
     if (index) {
       const parsed = JSON.parse(index.toString('utf8')) as { entries?: Array<{ noteID?: string; version?: number; contentHash?: string; historyCount?: number }> }
       const compressed = usesCompressedNotes(index)
@@ -269,7 +300,7 @@ export async function pullLegacyRepository(settings: LegacySshConnection): Promi
     }
     await finishHeartbeat()
     finishHeartbeat = undefined
-    return { files: [...files].map(([name, data]) => ({ name, dataBase64: data.toString('base64') })), indexHash: index ? sha256(index) : '', fingerprint: actualFingerprint }
+    return { files: [...files].map(([name, data]) => ({ name, dataBase64: data.toString('base64') })), indexHash: remoteIndex ? sha256(remoteIndex) : '', fingerprint: actualFingerprint }
   } finally {
     if (finishHeartbeat) await finishHeartbeat().catch(() => undefined)
     if (lock) await releaseLock(client, lock)
@@ -310,7 +341,7 @@ export async function pushLegacyRepository(settings: LegacySshConnection, files:
       if (file.name.endsWith('.json')) return { ...file, data: compactJson(file.data) }
       return file
     })
-    const priority = (name: string) => name === 'library.json' ? 0 : name.startsWith('attachments/') || name.startsWith('objects/') ? 1 : name === 'notes/assets_manifest.json' ? 2 : /^notes\/[0-9a-f-]{36}\.json\.gz$/i.test(name) ? 3 : name === 'notes/reading_positions.json' ? 4 : 5
+    const priority = (name: string) => name === 'library.json' ? 0 : name.startsWith('attachments/') || name.startsWith('objects/') ? 1 : name === 'notes/assets_manifest.json' ? 2 : /^notes\/[0-9a-f-]{36}\.json\.gz$/i.test(name) ? 3 : name === 'notes/privacy.json' ? 4 : name === 'notes/reading_positions.json' ? 5 : 6
     encoded.sort((left, right) => priority(left.name) - priority(right.name) || left.name.localeCompare(right.name))
     for (const file of encoded) {
       const noteMatch = /^notes\/([0-9a-f-]{36})\.json\.gz$/i.exec(file.name)

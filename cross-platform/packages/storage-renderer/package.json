@@ -14,7 +14,8 @@
     "@notebook/domain": "workspace:*",
     "@notebook/sync-contract": "workspace:*",
     "dexie": "^4.4.4",
-    "minisearch": "^7.2.0"
+    "minisearch": "^7.2.0",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",

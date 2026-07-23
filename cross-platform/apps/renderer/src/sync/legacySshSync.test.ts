@@ -1,6 +1,6 @@
 import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
 import { describe, expect, test, vi } from 'vitest'
-import { mergeBundles } from './legacySshSync'
+import { mergeBundles, publicationBundleWithRemoteConflicts } from './legacySshSync'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -82,5 +82,17 @@ describe('legacy SSH conflict merge', () => {
     const merged = mergeBundles(local, remote, new Map(), new Map())
     expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
     expect(merged.bundle.readingPositions[0]).toMatchObject({ anchorUtf16Offset: 90, deviceId: 'android' })
+  })
+
+  test('publishes unrelated edits while leaving a conflicted page at its remote version', () => {
+    const otherId = '30000000-0000-4000-8000-000000000099'
+    const merged = bundle(page({ syncStatus: 'conflict' }), document('local conflict'))
+    merged.pages.push(page({ id: otherId, title: 'unrelated local edit', syncStatus: 'pending' }))
+    merged.documents.push({ ...document('unrelated local body'), pageId: otherId })
+    const remote = bundle(page({ title: 'remote winner' }), document('remote conflict'))
+    const publication = publicationBundleWithRemoteConflicts(merged, remote, new Set([pageId]))
+    expect(publication.pages.find((item) => item.id === pageId)?.title).toBe('remote winner')
+    expect(publication.documents.find((item) => item.pageId === pageId)?.tiptapJson).toEqual(document('remote conflict').tiptapJson)
+    expect(publication.pages.find((item) => item.id === otherId)?.title).toBe('unrelated local edit')
   })
 })

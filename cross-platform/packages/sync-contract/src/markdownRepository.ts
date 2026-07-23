@@ -96,6 +96,7 @@ export interface EncryptedMarkdownNoteEnvelope {
 export type StoredMarkdownNoteEnvelope = MarkdownNoteEnvelope | EncryptedMarkdownNoteEnvelope
 
 const PRIVACY_ITERATIONS = 310_000
+const PRIVACY_CHECK_TEXT = 'notebook-next-private-notes-v1'
 const toBase64 = (bytes: Uint8Array) => {
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
@@ -106,6 +107,42 @@ const fromBase64 = (value: string) => Uint8Array.from(atob(value), (character) =
 async function privacyKey(secret: string, salt: Uint8Array, usage: KeyUsage[]) {
   const material = await crypto.subtle.importKey('raw', encoder.encode(secret), 'PBKDF2', false, ['deriveKey'])
   return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: salt as BufferSource, iterations: PRIVACY_ITERATIONS }, material, { name: 'AES-GCM', length: 256 }, false, usage)
+}
+
+export interface PrivacyKeyCheck {
+  schemaVersion: 1
+  algorithm: 'AES-256-GCM'
+  kdf: 'PBKDF2-SHA256'
+  iterations: number
+  salt: string
+  iv: string
+  ciphertext: string
+}
+
+export async function createPrivacyKeyCheck(secret: string): Promise<PrivacyKeyCheck> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as BufferSource, additionalData: encoder.encode(PRIVACY_CHECK_TEXT) as BufferSource },
+    await privacyKey(secret, salt, ['encrypt']),
+    encoder.encode(PRIVACY_CHECK_TEXT) as BufferSource,
+  ))
+  return { schemaVersion: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: PRIVACY_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(ciphertext) }
+}
+
+export async function verifyPrivacyKeyCheck(check: PrivacyKeyCheck, secret?: string): Promise<void> {
+  if (!secret) throw new Error('远端仓库包含隐私笔记，请先配置 SSH 密码')
+  if (check.schemaVersion !== 1 || check.algorithm !== 'AES-256-GCM' || check.kdf !== 'PBKDF2-SHA256' || check.iterations !== PRIVACY_ITERATIONS) throw new Error('远端隐私笔记密钥验证格式不受支持')
+  try {
+    const cleartext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromBase64(check.iv) as BufferSource, additionalData: encoder.encode(PRIVACY_CHECK_TEXT) as BufferSource },
+      await privacyKey(secret, fromBase64(check.salt), ['decrypt']),
+      fromBase64(check.ciphertext) as BufferSource,
+    )
+    if (new TextDecoder().decode(cleartext) !== PRIVACY_CHECK_TEXT) throw new Error('privacy check mismatch')
+  } catch {
+    throw new Error('隐私笔记密钥验证失败：SSH 密码与远端仓库不一致，已停止同步且未修改任何笔记')
+  }
 }
 
 async function encryptPrivateNote(note: MarkdownNoteEnvelope, secret: string): Promise<EncryptedMarkdownNoteEnvelope> {
@@ -193,6 +230,10 @@ export async function encodeMarkdownRepository(bundle: NotebookDataBundle, asset
   }
 
   files.set('notes/assets_manifest.json', encoder.encode(JSON.stringify({ schemaVersion: 3, deviceID: deviceId, entries: [...manifests.values()] })))
+  if (bundle.pages.some((page) => page.locked)) {
+    if (!privacySecret) throw new Error('隐私笔记无法安全同步：缺少 SSH 加密密码')
+    files.set('notes/privacy.json', encoder.encode(JSON.stringify(await createPrivacyKeyCheck(privacySecret))))
+  }
   const livePages = new Map(bundle.pages.filter((page) => !page.deletedAt).map((page) => [page.id, page]))
   const activeTombstones = bundle.tombstones.filter((item) => item.entityType === 'page' && (!livePages.get(item.entityId) || item.deletedAt >= livePages.get(item.entityId)!.updatedAt))
   files.set('notes/index.json', encoder.encode(JSON.stringify({ schemaVersion: 3, generatedAt: (Date.now() - Date.UTC(2001, 0, 1)) / 1000, deviceID: deviceId, repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' }, entries: indexEntries, deletedEntries: activeTombstones.map((item) => ({ noteID: item.entityId, deletedAt: item.deletedAt, deletedByDeviceID: item.deviceId })) })))

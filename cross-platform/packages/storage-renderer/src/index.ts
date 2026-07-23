@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from 'dexie'
 import MiniSearch from 'minisearch'
+import { z } from 'zod'
 import type {
   Notebook,
   NotebookRepository,
@@ -22,7 +23,7 @@ import type {
   PageRevision,
   PageComment,
 } from '@notebook/domain'
-import { markdownToEditorCache } from '@notebook/sync-contract'
+import { markdownToEditorCache, tiptapToMarkdown } from '@notebook/sync-contract'
 
 export interface SyncOutboxItem {
   id: string
@@ -36,7 +37,7 @@ export interface SyncOutboxItem {
 }
 
 function compactRevisionHistory(bundle: NotebookDataBundle) {
-  const signature = (document: PageDocument) => document.markdown ?? JSON.stringify(document.tiptapJson)
+  const signature = (document: PageDocument) => document.markdown ?? tiptapToMarkdown(document.tiptapJson)
   const currentDocuments = new Map(bundle.documents.map((document) => [document.pageId, signature(document)]))
   const byPage = new Map<string, PageRevision[]>()
   for (const revision of bundle.revisions) {
@@ -54,8 +55,61 @@ function compactRevisionHistory(bundle: NotebookDataBundle) {
     })
     const last = compacted[compacted.length - 1]
     if (last && signature(last.document) === currentDocuments.get(last.pageId)) compacted.pop()
-    return compacted
+    return compacted.map((revision) => ({
+      ...revision,
+      document: {
+        ...revision.document,
+        markdown: signature(revision.document),
+        tiptapJson: { type: 'doc', content: [] },
+        yjsState: undefined,
+      },
+    }))
   })
+}
+
+const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+
+function keepChangesSinceSnapshot<T>(target: T[], snapshot: T[], current: T[], keyOf: (value: T) => string): T[] {
+  const result = new Map(target.map((value) => [keyOf(value), value]))
+  const before = new Map(snapshot.map((value) => [keyOf(value), value]))
+  const now = new Map(current.map((value) => [keyOf(value), value]))
+  for (const key of new Set([...before.keys(), ...now.keys()])) {
+    const previous = before.get(key)
+    const latest = now.get(key)
+    if (sameValue(previous, latest)) continue
+    if (latest === undefined) result.delete(key)
+    else result.set(key, latest)
+  }
+  return [...result.values()]
+}
+
+/**
+ * Rebases changes made after a sync snapshot over the result that was actually
+ * published. This is deliberately collection-wide: an attachment, task step,
+ * tag, or reading-position edit made while SFTP is in flight must be protected
+ * just as carefully as a page body.
+ */
+export function preserveChangesSinceSnapshot(target: NotebookDataBundle, snapshot: NotebookDataBundle, current: NotebookDataBundle): NotebookDataBundle {
+  const byId = <T extends { id: string }>(value: T) => value.id
+  const byPage = <T extends { pageId: string }>(value: T) => value.pageId
+  const byPageTag = (value: PageTag) => `${value.pageId}:${value.tagId}`
+  return {
+    notebooks: keepChangesSinceSnapshot(target.notebooks, snapshot.notebooks, current.notebooks, byId),
+    sections: keepChangesSinceSnapshot(target.sections, snapshot.sections, current.sections, byId),
+    pages: keepChangesSinceSnapshot(target.pages, snapshot.pages, current.pages, byId),
+    documents: keepChangesSinceSnapshot(target.documents, snapshot.documents, current.documents, byPage),
+    tags: keepChangesSinceSnapshot(target.tags, snapshot.tags, current.tags, byId),
+    pageTags: keepChangesSinceSnapshot(target.pageTags, snapshot.pageTags, current.pageTags, byPageTag),
+    taskSteps: keepChangesSinceSnapshot(target.taskSteps, snapshot.taskSteps, current.taskSteps, byId),
+    assets: keepChangesSinceSnapshot(target.assets, snapshot.assets, current.assets, byId),
+    pageLinks: keepChangesSinceSnapshot(target.pageLinks, snapshot.pageLinks, current.pageLinks, byId),
+    knowledgeEntities: keepChangesSinceSnapshot(target.knowledgeEntities, snapshot.knowledgeEntities, current.knowledgeEntities, byId),
+    knowledgeRelations: keepChangesSinceSnapshot(target.knowledgeRelations, snapshot.knowledgeRelations, current.knowledgeRelations, byId),
+    readingPositions: keepChangesSinceSnapshot(target.readingPositions, snapshot.readingPositions, current.readingPositions, byId),
+    revisions: keepChangesSinceSnapshot(target.revisions, snapshot.revisions, current.revisions, byId),
+    comments: keepChangesSinceSnapshot(target.comments, snapshot.comments, current.comments, byId),
+    tombstones: keepChangesSinceSnapshot(target.tombstones, snapshot.tombstones, current.tombstones, byId),
+  }
 }
 
 export interface RemoteSyncChange {
@@ -124,10 +178,59 @@ export class NotebookRendererDatabase extends Dexie {
     this.version(6).stores({ revisions: 'id, pageId, createdAt' })
     this.version(7).stores({ comments: 'id, workspaceId, pageId, createdAt, resolvedAt' })
     this.version(8).stores({ drafts: 'pageId, createdAt' })
+    this.version(9).stores({}).upgrade(async (transaction) => {
+      await transaction.table<PageRevision>('revisions').toCollection().modify((revision) => {
+        revision.document = {
+          ...revision.document,
+          markdown: revision.document.markdown ?? tiptapToMarkdown(revision.document.tiptapJson),
+          tiptapJson: { type: 'doc', content: [] },
+          yjsState: undefined,
+        }
+      })
+    })
   }
 }
 
 const normalizeSearch = (value: string) => value.trim().toLocaleLowerCase()
+const searchTokenize = (value: string) => {
+  const normalized = value.normalize('NFKC').toLocaleLowerCase()
+  const words = normalized.match(/[\p{L}\p{N}_-]+/gu) ?? []
+  const cjk = [...normalized.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)].flatMap((match) => {
+    const characters = [...match[0]]
+    return characters.length === 1 ? characters : characters.slice(0, -1).map((character, index) => character + characters[index + 1])
+  })
+  return [...words, ...cjk]
+}
+
+const recordSchema = z.record(z.string(), z.unknown())
+const isoSchema = z.string().min(1)
+const notebookSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), name: z.string(), sortOrder: z.number(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
+const sectionSchema = z.object({ id: z.string().min(1), notebookId: z.string().min(1), name: z.string(), sortOrder: z.number(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
+const pageSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), kind: z.enum(['document', 'task']), title: z.string(), preview: z.string(), favorite: z.boolean(), createdAt: isoSchema, updatedAt: isoSchema, syncStatus: z.enum(['local', 'pending', 'synced', 'conflict', 'error']) }).passthrough()
+const documentSchema = z.object({ pageId: z.string().min(1), schemaVersion: z.number().int().nonnegative(), tiptapJson: recordSchema, updatedAt: isoSchema }).passthrough()
+const tagSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), name: z.string(), color: z.string(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
+const taskStepSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), text: z.string(), checked: z.boolean(), sortOrder: z.number(), createdAt: isoSchema }).passthrough()
+const assetSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), kind: z.enum(['image', 'audio', 'video', 'file']), filename: z.string(), mimeType: z.string(), createdAt: isoSchema }).passthrough()
+const pageLinkSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), sourcePageId: z.string().min(1), targetPageId: z.string().min(1), kind: z.enum(['link', 'mention', 'embed']), createdAt: isoSchema }).passthrough()
+const readingPositionSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), anchorUtf16Offset: z.number().int().nonnegative(), viewportOffsetFraction: z.number(), updatedAt: isoSchema, deviceId: z.string() }).passthrough()
+const revisionSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), document: documentSchema, createdAt: isoSchema, reason: z.enum(['autosave', 'manual', 'restore', 'import']) }).passthrough()
+const pageTagSchema = z.object({ pageId: z.string().min(1), tagId: z.string().min(1) }).passthrough()
+
+function parseRemotePayload(change: RemoteSyncChange) {
+  const schemas: Record<string, z.ZodType> = {
+    notebook: notebookSchema, section: sectionSchema, page: pageSchema, document: documentSchema,
+    tag: tagSchema, task_step: taskStepSchema, asset: assetSchema, page_link: pageLinkSchema,
+    reading_position: readingPositionSchema, revision: revisionSchema, page_tag: pageTagSchema,
+  }
+  const schema = schemas[change.entityType]
+  if (!schema) throw new Error(`Unsupported remote entity type: ${change.entityType}`)
+  const value = schema.parse(change.payload) as Record<string, unknown>
+  const payloadId = change.entityType === 'document' ? value.pageId
+    : change.entityType === 'page_tag' ? `${value.pageId}:${value.tagId}`
+      : value.id
+  if (payloadId !== change.entityId) throw new Error(`Remote ${change.entityType} payload id does not match change id`)
+  return value
+}
 
 function remapAssetReferences(value: unknown, assetIds: Map<string, string>): unknown {
   if (typeof value === 'string') {
@@ -141,6 +244,12 @@ function remapAssetReferences(value: unknown, assetIds: Map<string, string>): un
 }
 
 export class DexieNotebookRepository implements NotebookRepository {
+  private readonly searchCache = new Map<string, {
+    pages: Page[]
+    textByPage: Map<string, string>
+    index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
+  }>()
+
   constructor(readonly db = new NotebookRendererDatabase()) {}
 
   async listNotebooks(workspaceId: UUID): Promise<Notebook[]> {
@@ -174,27 +283,31 @@ export class DexieNotebookRepository implements NotebookRepository {
   getPage(id: UUID) { return this.db.pages.get(id) }
   getPageDocument(pageId: UUID) { return this.db.documents.get(pageId) }
   async saveNotebook(notebook: Notebook) {
-    await this.db.notebooks.put(notebook)
-    await this.enqueueChange(notebook.workspaceId, 'notebook', notebook.id, 'upsert', { ...notebook })
+    await this.db.transaction('rw', [this.db.notebooks, this.db.syncOutbox, this.db.syncVersions], async () => {
+      await this.db.notebooks.put(notebook)
+      await this.enqueueChange(notebook.workspaceId, 'notebook', notebook.id, 'upsert', { ...notebook })
+    })
   }
   async saveSection(section: Section) {
-    const notebook = await this.db.notebooks.get(section.notebookId)
-    if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
-    await this.db.sections.put(section)
-    await this.enqueueChange(notebook.workspaceId, 'section', section.id, 'upsert', { ...section })
+    await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const notebook = await this.db.notebooks.get(section.notebookId)
+      if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
+      await this.db.sections.put(section)
+      await this.enqueueChange(notebook.workspaceId, 'section', section.id, 'upsert', { ...section })
+    })
   }
   async deleteSection(sectionId: UUID, deletedAt: string, deviceId: string) {
-    const section = await this.db.sections.get(sectionId)
-    if (!section) return
-    const notebook = await this.db.notebooks.get(section.notebookId)
-    if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
-    if (await this.db.pages.where('sectionId').equals(sectionId).count()) throw new Error('分区中仍有页面（含回收站页面），请先移动或永久删除这些页面')
-    const tombstone: Tombstone = { id: `section:${sectionId}`, workspaceId: notebook.workspaceId, entityType: 'section', entityId: sectionId, deletedAt, deviceId }
-    await this.db.transaction('rw', this.db.sections, this.db.tombstones, async () => {
+    await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const section = await this.db.sections.get(sectionId)
+      if (!section) return
+      const notebook = await this.db.notebooks.get(section.notebookId)
+      if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
+      if (await this.db.pages.where('sectionId').equals(sectionId).count()) throw new Error('分区中仍有页面（含回收站页面），请先移动或永久删除这些页面')
+      const tombstone: Tombstone = { id: `section:${sectionId}`, workspaceId: notebook.workspaceId, entityType: 'section', entityId: sectionId, deletedAt, deviceId }
       await this.db.sections.delete(sectionId)
       await this.db.tombstones.put(tombstone)
+      await this.enqueueChange(notebook.workspaceId, 'section', sectionId, 'delete', {})
     })
-    await this.enqueueChange(notebook.workspaceId, 'section', sectionId, 'delete', {})
   }
 
   async duplicatePage(pageId: UUID, newPageId: UUID, createdAt: string): Promise<Page> {
@@ -232,8 +345,10 @@ export class DexieNotebookRepository implements NotebookRepository {
       const content = await this.getAssetContent(asset.id)
       if (content) await this.saveAsset(copiedAsset, content)
       else {
-        await this.db.assets.put(copiedAsset)
-        await this.enqueueChange(copy.workspaceId, 'asset', id, 'upsert', { ...copiedAsset, localPath: undefined })
+        await this.db.transaction('rw', [this.db.assets, this.db.syncOutbox, this.db.syncVersions], async () => {
+          await this.db.assets.put(copiedAsset)
+          await this.enqueueChange(copy.workspaceId, 'asset', id, 'upsert', { ...copiedAsset, localPath: undefined })
+        })
       }
     }
     return copy
@@ -241,23 +356,25 @@ export class DexieNotebookRepository implements NotebookRepository {
   listPageTags(pageId: UUID) { return this.db.pageTags.where('pageId').equals(pageId).toArray() }
   getReadingPosition(pageId: UUID) { return this.db.readingPositions.where('pageId').equals(pageId).first() }
   async saveReadingPosition(position: ReadingPosition) {
-    const page = await this.db.pages.get(position.pageId)
-    if (!page || page.deletedAt) return
-    await this.db.readingPositions.put(position)
-    await this.enqueueChange(page.workspaceId, 'reading_position', position.id, 'upsert', { ...position })
+    await this.db.transaction('rw', [this.db.pages, this.db.readingPositions, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const page = await this.db.pages.get(position.pageId)
+      if (!page || page.deletedAt) return
+      await this.db.readingPositions.put(position)
+      await this.enqueueChange(page.workspaceId, 'reading_position', position.id, 'upsert', { ...position })
+    })
   }
   async savePageTags(pageId: UUID, tagIds: UUID[]) {
-    const page = await this.db.pages.get(pageId)
-    if (!page) throw new Error(`Page not found: ${pageId}`)
-    const previous = await this.db.pageTags.where('pageId').equals(pageId).toArray()
     const next = [...new Set(tagIds)].map((tagId) => ({ pageId, tagId }))
     await this.db.transaction('rw', this.db.tables, async () => {
+      const page = await this.db.pages.get(pageId)
+      if (!page) throw new Error(`Page not found: ${pageId}`)
+      const previous = await this.db.pageTags.where('pageId').equals(pageId).toArray()
       await this.db.pageTags.where('pageId').equals(pageId).delete()
       await this.db.pageTags.bulkPut(next)
+      const nextIds = new Set(tagIds)
+      for (const value of previous.filter((item) => !nextIds.has(item.tagId))) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'delete', {})
+      for (const value of next) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'upsert', value)
     })
-    const nextIds = new Set(tagIds)
-    for (const value of previous.filter((item) => !nextIds.has(item.tagId))) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'delete', {})
-    for (const value of next) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'upsert', value)
   }
 
   async savePage(page: Page, document?: PageDocument): Promise<void> {
@@ -267,7 +384,13 @@ export class DexieNotebookRepository implements NotebookRepository {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
         const existing = await this.db.documents.get(page.id)
         if (existing && JSON.stringify(existing.tiptapJson) !== JSON.stringify(document.tiptapJson)) {
-          const revision: PageRevision = { id: crypto.randomUUID(), pageId: page.id, document: existing, createdAt: document.updatedAt, reason: 'autosave' }
+          const revision: PageRevision = {
+            id: crypto.randomUUID(),
+            pageId: page.id,
+            document: { ...existing, markdown: existing.markdown ?? tiptapToMarkdown(existing.tiptapJson), tiptapJson: { type: 'doc', content: [] }, yjsState: undefined },
+            createdAt: document.updatedAt,
+            reason: 'autosave',
+          }
           await this.db.revisions.put(revision)
           if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'revision', revision.id, 'upsert', { ...revision, document: { ...revision.document, yjsState: undefined } })
           // Imported legacy versions are archival user data and must never be
@@ -283,6 +406,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
     })
+    this.searchCache.delete(page.workspaceId)
   }
 
   async stageDraft(document: PageDocument): Promise<void> {
@@ -311,6 +435,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     })
+    this.searchCache.delete(page.workspaceId)
   }
 
   async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
@@ -322,6 +447,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.delete(`page:${pageId}`)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', restored)
     })
+    this.searchCache.delete(page.workspaceId)
   }
 
   async purgePage(pageId: UUID, deletedAt = new Date().toISOString(), deviceId = 'electron'): Promise<void> {
@@ -332,12 +458,12 @@ export class DexieNotebookRepository implements NotebookRepository {
     const steps = await this.db.taskSteps.where('pageId').equals(pageId).toArray()
     const assets = await this.db.assets.where('pageId').equals(pageId).toArray()
     const links = await this.db.pageLinks.where('sourcePageId').equals(pageId).toArray()
-    for (const item of steps) await this.enqueueChange(page.workspaceId, 'task_step', item.id, 'delete', {})
-    for (const item of assets) await this.enqueueChange(page.workspaceId, 'asset', item.id, 'delete', {})
-    for (const item of links) await this.enqueueChange(page.workspaceId, 'page_link', item.id, 'delete', {})
-    await this.enqueueChange(page.workspaceId, 'document', pageId, 'delete', {})
-    await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     await this.db.transaction('rw', this.db.tables, async () => {
+      for (const item of steps) await this.enqueueChange(page.workspaceId, 'task_step', item.id, 'delete', {})
+      for (const item of assets) await this.enqueueChange(page.workspaceId, 'asset', item.id, 'delete', {})
+      for (const item of links) await this.enqueueChange(page.workspaceId, 'page_link', item.id, 'delete', {})
+      await this.enqueueChange(page.workspaceId, 'document', pageId, 'delete', {})
+      await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
       await this.db.tombstones.put(tombstone)
       await Promise.all([
         this.db.pages.delete(pageId),
@@ -353,6 +479,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
+    this.searchCache.delete(page.workspaceId)
   }
 
   async listTags(workspaceId: UUID): Promise<Tag[]> {
@@ -368,16 +495,16 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   async saveTaskSteps(pageId: UUID, steps: TaskStep[]): Promise<void> {
     if (steps.some((step) => step.pageId !== pageId)) throw new Error('All task steps must belong to the requested page')
-    const page = await this.db.pages.get(pageId)
-    if (!page) throw new Error(`Page not found: ${pageId}`)
-    const previous = await this.db.taskSteps.where('pageId').equals(pageId).toArray()
-    await this.db.transaction('rw', this.db.taskSteps, async () => {
+    await this.db.transaction('rw', [this.db.pages, this.db.taskSteps, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const page = await this.db.pages.get(pageId)
+      if (!page) throw new Error(`Page not found: ${pageId}`)
+      const previous = await this.db.taskSteps.where('pageId').equals(pageId).toArray()
       await this.db.taskSteps.where('pageId').equals(pageId).delete()
       await this.db.taskSteps.bulkPut(steps)
+      const nextIds = new Set(steps.map((step) => step.id))
+      for (const removed of previous.filter((step) => !nextIds.has(step.id))) await this.enqueueChange(page.workspaceId, 'task_step', removed.id, 'delete', { ...removed })
+      for (const step of steps) await this.enqueueChange(page.workspaceId, 'task_step', step.id, 'upsert', { ...step })
     })
-    const nextIds = new Set(steps.map((step) => step.id))
-    for (const removed of previous.filter((step) => !nextIds.has(step.id))) await this.enqueueChange(page.workspaceId, 'task_step', removed.id, 'delete', { ...removed })
-    for (const step of steps) await this.enqueueChange(page.workspaceId, 'task_step', step.id, 'upsert', { ...step })
   }
 
   private versionId(workspaceId: string, entityType: string, entityId: string) { return `${workspaceId}:${entityType}:${entityId}` }
@@ -392,7 +519,6 @@ export class DexieNotebookRepository implements NotebookRepository {
   }
 
   listOutbox(workspaceId: string, limit = 200) { return this.db.syncOutbox.where('workspaceId').equals(workspaceId).limit(limit).toArray() }
-  clearOutbox(workspaceId: string) { return this.db.syncOutbox.where('workspaceId').equals(workspaceId).delete() }
   getSyncCursor(workspaceId: string) { return this.db.syncCursors.get(workspaceId).then((value) => value?.cursor ?? 0) }
 
   async acknowledgeSync(workspaceId: string, applied: Array<{ operation_id: string; entity_type: string; entity_id: string; version: number }>, cursor?: number) {
@@ -413,6 +539,25 @@ export class DexieNotebookRepository implements NotebookRepository {
   async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number) {
     await this.db.transaction('rw', this.db.tables, async () => {
       for (const change of changes) {
+        const supportedEntityTypes = new Set(['notebook', 'section', 'page', 'document', 'tag', 'task_step', 'asset', 'page_link', 'reading_position', 'revision', 'page_tag'])
+        if (!supportedEntityTypes.has(change.entityType) || !Number.isSafeInteger(change.version) || change.version < 0 || !['upsert', 'delete'].includes(change.operation)) {
+          throw new Error(`Invalid remote change for ${change.entityType}:${change.entityId}`)
+        }
+        const payload = change.operation === 'upsert' ? parseRemotePayload(change) : undefined
+        if (payload && typeof payload.workspaceId === 'string' && payload.workspaceId !== workspaceId) {
+          throw new Error(`Remote ${change.entityType} belongs to another workspace`)
+        }
+        const pendingExact = await this.db.syncOutbox.where('[entityType+entityId]').equals([change.entityType, change.entityId]).and((item) => item.workspaceId === workspaceId).first()
+        const pendingPage = change.entityType === 'document'
+          ? await this.db.syncOutbox.where('[entityType+entityId]').equals(['page', change.entityId]).and((item) => item.workspaceId === workspaceId).first()
+          : undefined
+        if (pendingExact || pendingPage) {
+          const pageId = change.entityType === 'page' || change.entityType === 'document'
+            ? change.entityId
+            : typeof payload?.pageId === 'string' ? payload.pageId : undefined
+          if (pageId) await this.db.pages.update(pageId, { syncStatus: 'conflict' })
+          continue
+        }
         if (change.operation === 'delete') {
           if (change.entityType === 'page') await this.db.pages.delete(change.entityId)
           else if (change.entityType === 'document') await this.db.documents.delete(change.entityId)
@@ -429,30 +574,37 @@ export class DexieNotebookRepository implements NotebookRepository {
             if (pageId && tagId) await this.db.pageTags.where('[pageId+tagId]').equals([pageId, tagId]).delete()
           }
         } else if (change.entityType === 'page') {
-          await this.db.pages.put({ ...(change.payload as unknown as Page), syncStatus: 'synced' })
-        } else if (change.entityType === 'notebook') await this.db.notebooks.put(change.payload as unknown as Notebook)
-        else if (change.entityType === 'document') await this.db.documents.put(change.payload as unknown as PageDocument)
-        else if (change.entityType === 'section') await this.db.sections.put(change.payload as unknown as Section)
-        else if (change.entityType === 'tag') await this.db.tags.put(change.payload as unknown as Tag)
-        else if (change.entityType === 'task_step') await this.db.taskSteps.put(change.payload as unknown as TaskStep)
-        else if (change.entityType === 'asset') await this.db.assets.put(change.payload as unknown as Asset)
-        else if (change.entityType === 'page_link') await this.db.pageLinks.put(change.payload as unknown as PageLink)
-        else if (change.entityType === 'reading_position') await this.db.readingPositions.put(change.payload as unknown as ReadingPosition)
-        else if (change.entityType === 'revision') await this.db.revisions.put(change.payload as unknown as PageRevision)
-        else if (change.entityType === 'page_tag') await this.db.pageTags.put(change.payload as unknown as PageTag)
+          await this.db.pages.put({ ...(payload as unknown as Page), syncStatus: 'synced' })
+        } else if (change.entityType === 'notebook') await this.db.notebooks.put(payload as unknown as Notebook)
+        else if (change.entityType === 'document') await this.db.documents.put(payload as unknown as PageDocument)
+        else if (change.entityType === 'section') await this.db.sections.put(payload as unknown as Section)
+        else if (change.entityType === 'tag') await this.db.tags.put(payload as unknown as Tag)
+        else if (change.entityType === 'task_step') await this.db.taskSteps.put(payload as unknown as TaskStep)
+        else if (change.entityType === 'asset') await this.db.assets.put(payload as unknown as Asset)
+        else if (change.entityType === 'page_link') await this.db.pageLinks.put(payload as unknown as PageLink)
+        else if (change.entityType === 'reading_position') await this.db.readingPositions.put(payload as unknown as ReadingPosition)
+        else if (change.entityType === 'revision') await this.db.revisions.put(payload as unknown as PageRevision)
+        else if (change.entityType === 'page_tag') await this.db.pageTags.put(payload as unknown as PageTag)
         await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version: change.version })
       }
       await this.db.syncCursors.put({ workspaceId, cursor })
     })
+    this.searchCache.delete(workspaceId)
   }
 
   listPageLinks(pageId: UUID) { return this.db.pageLinks.where('sourcePageId').equals(pageId).toArray() }
 
   async replacePageLinks(pageId: UUID, links: PageLink[]): Promise<void> {
     if (links.some((link) => link.sourcePageId !== pageId)) throw new Error('All links must originate from the requested page')
-    await this.db.transaction('rw', this.db.pageLinks, async () => {
+    await this.db.transaction('rw', [this.db.pages, this.db.pageLinks, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const page = await this.db.pages.get(pageId)
+      if (!page) throw new Error(`Page not found: ${pageId}`)
+      const previous = await this.db.pageLinks.where('sourcePageId').equals(pageId).toArray()
       await this.db.pageLinks.where('sourcePageId').equals(pageId).delete()
       await this.db.pageLinks.bulkPut(links)
+      const nextIds = new Set(links.map((link) => link.id))
+      for (const removed of previous.filter((link) => !nextIds.has(link.id))) await this.enqueueChange(page.workspaceId, 'page_link', removed.id, 'delete', {})
+      for (const link of links) await this.enqueueChange(page.workspaceId, 'page_link', link.id, 'upsert', { ...link })
     })
   }
 
@@ -501,6 +653,18 @@ export class DexieNotebookRepository implements NotebookRepository {
         this.db.revisions.bulkPut(compactedRevisions),
       ])
     })
+    for (const workspaceId of new Set([...bundle.notebooks.map((item) => item.workspaceId), ...bundle.pages.map((item) => item.workspaceId)])) this.searchCache.delete(workspaceId)
+  }
+
+  async importSyncResult(bundle: NotebookDataBundle, snapshot: NotebookDataBundle): Promise<NotebookDataBundle> {
+    const workspaceId = snapshot.notebooks[0]?.workspaceId ?? snapshot.pages[0]?.workspaceId ?? bundle.notebooks[0]?.workspaceId ?? bundle.pages[0]?.workspaceId
+    if (!workspaceId) throw new Error('Cannot determine workspace for synchronized bundle')
+    return this.db.transaction('rw', this.db.tables, async () => {
+      const current = await this.exportData(workspaceId)
+      const rebased = preserveChangesSinceSnapshot(bundle, snapshot, current)
+      await this.importData(rebased)
+      return rebased
+    })
   }
 
   /**
@@ -511,32 +675,34 @@ export class DexieNotebookRepository implements NotebookRepository {
   async queueImportedData(bundle: NotebookDataBundle): Promise<void> {
     const notebookWorkspace = new Map(bundle.notebooks.map((item) => [item.id, item.workspaceId]))
     const pageWorkspace = new Map(bundle.pages.map((item) => [item.id, item.workspaceId]))
-    const queue = (workspaceId: string | undefined, entityType: string, entityId: string, payload: Record<string, unknown>) => {
-      if (!workspaceId) throw new Error(`Cannot resolve workspace for imported ${entityType} ${entityId}`)
-      return this.enqueueChange(workspaceId, entityType, entityId, 'upsert', payload)
-    }
+    await this.db.transaction('rw', [this.db.pages, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const queue = (workspaceId: string | undefined, entityType: string, entityId: string, payload: Record<string, unknown>) => {
+        if (!workspaceId) throw new Error(`Cannot resolve workspace for imported ${entityType} ${entityId}`)
+        return this.enqueueChange(workspaceId, entityType, entityId, 'upsert', payload)
+      }
 
-    // Parent and metadata records are queued first. The server retains order in
-    // its change log, which lets a newly connected client apply dependencies as
-    // they arrive without manufacturing placeholder records.
-    for (const item of bundle.notebooks) await queue(item.workspaceId, 'notebook', item.id, { ...item })
-    for (const item of bundle.sections) await queue(notebookWorkspace.get(item.notebookId), 'section', item.id, { ...item })
-    for (const item of bundle.pages) {
-      const value: Page = { ...item, syncStatus: 'pending' }
-      await this.db.pages.put(value)
-      await queue(item.workspaceId, 'page', item.id, { ...value })
-    }
-    for (const item of bundle.documents) await queue(pageWorkspace.get(item.pageId), 'document', item.pageId, { ...item, yjsState: undefined })
-    for (const item of bundle.tags) await queue(item.workspaceId, 'tag', item.id, { ...item })
-    for (const item of bundle.pageTags) await queue(pageWorkspace.get(item.pageId), 'page_tag', `${item.pageId}:${item.tagId}`, { ...item })
-    for (const item of bundle.taskSteps) await queue(pageWorkspace.get(item.pageId), 'task_step', item.id, { ...item })
-    for (const item of bundle.assets) await queue(pageWorkspace.get(item.pageId), 'asset', item.id, { ...item, localPath: undefined })
-    for (const item of bundle.pageLinks) await queue(item.workspaceId, 'page_link', item.id, { ...item })
-    for (const item of bundle.readingPositions) await queue(pageWorkspace.get(item.pageId), 'reading_position', item.id, { ...item })
-    for (const item of bundle.revisions) await queue(pageWorkspace.get(item.pageId), 'revision', item.id, { ...item, document: { ...item.document, yjsState: undefined } })
-    // Tombstones are last so an imported deletion wins if an archive contains a
-    // historical live row as well as its later tombstone.
-    for (const item of bundle.tombstones) await this.enqueueChange(item.workspaceId, item.entityType, item.entityId, 'delete', {})
+      // Parent and metadata records are queued first. The server retains order in
+      // its change log, which lets a newly connected client apply dependencies as
+      // they arrive without manufacturing placeholder records.
+      for (const item of bundle.notebooks) await queue(item.workspaceId, 'notebook', item.id, { ...item })
+      for (const item of bundle.sections) await queue(notebookWorkspace.get(item.notebookId), 'section', item.id, { ...item })
+      for (const item of bundle.pages) {
+        const value: Page = { ...item, syncStatus: 'pending' }
+        await this.db.pages.put(value)
+        await queue(item.workspaceId, 'page', item.id, { ...value })
+      }
+      for (const item of bundle.documents) await queue(pageWorkspace.get(item.pageId), 'document', item.pageId, { ...item, yjsState: undefined })
+      for (const item of bundle.tags) await queue(item.workspaceId, 'tag', item.id, { ...item })
+      for (const item of bundle.pageTags) await queue(pageWorkspace.get(item.pageId), 'page_tag', `${item.pageId}:${item.tagId}`, { ...item })
+      for (const item of bundle.taskSteps) await queue(pageWorkspace.get(item.pageId), 'task_step', item.id, { ...item })
+      for (const item of bundle.assets) await queue(pageWorkspace.get(item.pageId), 'asset', item.id, { ...item, localPath: undefined })
+      for (const item of bundle.pageLinks) await queue(item.workspaceId, 'page_link', item.id, { ...item })
+      for (const item of bundle.readingPositions) await queue(pageWorkspace.get(item.pageId), 'reading_position', item.id, { ...item })
+      for (const item of bundle.revisions) await queue(pageWorkspace.get(item.pageId), 'revision', item.id, { ...item, document: { ...item.document, yjsState: undefined } })
+      // Tombstones are last so an imported deletion wins if an archive contains a
+      // historical live row as well as its later tombstone.
+      for (const item of bundle.tombstones) await this.enqueueChange(item.workspaceId, item.entityType, item.entityId, 'delete', {})
+    })
   }
 
   async importAssetContents(contents: Map<string, Uint8Array>) {
@@ -608,21 +774,18 @@ export class DexieNotebookRepository implements NotebookRepository {
     return document
   }
   async searchWorkspace(workspaceId: UUID, query: string, limit = 50): Promise<Page[]> {
-    const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
-    const pageIds = new Set(pages.map((page) => page.id))
-    const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
-    const textByPage = new Map(documents.map((document) => [document.pageId, extractText(document.tiptapJson)]))
-    const tokenize = (value: string) => {
-      const normalized = value.normalize('NFKC').toLocaleLowerCase()
-      const words = normalized.match(/[\p{L}\p{N}_-]+/gu) ?? []
-      const cjk = [...normalized.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)].flatMap((match) => {
-        const characters = [...match[0]]
-        return characters.length === 1 ? characters : characters.slice(0, -1).map((character, index) => character + characters[index + 1])
-      })
-      return [...words, ...cjk]
+    let cached = this.searchCache.get(workspaceId)
+    if (!cached) {
+      const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
+      const pageIds = new Set(pages.map((page) => page.id))
+      const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
+      const textByPage = new Map(documents.map((document) => [document.pageId, document.markdown ?? extractText(document.tiptapJson)]))
+      const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
+      index.addAll(pages.map((page) => ({ id: page.id, title: page.title, preview: page.preview, content: textByPage.get(page.id) ?? '' })))
+      cached = { pages, textByPage, index }
+      this.searchCache.set(workspaceId, cached)
     }
-    const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize })
-    index.addAll(pages.map((page) => ({ id: page.id, title: page.title, preview: page.preview, content: textByPage.get(page.id) ?? '' })))
+    const { pages, textByPage, index } = cached
     // A Chinese phrase yields both a full token and overlapping CJK bigrams.
     // MiniSearch's default OR combination can otherwise rank pages sharing one
     // common bigram above an exact title match. Keep exact substring matches at

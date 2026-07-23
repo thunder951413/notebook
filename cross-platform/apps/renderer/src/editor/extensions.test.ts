@@ -1,6 +1,6 @@
 import { Editor } from '@tiptap/core'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { createContentExtensions, documentToMarkdown, markdownToDocument } from './extensions'
+import { createContentExtensions, documentToMarkdown, htmlToDocument, markdownToDocument } from './extensions'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -29,5 +29,12 @@ describe('official Tiptap Markdown round trip', () => {
     expect(loadAsset).toHaveBeenCalledWith('asset-1')
     expect(createObjectUrl).toHaveBeenCalled()
     editor.destroy()
+  })
+
+  test('sanitizes executable HTML before importing it as a note', () => {
+    const imported = JSON.stringify(htmlToDocument('<p>安全正文</p><script>alert(1)</script><a href="javascript:alert(2)">危险链接</a>'))
+    expect(imported).toContain('安全正文')
+    expect(imported).not.toContain('alert(1)')
+    expect(imported).not.toContain('javascript:')
   })
 })

@@ -13,6 +13,8 @@ import {
   normalizeLegacyEncryptedData,
   importMarkdownRepository,
   sha256Hex,
+  verifyPrivacyKeyCheck,
+  type PrivacyKeyCheck,
   type StoredMarkdownNoteEnvelope,
   type LegacyEncryptedData,
   type LegacyLibraryEnvelope,
@@ -69,6 +71,8 @@ export function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?:
 
 export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string): Promise<DecodedImport> {
   const expanded = expandFiles(files)
+  const privacyCheckFile = expanded.find((file) => /(^|\/)notes\/privacy\.json$/i.test(file.name))
+  if (privacyCheckFile) await verifyPrivacyKeyCheck(JSON.parse(strFromU8(privacyCheckFile.data)) as PrivacyKeyCheck, privacySecret)
   const current = expanded.find((file) => file.name.endsWith('notebook-next.json'))
   if (current) {
     const value = JSON.parse(strFromU8(current.data)) as { schemaVersion?: number; bundle?: NotebookDataBundle }

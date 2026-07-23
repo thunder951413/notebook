@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { expect, test } from 'vitest'
-import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, readingPositionsSchema, type MarkdownNoteEnvelope } from './index'
+import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, readingPositionsSchema, verifyPrivacyKeyCheck, type MarkdownNoteEnvelope, type PrivacyKeyCheck } from './index'
 import type { NotebookDataBundle } from '@notebook/domain'
 
 test('parses the shared macOS/Android fixture and preserves identity and rich blocks', async () => {
@@ -261,6 +261,9 @@ test('encrypts private note metadata, body and history with the SSH secret', asy
   expect(storedText).not.toContain('不能泄露的标题')
   expect(storedText).not.toContain('绝密正文')
   const stored = JSON.parse(storedText)
+  const privacyCheck = JSON.parse(new TextDecoder().decode(encoded.files.get('notes/privacy.json'))) as PrivacyKeyCheck
+  await expect(verifyPrivacyKeyCheck(privacyCheck, 'strong ssh password')).resolves.toBeUndefined()
+  await expect(verifyPrivacyKeyCheck(privacyCheck, 'wrong password')).rejects.toThrow(/未修改任何笔记/)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
   const imported = await importMarkdownRepository({ library, notes: [stored], privacySecret: 'strong ssh password' }, workspaceId)
   expect(imported.pages[0]?.title).toBe('不能泄露的标题')
