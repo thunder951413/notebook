@@ -3,7 +3,7 @@ import { EditorState, Transaction } from '@codemirror/state'
 import { EditorView, drawSelection, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
-import { vim } from '@replit/codemirror-vim'
+import { getCM, vim } from '@replit/codemirror-vim'
 import { Button } from '@fluentui/react-components'
 import {
   CheckboxChecked20Regular,
@@ -27,6 +27,7 @@ export interface MarkdownSourceEditorProps {
   onDraft?: (document: Record<string, unknown>) => void | Promise<void>
   saveImage?: (file: File) => Promise<Asset>
   vimEnabled?: boolean
+  onVimCommandModeChange?: (active: boolean) => void
 }
 
 function minimalChange(current: string, next: string) {
@@ -42,12 +43,13 @@ function minimalChange(current: string, next: string) {
   return { from, to: currentEnd, insert: next.slice(from, nextEnd) }
 }
 
-export default function MarkdownSourceEditor({ pageId, content, onChange, onDraft, saveImage, vimEnabled = false }: MarkdownSourceEditorProps) {
+export default function MarkdownSourceEditor({ pageId, content, onChange, onDraft, saveImage, vimEnabled = false, onVimCommandModeChange }: MarkdownSourceEditorProps) {
   const host = useRef<HTMLDivElement>(null)
   const imageInput = useRef<HTMLInputElement>(null)
   const viewRef = useRef<EditorView | undefined>(undefined)
   const onChangeRef = useRef(onChange)
   const onDraftRef = useRef(onDraft)
+  const onVimCommandModeChangeRef = useRef(onVimCommandModeChange)
   const dirty = useRef(false)
   const applyingExternal = useRef(false)
   const pendingExternal = useRef<string | undefined>(undefined)
@@ -55,6 +57,7 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   onChangeRef.current = onChange
   onDraftRef.current = onDraft
+  onVimCommandModeChangeRef.current = onVimCommandModeChange
 
   const commit = async () => {
     const view = viewRef.current
@@ -115,9 +118,19 @@ export default function MarkdownSourceEditor({ pageId, content, onChange, onDraf
       }),
     })
     viewRef.current = view
+    const cm = vimEnabled ? getCM(view) : null
+    const handleVimModeChange = (event: { mode?: string }) => onVimCommandModeChangeRef.current?.(event.mode !== 'insert' && event.mode !== 'replace')
+    if (cm) {
+      cm.on('vim-mode-change', handleVimModeChange)
+      onVimCommandModeChangeRef.current?.(true)
+    } else {
+      onVimCommandModeChangeRef.current?.(false)
+    }
     const unregisterFlush = registerFlushHandler(commit)
     return () => {
       unregisterFlush()
+      cm?.off('vim-mode-change', handleVimModeChange)
+      onVimCommandModeChangeRef.current?.(false)
       clearTimeout(saveTimer.current)
       clearTimeout(draftTimer.current)
       viewRef.current = undefined

@@ -66,6 +66,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [recentPageIds, setRecentPageIds] = useState<string[]>(() => readRecentPageIds())
   const [mode, setMode] = useState<WorkspaceMode>('document')
   const [vimEnabled, setVimEnabled] = useState(readVimEnabled)
+  const [vimCommandMode, setVimCommandMode] = useState(readVimEnabled)
   const [aiOpen, setAiOpen] = useState(() => readLayout().aiOpen ?? (typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 1301px)').matches))
   const [navOpen, setNavOpen] = useState(() => readLayout().navOpen ?? true)
   const [pagesOpen, setPagesOpen] = useState(() => readLayout().pagesOpen ?? true)
@@ -477,7 +478,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
                 {(Object.keys(modeLabels) as WorkspaceMode[]).map((item) => <Button key={item} className={mode === item ? 'selected' : ''} appearance="subtle" aria-pressed={mode === item} size="small" title={item === 'document' ? '实时渲染 Markdown' : '查看和编辑原始 Markdown'} icon={item === 'document' ? <Edit20Regular /> : <Document20Regular />} onClick={() => setMode(item)}>{modeLabels[item]}</Button>)}
               </div>
-              <Button className={`vim-toggle ${vimEnabled ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title="Vim 模式：Esc 普通模式，i 插入模式" onClick={() => setVimEnabled((value) => !value)}>Vim</Button>
+              <Button className={`vim-toggle ${vimEnabled && vimCommandMode ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑' : 'Vim INSERT：Esc 返回普通模式' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</Button>
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">{activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /><Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) }} /></>}<Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} /><Button appearance="subtle" icon={aiOpen ? <Bot20Filled /> : <Bot20Regular />} aria-label={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} title={aiOpen ? '关闭 AI 助手' : '打开 AI 助手'} aria-pressed={aiOpen} onClick={() => setAiOpen((value) => !value)} /></div>
           </div>
@@ -502,9 +503,10 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               loadAsset={getAssetContent}
               forceRestore={restoreToken.startsWith(`${currentPage.id}:`)}
               vimEnabled={vimEnabled}
+              onVimCommandModeChange={setVimCommandMode}
             />}
             <Suspense fallback={<ModePlaceholder icon={<Document20Regular />} title="正在加载 Markdown" description="正在准备源码编辑器。" />}>
-              {mode === 'source' && <MarkdownSourceEditor key={`${currentPage.id}:${vimEnabled}`} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onDraft={(json) => stageDocument(currentPage.id, json)} onChange={(json) => saveDocument(currentPage.id, json)} saveImage={(file) => saveAsset(currentPage.id, file)} vimEnabled={vimEnabled} />}
+              {mode === 'source' && <MarkdownSourceEditor key={`${currentPage.id}:${vimEnabled}`} workspaceId={WORKSPACE_ID} pageId={currentPage.id} content={documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }} onDraft={(json) => stageDocument(currentPage.id, json)} onChange={(json) => saveDocument(currentPage.id, json)} saveImage={(file) => saveAsset(currentPage.id, file)} vimEnabled={vimEnabled} onVimCommandModeChange={setVimCommandMode} />}
             </Suspense>
             </>}
           </section>

@@ -36,21 +36,23 @@ export interface DocumentEditorProps {
   forceRestore?: boolean
   loadAsset?: AssetLoader
   vimEnabled?: boolean
+  onVimCommandModeChange?: (active: boolean) => void
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} vimEnabled={vimEnabled} />
+  return <ReadyDocumentEditor session={session} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} />
 }
 
-function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false }: Pick<DocumentEditorProps, 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'vimEnabled'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange }: Pick<DocumentEditorProps, 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'vimEnabled' | 'onVimCommandModeChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
   const onChangeRef = useRef(onChange)
   const onDraftRef = useRef(onDraft)
+  const onVimCommandModeChangeRef = useRef(onVimCommandModeChange)
   const vimEnabledRef = useRef(vimEnabled)
   const vimModeRef = useRef<'normal' | 'insert'>('insert')
   const pendingVimKey = useRef<string | undefined>(undefined)
@@ -59,11 +61,13 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
   const [searchQuery, setSearchQuery] = useState('')
   onChangeRef.current = onChange
   onDraftRef.current = onDraft
+  onVimCommandModeChangeRef.current = onVimCommandModeChange
   vimEnabledRef.current = vimEnabled
   const changeVimMode = (mode: 'normal' | 'insert') => {
     vimModeRef.current = mode
     pendingVimKey.current = undefined
     setVimMode(mode)
+    onVimCommandModeChangeRef.current?.(vimEnabledRef.current && mode === 'normal')
   }
   const collaborative = Boolean(session.provider)
   const editor = useEditor({
@@ -98,7 +102,7 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
       },
       transformPastedHTML: sanitizeSupportedHtml,
       handleKeyDown: (view, event) => {
-        if (!vimEnabledRef.current || event.metaKey || event.ctrlKey || event.altKey) return false
+        if (!vimEnabledRef.current || event.metaKey || event.altKey) return false
         if (event.key === 'Escape') {
           event.preventDefault()
           setSearchOpen(false)
@@ -106,6 +110,12 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
           return true
         }
         if (vimModeRef.current === 'insert') return false
+        if (event.ctrlKey && (event.key.toLocaleLowerCase() === 'p' || event.key.toLocaleLowerCase() === 'n')) {
+          event.preventDefault()
+          moveVertical(view, event.key.toLocaleLowerCase() === 'p' ? -1 : 1)
+          return true
+        }
+        if (event.ctrlKey) return false
         if (event.key === 'i') {
           event.preventDefault()
           changeVimMode('insert')
@@ -147,6 +157,11 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
         if (event.key === 'G') {
           event.preventDefault()
           moveSelection(view, Selection.atEnd(view.state.doc))
+          return true
+        }
+        if (event.key === '0' || event.key === '$') {
+          event.preventDefault()
+          moveToTextblockEdge(view, event.key === '0' ? 'start' : 'end')
           return true
         }
         if (event.key === 'h' || event.key === 'l') {
@@ -206,6 +221,7 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
   useEffect(() => {
     changeVimMode(vimEnabled ? 'normal' : 'insert')
     setSearchOpen(false)
+    return () => onVimCommandModeChangeRef.current?.(false)
   }, [vimEnabled])
 
   const findNext = () => {
@@ -256,9 +272,23 @@ function moveHorizontal(view: ProseMirrorView, direction: -1 | 1) {
 }
 
 function moveVertical(view: ProseMirrorView, direction: -1 | 1) {
-  const coordinates = view.coordsAtPos(view.state.selection.head)
-  const target = view.posAtCoords({ left: coordinates.left, top: direction < 0 ? coordinates.top - 20 : coordinates.bottom + 20 })
-  if (target) moveSelection(view, Selection.near(view.state.doc.resolve(target.pos), direction))
+  try {
+    const coordinates = view.coordsAtPos(view.state.selection.head)
+    const target = view.posAtCoords({ left: coordinates.left, top: direction < 0 ? coordinates.top - 20 : coordinates.bottom + 20 })
+    if (target) moveSelection(view, Selection.near(view.state.doc.resolve(target.pos), direction))
+  } catch {
+    const fallback = Selection.findFrom(view.state.selection.$head, direction, true)
+    if (fallback) moveSelection(view, fallback)
+  }
+}
+
+function moveToTextblockEdge(view: ProseMirrorView, edge: 'start' | 'end') {
+  const { $head } = view.state.selection
+  for (let depth = $head.depth; depth > 0; depth -= 1) {
+    if (!$head.node(depth).isTextblock) continue
+    moveSelection(view, TextSelection.create(view.state.doc, edge === 'start' ? $head.start(depth) : $head.end(depth)))
+    return
+  }
 }
 
 function currentTextblockRange(state: EditorState) {
