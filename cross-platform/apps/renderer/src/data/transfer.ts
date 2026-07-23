@@ -1,0 +1,152 @@
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { parse as parsePlist } from 'plist'
+import type { NotebookDataBundle } from '@notebook/domain'
+import {
+  importLegacyBundle,
+  importDocumentMigrationPackage,
+  libraryEnvelopeSchema,
+  migratedDocumentSchema,
+  migrationManifestSchema,
+  noteEnvelopeSchema,
+  noteIndexSchema,
+  readingPositionsSchema,
+  normalizeLegacyEncryptedData,
+  importMarkdownRepository,
+  type MarkdownNoteEnvelope,
+  type LegacyEncryptedData,
+  type LegacyLibraryEnvelope,
+  type LegacyNoteEnvelope,
+  type LegacyNoteIndex,
+  type LegacyReadingPositions,
+} from '@notebook/sync-contract'
+
+export interface ImportFile { name: string; data: Uint8Array }
+
+function expandFiles(files: ImportFile[]): ImportFile[] {
+  return files.flatMap((file) => {
+    if (!file.name.toLocaleLowerCase().endsWith('.zip')) return [file]
+    return Object.entries(unzipSync(file.data)).map(([name, data]) => ({ name, data }))
+  })
+}
+
+export interface DecodedImport { bundle: NotebookDataBundle; assetContents: Map<string, Uint8Array> }
+
+function decodeBase64Text(value: string) {
+  const binary = atob(value.replace(/\s+/g, ''))
+  return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)))
+}
+
+export function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknown): LegacyEncryptedData {
+  const encryptedFile = files.find((file) => /(^|\/)Config\/EncryptedData\.plist$/i.test(file.name))
+  const folderFile = files.find((file) => /(^|\/)Config\/EncryptedFolders\.plist$/i.test(file.name))
+  const encrypted = normalizeLegacyEncryptedData(encryptedFile ? parsePlist(strFromU8(encryptedFile.data)) : embedded)
+  if (!folderFile) return encrypted
+  const folderConfig = parsePlist(strFromU8(folderFile.data)) as Record<string, unknown>
+  let folders = encrypted.encryptedFolders
+  if (typeof folderConfig.foldersData === 'string') {
+    try {
+      const decoded = JSON.parse(decodeBase64Text(folderConfig.foldersData))
+      folders = normalizeLegacyEncryptedData({ encryptedFolders: decoded }).encryptedFolders
+    } catch { /* A damaged optional folder-name file must not hide the notes themselves. */ }
+  }
+  const names = folderConfig.folderNames && typeof folderConfig.folderNames === 'object' ? folderConfig.folderNames as Record<string, unknown> : {}
+  folders = folders.map((folder) => ({ ...folder, name: typeof names[folder.id] === 'string' ? names[folder.id] as string : folder.name }))
+  return { ...encrypted, encryptedFolders: folders }
+}
+
+export function decodeImport(files: ImportFile[], workspaceId: string): DecodedImport {
+  const expanded = expandFiles(files)
+  const current = expanded.find((file) => file.name.endsWith('notebook-next.json'))
+  if (current) {
+    const value = JSON.parse(strFromU8(current.data)) as { schemaVersion?: number; bundle?: NotebookDataBundle }
+    if (value.schemaVersion !== 1 || !value.bundle) throw new Error('不支持的 Notebook Next 备份版本')
+    const bundle = { ...value.bundle, revisions: value.bundle.revisions ?? [], comments: value.bundle.comments ?? [] }
+    const assetContents = new Map(bundle.assets.flatMap((asset) => {
+      const file = expanded.find((item) => item.name === `assets/${asset.id}`)
+      return file ? [[asset.id, file.data] as const] : []
+    }))
+    return { bundle, assetContents }
+  }
+
+  const manifestFile = expanded.find((file) => file.name.endsWith('manifest.json'))
+  if (manifestFile) {
+    const parsedManifest = migrationManifestSchema.safeParse(JSON.parse(strFromU8(manifestFile.data)))
+    if (parsedManifest.success) {
+      const documents = new Map(parsedManifest.data.notes.map((note) => {
+        const file = expanded.find((item) => item.name === note.documentPath || item.name.endsWith(`/${note.documentPath}`))
+        if (!file) throw new Error(`迁移包缺少文档：${note.documentPath}`)
+        return [note.documentPath, migratedDocumentSchema.parse(JSON.parse(strFromU8(file.data)))] as const
+      }))
+      const embeddedPrivacy = (parsedManifest.data as unknown as { encryptedData?: unknown }).encryptedData
+      const imported = importDocumentMigrationPackage(parsedManifest.data, documents, workspaceId, decodeLegacyPrivacyConfiguration(expanded, embeddedPrivacy))
+      const bundle: NotebookDataBundle = {
+        notebooks: [imported.notebook, ...(imported.privateNotebook ? [imported.privateNotebook] : [])], sections: imported.sections, pages: imported.pages, documents: imported.documents,
+        tags: imported.tags, pageTags: imported.pageTags, taskSteps: imported.taskSteps, assets: imported.assets,
+        pageLinks: imported.pageLinks, knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], revisions: imported.revisions, comments: [], tombstones: imported.tombstones,
+      }
+      const assetContents = new Map(imported.assets.flatMap((asset) => {
+        const file = asset.localPath ? expanded.find((item) => item.name === asset.localPath || item.name.endsWith(`/${asset.localPath}`)) : undefined
+        return file ? [[asset.id, file.data] as const] : []
+      }))
+      return { bundle, assetContents }
+    }
+  }
+
+  let library: LegacyLibraryEnvelope | undefined
+  let index: LegacyNoteIndex | undefined
+  let positions: LegacyReadingPositions | undefined
+  const notes: LegacyNoteEnvelope[] = []
+  const markdownNotes: MarkdownNoteEnvelope[] = []
+  for (const file of expanded.filter((item) => item.name.toLocaleLowerCase().endsWith('.json'))) {
+    const value: unknown = JSON.parse(strFromU8(file.data))
+    if (value && typeof value === 'object' && (value as { schemaVersion?: unknown }).schemaVersion === 3 && typeof (value as { noteID?: unknown }).noteID === 'string') { markdownNotes.push(value as MarkdownNoteEnvelope); continue }
+    const note = noteEnvelopeSchema.safeParse(value)
+    if (note.success) { notes.push(note.data); continue }
+    const parsedLibrary = libraryEnvelopeSchema.safeParse(value)
+    if (parsedLibrary.success) { library = parsedLibrary.data; continue }
+    const parsedIndex = noteIndexSchema.safeParse(value)
+    if (parsedIndex.success) { index = parsedIndex.data; continue }
+    const parsedPositions = readingPositionsSchema.safeParse(value)
+    if (parsedPositions.success) positions = parsedPositions.data
+  }
+  if (!library) throw new Error('迁移包中缺少 library-envelope.json')
+  if (markdownNotes.length) {
+    const bundle = importMarkdownRepository({ library, notes: markdownNotes, readingPositions: positions }, workspaceId)
+    const assetContents = new Map(bundle.assets.flatMap((asset) => {
+      const normalized = asset.localPath?.replace(/^\.\//, '')
+      const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
+      return file ? [[asset.id, file.data] as const] : []
+    }))
+    return { bundle, assetContents }
+  }
+  if (notes.length === 0) throw new Error('迁移包中没有可导入的笔记信封')
+  const imported = importLegacyBundle({ library, notes, index, readingPositions: positions }, workspaceId)
+  const bundle: NotebookDataBundle = {
+    notebooks: [imported.notebook, ...(imported.privateNotebook ? [imported.privateNotebook] : [])], sections: imported.sections, pages: imported.pages, documents: imported.documents,
+    tags: imported.tags, pageTags: imported.pageTags, taskSteps: imported.taskSteps, assets: imported.assets,
+    pageLinks: imported.pageLinks, knowledgeEntities: [], knowledgeRelations: [], readingPositions: imported.readingPositions, revisions: imported.revisions, comments: [], tombstones: imported.tombstones,
+  }
+  const assetContents = new Map(imported.assets.flatMap((asset) => {
+    const normalized = asset.localPath?.replace(/^\.\//, '')
+    const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
+    return file ? [[asset.id, file.data] as const] : []
+  }))
+  return { bundle, assetContents }
+}
+
+export function encodeExport(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>) {
+  const payload = { format: 'notebook-next', schemaVersion: 1, exportedAt: new Date().toISOString(), bundle }
+  return zipSync({ 'notebook-next.json': strToU8(JSON.stringify(payload)), ...Object.fromEntries([...assetContents].map(([id, data]) => [`assets/${id}`, data])) }, { level: 6 })
+}
+
+export function base64ToBytes(value: string) {
+  const binary = atob(value)
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+}
+
+export function bytesToBase64(value: Uint8Array) {
+  let result = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < value.length; offset += chunkSize) result += String.fromCharCode(...value.subarray(offset, offset + chunkSize))
+  return btoa(result)
+}

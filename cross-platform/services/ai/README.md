@@ -14,7 +14,7 @@ Production must set `NOTEBOOK_AI_API_TOKEN`; desktop development may keep the se
 
 The Electron desktop app connects to the old SSH repository directly. Choose
 `旧版 SSH/SFTP` in Settings and enter the same host, port, user, password and
-remote directory used by Android/macOS. It reads and writes `library.json`,
+remote directory used by Android/Electron. It reads and writes `library.json`,
 `notes/index.json`, note envelopes, reading positions, attachment manifests and
 attachments with the legacy lock and atomic-write contract.
 

@@ -1,15 +1,15 @@
-name: Cross-platform Next
+name: Electron Next
 
 permissions:
   contents: write
 
 on:
   push:
-    branches: [master]
+    branches: [next]
     tags: ['v*']
     paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
   pull_request:
-    branches: [master]
+    branches: [next]
     paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
   workflow_dispatch:
 
@@ -25,7 +25,7 @@ jobs:
         with: { node-version: 24, cache: pnpm, cache-dependency-path: cross-platform/pnpm-lock.yaml }
       - uses: actions/setup-python@v6
         with: { python-version: '3.12', cache: pip, cache-dependency-path: cross-platform/services/ai/pyproject.toml }
-      - name: Install web and desktop dependencies
+      - name: Install Electron dependencies
         working-directory: cross-platform
         run: pnpm install --frozen-lockfile
       - name: Typecheck, test and build

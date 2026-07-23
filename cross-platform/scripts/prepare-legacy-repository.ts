@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { encodeLegacyRepository } from '../packages/sync-contract/src/exporter.ts'
-import { strFromU8, unzipSync, zipSync } from '../apps/web/node_modules/fflate/esm/index.mjs'
+import { strFromU8, unzipSync, zipSync } from '../apps/renderer/node_modules/fflate/esm/index.mjs'
 
 const argument = (name: string) => {
   const index = process.argv.indexOf(name)

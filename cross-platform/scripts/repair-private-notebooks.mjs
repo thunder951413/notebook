@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
-import plist from '../apps/web/node_modules/plist/index.js'
-import { strFromU8, strToU8, unzipSync, zipSync } from '../apps/web/node_modules/fflate/esm/index.mjs'
+import plist from '../apps/renderer/node_modules/plist/index.js'
+import { strFromU8, strToU8, unzipSync, zipSync } from '../apps/renderer/node_modules/fflate/esm/index.mjs'
 
 const args = new Map(Array.from({ length: Math.floor(process.argv.slice(2).length / 2) }, (_, index) => {
   const offset = index * 2 + 2

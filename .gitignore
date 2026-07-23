@@ -1,28 +1,4 @@
-# Xcode
-#
-build/
-DerivedData/
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-xcuserdata/
-*.xccheckout
-*.moved-aside
-DerivedData
-*.hmap
-*.ipa
-*.xcuserstate
-*.profraw
-
-# Swift Package Manager
-#
-.build/
-Tools/MarkdownEditor/node_modules
+# Electron / Node
 cross-platform/node_modules/
 cross-platform/**/node_modules/
 cross-platform/**/dist/
@@ -31,21 +7,25 @@ cross-platform/**/release/
 cross-platform/**/.venv/
 cross-platform/**/__pycache__/
 cross-platform/**/.pytest_cache/
-cross-platform/**/data/
+cross-platform/services/**/data/
 cross-platform/**/.env
 cross-platform/**/*.tsbuildinfo
 cross-platform/**/*.db
 cross-platform/**/*.egg-info/
 !cross-platform/**/.env.example
+*.profraw
+*.xcuserstate
+xcuserdata/
 
-# OS X
-#
+# Local files
 .DS_Store
 .vscode/
+.launchpad.json
+ctl
 
 # Local build artifacts and verification logs
 output/
 
-# Nested platform workspace and sensitive local recovery artifacts
+# Android is maintained as a separate repository.
 notebook_android/
 recovery/

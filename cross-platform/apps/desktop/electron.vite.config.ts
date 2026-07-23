@@ -21,12 +21,12 @@ export default defineConfig({
     },
   },
   renderer: {
-    root: resolve(__dirname, '../web'),
+    root: resolve(__dirname, '../renderer'),
     plugins: [react()],
     build: {
       outDir: resolve(__dirname, 'dist/renderer'),
       emptyOutDir: true,
-      rollupOptions: { input: resolve(__dirname, '../web/index.html') },
+      rollupOptions: { input: resolve(__dirname, '../renderer/index.html') },
     },
   },
 })

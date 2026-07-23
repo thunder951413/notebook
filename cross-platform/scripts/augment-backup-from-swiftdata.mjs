@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { inflateRawSync } from 'node:zlib'
 import Database from '../services/collaboration/node_modules/better-sqlite3/lib/index.js'
-import { strFromU8, strToU8, unzipSync, zipSync } from '../apps/web/node_modules/fflate/esm/index.mjs'
+import { strFromU8, strToU8, unzipSync, zipSync } from '../apps/renderer/node_modules/fflate/esm/index.mjs'
 import { legacyDocumentToTiptap } from '../packages/sync-contract/src/importer.ts'
 
 const args = new Map(Array.from({ length: Math.floor(process.argv.slice(2).length / 2) }, (_, index) => {
