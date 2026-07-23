@@ -4,7 +4,7 @@ import { build as buildPlist } from 'plist'
 import type { NotebookDataBundle } from '@notebook/domain'
 import { decodeImport, encodeExport } from './transfer'
 
-test('imports the macOS document migration package without dropping rich source data or assets', () => {
+test('imports the macOS document migration package without dropping rich source data or assets', async () => {
   const noteId = '11111111-1111-4111-8111-111111111111'
   const folderId = '22222222-2222-4222-8222-222222222222'
   const tagId = '33333333-3333-4333-8333-333333333333'
@@ -23,7 +23,7 @@ test('imports the macOS document migration package without dropping rich source 
     { id: 'asset-1', type: 'attachment', asset: { id: 'image', kind: 'image', filename: 'Assets/image_photo.png', mimeType: 'image/png', width: 120, height: 80, duration: null, createdAt: '2026-07-20T00:00:00Z', sidecarFiles: [] } },
   ] }
   const zip = zipSync({ 'manifest.json': strToU8(JSON.stringify(manifest)), [documentPath]: strToU8(JSON.stringify(document)), [assetPath]: new Uint8Array([1, 2, 3]) })
-  const decoded = decodeImport([{ name: 'legacy.zip', data: zip }], 'workspace-a')
+  const decoded = await decodeImport([{ name: 'legacy.zip', data: zip }], 'workspace-a')
   const migratedAssetId = `legacy-asset:${noteId}:image`
   expect(decoded.bundle.pages[0]).toMatchObject({ id: noteId, kind: 'task', dueAt: '2026-07-30T00:00:00Z', important: true, legacyVersion: 9 })
   expect(decoded.bundle.documents[0]?.legacySource).toMatchObject({ source: 'NotebookBlockDocument' })
@@ -32,7 +32,7 @@ test('imports the macOS document migration package without dropping rich source 
   expect(decoded.bundle.taskSteps[0]?.id).toBe(stepId)
 })
 
-test('restores privacy mappings from the old macOS configuration files', () => {
+test('restores privacy mappings from the old macOS configuration files', async () => {
   const noteId = '11111111-1111-4111-8111-111111111111'
   const folderId = '22222222-2222-4222-8222-222222222222'
   const documentPath = `Notes/${noteId}/document.json`
@@ -48,13 +48,13 @@ test('restores privacy mappings from the old macOS configuration files', () => {
     'Config/EncryptedData.plist': strToU8(buildPlist({ encryptedNoteIDs: [noteId], noteToFolderMapping: { [noteId]: folderId } })),
     'Config/EncryptedFolders.plist': strToU8(buildPlist({ foldersData })),
   })
-  const decoded = decodeImport([{ name: 'legacy-private.zip', data: zip }], 'workspace-a')
+  const decoded = await decodeImport([{ name: 'legacy-private.zip', data: zip }], 'workspace-a')
   expect(decoded.bundle.notebooks.find((notebook) => notebook.locked)).toMatchObject({ name: '隐私笔记本' })
   expect(decoded.bundle.sections.find((section) => section.id === folderId)).toMatchObject({ name: 'Private Folder' })
   expect(decoded.bundle.pages[0]).toMatchObject({ id: noteId, sectionId: folderId, locked: true })
 })
 
-test('complete backup round trip preserves history tombstones privacy and attachment bytes', () => {
+test('complete backup round trip preserves history tombstones privacy and attachment bytes', async () => {
   const workspaceId = '00000000-0000-4000-8000-000000000001'
   const notebookId = '10000000-0000-4000-8000-000000000001'
   const sectionId = '20000000-0000-4000-8000-000000000001'
@@ -75,7 +75,18 @@ test('complete backup round trip preserves history tombstones privacy and attach
   }
   const bytes = new Uint8Array([137, 80, 78, 71])
   const archive = encodeExport(bundle, new Map([[assetId, bytes]]))
-  const decoded = decodeImport([{ name: 'backup.zip', data: archive }], workspaceId)
+  const decoded = await decodeImport([{ name: 'backup.zip', data: archive }], workspaceId)
   expect(decoded.bundle).toEqual(bundle)
   expect(decoded.assetContents.get(assetId)).toEqual(bytes)
+})
+
+test('rejects an attachment whose bytes do not match its declared SHA-256', async () => {
+  const now = '2026-07-22T00:00:00.000Z'
+  const bundle: NotebookDataBundle = {
+    notebooks: [], sections: [], pages: [{ id: 'page', workspaceId: 'workspace', kind: 'document', title: 'x', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' }], documents: [],
+    assets: [{ id: 'asset', pageId: 'page', kind: 'file', filename: 'damaged.bin', mimeType: 'application/octet-stream', checksum: '0'.repeat(64), byteSize: 3, createdAt: now }],
+    tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], revisions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+  }
+  const archive = encodeExport(bundle, new Map([['asset', new Uint8Array([1, 2, 3])]]))
+  await expect(decodeImport([{ name: 'damaged.zip', data: archive }], 'workspace')).rejects.toThrow(/SHA-256/)
 })

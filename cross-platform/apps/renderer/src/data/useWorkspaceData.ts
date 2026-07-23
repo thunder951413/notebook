@@ -64,6 +64,7 @@ const toPageSummary = (page: Page): PageSummary => ({
   reminderAt: page.reminderAt,
   recurrenceRule: page.recurrenceRule,
   locked: page.locked,
+  syncStatus: page.syncStatus,
 })
 
 export function useWorkspaceData() {
@@ -114,6 +115,7 @@ export function useWorkspaceData() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
+      await repository.recoverDrafts()
       if ((await repository.listNotebooks(WORKSPACE_ID)).length === 0) {
         await db.transaction('rw', db.notebooks, db.sections, db.pages, async () => {
           await db.notebooks.bulkPut(seedNotebooks)
@@ -184,11 +186,12 @@ export function useWorkspaceData() {
 
   const saveDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
     loadedDocumentIds.current.add(pageId)
+    const updatedAt = new Date().toISOString()
+    const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt }
+    await repository.stageDraft(document)
     await enqueuePageMutation(pageId, async () => {
       const page = await repository.getPage(pageId)
       if (!page) return
-      const updatedAt = new Date().toISOString()
-      const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt }
       await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
       setDocuments((current) => ({ ...current, [pageId]: tiptapJson }))
       if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(tiptapJson)).catch(() => undefined)
@@ -265,7 +268,7 @@ export function useWorkspaceData() {
       await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown: /\.html?$/i.test(file.name) ? documentToMarkdown(documentJson) : source, tiptapJson: documentJson, updatedAt: now })
     }
     const bundleFiles = files.filter((file) => !/\.(md|markdown|txt|html?)$/i.test(file.name))
-    const decoded = bundleFiles.length ? decodeImport(bundleFiles, WORKSPACE_ID) : undefined
+    const decoded = bundleFiles.length ? await decodeImport(bundleFiles, WORKSPACE_ID) : undefined
     if (decoded) {
       await repository.importData(decoded.bundle)
       await repository.importAssetContents(decoded.assetContents)
@@ -300,9 +303,9 @@ export function useWorkspaceData() {
     const visible = includeLocked ? results : results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))
     return limit == null ? visible : visible.slice(0, limit)
   }, [privateSectionIds])
-  const moveToTrash = useCallback(async (pageId: string) => { await repository.movePageToTrash(pageId, new Date().toISOString()); await reload() }, [reload])
+  const moveToTrash = useCallback(async (pageId: string) => { await repository.movePageToTrash(pageId, new Date().toISOString(), legacyDeviceId()); await reload() }, [reload])
   const restorePage = useCallback(async (pageId: string) => { await repository.restorePage(pageId); await reload() }, [reload])
-  const purgePage = useCallback(async (pageId: string) => { await repository.purgePage(pageId); await reload() }, [reload])
+  const purgePage = useCallback(async (pageId: string) => { await repository.purgePage(pageId, new Date().toISOString(), legacyDeviceId()); await reload() }, [reload])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])

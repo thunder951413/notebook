@@ -70,6 +70,7 @@ export interface RemoteSyncChange {
 interface SyncCursor { workspaceId: string; cursor: number }
 interface SyncVersion { id: string; version: number }
 interface AssetContent { id: string; data: Blob }
+interface PageDraft { pageId: string; document: PageDocument; createdAt: string }
 
 export class NotebookRendererDatabase extends Dexie {
   notebooks!: EntityTable<Notebook, 'id'>
@@ -91,6 +92,7 @@ export class NotebookRendererDatabase extends Dexie {
   assetContents!: EntityTable<AssetContent, 'id'>
   revisions!: EntityTable<PageRevision, 'id'>
   comments!: EntityTable<PageComment, 'id'>
+  drafts!: EntityTable<PageDraft, 'pageId'>
 
   constructor(name = 'notebook-next') {
     super(name)
@@ -121,6 +123,7 @@ export class NotebookRendererDatabase extends Dexie {
     this.version(5).stores({ assetContents: 'id' })
     this.version(6).stores({ revisions: 'id, pageId, createdAt' })
     this.version(7).stores({ comments: 'id, workspaceId, pageId, createdAt, resolvedAt' })
+    this.version(8).stores({ drafts: 'pageId, createdAt' })
   }
 }
 
@@ -258,7 +261,7 @@ export class DexieNotebookRepository implements NotebookRepository {
   }
 
   async savePage(page: Page, document?: PageDocument): Promise<void> {
-    await this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
+    await this.db.transaction('rw', [this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, this.db.drafts], async () => {
       await this.db.pages.put(page)
       if (document) {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
@@ -274,27 +277,58 @@ export class DexieNotebookRepository implements NotebookRepository {
           if (autosaves.length > 100) await this.db.revisions.bulkDelete(autosaves.slice(0, autosaves.length - 100).map((item) => item.id))
         }
         await this.db.documents.put(document)
+        const draft = await this.db.drafts.get(page.id)
+        if (draft && draft.document.updatedAt <= document.updatedAt) await this.db.drafts.delete(page.id)
         if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'document', page.id, 'upsert', { ...document, yjsState: undefined })
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
     })
   }
 
-  async movePageToTrash(pageId: UUID, deletedAt: string): Promise<void> {
-    const page = await this.db.pages.get(pageId)
-    if (!page) throw new Error(`Page not found: ${pageId}`)
-    await this.savePage({ ...page, deletedAt, syncStatus: 'pending', updatedAt: deletedAt })
+  async stageDraft(document: PageDocument): Promise<void> {
+    await this.db.drafts.put({ pageId: document.pageId, document, createdAt: new Date().toISOString() })
   }
 
-  async restorePage(pageId: UUID): Promise<void> {
-    const page = await this.db.pages.get(pageId)
-    if (!page) throw new Error(`Page not found: ${pageId}`)
-    await this.savePage({ ...page, deletedAt: undefined, syncStatus: 'pending', updatedAt: new Date().toISOString() })
+  async recoverDrafts(): Promise<string[]> {
+    const recovered: string[] = []
+    for (const draft of await this.db.drafts.toArray()) {
+      const [page, stored] = await Promise.all([this.db.pages.get(draft.pageId), this.db.documents.get(draft.pageId)])
+      if (!page) { await this.db.drafts.delete(draft.pageId); continue }
+      if (!stored || draft.document.updatedAt > stored.updatedAt) {
+        await this.savePage({ ...page, updatedAt: draft.document.updatedAt, syncStatus: 'pending' }, draft.document)
+        recovered.push(draft.pageId)
+      } else await this.db.drafts.delete(draft.pageId)
+    }
+    return recovered
   }
 
-  async purgePage(pageId: UUID): Promise<void> {
+  async movePageToTrash(pageId: UUID, deletedAt: string, deviceId = 'electron'): Promise<void> {
+    const page = await this.db.pages.get(pageId)
+    if (!page) throw new Error(`Page not found: ${pageId}`)
+    const tombstone: Tombstone = { id: `page:${pageId}`, workspaceId: page.workspaceId, entityType: 'page', entityId: pageId, deletedAt, deviceId }
+    await this.db.transaction('rw', this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, async () => {
+      await this.db.pages.put({ ...page, deletedAt, syncStatus: 'pending', updatedAt: deletedAt })
+      await this.db.tombstones.put(tombstone)
+      await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
+    })
+  }
+
+  async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
+    const page = await this.db.pages.get(pageId)
+    if (!page) throw new Error(`Page not found: ${pageId}`)
+    await this.db.transaction('rw', this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, async () => {
+      const restored = { ...page, deletedAt: undefined, syncStatus: 'pending' as const, updatedAt: restoredAt }
+      await this.db.pages.put(restored)
+      await this.db.tombstones.delete(`page:${pageId}`)
+      await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', restored)
+    })
+  }
+
+  async purgePage(pageId: UUID, deletedAt = new Date().toISOString(), deviceId = 'electron'): Promise<void> {
     const page = await this.db.pages.get(pageId)
     if (!page) return
+    const effectiveDeletedAt = page.deletedAt && page.deletedAt > deletedAt ? page.deletedAt : deletedAt
+    const tombstone: Tombstone = { id: `page:${pageId}`, workspaceId: page.workspaceId, entityType: 'page', entityId: pageId, deletedAt: effectiveDeletedAt, deviceId }
     const steps = await this.db.taskSteps.where('pageId').equals(pageId).toArray()
     const assets = await this.db.assets.where('pageId').equals(pageId).toArray()
     const links = await this.db.pageLinks.where('sourcePageId').equals(pageId).toArray()
@@ -304,6 +338,7 @@ export class DexieNotebookRepository implements NotebookRepository {
     await this.enqueueChange(page.workspaceId, 'document', pageId, 'delete', {})
     await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     await this.db.transaction('rw', this.db.tables, async () => {
+      await this.db.tombstones.put(tombstone)
       await Promise.all([
         this.db.pages.delete(pageId),
         this.db.documents.delete(pageId),
@@ -314,6 +349,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         this.db.readingPositions.where('pageId').equals(pageId).delete(),
         this.db.revisions.where('pageId').equals(pageId).delete(),
         this.db.comments.where('pageId').equals(pageId).delete(),
+        this.db.drafts.delete(pageId),
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
@@ -523,6 +559,12 @@ export class DexieNotebookRepository implements NotebookRepository {
     const sections = (await this.db.sections.toArray()).filter((item) => notebookIds.has(item.notebookId))
     const pages = await this.db.pages.where('workspaceId').equals(workspaceId).toArray()
     const pageIds = new Set(pages.map((item) => item.id))
+    const tombstones = await this.db.tombstones.where('workspaceId').equals(workspaceId).toArray()
+    const activeTombstones = tombstones.filter((item) => {
+      if (item.entityType !== 'page') return true
+      const page = pages.find((candidate) => candidate.id === item.entityId)
+      return !page || Boolean(page.deletedAt) || item.deletedAt >= page.updatedAt
+    })
     return {
       notebooks, sections, pages,
       documents: (await this.db.documents.toArray()).filter((item) => pageIds.has(item.pageId)),
@@ -536,7 +578,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       readingPositions: (await this.db.readingPositions.toArray()).filter((item) => pageIds.has(item.pageId)),
       revisions: (await this.db.revisions.toArray()).filter((item) => pageIds.has(item.pageId)),
       comments: [],
-      tombstones: await this.db.tombstones.where('workspaceId').equals(workspaceId).toArray(),
+      tombstones: activeTombstones,
     }
   }
 

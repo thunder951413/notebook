@@ -27,6 +27,10 @@ Binary resources live once at `objects/<first-two-hash-characters>/<sha256>`. Th
 
 The supported durable formatting surface is GFM headings, emphasis, links, code, tables, task lists, lists, quotes, and inline images/resources. Font family, font size, arbitrary text color, absolute positioning, handwriting, and free canvas data are intentionally outside the format.
 
+## Private notes
+
+Notes marked as private wrap the complete note envelope (title, preview, Markdown objects, history and note-local metadata) in AES-256-GCM. The key is derived from the configured SSH password with PBKDF2-HMAC-SHA256 (310,000 iterations); the note ID is authenticated as additional data. Electron and Android reject a wrong password or modified ciphertext without replacing local content. Binary resource objects are not encrypted by this layer and continue to rely on SSH transport, account permissions and server-disk protection.
+
 ## Performance
 
 - Notes are compressed independently with gzip level 9 and loaded on demand.

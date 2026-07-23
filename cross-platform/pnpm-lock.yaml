@@ -208,6 +208,9 @@ importers:
 
   packages/sync-contract:
     dependencies:
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.2.0
       '@notebook/domain':
         specifier: workspace:*
         version: link:../domain

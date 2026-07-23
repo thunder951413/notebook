@@ -31,15 +31,38 @@ describe('legacy SSH conflict merge', () => {
     expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
   })
 
-  test('accepts a newer remote version and archives the overwritten local document', () => {
+  test('stops on concurrent edits, preserves the local body and archives the remote body', () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'revision-id' })
     const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2, title: '本地编辑' }), document('local'))
     const remote = bundle(page({ legacyVersion: 3, updatedAt: '2026-07-22T01:00:00.000Z', title: 'Android 编辑' }), document('remote', '2026-07-22T01:00:00.000Z'))
     const merged = mergeBundles(local, remote, new Map(), new Map())
-    expect(merged.bundle.pages[0]!.title).toBe('Android 编辑')
+    expect(merged.bundle.pages[0]!.title).toBe('本地编辑')
+    expect(merged.bundle.pages[0]!.syncStatus).toBe('conflict')
+    expect(merged.conflicts).toEqual([pageId])
     expect(merged.bundle.revisions).toHaveLength(1)
-    expect(merged.bundle.revisions[0]!.document.tiptapJson).toEqual(document('local').tiptapJson)
+    expect(merged.bundle.revisions[0]!.document.tiptapJson).toEqual(document('remote', '2026-07-22T01:00:00.000Z').tiptapJson)
     vi.unstubAllGlobals()
+  })
+
+  test('treats the next explicit local edit as conflict resolution when the remote baseline is unchanged', () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'revision-id' })
+    const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2 }), document('local'))
+    const remote = bundle(page({ legacyVersion: 3, updatedAt: '2026-07-22T01:00:00.000Z' }), document('remote', '2026-07-22T01:00:00.000Z'))
+    const conflicted = mergeBundles(local, remote, new Map(), new Map())
+    const resolvedLocal = { ...conflicted.bundle, pages: conflicted.bundle.pages.map((item) => ({ ...item, syncStatus: 'pending' as const, updatedAt: '2026-07-22T02:00:00.000Z' })) }
+    const resolved = mergeBundles(resolvedLocal, remote, new Map(), new Map())
+    expect(resolved.conflicts).toEqual([])
+    expect(resolved.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
+    vi.unstubAllGlobals()
+  })
+
+  test('lets a newer restored page supersede an older deletion tombstone', () => {
+    const local = bundle(page({ updatedAt: '2026-07-22T03:00:00.000Z', syncStatus: 'pending' }), document('restored', '2026-07-22T03:00:00.000Z'))
+    const remote = bundle()
+    remote.tombstones.push({ id: `page:${pageId}`, workspaceId, entityType: 'page', entityId: pageId, deletedAt: '2026-07-22T02:00:00.000Z', deviceId: 'android' })
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.pages[0]!.deletedAt).toBeUndefined()
+    expect(merged.bundle.tombstones).toEqual([])
   })
 
   test('honors a newer remote tombstone instead of resurrecting a deleted note', () => {

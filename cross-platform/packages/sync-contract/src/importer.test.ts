@@ -211,6 +211,7 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   }
   const encoded = await encodeMarkdownRepository(bundle, new Map([[assetId, new Uint8Array([1, 2, 3])]]), 'electron')
   const note = JSON.parse(new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))) as MarkdownNoteEnvelope
+  const index = noteIndexSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('notes/index.json'))))
   expect(note.schemaVersion).toBe(3)
   expect(note.contentObjects[note.currentContentHash]).toBe(markdown)
   expect(JSON.stringify(note)).not.toContain('缓存不应同步')
@@ -219,7 +220,7 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(note.assets[0]?.objectHash).toHaveLength(64)
   expect([...encoded.files.keys()]).toContain(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
-  const imported = importMarkdownRepository({ library, notes: [note] }, workspaceId)
+  const imported = await importMarkdownRepository({ library, notes: [note], index }, workspaceId)
   expect(imported.documents[0]?.markdown).toBe(markdown)
   expect(imported.documents[0]?.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.revisions[0]?.document.markdown).toBe('历史正文')
@@ -227,6 +228,44 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('标题')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"width":480')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"textAlign":"center"')
+})
+
+test('rejects missing or corrupted current and historical Markdown objects', async () => {
+  const workspaceId = '00000000-0000-4000-8000-000000000001'
+  const pageId = '30000000-0000-4000-8000-000000000004'
+  const now = '2026-07-22T05:00:00.000Z'
+  const library = libraryEnvelopeSchema.parse({ exportedAt: 1, deviceID: 'device', folders: [], tags: [], deletedFolders: [], deletedTags: [] })
+  const note: MarkdownNoteEnvelope = {
+    schemaVersion: 3, noteID: pageId,
+    metadata: { id: pageId, workspaceId, kind: 'document', title: '损坏', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' },
+    currentContentHash: '0'.repeat(64), contentObjects: { ['0'.repeat(64)]: 'not matching' }, history: [], assets: [], taskSteps: [], tagIDs: [], linkedPageIDs: [],
+  }
+  await expect(importMarkdownRepository({ library, notes: [note] }, workspaceId)).rejects.toThrow(/已损坏/)
+  const missing = { ...note, contentObjects: {} }
+  await expect(importMarkdownRepository({ library, notes: [missing] }, workspaceId)).rejects.toThrow(/缺少当前正文/)
+})
+
+test('encrypts private note metadata, body and history with the SSH secret', async () => {
+  const workspaceId = '00000000-0000-4000-8000-000000000001'
+  const notebookId = '10000000-0000-4000-8000-000000000001'
+  const pageId = '30000000-0000-4000-8000-000000000005'
+  const now = '2026-07-22T05:00:00.000Z'
+  const bundle: NotebookDataBundle = {
+    notebooks: [{ id: notebookId, workspaceId, name: '隐私笔记本', sortOrder: 0, createdAt: now, updatedAt: now, locked: true }], sections: [],
+    pages: [{ id: pageId, workspaceId, kind: 'document', title: '不能泄露的标题', preview: '不能泄露的摘要', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: true }],
+    documents: [{ pageId, schemaVersion: 3, markdown: '绝密正文', tiptapJson: { type: 'doc' }, updatedAt: now }],
+    revisions: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+  }
+  const encoded = await encodeMarkdownRepository(bundle, new Map(), 'electron', 'strong ssh password')
+  const storedText = new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))
+  expect(storedText).not.toContain('不能泄露的标题')
+  expect(storedText).not.toContain('绝密正文')
+  const stored = JSON.parse(storedText)
+  const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
+  const imported = await importMarkdownRepository({ library, notes: [stored], privacySecret: 'strong ssh password' }, workspaceId)
+  expect(imported.pages[0]?.title).toBe('不能泄露的标题')
+  expect(imported.documents[0]?.markdown).toBe('绝密正文')
+  await expect(importMarkdownRepository({ library, notes: [stored], privacySecret: 'wrong password' }, workspaceId)).rejects.toThrow(/解密失败/)
 })
 
 test('retains tombstoned note envelopes and history without exposing them as active index entries', async () => {

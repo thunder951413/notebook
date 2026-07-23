@@ -145,7 +145,7 @@ export function SettingsCenter({ theme, syncState, syncError, currentPageTitle, 
             </SettingsSection>
             <SettingsSection title="安全" description="敏感信息不会写入笔记内容。">
               <SettingsRow title="隐私笔记本" description={!privacyAvailable ? '尚未导入隐私笔记本' : privacyUnlocked ? '当前已解锁；关闭应用后会重新锁定' : privacyConfigured ? '当前已锁定' : '需要为此设备设置新的隐私密码'}><Button disabled={!privacyAvailable} onClick={onPrivacyAction}>{privacyUnlocked ? '立即锁定' : privacyConfigured ? '解锁' : '设置密码'}</Button></SettingsRow>
-              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。旧版访问密码保存在 macOS 钥匙串，无法随导出包迁移，因此每台桌面设备需设置本地密码。</p>
+              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。通过 SSH 同步时，隐私笔记的标题、正文、历史和笔记内元数据会使用由 SSH 密码派生的 AES-256-GCM 密钥加密；附件二进制仍依赖 SSH 账户和服务器磁盘保护。</p>
               <p className="settings-note">Electron 桌面版使用操作系统凭据保存 SSH 密码；普通浏览器只在当前标签会话保存密码，不写入 localStorage 或 IndexedDB。</p>
               <p className="settings-note">加密备份使用 AES-GCM；备份口令只在当前设备处理，无法由服务端找回。</p>
             </SettingsSection>

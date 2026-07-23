@@ -228,9 +228,9 @@ export interface NotebookRepository {
   getPage(id: UUID): Promise<Page | undefined>
   getPageDocument(pageId: UUID): Promise<PageDocument | undefined>
   savePage(page: Page, document?: PageDocument): Promise<void>
-  movePageToTrash(pageId: UUID, deletedAt: IsoDate): Promise<void>
-  restorePage(pageId: UUID): Promise<void>
-  purgePage(pageId: UUID): Promise<void>
+  movePageToTrash(pageId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
+  restorePage(pageId: UUID, restoredAt?: IsoDate): Promise<void>
+  purgePage(pageId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   listTags(workspaceId: UUID): Promise<Tag[]>
   listPageTags(pageId: UUID): Promise<PageTag[]>
   savePageTags(pageId: UUID, tagIds: UUID[]): Promise<void>

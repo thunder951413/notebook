@@ -132,12 +132,27 @@ test('searches, soft deletes, restores and purges without leaking children', asy
   await repository.savePage(page('page-b', 'Meeting Notes'))
   expect((await repository.listPages({ search: 'product' })).items.map((item) => item.id)).toEqual(['page-a'])
   await repository.movePageToTrash('page-a', '2026-01-03T00:00:00.000Z')
+  expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityId: 'page-a', deletedAt: '2026-01-03T00:00:00.000Z' }))
   expect((await repository.listPages({})).items.map((item) => item.id)).toEqual(['page-b'])
   expect((await repository.listPages({ includeDeleted: true })).items).toHaveLength(2)
   await repository.restorePage('page-a')
   expect((await repository.listPages({})).items).toHaveLength(2)
+  expect((await repository.exportData('workspace-a')).tombstones).not.toContainEqual(expect.objectContaining({ entityId: 'page-a' }))
   await repository.purgePage('page-a')
   expect(await repository.getPage('page-a')).toBeUndefined()
+  expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityId: 'page-a' }))
+})
+
+test('recovers a newer staged draft after an interrupted save and clears it after commit', async () => {
+  const repository = makeRepository()
+  const value = page('page-draft', 'Draft')
+  const oldDocument: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: 'old', tiptapJson: { type: 'doc' }, updatedAt: value.updatedAt }
+  await repository.savePage(value, oldDocument)
+  const draft: PageDocument = { ...oldDocument, markdown: 'recovered', updatedAt: '2026-01-03T00:00:00.000Z' }
+  await repository.stageDraft(draft)
+  expect(await repository.recoverDrafts()).toEqual([value.id])
+  expect((await repository.getPageDocument(value.id))?.markdown).toBe('recovered')
+  expect(await repository.recoverDrafts()).toEqual([])
 })
 
 test('imports and exports a versioned workspace bundle without losing metadata', async () => {

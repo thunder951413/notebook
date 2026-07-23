@@ -12,7 +12,8 @@ import {
   readingPositionsSchema,
   normalizeLegacyEncryptedData,
   importMarkdownRepository,
-  type MarkdownNoteEnvelope,
+  sha256Hex,
+  type StoredMarkdownNoteEnvelope,
   type LegacyEncryptedData,
   type LegacyLibraryEnvelope,
   type LegacyNoteEnvelope,
@@ -30,6 +31,18 @@ function expandFiles(files: ImportFile[]): ImportFile[] {
 }
 
 export interface DecodedImport { bundle: NotebookDataBundle; assetContents: Map<string, Uint8Array> }
+
+function verified(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>): DecodedImport {
+  for (const asset of bundle.assets) {
+    const declaredHash = (asset as typeof asset & { objectHash?: string }).objectHash ?? asset.checksum
+    if (!declaredHash) continue
+    const content = assetContents.get(asset.id)
+    if (!content) throw new Error(`资源 ${asset.filename} 缺少内容对象，已中止导入`)
+    if (sha256Hex(content) !== declaredHash.toLocaleLowerCase()) throw new Error(`资源 ${asset.filename} 的 SHA-256 校验失败，已中止导入`)
+    if (asset.byteSize !== undefined && asset.byteSize !== content.byteLength) throw new Error(`资源 ${asset.filename} 的大小与清单不一致，已中止导入`)
+  }
+  return { bundle, assetContents }
+}
 
 function decodeBase64Text(value: string) {
   const binary = atob(value.replace(/\s+/g, ''))
@@ -54,7 +67,7 @@ export function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?:
   return { ...encrypted, encryptedFolders: folders }
 }
 
-export function decodeImport(files: ImportFile[], workspaceId: string): DecodedImport {
+export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string): Promise<DecodedImport> {
   const expanded = expandFiles(files)
   const current = expanded.find((file) => file.name.endsWith('notebook-next.json'))
   if (current) {
@@ -65,7 +78,7 @@ export function decodeImport(files: ImportFile[], workspaceId: string): DecodedI
       const file = expanded.find((item) => item.name === `assets/${asset.id}`)
       return file ? [[asset.id, file.data] as const] : []
     }))
-    return { bundle, assetContents }
+    return verified(bundle, assetContents)
   }
 
   const manifestFile = expanded.find((file) => file.name.endsWith('manifest.json'))
@@ -88,7 +101,7 @@ export function decodeImport(files: ImportFile[], workspaceId: string): DecodedI
         const file = asset.localPath ? expanded.find((item) => item.name === asset.localPath || item.name.endsWith(`/${asset.localPath}`)) : undefined
         return file ? [[asset.id, file.data] as const] : []
       }))
-      return { bundle, assetContents }
+      return verified(bundle, assetContents)
     }
   }
 
@@ -96,10 +109,10 @@ export function decodeImport(files: ImportFile[], workspaceId: string): DecodedI
   let index: LegacyNoteIndex | undefined
   let positions: LegacyReadingPositions | undefined
   const notes: LegacyNoteEnvelope[] = []
-  const markdownNotes: MarkdownNoteEnvelope[] = []
+  const markdownNotes: StoredMarkdownNoteEnvelope[] = []
   for (const file of expanded.filter((item) => item.name.toLocaleLowerCase().endsWith('.json'))) {
     const value: unknown = JSON.parse(strFromU8(file.data))
-    if (value && typeof value === 'object' && (value as { schemaVersion?: unknown }).schemaVersion === 3 && typeof (value as { noteID?: unknown }).noteID === 'string') { markdownNotes.push(value as MarkdownNoteEnvelope); continue }
+    if (value && typeof value === 'object' && (value as { schemaVersion?: unknown }).schemaVersion === 3 && typeof (value as { noteID?: unknown }).noteID === 'string') { markdownNotes.push(value as StoredMarkdownNoteEnvelope); continue }
     const note = noteEnvelopeSchema.safeParse(value)
     if (note.success) { notes.push(note.data); continue }
     const parsedLibrary = libraryEnvelopeSchema.safeParse(value)
@@ -111,13 +124,13 @@ export function decodeImport(files: ImportFile[], workspaceId: string): DecodedI
   }
   if (!library) throw new Error('迁移包中缺少 library-envelope.json')
   if (markdownNotes.length) {
-    const bundle = importMarkdownRepository({ library, notes: markdownNotes, readingPositions: positions }, workspaceId)
+    const bundle = await importMarkdownRepository({ library, notes: markdownNotes, readingPositions: positions, index, privacySecret }, workspaceId)
     const assetContents = new Map(bundle.assets.flatMap((asset) => {
       const normalized = asset.localPath?.replace(/^\.\//, '')
       const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
       return file ? [[asset.id, file.data] as const] : []
     }))
-    return { bundle, assetContents }
+    return verified(bundle, assetContents)
   }
   if (notes.length === 0) throw new Error('迁移包中没有可导入的笔记信封')
   const imported = importLegacyBundle({ library, notes, index, readingPositions: positions }, workspaceId)
@@ -131,7 +144,7 @@ export function decodeImport(files: ImportFile[], workspaceId: string): DecodedI
     const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
     return file ? [[asset.id, file.data] as const] : []
   }))
-  return { bundle, assetContents }
+  return verified(bundle, assetContents)
 }
 
 export function encodeExport(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>) {

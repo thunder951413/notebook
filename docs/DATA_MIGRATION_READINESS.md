@@ -46,7 +46,7 @@ NOTEBOOK_NEXT_DATA_DIR=/absolute/path Notebook Next
 | 历史版本 | 支持 | 通过旧版本同步信封导入为 Revision；普通文档迁移包本身不含历史 |
 | 删除墓碑 | 支持 | 通过 note index/library envelope 导入 |
 | 旧同步状态和后端游标 | 归档保留，不复用 | 原始状态放入迁移元数据；新协议重新建立游标，避免把旧后端版本误当成新服务版本 |
-| 加密文件夹映射 | 部分支持 | 锁定笔记 ID 可从 library envelope 识别；Keychain 密码/密钥不导出，必须重新输入或重新加密 |
+| 隐私文件夹映射 | 支持 | 锁定笔记 ID 可从 library envelope 识别；旧 Keychain 密码不导出，需要在新设备设置本地访问密码。SSH 同步使用 SSH 密码派生的 AES-256-GCM 密钥保护笔记信封 |
 | 直接打开 `notebook.store` | 不支持且禁止 | 必须经过只读转换；不能让 Electron/IndexedDB 写入旧目录 |
 
 “完全兼容”应区分可恢复数据与完全一致呈现：当前可保留迁移协议公开的内容和原始富文本载荷，但不能从普通文档迁移包恢复它从未包含的 1,227 个历史版本、旧后端游标或系统 Keychain 密钥。历史必须同时提供旧同步信封，密钥必须人工重建。

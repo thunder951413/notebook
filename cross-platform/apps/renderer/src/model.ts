@@ -30,6 +30,7 @@ export interface PageSummary {
   reminderAt?: string
   recurrenceRule?: string
   locked?: boolean
+  syncStatus?: 'local' | 'pending' | 'synced' | 'conflict' | 'error'
 }
 
 export const notebooks: NotebookSummary[] = [

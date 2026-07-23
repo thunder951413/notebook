@@ -165,6 +165,8 @@ button { color: inherit; }
 .sync-settings-result { padding: 8px 10px; border: 1px solid #b9d8c5; border-radius: 7px; color: #245a38; background: #f1faf4; font-size: 12px; }
 .sync-settings-result.error { color: #8d2d25; border-color: #e7b7b2; background: #fff3f1; }
 .document-surface { min-width: 0; min-height: 0; overflow-y: auto; }
+.sync-conflict-banner { display: flex; gap: 6px 16px; align-items: baseline; margin: 12px 24px 0; padding: 10px 14px; border: 1px solid #d8a33b; border-radius: 8px; color: #704b00; background: #fff8e6; font-size: 13px; }
+.sync-conflict-banner span { color: #765f2c; }
 
 .document-editor { position: relative; min-height: 100%; }
 .format-toolbar { position: sticky; z-index: 3; top: 0; display: flex; justify-content: center; gap: 8px; min-height: 43px; padding: 5px 150px 5px 12px; border-block: 1px solid #ebe6ee; background: rgba(252,251,252,.96); backdrop-filter: blur(12px); }
@@ -343,6 +345,8 @@ body.resizing-panel .workspace-grid { transition: none; }
 .theme-dark .sync-settings-form > label > span, .theme-dark .sync-settings-form > .fui-Text, .theme-dark .sync-ssh-grid > label > span { color: #b8b0bb; }
 .theme-dark .sync-settings-result { color: #c8ead3; border-color: #42644d; background: #27372c; }
 .theme-dark .sync-settings-result.error { color: #f0c4bf; border-color: #704944; background: #3b2928; }
+.theme-dark .sync-conflict-banner { color: #f4d58b; border-color: #7b632d; background: #3a321f; }
+.theme-dark .sync-conflict-banner span { color: #ddc98e; }
 .theme-dark .page-list-empty strong { color: #eee9f0; }
 
 .theme-light, .theme-light .app-shell { color: #242126; background: #f7f5f8; }

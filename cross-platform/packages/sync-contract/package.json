@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@notebook/domain": "workspace:*",
+    "@noble/hashes": "^2.0.1",
     "@tiptap/core": "^3.28.0",
     "@tiptap/extension-image": "^3.28.0",
     "@tiptap/extension-list": "^3.28.0",
