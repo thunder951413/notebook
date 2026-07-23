@@ -129,11 +129,48 @@ export function documentToHtml(document: Record<string, unknown>) {
   return generateHTML(document as JSONContent, createContentExtensions())
 }
 
-export function htmlToDocument(html: string) {
+/**
+ * Keep only the structure that the Markdown document model can represent.
+ * This is shared by HTML import and clipboard paste so content copied from
+ * Word, browsers, mail clients, etc. cannot bring its font/theme CSS into a
+ * notebook page.
+ */
+export function sanitizeSupportedHtml(html: string) {
   const sanitized = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
-    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
+    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'font', 'center'],
     FORBID_ATTR: ['style'],
+    ALLOW_DATA_ATTR: false,
+    ADD_ATTR: ['data-type', 'data-checked', 'data-asset-id', 'data-pm-slice'],
   })
+  const supportedAttributes = new Set([
+    'href',
+    'title',
+    'src',
+    'alt',
+    'start',
+    'colspan',
+    'rowspan',
+    'type',
+    'checked',
+    'data-type',
+    'data-checked',
+    'data-asset-id',
+    // ProseMirror adds this to its own clipboard HTML so partial lists,
+    // tables and block selections can be pasted without changing structure.
+    'data-pm-slice',
+  ])
+  const container = document.createElement('div')
+  container.innerHTML = sanitized
+  container.querySelectorAll('*').forEach((element) => {
+    for (const attribute of Array.from(element.attributes)) {
+      if (!supportedAttributes.has(attribute.name)) element.removeAttribute(attribute.name)
+    }
+  })
+  return container.innerHTML
+}
+
+export function htmlToDocument(html: string) {
+  const sanitized = sanitizeSupportedHtml(html)
   return generateJSON(sanitized, createContentExtensions()) as Record<string, unknown>
 }

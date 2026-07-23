@@ -1,6 +1,6 @@
 import { Editor } from '@tiptap/core'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { createContentExtensions, documentToMarkdown, htmlToDocument, markdownToDocument } from './extensions'
+import { createContentExtensions, documentToMarkdown, htmlToDocument, markdownToDocument, sanitizeSupportedHtml } from './extensions'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -36,5 +36,29 @@ describe('official Tiptap Markdown round trip', () => {
     expect(imported).toContain('安全正文')
     expect(imported).not.toContain('alert(1)')
     expect(imported).not.toContain('javascript:')
+  })
+
+  test('removes source typography while preserving supported paste semantics', () => {
+    const pasted = sanitizeSupportedHtml(`
+      <div class="WordSection1" style="font-family: Calibri; font-size: 18pt; color: red; line-height: 2">
+        <h2 id="source-title"><font face="宋体" size="6" color="blue">标题</font></h2>
+        <p style="background: yellow"><strong>重点</strong>和<em>斜体</em>，
+          <a class="external" style="color: green" href="https://example.com" target="_blank">链接</a>
+        </p>
+        <ol start="3"><li>列表</li></ol>
+        <ul data-type="taskList"><li data-checked="true" data-pm-slice="1 1 []">待办</li></ul>
+        <img data-asset-id="asset-1" src="notebook-asset:asset-1" alt="本地图片" class="source-image">
+      </div>
+    `)
+    expect(pasted).toContain('<h2>标题</h2>')
+    expect(pasted).toContain('<strong>重点</strong>')
+    expect(pasted).toContain('<em>斜体</em>')
+    expect(pasted).toContain('href="https://example.com"')
+    expect(pasted).toContain('<ol start="3">')
+    expect(pasted).toContain('data-type="taskList"')
+    expect(pasted).toContain('data-checked="true"')
+    expect(pasted).toContain('data-pm-slice="1 1 []"')
+    expect(pasted).toContain('data-asset-id="asset-1"')
+    expect(pasted).not.toMatch(/style=|class=|font-family|font-size|color=|face=|size=|target=|\sid=/)
   })
 })

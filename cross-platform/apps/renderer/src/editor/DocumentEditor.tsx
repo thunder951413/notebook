@@ -4,7 +4,7 @@ import Placeholder from '@tiptap/extension-placeholder'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { useCollaborativeDocument } from '../collaboration/useCollaborativeDocument'
-import { createContentExtensions, type AssetLoader } from './extensions'
+import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from './extensions'
 import { Button } from '@fluentui/react-components'
 import {
   CheckboxChecked20Regular,
@@ -95,6 +95,7 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
         class: 'document-editor-content',
         'aria-label': '页面正文',
       },
+      transformPastedHTML: sanitizeSupportedHtml,
     },
   }, [session.document, session.provider, loadAsset])
 
