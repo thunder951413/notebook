@@ -296,6 +296,31 @@ body.resizing-panel .workspace-grid { transition: none; }
   .version-popover { right: -78px; width: min(680px, calc(100cqw - 24px)); }
 }
 
+@container (max-width: 520px) {
+  .page-utilities .fui-Button {
+    width: 34px;
+    min-width: 34px;
+    max-width: 34px;
+    padding-inline: 5px;
+    overflow: hidden;
+    font-size: 0;
+  }
+  .editor-actions { gap: 0; }
+}
+
+@container (max-width: 400px) {
+  .view-switcher .fui-Button {
+    width: 36px;
+    min-width: 36px;
+    max-width: 36px;
+    padding-inline: 6px;
+    overflow: hidden;
+    font-size: 0;
+  }
+  .breadcrumb > span:first-child, .breadcrumb > svg { display: none; }
+  .breadcrumb-title-input { width: 100%; }
+}
+
 @media (max-width: 1180px) {
   .titlebar { grid-template-columns: auto 1fr auto; }
   .titlebar-actions > * { display: none; }

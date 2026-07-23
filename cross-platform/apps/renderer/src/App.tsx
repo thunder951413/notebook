@@ -46,8 +46,8 @@ import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 const MarkdownSourceEditor = lazy(() => import('./editor/MarkdownSourceEditor'))
 
 const modeLabels: Record<WorkspaceMode, string> = {
-  document: '页面',
-  source: 'Markdown',
+  document: 'Markdown',
+  source: '源码',
 }
 
 export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
@@ -442,7 +442,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           </div>
           <div className="editor-toolbar">
             <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '笔记本' : '我的知识库'}</span><ChevronRight16Regular />{activeArea === 'notes' ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
-            {activeArea === 'notes' ? <div className="view-switcher" role="group" aria-label="页面视图">
+            {activeArea === 'notes' ? <div className="view-switcher" role="group" aria-label="Markdown 编辑视图">
               {(Object.keys(modeLabels) as WorkspaceMode[]).map((item) => <Button key={item} className={mode === item ? 'selected' : ''} appearance="subtle" aria-pressed={mode === item} size="small" icon={item === 'document' ? <Edit20Regular /> : <Document20Regular />} onClick={() => setMode(item)}>{modeLabels[item]}</Button>)}
             </div> : <div className="area-toolbar-label">{activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">{activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /><Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void moveToTrash(currentPage.id).then(() => setActivePage(accessiblePages.find((page) => page.id !== currentPage.id)?.id ?? '')) }} /></>}<Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} /></div>
