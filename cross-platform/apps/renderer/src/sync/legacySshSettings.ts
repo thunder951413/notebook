@@ -14,7 +14,7 @@ export interface LegacySshSettings {
   fingerprint: string
 }
 
-export const emptyLegacySshSettings: LegacySshSettings = { host: '', port: 22, username: '', remotePath: '~/notebook_backup', fingerprint: '' }
+const emptyLegacySshSettings: LegacySshSettings = { host: '', port: 22, username: '', remotePath: '~/notebook_backup', fingerprint: '' }
 
 export function loadSyncBackend(): SyncBackend {
   const saved = window.localStorage?.getItem(BACKEND_KEY)

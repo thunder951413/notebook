@@ -7,12 +7,13 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "build:native": "node scripts/build-macos-input-source-helper.mjs",
+    "dev": "pnpm build:native && electron-vite dev",
     "build": "electron-vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "package": "pnpm build && electron-builder --dir",
-    "dist": "pnpm build && electron-builder"
+    "package": "pnpm build:native && pnpm build && electron-builder --dir",
+    "dist": "pnpm build:native && pnpm build && electron-builder"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
@@ -44,7 +45,13 @@
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "extraResources": [
+        {
+          "from": "build/notebook-input-source",
+          "to": "bin/notebook-input-source"
+        }
+      ]
     },
     "win": {
       "target": [

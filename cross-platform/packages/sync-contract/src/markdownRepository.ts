@@ -5,6 +5,7 @@ import type { LegacyLibraryEnvelope, LegacyReadingPositions } from './schema'
 import { markdownToTiptap, tiptapToMarkdown } from './markdown'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
+import { extractNotebookReferences, pageLinksFromNotebookMarkdown } from './references'
 
 const encoder = new TextEncoder()
 
@@ -219,7 +220,9 @@ export async function encodeMarkdownRepository(bundle: NotebookDataBundle, asset
       schemaVersion: 3, noteID: page.id, metadata: page, currentContentHash, contentObjects, history, assets,
       taskSteps: bundle.taskSteps.filter((item) => item.pageId === page.id),
       tagIDs: bundle.pageTags.filter((item) => item.pageId === page.id).map((item) => item.tagId),
-      linkedPageIDs: bundle.pageLinks.filter((item) => item.sourcePageId === page.id).map((item) => item.targetPageId),
+      // Compatibility summary for older clients. The canonical reference
+      // identity remains in Markdown and is never sourced from a stale cache.
+      linkedPageIDs: [...new Set(extractNotebookReferences(currentMarkdown).map((reference) => reference.pageId))],
     }
     if (page.locked && !privacySecret) throw new Error(`隐私笔记 ${page.title} 无法安全同步：缺少 SSH 加密密码`)
     const storedEnvelope = page.locked ? await encryptPrivateNote(envelope, privacySecret!) : envelope
@@ -260,7 +263,7 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
   const index = new Map(input.index?.entries.map((entry) => [entry.noteID, entry.contentHash]) ?? [])
   const notes = await Promise.all(input.notes.map((note) => decryptPrivateNote(note, input.privacySecret)))
   for (const note of notes) validateMarkdownNote(note, index.get(note.noteID))
-  const pages = notes.map((note) => ({ ...note.metadata, workspaceId, syncStatus: 'synced' as const }))
+  const pages = normalizePageHierarchy(notes.map((note) => ({ ...note.metadata, workspaceId, syncStatus: 'synced' as const })))
   const documents = notes.map((note) => {
     const markdown = note.contentObjects[note.currentContentHash]!
     return { pageId: note.noteID, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: note.metadata.updatedAt }
@@ -275,7 +278,29 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
     notebooks: [library.notebook, ...(library.privateNotebook ? [library.privateNotebook] : [])], sections: library.sections, pages, documents,
     tags: library.tags, pageTags: notes.flatMap((note) => note.tagIDs.map((tagId) => ({ pageId: note.noteID, tagId }))),
     taskSteps: notes.flatMap((note) => note.taskSteps), assets: notes.flatMap((note) => note.assets),
-    pageLinks: notes.flatMap((note) => note.linkedPageIDs.map((targetPageId) => ({ id: `markdown-link:${note.noteID}:${targetPageId}`, workspaceId, sourcePageId: note.noteID, targetPageId, kind: 'link' as const, createdAt: now }))),
+    pageLinks: notes.flatMap((note) => pageLinksFromNotebookMarkdown(
+      note.noteID,
+      workspaceId,
+      note.contentObjects[note.currentContentHash]!,
+      note.metadata.updatedAt || now,
+    )),
     knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], revisions, comments: [], tombstones: library.tombstones,
   } satisfies NotebookDataBundle
+}
+
+function normalizePageHierarchy<T extends NotebookDataBundle['pages'][number]>(pages: T[]): T[] {
+  const byId = new Map(pages.map((page) => [page.id, page]))
+  return pages.map((page) => {
+    const parent = page.parentPageId ? byId.get(page.parentPageId) : undefined
+    if (!page.parentPageId) return page
+    if (!parent || parent.sectionId !== page.sectionId || parent.id === page.id) return { ...page, parentPageId: undefined }
+    const seen = new Set<string>([page.id])
+    let cursor: typeof parent | undefined = parent
+    while (cursor) {
+      if (seen.has(cursor.id)) return { ...page, parentPageId: undefined }
+      seen.add(cursor.id)
+      cursor = cursor.parentPageId ? byId.get(cursor.parentPageId) : undefined
+    }
+    return page
+  })
 }

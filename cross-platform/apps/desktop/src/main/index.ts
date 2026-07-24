@@ -25,6 +25,7 @@ const isAllowedExternalUrl = (value: string) => {
 }
 
 function createWindow() {
+  let lastRendererRecoveryAt = 0
   const window = new BrowserWindow({
     width: 1480,
     height: 920,
@@ -32,6 +33,10 @@ function createWindow() {
     minHeight: 620,
     title: 'Notebook Next',
     backgroundColor: '#f7f5f8',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin'
+      ? { trafficLightPosition: { x: 14, y: 16 } }
+      : { titleBarOverlay: { color: '#00000000', symbolColor: '#737078', height: 38 } }),
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -49,6 +54,17 @@ function createWindow() {
   window.webContents.on('will-navigate', (event, url) => {
     const current = window.webContents.getURL()
     if (current && new URL(url).origin !== new URL(current).origin) event.preventDefault()
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error('Notebook renderer process exited', details)
+    if (window.isDestroyed()) return
+    const now = Date.now()
+    if (now - lastRendererRecoveryAt > 30_000) {
+      lastRendererRecoveryAt = now
+      setTimeout(() => { if (!window.isDestroyed()) window.webContents.reload() }, 250)
+      return
+    }
+    dialog.showErrorBox('Notebook 界面进程异常退出', '笔记数据仍保存在本机。请重新打开应用；如果问题持续出现，请记录当时正在操作的页面。')
   })
   let closeAfterFlush = false
   let closeFlushInProgress = false

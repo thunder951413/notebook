@@ -8,6 +8,8 @@ import { Selection, TextSelection, type EditorState } from 'prosemirror-state'
 import { useCollaborativeDocument } from '../collaboration/useCollaborativeDocument'
 import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from './extensions'
 import { registerFlushHandler } from '../data/flushCoordinator'
+import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail } from './referenceCommands'
+import { OUTLINE_JUMP_EVENT } from './OutlinePanel'
 
 export const initialContent = `
   <h1>Notebook Next 产品愿景</h1>
@@ -37,21 +39,29 @@ export interface DocumentEditorProps {
   loadAsset?: AssetLoader
   vimEnabled?: boolean
   onVimCommandModeChange?: (active: boolean) => void
+  viewportPosition?: { scrollTop?: number; fraction: number }
+  onViewportChange?: (position: { scrollTop: number; fraction: number }) => void
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} />
+  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} />
 }
 
-function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange }: Pick<DocumentEditorProps, 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'vimEnabled' | 'onVimCommandModeChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const restoreTimers = useRef<number[]>([])
+  const restoringViewport = useRef(false)
+  const userMovedViewport = useRef(false)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
+  const lastAppliedContent = useRef(content)
   const onChangeRef = useRef(onChange)
   const onDraftRef = useRef(onDraft)
+  const onViewportChangeRef = useRef(onViewportChange)
   const onVimCommandModeChangeRef = useRef(onVimCommandModeChange)
   const vimEnabledRef = useRef(vimEnabled)
   const vimModeRef = useRef<'normal' | 'insert'>('insert')
@@ -59,8 +69,11 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
   const [vimMode, setVimMode] = useState<'normal' | 'insert'>('insert')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [slashMenu, setSlashMenu] = useState<{ left: number; top: number }>()
+  const [largeDocument, setLargeDocument] = useState(false)
   onChangeRef.current = onChange
   onDraftRef.current = onDraft
+  onViewportChangeRef.current = onViewportChange
   onVimCommandModeChangeRef.current = onVimCommandModeChange
   vimEnabledRef.current = vimEnabled
   const changeVimMode = (mode: 'normal' | 'insert') => {
@@ -72,7 +85,7 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
   const collaborative = Boolean(session.provider)
   const editor = useEditor({
     extensions: [
-      ...createContentExtensions(collaborative, loadAsset),
+      ...createContentExtensions(collaborative, loadAsset, pageId),
       Placeholder.configure({ placeholder: '开始记录，或输入 / 插入内容…' }),
       ...(collaborative ? [Collaboration.configure({ document: session.document })] : []),
       ...(session.provider ? [CollaborationCaret.configure({
@@ -86,8 +99,13 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
       // opened page as pending and could make an old local copy beat a newer
       // Android/SSH revision during the next merge.
       if (collaborative && (forceRestore || session.document.getXmlFragment('default').length === 0) && content) currentEditor.commands.setContent(content, { emitUpdate: false })
+      setLargeDocument(isLargeEditorDocument(currentEditor))
     },
     onUpdate: ({ editor: currentEditor }) => {
+      setLargeDocument((current) => {
+        const next = isLargeEditorDocument(currentEditor)
+        return current === next ? current : next
+      })
       latestJson.current = currentEditor.getJSON()
       void Promise.resolve(onDraftRef.current?.(latestJson.current)).catch(() => undefined)
       clearTimeout(saveTimer.current)
@@ -101,10 +119,29 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
         'aria-label': '页面正文',
       },
       transformPastedHTML: sanitizeSupportedHtml,
+      handleTextInput: (view, from, _to, text) => {
+        if (text === '/' && view.state.selection.$from.parent.isTextblock && view.state.selection.$from.parent.textContent === '') {
+          queueMicrotask(() => {
+            try {
+              const coordinates = view.coordsAtPos(view.state.selection.from)
+              setSlashMenu({ left: Math.min(coordinates.left, window.innerWidth - 260), top: Math.min(coordinates.bottom + 6, window.innerHeight - 330) })
+            } catch {
+              setSlashMenu({ left: 24, top: 140 })
+            }
+          })
+        } else if (text !== '/') {
+          setSlashMenu(undefined)
+        }
+        if (text !== '[' || from < 1 || view.state.doc.textBetween(from - 1, from, '') !== '[') return false
+        view.dispatch(view.state.tr.delete(from - 1, from))
+        openReferencePicker()
+        return true
+      },
       handleKeyDown: (view, event) => {
         if (!vimEnabledRef.current || event.metaKey || event.altKey) return false
         if (event.key === 'Escape') {
           event.preventDefault()
+          setSlashMenu(undefined)
           setSearchOpen(false)
           changeVimMode('normal')
           return true
@@ -116,8 +153,29 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
           return true
         }
         if (event.ctrlKey) return false
-        if (event.key === 'i') {
+        if (event.key === 'i' || event.key === 'I') {
           event.preventDefault()
+          if (event.key === 'I') moveToTextblockEdge(view, 'start')
+          changeVimMode('insert')
+          return true
+        }
+        if (event.key === 'a' || event.key === 'A') {
+          event.preventDefault()
+          if (event.key === 'A') moveToTextblockEdge(view, 'end')
+          else moveAfterCursor(view)
+          changeVimMode('insert')
+          return true
+        }
+        if (event.key === 'o' || event.key === 'O') {
+          event.preventDefault()
+          insertOpenLine(view, event.key === 'O' ? 'above' : 'below')
+          changeVimMode('insert')
+          return true
+        }
+        if (event.key === 's' || event.key === 'S') {
+          event.preventDefault()
+          if (event.key === 'S') clearCurrentTextblock(view)
+          else deleteCharacter(view)
           changeVimMode('insert')
           return true
         }
@@ -188,13 +246,15 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
         return true
       },
     },
-  }, [session.document, session.provider, loadAsset])
+  }, [session.document, session.provider, loadAsset, pageId])
 
-  const incomingContentSignature = serializeContent(content)
   useEffect(() => {
     if (!editor || !content) return
-    const currentContent = editor.getJSON()
-    if (serializeContent(currentContent) === incomingContentSignature) return
+    if (lastAppliedContent.current === content) return
+    if (latestJson.current === content) {
+      lastAppliedContent.current = content
+      return
+    }
 
     // The content prop only changes after storage has accepted a local save or
     // after sync/revision restore has replaced the stored document. Local saves
@@ -203,7 +263,45 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
     clearTimeout(saveTimer.current)
     editor.commands.setContent(content, { emitUpdate: false })
     latestJson.current = editor.getJSON()
-  }, [content, editor, incomingContentSignature])
+    lastAppliedContent.current = content
+    setLargeDocument(isLargeEditorDocument(editor))
+  }, [content, editor])
+
+  useEffect(() => {
+    restoreTimers.current.forEach(window.clearTimeout)
+    restoreTimers.current = []
+    const body = bodyRef.current
+    if (!editor || !body || !viewportPosition) return
+    let cancelled = false
+    restoringViewport.current = true
+    userMovedViewport.current = false
+    const apply = () => {
+      if (cancelled || userMovedViewport.current) return
+      const maximum = Math.max(0, body.scrollHeight - body.clientHeight)
+      const target = viewportPosition.scrollTop === undefined
+        ? viewportPosition.fraction * maximum
+        : Math.min(viewportPosition.scrollTop, maximum)
+      body.scrollTop = Math.max(0, target)
+    }
+    const frame = window.requestAnimationFrame(() => window.requestAnimationFrame(apply))
+    for (const delay of [90, 260, 700]) {
+      restoreTimers.current.push(window.setTimeout(() => {
+        apply()
+        if (delay === 700) {
+          restoringViewport.current = false
+          const maximum = Math.max(1, body.scrollHeight - body.clientHeight)
+          onViewportChangeRef.current?.({ scrollTop: body.scrollTop, fraction: body.scrollTop / maximum })
+        }
+      }, delay))
+    }
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(frame)
+      restoreTimers.current.forEach(window.clearTimeout)
+      restoreTimers.current = []
+      restoringViewport.current = false
+    }
+  }, [content, editor, pageId, viewportPosition?.fraction, viewportPosition?.scrollTop])
 
   useEffect(() => () => {
     clearTimeout(saveTimer.current)
@@ -214,6 +312,39 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
     clearTimeout(saveTimer.current)
     if (latestJson.current) await onChangeRef.current?.(latestJson.current)
   }), [])
+
+  useEffect(() => {
+    if (!editor) return
+    const insert = (event: Event) => {
+      const detail = (event as CustomEvent<InsertReferenceDetail>).detail
+      const attrs = {
+        pageId: detail.target.pageId,
+        targetKind: detail.target.kind,
+        targetId: detail.target.kind === 'page' ? null : detail.target.targetId,
+        alias: detail.alias ?? null,
+      }
+      editor.chain().focus().insertContent({ type: detail.embed ? 'notebookEmbed' : 'notebookLink', attrs }).run()
+    }
+    window.addEventListener(INSERT_REFERENCE_EVENT, insert)
+    return () => window.removeEventListener(INSERT_REFERENCE_EVENT, insert)
+  }, [editor])
+
+  useEffect(() => {
+    if (!editor) return
+    const jump = (event: Event) => {
+      const index = Number((event as CustomEvent<{ index: number }>).detail?.index)
+      let current = 0
+      let position: number | undefined
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name !== 'heading') return
+        if (current === index) position = pos + 1
+        current += 1
+      })
+      if (position !== undefined) editor.chain().focus().setTextSelection(position).scrollIntoView().run()
+    }
+    window.addEventListener(OUTLINE_JUMP_EVENT, jump)
+    return () => window.removeEventListener(OUTLINE_JUMP_EVENT, jump)
+  }, [editor])
 
   const firstNode = editor?.state.doc.firstChild
   const duplicateTitle = firstNode?.type.name === 'heading' && firstNode.attrs.level === 1 && firstNode.textContent.trim() === pageTitle.trim()
@@ -245,10 +376,57 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
     changeVimMode('normal')
   }
 
-  return <div className={`document-editor ${duplicateTitle ? 'duplicate-title' : ''}`}>
+  const runSlashCommand = (command: 'paragraph' | 'h1' | 'h2' | 'h3' | 'bullet' | 'task' | 'quote' | 'code' | 'link') => {
+    if (!editor) return
+    const from = Math.max(0, editor.state.selection.from - 1)
+    editor.chain().focus().deleteRange({ from, to: editor.state.selection.from }).run()
+    if (command === 'paragraph') editor.chain().focus().setParagraph().run()
+    if (command === 'h1' || command === 'h2' || command === 'h3') editor.chain().focus().toggleHeading({ level: Number(command.slice(1)) as 1 | 2 | 3 }).run()
+    if (command === 'bullet') editor.chain().focus().toggleBulletList().run()
+    if (command === 'task') editor.chain().focus().toggleTaskList().run()
+    if (command === 'quote') editor.chain().focus().toggleBlockquote().run()
+    if (command === 'code') editor.chain().focus().toggleCodeBlock().run()
+    if (command === 'link') openReferencePicker()
+    setSlashMenu(undefined)
+  }
+
+  return <div className={`document-editor ${duplicateTitle ? 'duplicate-title' : ''} ${largeDocument ? 'large-document' : ''}`}>
     {(session.status === 'connecting' || session.status === 'error') && <span className={`collaboration-status ${session.status}`}>{statusLabels[session.status]}</span>}
-    <EditorContent editor={editor} />
-    {vimEnabled && <div className="vim-status" aria-live="polite"><strong>{vimMode === 'normal' ? 'NORMAL' : 'INSERT'}</strong><span>{vimMode === 'normal' ? 'i 插入 · / 搜索 · Esc 保持普通模式' : 'Esc 返回普通模式'}</span></div>}
+    {largeDocument && <span className="large-document-status">大型笔记 · 已按视口分段渲染</span>}
+    <div
+      ref={bodyRef}
+      className="document-editor-body"
+      onWheel={() => { userMovedViewport.current = true; restoringViewport.current = false }}
+      onPointerDown={() => { userMovedViewport.current = true; restoringViewport.current = false }}
+      onKeyDownCapture={(event) => {
+        if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '].includes(event.key)) {
+          userMovedViewport.current = true
+          restoringViewport.current = false
+        }
+      }}
+      onScroll={(event) => {
+        if (restoringViewport.current) return
+        const body = event.currentTarget
+        onViewportChangeRef.current?.({
+          scrollTop: body.scrollTop,
+          fraction: body.scrollTop / Math.max(1, body.scrollHeight - body.clientHeight),
+        })
+      }}
+    ><EditorContent editor={editor} /></div>
+    {slashMenu && <div className="slash-command-menu" role="menu" style={slashMenu}>
+      <strong>插入内容</strong>
+      {([
+        ['paragraph', '正文', '普通 Markdown 段落'],
+        ['h1', '标题一', '# 一级标题'],
+        ['h2', '标题二', '## 二级标题'],
+        ['h3', '标题三', '### 三级标题'],
+        ['bullet', '项目列表', '- 列表'],
+        ['task', '待办列表', '- [ ] 待办'],
+        ['quote', '引用', '> 引用内容'],
+        ['code', '代码块', '``` 代码'],
+        ['link', '双链或嵌入', '链接页面、段落或连续内容'],
+      ] as const).map(([id, title, hint]) => <button type="button" role="menuitem" key={id} onMouseDown={(event) => { event.preventDefault(); runSlashCommand(id) }}><span>{title}</span><small>{hint}</small></button>)}
+    </div>}
     {vimEnabled && searchOpen && <form className="vim-search" role="search" onSubmit={(event) => { event.preventDefault(); findNext() }}>
       <span>/</span><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false); editor?.commands.focus() } }} aria-label="Vim 搜索" />
       <button type="submit">查找下一个</button>
@@ -256,8 +434,8 @@ function ReadyDocumentEditor({ session, pageTitle, content, onChange, onDraft, f
   </div>
 }
 
-function serializeContent(content: Record<string, unknown> | string | undefined) {
-  return typeof content === 'string' ? content : JSON.stringify(content ?? null)
+function isLargeEditorDocument(editor: Editor) {
+  return editor.state.doc.childCount > 120 || editor.state.doc.content.size > 250_000
 }
 
 type ProseMirrorView = Editor['view']
@@ -294,9 +472,62 @@ function moveToTextblockEdge(view: ProseMirrorView, edge: 'start' | 'end') {
 function currentTextblockRange(state: EditorState) {
   const { $head } = state.selection
   for (let depth = $head.depth; depth > 0; depth -= 1) {
-    if ($head.node(depth).isTextblock) return { from: $head.before(depth), to: $head.after(depth), textEnd: $head.end(depth) }
+    if ($head.node(depth).isTextblock) {
+      return {
+        depth,
+        from: $head.before(depth),
+        to: $head.after(depth),
+        textStart: $head.start(depth),
+        textEnd: $head.end(depth),
+      }
+    }
   }
   return undefined
+}
+
+function moveAfterCursor(view: ProseMirrorView) {
+  const range = currentTextblockRange(view.state)
+  if (!range) return
+  const position = Math.min(range.textEnd, view.state.selection.head + 1)
+  moveSelection(view, TextSelection.create(view.state.doc, position))
+}
+
+function insertOpenLine(view: ProseMirrorView, direction: 'above' | 'below') {
+  const { state } = view
+  const { $head } = state.selection
+
+  for (let depth = $head.depth; depth > 0; depth -= 1) {
+    const node = $head.node(depth)
+    if (node.type.name !== 'listItem' && node.type.name !== 'taskItem') continue
+    const paragraph = state.schema.nodes.paragraph?.createAndFill()
+    if (!paragraph) return
+    const attrs = node.type.name === 'taskItem' ? { ...node.attrs, checked: false } : node.attrs
+    const item = node.type.create(attrs, paragraph)
+    const position = direction === 'above' ? $head.before(depth) : $head.after(depth)
+    const transaction = state.tr.insert(position, item)
+    transaction.setSelection(TextSelection.near(transaction.doc.resolve(position + 2))).scrollIntoView()
+    view.dispatch(transaction)
+    return
+  }
+
+  const range = currentTextblockRange(state)
+  const paragraph = state.schema.nodes.paragraph?.createAndFill()
+  if (!range || !paragraph) return
+  const position = direction === 'above' ? range.from : range.to
+  const parent = $head.node(range.depth - 1)
+  const index = $head.index(range.depth - 1) + (direction === 'below' ? 1 : 0)
+  if (!parent.canReplaceWith(index, index, paragraph.type)) return
+  const transaction = state.tr.insert(position, paragraph)
+  transaction.setSelection(TextSelection.near(transaction.doc.resolve(position + 1))).scrollIntoView()
+  view.dispatch(transaction)
+}
+
+function clearCurrentTextblock(view: ProseMirrorView) {
+  const range = currentTextblockRange(view.state)
+  if (!range || range.textStart === range.textEnd) return
+  const transaction = view.state.tr.delete(range.textStart, range.textEnd)
+  transaction.setSelection(TextSelection.create(transaction.doc, range.textStart)).scrollIntoView()
+  view.dispatch(transaction)
 }
 
 function deleteCurrentBlock(view: ProseMirrorView) {

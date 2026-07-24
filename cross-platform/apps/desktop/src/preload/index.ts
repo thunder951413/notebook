@@ -5,6 +5,7 @@ export interface NotebookDesktopApi {
   versions: Readonly<{ electron: string; chrome: string }>
   notifications: { show(title: string, body: string): Promise<boolean> }
   external: { open(url: string): Promise<void> }
+  inputSource: { useAbc(): Promise<boolean> }
   files: {
     pickOpen(): Promise<Array<{ name: string; dataBase64: string }>>
     pickSave(suggestedName: string, dataBase64: string): Promise<boolean>
@@ -34,6 +35,7 @@ const api: NotebookDesktopApi = Object.freeze({
   versions: Object.freeze({ electron: process.versions.electron, chrome: process.versions.chrome }),
   notifications: Object.freeze({ show: (title: string, body: string) => ipcRenderer.invoke('platform:showNotification', { title, body }) }),
   external: Object.freeze({ open: (url: string) => ipcRenderer.invoke('platform:openExternal', url) }),
+  inputSource: Object.freeze({ useAbc: () => ipcRenderer.invoke('platform:useAbcInputSource') }),
   files: Object.freeze({
     pickOpen: () => ipcRenderer.invoke('files:pickOpen'),
     pickSave: (suggestedName: string, dataBase64: string) => ipcRenderer.invoke('files:pickSave', { suggestedName, dataBase64 }),

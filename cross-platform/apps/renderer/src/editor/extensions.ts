@@ -22,10 +22,14 @@ import type { JSONContent } from '@tiptap/core'
 import { generateHTML, generateJSON } from '@tiptap/html'
 import DOMPurify from 'dompurify'
 import 'katex/dist/katex.min.css'
+import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, type NotebookReferenceTarget } from '@notebook/sync-contract'
+import { openReferencedTarget, resolveNotebookReference, subscribeToReferenceRuntime } from './referenceRuntime'
+import { findReferencedFragment, referenceDynamicLabel } from './referenceContent'
 
 export type AssetLoader = (assetId: string) => Promise<Blob | undefined>
 const lowlight = createLowlight()
 lowlight.register({ bash, css, java, javascript, json, kotlin, markdown: markdownLanguage, python, sql, swift, typescript, xml })
+const SAFE_REFERENCE_URI = /^(?:(?:https?|mailto|tel|notebook-asset):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i
 
 function notebookImage(loadAsset?: AssetLoader) {
   return Image.extend({
@@ -52,17 +56,25 @@ function notebookImage(loadAsset?: AssetLoader) {
         host.append(image, placeholder)
         let objectUrl: string | undefined
         let generation = 0
+        let currentNode = node
+        let visible = typeof IntersectionObserver === 'undefined'
 
-        const render = (current: typeof node) => {
+        const render = () => {
           generation += 1
           const currentGeneration = generation
           if (objectUrl) URL.revokeObjectURL(objectUrl)
           objectUrl = undefined
           image.removeAttribute('src')
-          image.alt = String(current.attrs.alt ?? '')
-          image.title = String(current.attrs.title ?? '')
-          const stableSource = typeof current.attrs.src === 'string' ? current.attrs.src : ''
-          const assetId = String(current.attrs.legacyAssetId ?? (stableSource.startsWith('notebook-asset:') ? stableSource.slice('notebook-asset:'.length) : ''))
+          image.alt = String(currentNode.attrs.alt ?? '')
+          image.title = String(currentNode.attrs.title ?? '')
+          if (!visible) {
+            image.hidden = true
+            placeholder.hidden = false
+            placeholder.textContent = image.alt ? `${image.alt}（滚动到附近时载入）` : '图片将在滚动到附近时载入'
+            return
+          }
+          const stableSource = typeof currentNode.attrs.src === 'string' ? currentNode.attrs.src : ''
+          const assetId = String(currentNode.attrs.legacyAssetId ?? (stableSource.startsWith('notebook-asset:') ? stableSource.slice('notebook-asset:'.length) : ''))
           const setReady = (src: string) => {
             image.src = src
             image.hidden = false
@@ -89,22 +101,198 @@ function notebookImage(loadAsset?: AssetLoader) {
             placeholder.textContent = image.alt || '图片附件尚未下载'
           }
         }
-        render(node)
+        const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver((entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return
+          visible = true
+          observer?.disconnect()
+          render()
+        }, { rootMargin: '900px 0px' })
+        if (observer) observer.observe(host)
+        render()
         return {
           dom: host,
           update: (updated) => {
             if (updated.type !== node.type) return false
-            render(updated)
+            currentNode = updated
+            render()
             return true
           },
-          destroy: () => { generation += 1; if (objectUrl) URL.revokeObjectURL(objectUrl) },
+          destroy: () => { generation += 1; observer?.disconnect(); if (objectUrl) URL.revokeObjectURL(objectUrl) },
         }
       }
     },
   }).configure({ allowBase64: false, resize: { enabled: true } })
 }
 
-export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader) {
+function targetFromAttributes(attributes: Record<string, unknown>): NotebookReferenceTarget {
+  const pageId = String(attributes.pageId ?? '')
+  if (attributes.targetKind === 'block') return { pageId, kind: 'block', targetId: String(attributes.targetId ?? '') }
+  if (attributes.targetKind === 'group') return { pageId, kind: 'group', targetId: String(attributes.targetId ?? '') }
+  return { pageId, kind: 'page' }
+}
+
+function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
+  const link = NotebookLink.extend({
+    addNodeView() {
+      return ({ node }) => {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'notebook-link-node'
+        button.contentEditable = 'false'
+        let generation = 0
+        let currentNode = node
+        const render = async () => {
+          const currentGeneration = ++generation
+          const target = targetFromAttributes(currentNode.attrs)
+          const alias = typeof currentNode.attrs.alias === 'string' ? currentNode.attrs.alias.trim() : ''
+          button.textContent = alias || '正在读取引用…'
+          const resolved = await resolveNotebookReference(target, target.kind !== 'page')
+          if (generation !== currentGeneration) return
+          const fragment = resolved.document && findReferencedFragment(resolved.document, target)
+          const status = resolved.status === 'ready' && target.kind !== 'page' && resolved.document && !fragment ? 'missing' : resolved.status
+          button.textContent = alias || (status === 'ready'
+            ? referenceDynamicLabel(resolved.document, target, resolved.title)
+            : resolved.title)
+          button.dataset.status = status
+          button.dataset.targetKind = target.kind
+          button.title = resolved.status === 'ready' ? `打开“${resolved.title}”` : resolved.title
+        }
+        let unsubscribe = subscribeToReferenceRuntime(String(currentNode.attrs.pageId ?? ''), () => { void render() })
+        button.addEventListener('click', () => openReferencedTarget(targetFromAttributes(currentNode.attrs)))
+        void render()
+        return {
+          dom: button,
+          update: (updated) => {
+            if (updated.type.name !== 'notebookLink') return false
+            const previousPageId = String(currentNode.attrs.pageId ?? '')
+            currentNode = updated
+            const nextPageId = String(currentNode.attrs.pageId ?? '')
+            if (previousPageId !== nextPageId) {
+              unsubscribe()
+              unsubscribe = subscribeToReferenceRuntime(nextPageId, () => { void render() })
+            }
+            void render()
+            return true
+          },
+          destroy: () => { generation += 1; unsubscribe() },
+        }
+      }
+    },
+  })
+
+  const embed = NotebookEmbed.extend({
+    addNodeView() {
+      return ({ node }) => {
+        const host = document.createElement('article')
+        const header = document.createElement('button')
+        const body = document.createElement('div')
+        host.className = 'notebook-embed-node'
+        host.contentEditable = 'false'
+        header.type = 'button'
+        header.className = 'notebook-embed-header'
+        body.className = 'notebook-embed-body'
+        host.append(header, body)
+        let generation = 0
+        let currentNode = node
+        let visible = typeof IntersectionObserver === 'undefined'
+        const objectUrls = new Set<string>()
+        const clearObjectUrls = () => {
+          for (const url of objectUrls) URL.revokeObjectURL(url)
+          objectUrls.clear()
+        }
+        const render = async () => {
+          const currentGeneration = ++generation
+          clearObjectUrls()
+          const target = targetFromAttributes(currentNode.attrs)
+          body.replaceChildren()
+          if (target.pageId === currentPageId) {
+            host.dataset.status = 'cycle'
+            header.textContent = '循环引用'
+            body.textContent = '页面不能嵌入自身。'
+            return
+          }
+          if (!visible) {
+            host.dataset.status = 'deferred'
+            header.textContent = typeof currentNode.attrs.alias === 'string' && currentNode.attrs.alias.trim() ? currentNode.attrs.alias : '嵌入内容'
+            body.textContent = '滚动到附近时载入引用内容。'
+            return
+          }
+          header.textContent = '正在读取嵌入内容…'
+          const resolved = await resolveNotebookReference(target, true)
+          if (generation !== currentGeneration) return
+          host.dataset.status = resolved.status
+          header.textContent = typeof currentNode.attrs.alias === 'string' && currentNode.attrs.alias.trim() ? currentNode.attrs.alias : resolved.title
+          if (resolved.status !== 'ready') {
+            body.textContent = resolved.status === 'locked' ? '解锁隐私笔记后才能查看引用内容。' : '目标可能已被删除，或尚未同步到本机。'
+            return
+          }
+          const fragment = resolved.document && findReferencedFragment(resolved.document, target)
+          if (!fragment) {
+            host.dataset.status = 'missing'
+            body.textContent = resolved.document ? '引用的段落或内容范围已不存在。' : '目标正文尚未载入。'
+            return
+          }
+          body.innerHTML = DOMPurify.sanitize(documentToHtml(fragment), { ALLOWED_URI_REGEXP: SAFE_REFERENCE_URI })
+          body.querySelectorAll<HTMLElement>('[data-notebook-embed]').forEach((element) => {
+            element.replaceChildren(document.createTextNode('嵌套引用：打开原文查看'))
+          })
+          body.querySelectorAll<HTMLImageElement>('img[src^="notebook-asset:"]').forEach((image) => {
+            const assetId = image.getAttribute('src')!.slice('notebook-asset:'.length)
+            image.removeAttribute('src')
+            image.alt = image.alt || '引用图片'
+            if (!loadAsset) {
+              image.replaceWith(document.createTextNode(image.alt ? `【图片：${image.alt}】` : '【图片附件】'))
+              return
+            }
+            image.dataset.loading = 'true'
+            void loadAsset(assetId).then((blob) => {
+              if (generation !== currentGeneration || !image.isConnected) return
+              if (!blob) {
+                image.replaceWith(document.createTextNode(`【图片附件尚未下载：${image.alt}】`))
+                return
+              }
+              const url = URL.createObjectURL(blob)
+              objectUrls.add(url)
+              image.src = url
+              delete image.dataset.loading
+            }).catch(() => {
+              if (generation === currentGeneration && image.isConnected) image.replaceWith(document.createTextNode(`【图片载入失败：${image.alt}】`))
+            })
+          })
+        }
+        const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver((entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return
+          visible = true
+          observer?.disconnect()
+          void render()
+        }, { rootMargin: '900px 0px' })
+        if (observer) observer.observe(host)
+        let unsubscribe = subscribeToReferenceRuntime(String(currentNode.attrs.pageId ?? ''), () => { void render() })
+        header.addEventListener('click', () => openReferencedTarget(targetFromAttributes(currentNode.attrs)))
+        void render()
+        return {
+          dom: host,
+          update: (updated) => {
+            if (updated.type.name !== 'notebookEmbed') return false
+            const previousPageId = String(currentNode.attrs.pageId ?? '')
+            currentNode = updated
+            const nextPageId = String(currentNode.attrs.pageId ?? '')
+            if (previousPageId !== nextPageId) {
+              unsubscribe()
+              unsubscribe = subscribeToReferenceRuntime(nextPageId, () => { void render() })
+            }
+            void render()
+            return true
+          },
+          destroy: () => { generation += 1; clearObjectUrls(); observer?.disconnect(); unsubscribe() },
+        }
+      }
+    },
+  })
+  return [BlockGroup, embed, BlockAnchor, link]
+}
+
+export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader, currentPageId?: string) {
   return [
     StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false }),
     CodeBlockLowlight.configure({ lowlight }),
@@ -113,6 +301,7 @@ export function createContentExtensions(collaborative = false, loadAsset?: Asset
     TableKit.configure({ table: { resizable: true } }),
     Mathematics.configure({ katexOptions: { throwOnError: false } }),
     notebookImage(loadAsset),
+    ...referenceExtensions(currentPageId, loadAsset),
     Markdown.configure({ markedOptions: { gfm: true, breaks: false } }),
   ]
 }

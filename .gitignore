@@ -4,6 +4,7 @@ cross-platform/**/node_modules/
 cross-platform/**/dist/
 cross-platform/**/out/
 cross-platform/**/release/
+cross-platform/apps/desktop/build/
 cross-platform/**/.venv/
 cross-platform/**/__pycache__/
 cross-platform/**/.pytest_cache/

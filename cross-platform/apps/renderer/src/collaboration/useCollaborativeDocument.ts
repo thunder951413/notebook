@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { HocuspocusProvider } from '@hocuspocus/provider'
 import * as Y from 'yjs'
 
-export type CollaborationStatus = 'loading' | 'offline' | 'connecting' | 'connected' | 'error'
+type CollaborationStatus = 'loading' | 'offline' | 'connecting' | 'connected' | 'error'
 
 export interface CollaborativeDocumentSession {
   document: Y.Doc

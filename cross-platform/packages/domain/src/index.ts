@@ -40,6 +40,12 @@ export interface Page {
   id: UUID
   workspaceId: UUID
   sectionId?: UUID
+  /** Parent document in the section's ordered document tree. */
+  parentPageId?: UUID
+  /** Sparse sibling order. Values are local metadata and sync independently from Markdown. */
+  sortOrder?: number
+  /** Last structural move/reorder time, used to merge tree edits independently from body edits. */
+  treeUpdatedAt?: IsoDate
   kind: PageKind
   title: string
   preview: string
@@ -237,6 +243,7 @@ export interface NotebookRepository {
   listTaskSteps(pageId: UUID): Promise<TaskStep[]>
   saveTaskSteps(pageId: UUID, steps: TaskStep[]): Promise<void>
   listPageLinks(pageId: UUID): Promise<PageLink[]>
+  listBacklinks(pageId: UUID): Promise<PageLink[]>
   replacePageLinks(pageId: UUID, links: PageLink[]): Promise<void>
   saveNotebook(notebook: Notebook): Promise<void>
   deleteNotebook(notebookId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>

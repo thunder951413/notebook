@@ -37,6 +37,25 @@ test('atomically saves and loads a page with its document', async () => {
   expect(await repository.getPageDocument(value.id)).toEqual(document)
 })
 
+test('keeps parsed editor caches local, versioned, and disposable', async () => {
+  const repository = makeRepository()
+  const value = page('cached-page', 'Large Markdown')
+  const document: PageDocument = {
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown: '# Large Markdown',
+    tiptapJson: { type: 'doc', content: [] },
+    updatedAt: value.updatedAt,
+  }
+  const parsed = { type: 'doc', content: [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Large Markdown' }] }] }
+  await repository.savePage(value, document)
+  await repository.saveEditorCache(value.id, 'version-a', parsed)
+
+  expect(await repository.getEditorCache(value.id, 'version-a')).toEqual(parsed)
+  expect((await repository.exportData(value.workspaceId)).documents[0]?.tiptapJson).toEqual(document.tiptapJson)
+  expect(await repository.getEditorCache(value.id, 'version-b')).toBeUndefined()
+})
+
 test('upgrades legacy rich-text bodies to canonical Markdown with a recovery revision and sync baseline', async () => {
   const name = `legacy-upgrade-${crypto.randomUUID()}`
   const legacy = new Dexie(name)
@@ -164,7 +183,7 @@ test('queues notebook hierarchy and task steps for cross-device sync', async () 
 
 test('duplicates a page with its body, task steps, tags and attachment references', async () => {
   const repository = makeRepository()
-  const value = { ...page('page-source', 'Source'), kind: 'task' as const, syncStatus: 'pending' as const }
+  const value = { ...page('page-source', 'Source'), parentPageId: 'parent-page', sortOrder: 2000, treeUpdatedAt: '2026-01-02T00:00:00.000Z', kind: 'task' as const, syncStatus: 'pending' as const }
   const document: PageDocument = { pageId: value.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'image', attrs: { src: 'notebook-asset:asset-source', legacyAssetId: 'asset-source' } }] }, updatedAt: value.updatedAt }
   await repository.savePage(value, document)
   await repository.savePageTags(value.id, ['tag-a'])
@@ -174,6 +193,7 @@ test('duplicates a page with its body, task steps, tags and attachment reference
   const copy = await repository.duplicatePage(value.id, 'page-copy', '2026-01-04T00:00:00.000Z')
   const copiedAssets = await repository.listAssets(copy.id)
   expect(copy.title).toBe('Source 副本')
+  expect(copy).toMatchObject({ parentPageId: 'parent-page', sortOrder: 2001, treeUpdatedAt: '2026-01-04T00:00:00.000Z' })
   expect((await repository.listTaskSteps(copy.id))[0]).toMatchObject({ pageId: copy.id, text: 'Step' })
   expect(await repository.listPageTags(copy.id)).toEqual([{ pageId: copy.id, tagId: 'tag-a' }])
   expect(copiedAssets).toHaveLength(1)
@@ -182,17 +202,25 @@ test('duplicates a page with its body, task steps, tags and attachment reference
   expect(JSON.stringify((await repository.getPageDocument(copy.id))?.tiptapJson)).not.toContain('asset-source')
 })
 
-test('only deletes empty sections and queues a compatible tombstone', async () => {
+test('deletes a non-empty section with all page data and queues compatible tombstones', async () => {
   const repository = makeRepository()
   const notebook = { id: 'notebook-delete', workspaceId: 'workspace-a', name: 'Delete', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
   await repository.saveNotebook(notebook)
   await repository.saveSection({ id: 'section-full', notebookId: notebook.id, name: 'Full', sortOrder: 0, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt })
-  await repository.savePage(page('page-in-section', 'Page', 'section-full'))
-  await expect(repository.deleteSection('section-full', '2026-01-04T00:00:00.000Z', 'test-device')).rejects.toThrow('仍有页面')
-  await repository.purgePage('page-in-section')
+  const sectionPage = page('page-in-section', 'Page', 'section-full')
+  await repository.savePage(sectionPage, { pageId: sectionPage.id, schemaVersion: 3, markdown: 'Body', tiptapJson: { type: 'doc', content: [] }, updatedAt: sectionPage.updatedAt })
+  await repository.saveAsset({ id: 'section-asset', pageId: sectionPage.id, kind: 'file', filename: 'file.txt', mimeType: 'text/plain', createdAt: notebook.createdAt }, new Blob(['content']))
+  await repository.saveEditorCache(sectionPage.id, 'version-a', { type: 'doc', content: [{ type: 'paragraph' }] })
   await repository.deleteSection('section-full', '2026-01-04T00:00:00.000Z', 'test-device')
+
   expect(await repository.listSections(notebook.id)).toEqual([])
-  expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityType: 'section', entityId: 'section-full', deviceId: 'test-device' }))
+  expect(await repository.getPage(sectionPage.id)).toBeUndefined()
+  expect(await repository.getPageDocument(sectionPage.id)).toBeUndefined()
+  expect(await repository.listAssets(sectionPage.id)).toEqual([])
+  expect(await repository.getEditorCache(sectionPage.id, 'version-a')).toBeUndefined()
+  const tombstones = (await repository.exportData('workspace-a')).tombstones
+  expect(tombstones).toContainEqual(expect.objectContaining({ entityType: 'page', entityId: sectionPage.id, deviceId: 'test-device' }))
+  expect(tombstones).toContainEqual(expect.objectContaining({ entityType: 'section', entityId: 'section-full', deviceId: 'test-device' }))
   expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'section')).toMatchObject({ operation: 'delete', entityId: 'section-full' })
 })
 
@@ -449,6 +477,20 @@ test('indexes document bodies for Latin and CJK full-text search', async () => {
   await repository.savePage(first, { pageId: first.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '会议笔记 connects evidence' }] }] }, updatedAt: first.updatedAt })
   expect((await repository.searchWorkspace('workspace-a', '会议笔记')).map((item) => item.id)).toEqual(['page-search'])
   expect((await repository.searchWorkspace('workspace-a', 'evidence')).map((item) => item.id)).toEqual(['page-search'])
+})
+
+test('finds an exact unlinked mention in the inverted-index candidate set', async () => {
+  const repository = makeRepository()
+  const source = page('mention-source', '普通标题')
+  await repository.savePage(source, {
+    pageId: source.id,
+    schemaVersion: 3,
+    markdown: '正文中提到了目标页面标题，但还没有创建双链。',
+    tiptapJson: { type: 'doc', content: [] },
+    updatedAt: source.updatedAt,
+  })
+  await repository.savePage(page('unrelated', '无关页面'))
+  expect((await repository.searchWorkspaceCandidates('workspace-a', '目标页面标题')).map((item) => item.id)).toContain('mention-source')
 })
 
 test('ranks an exact Chinese phrase ahead of weak bigram matches', async () => {

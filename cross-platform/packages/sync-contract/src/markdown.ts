@@ -5,14 +5,16 @@ import Image from '@tiptap/extension-image'
 import { Markdown, MarkdownManager } from '@tiptap/markdown'
 import type { JSONContent } from '@tiptap/core'
 import type { PageDocument } from '@notebook/domain'
+import { notebookReferenceExtensions } from './references'
 
-function extensions() {
+function extensions(references = true) {
   return [
     StarterKit,
     TaskList,
     TaskItem.configure({ nested: true }),
     TableKit,
     Image.configure({ allowBase64: false }),
+    ...(references ? notebookReferenceExtensions : []),
     Markdown.configure({ markedOptions: { gfm: true, breaks: false } }),
   ]
 }
@@ -22,9 +24,35 @@ function extensions() {
 // per-document mutable state, so one shared instance keeps large backup
 // migrations responsive.
 const markdownManager = new MarkdownManager({ extensions: extensions() })
+const legacyMarkdownManager = new MarkdownManager({ extensions: extensions(false) })
 
 export function markdownToTiptap(markdown: string) {
-  return markdownManager.parse(markdown) as Record<string, unknown>
+  try {
+    return markdownManager.parse(markdown) as Record<string, unknown>
+  } catch (error) {
+    // Raw HTML is outside Notebook Next's canonical GFM subset. Some migrated
+    // engineering notes contain tag-like fragments (for example C/C++ types)
+    // that Marked classifies as HTML and that can make the schema HTML parser
+    // recurse. Preserve those fragments as visible text instead of making the
+    // whole page impossible to open. Notebook's own group boundary comments
+    // remain structural syntax and are never escaped here.
+    if (!(error instanceof Error) || !/parse HTML in markdown|call stack/i.test(error.message)) throw error
+    return markdownManager.parse(escapeUnsupportedRawHtml(markdown)) as Record<string, unknown>
+  }
+}
+
+function escapeUnsupportedRawHtml(markdown: string) {
+  let fence: string | undefined
+  return markdown.split('\n').map((line) => {
+    const marker = line.match(/^\s*(```+|~~~+)/)?.[1]
+    if (marker) {
+      if (!fence) fence = marker[0]
+      else if (marker[0] === fence) fence = undefined
+      return line
+    }
+    if (fence || /^\s*<!--\s*notebook:group\b/.test(line)) return line
+    return line.replace(/<(?=\/?[A-Za-z][^>\n]*>)/g, '&lt;')
+  }).join('\n')
 }
 
 export function tiptapToMarkdown(document: Record<string, unknown>) {
@@ -138,12 +166,12 @@ export function legacyTiptapToCanonicalMarkdown(document: Record<string, unknown
     if (plain === undefined) return [node]
     const normalized = normalizeLegacyMarkdownSyntax(plain)
     if (looksLikeIntentionalMarkdown(normalized)) {
-      const parsed = markdownManager.parse(normalized) as LegacyNode
+      const parsed = legacyMarkdownManager.parse(normalized) as LegacyNode
       return parsed.content?.length ? parsed.content : [node]
     }
     return normalized.includes('\n') ? hardBreakParagraphs(normalized) : [{ ...node, content: normalized ? [{ type: 'text', text: normalized }] : undefined }]
   })
-  return markdownManager.serialize({ type: 'doc', content } as JSONContent)
+  return legacyMarkdownManager.serialize({ type: 'doc', content } as JSONContent)
 }
 
 export function migrateLegacyPageDocument(document: PageDocument): PageDocument {

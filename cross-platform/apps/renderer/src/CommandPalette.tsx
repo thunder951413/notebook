@@ -28,6 +28,7 @@ export interface PaletteItem {
 interface CommandPaletteProps {
   open: boolean
   items: PaletteItem[]
+  searchPageIds?: (query: string) => Promise<string[]>
   onClose: () => void
 }
 
@@ -36,10 +37,11 @@ const RECENT_COMMANDS_KEY = 'notebook-recent-commands-v1'
 const groupLabels: Record<PaletteGroup, string> = { command: '命令', page: '页面', setting: '设置' }
 const groupIcons = { command: <WindowConsole20Regular />, page: <Document20Regular />, setting: <Settings20Regular /> }
 
-export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
+export function CommandPalette({ open, items, searchPageIds, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [activeId, setActiveId] = useState<string>()
   const [confirmItem, setConfirmItem] = useState<PaletteItem>()
+  const [contentPageIds, setContentPageIds] = useState<string[]>([])
   const [pinnedIds, setPinnedIds] = useState<string[]>(readStringList(PINNED_KEY))
   const [recentCommandIds, setRecentCommandIds] = useState<string[]>(readStringList(RECENT_COMMANDS_KEY))
   const inputRef = useRef<HTMLInputElement>(null)
@@ -54,9 +56,11 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
     const normalized = query.trim().toLocaleLowerCase()
     if (normalized) {
       const byId = new Map(items.map((item) => [item.id, item]))
-      return index.search(normalized)
+      const localMatches = index.search(normalized)
         .map((result) => byId.get(String(result.id)))
         .filter((item): item is PaletteItem => Boolean(item))
+      const contentMatches = contentPageIds.flatMap((id) => byId.get(`page:${id}`) ?? [])
+      return [...new Map([...localMatches, ...contentMatches].map((item) => [item.id, item])).values()]
         .sort((left, right) => matchPriority(left, normalized) - matchPriority(right, normalized))
     }
     const pinned = new Map(pinnedIds.map((id, position) => [id, position]))
@@ -74,7 +78,7 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
       if (left.group === 'page' && left.recent !== right.recent) return left.recent ? -1 : 1
       return 0
     })
-  }, [index, items, pinnedIds, query, recentCommandIds])
+  }, [contentPageIds, index, items, pinnedIds, query, recentCommandIds])
 
   const grouped = useMemo(() => (['command', 'page', 'setting'] as PaletteGroup[]).map((group) => ({
     group,
@@ -85,9 +89,31 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
   useEffect(() => {
     if (!open) return
     setQuery('')
+    setContentPageIds([])
     setConfirmItem(undefined)
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }, [open])
+
+  useEffect(() => {
+    const normalized = query.trim()
+    if (!open || !normalized || !searchPageIds) {
+      setContentPageIds([])
+      return
+    }
+    let cancelled = false
+    setContentPageIds([])
+    const timer = window.setTimeout(() => {
+      void searchPageIds(normalized).then((ids) => {
+        if (!cancelled) setContentPageIds(ids)
+      }).catch(() => {
+        if (!cancelled) setContentPageIds([])
+      })
+    }, 80)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [open, query, searchPageIds])
 
   useEffect(() => {
     if (!open) return
@@ -160,7 +186,7 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
         <p>{confirmItem.confirmDescription ?? '这项操作会修改或删除数据，请确认是否继续。'}</p>
         <div><Button autoFocus onClick={() => { setConfirmItem(undefined); window.requestAnimationFrame(() => inputRef.current?.focus()) }}>取消</Button><Button appearance="primary" onClick={confirmDangerous}>{confirmItem.confirmLabel ?? '确认执行'}</Button></div>
       </div> : <>
-        <div className="command-palette-search"><Search20Regular /><Input ref={inputRef} value={query} onChange={(_, data) => { setQuery(data.value); setActiveId(undefined) }} placeholder="搜索命令、页面和设置…" aria-label="搜索命令、页面和设置" onKeyDown={(event) => {
+        <div className="command-palette-search"><Search20Regular /><Input ref={inputRef} value={query} onChange={(_, data) => { setQuery(data.value); setActiveId(undefined) }} placeholder="搜索命令、页面标题、正文和设置…" aria-label="搜索命令、页面和设置" onKeyDown={(event) => {
           if (event.key === 'ArrowDown') { event.preventDefault(); moveActive(1) }
           if (event.key === 'ArrowUp') { event.preventDefault(); moveActive(-1) }
           if (event.key === 'Enter') { event.preventDefault(); const item = flatItems.find((candidate) => candidate.id === activeId); if (item) execute(item) }
@@ -173,7 +199,7 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
               <button className="command-palette-main-action" onClick={() => execute(item)}><span><strong>{item.title}</strong>{item.subtitle && <small>{item.subtitle}</small>}</span>{item.recent && item.group === 'page' && <em>最近</em>}{item.dangerous && <em>需确认</em>}</button>
               {item.group === 'command' && <button className="command-pin" aria-label={pinnedIds.includes(item.id) ? `取消固定：${item.title}` : `固定命令：${item.title}`} title={pinnedIds.includes(item.id) ? '取消固定' : '固定到顶部'} onClick={() => togglePinned(item.id)}>{pinnedIds.includes(item.id) ? <Star16Filled /> : <Star16Regular />}</button>}
             </div>)}
-          </section>) : <div className="command-palette-empty"><Search20Regular /><strong>没有匹配结果</strong><span>尝试输入页面标题、功能名称或设置项。</span></div>}
+          </section>) : <div className="command-palette-empty"><Search20Regular /><strong>没有匹配结果</strong><span>尝试输入页面标题、正文内容、功能名称或设置项。</span></div>}
         </div>
         <footer><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span></footer>
       </>}

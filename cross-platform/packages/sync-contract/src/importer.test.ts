@@ -253,7 +253,7 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   const pageId = '30000000-0000-4000-8000-000000000003'
   const assetId = 'asset-v3-image'
   const now = '2026-07-22T05:00:00.000Z'
-  const markdown = '# 标题\n\n- [x] 任务\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n![图](notebook-asset:asset-v3-image "说明")'
+  const markdown = '# 标题\n\n- [x] 任务\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n![图](notebook-asset:asset-v3-image "说明")\n\n[[page:target-page]]\n\n![[page:target-page#^b-one]]\n\n[[page:target-page#group:g-one]]'
   const document = { pageId, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '缓存不应同步' }] }] }, updatedAt: now }
   const bundle: NotebookDataBundle = {
     notebooks: [{ id: notebookId, workspaceId, name: '测试', sortOrder: 0, createdAt: now, updatedAt: now }], sections: [{ id: sectionId, notebookId, name: '分区', sortOrder: 0, createdAt: now, updatedAt: now }],
@@ -270,6 +270,7 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(note.history[0]).not.toHaveProperty('snapshot')
   expect(note.history[0]?.contentHash).toHaveLength(64)
   expect(note.assets[0]?.objectHash).toHaveLength(64)
+  expect(note.linkedPageIDs).toEqual(['target-page'])
   expect([...encoded.files.keys()]).toContain(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
   const imported = await importMarkdownRepository({ library, notes: [note], index }, workspaceId)
@@ -277,6 +278,11 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(imported.documents[0]?.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.revisions[0]?.document.markdown).toBe('历史正文')
   expect(imported.revisions[0]?.document.tiptapJson).toEqual({ type: 'doc', content: [] })
+  expect(imported.pageLinks.map((link) => `${link.kind}:${link.excerpt ?? 'page'}`)).toEqual([
+    'link:page',
+    'embed:block:b-one',
+    'link:group:g-one',
+  ])
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('标题')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"width":480')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"textAlign":"center"')

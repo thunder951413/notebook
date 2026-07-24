@@ -1,4 +1,4 @@
-import type { NotebookDataBundle, PageDocument, PageRevision } from '@notebook/domain'
+import type { NotebookDataBundle, Page, PageDocument, PageRevision } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { encodeMarkdownRepository, sha256Hex } from '@notebook/sync-contract'
 import { decodeImport, type ImportFile } from '../data/transfer'
@@ -51,13 +51,32 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
     const baselineHash = typeof left.legacyMetadata?.syncBaselineHash === 'string' ? left.legacyMetadata.syncBaselineHash : undefined
     const localChanged = left.syncStatus === 'pending' || left.syncStatus === 'conflict' || Boolean(baselineHash && localHash !== baselineHash)
     const remoteChanged = baselineHash ? remoteHash !== baselineHash : (right.legacyVersion ?? 0) >= (left.legacyVersion ?? 0) && remoteHash !== localHash
+    const localTreeTime = left.treeUpdatedAt ?? left.createdAt
+    const remoteTreeTime = right.treeUpdatedAt ?? right.createdAt
+    const tree = remoteTreeTime > localTreeTime ? right : left
+    const withTree = <T extends Page>(value: T): T => ({
+      ...value,
+      sectionId: tree.sectionId,
+      parentPageId: tree.parentPageId,
+      sortOrder: tree.sortOrder,
+      treeUpdatedAt: tree.treeUpdatedAt,
+    })
     if (localHash && remoteHash && localHash !== remoteHash && localChanged && remoteChanged) {
       conflicts.push(id)
       sources.set(id, 'local')
-      return [{ ...left, legacyVersion: Math.max(left.legacyVersion ?? 0, right.legacyVersion ?? 0), syncStatus: 'conflict' as const, legacyMetadata: { ...left.legacyMetadata, syncBaselineHash: remoteHash } }]
+      return [withTree({ ...left, legacyVersion: Math.max(left.legacyVersion ?? 0, right.legacyVersion ?? 0), syncStatus: 'conflict' as const, legacyMetadata: { ...left.legacyMetadata, syncBaselineHash: remoteHash } })]
     }
     const source = selectPage(left, right); sources.set(id, source)
-    return [{ ...(source === 'remote' ? right : left), syncStatus: source === 'remote' ? 'synced' as const : left.syncStatus }]
+    const selected = source === 'remote' ? right : left
+    const localTreeWon = tree === left && (
+      left.sectionId !== right.sectionId
+      || left.parentPageId !== right.parentPageId
+      || left.sortOrder !== right.sortOrder
+    )
+    return [withTree({
+      ...selected,
+      syncStatus: localTreeWon ? left.syncStatus : source === 'remote' ? 'synced' as const : left.syncStatus,
+    })]
   })
 
   const localSections = new Map(local.sections.map((item) => [item.id, item]))
@@ -146,7 +165,9 @@ export function publicationBundleWithRemoteConflicts(merged: NotebookDataBundle,
   }
 }
 
-export async function synchronizeLegacySsh(repository: DexieNotebookRepository, workspaceId: string, force = false) {
+export type LegacySyncMode = 'bidirectional' | 'pull' | 'push'
+
+export async function synchronizeLegacySsh(repository: DexieNotebookRepository, workspaceId: string, force = false, mode: LegacySyncMode = 'bidirectional') {
   if (!force && !loadSyncSettings().enabled) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
   const settings = loadLegacySshSettings()
   if (!settings.host || !settings.username || !settings.remotePath) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
@@ -164,6 +185,13 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
   const decodedRemote = hasRemoteNotes ? await decodeImport(remoteFiles, workspaceId, password) : undefined
   const merged = decodedRemote ? mergeBundles(localBundle, decodedRemote.bundle, localContents, decodedRemote.assetContents) : { bundle: localBundle, contents: localContents, conflicts: [] }
   const conflictIds = new Set(merged.conflicts)
+  if (mode === 'pull') {
+    await repository.importAssetContents(merged.contents)
+    await repository.importSyncResult(merged.bundle, localBundle)
+    return merged.conflicts.length
+      ? { state: 'conflict' as const, skipped: 0, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }
+      : { state: 'synced' as const, skipped: 0, fingerprint: pulled.fingerprint }
+  }
   const publicationBundle = decodedRemote && conflictIds.size
     ? publicationBundleWithRemoteConflicts(merged.bundle, decodedRemote.bundle, conflictIds)
     : merged.bundle

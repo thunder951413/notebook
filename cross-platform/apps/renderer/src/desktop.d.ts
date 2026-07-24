@@ -7,6 +7,7 @@ declare global {
       versions: Readonly<{ electron: string; chrome: string }>
       notifications: { show(title: string, body: string): Promise<boolean> }
       external: { open(url: string): Promise<void> }
+      inputSource: { useAbc(): Promise<boolean> }
       files: {
         pickOpen(): Promise<Array<{ name: string; dataBase64: string }>>
         pickSave(suggestedName: string, dataBase64: string): Promise<boolean>

@@ -27,6 +27,18 @@ Binary resources live once at `objects/<first-two-hash-characters>/<sha256>`. Th
 
 The supported durable formatting surface is GFM headings, emphasis, links, code, tables, task lists, lists, quotes, and inline images/resources. Font family, font size, arbitrary text color, absolute positioning, handwriting, and free canvas data are intentionally outside the format.
 
+## Ordered page hierarchy
+
+Every page remains an independently addressable Markdown document. Navigation hierarchy is stored in the note metadata, never encoded into the Markdown body:
+
+- `parentPageId`: optional parent page UUID; absence means a section root.
+- `sortOrder`: a floating-point sibling order key. Clients normally allocate gaps of 1000 and may insert between two siblings without rewriting the subtree.
+- `treeUpdatedAt`: the timestamp of the last structural move, independent from `updatedAt` for body edits.
+
+Electron and Android merge this structural clock independently from the body revision. An older client that edits Markdown but does not send hierarchy fields therefore cannot flatten a tree created by a newer client. Importers clear self-links, missing/cross-section parents and cycles. Moving a page between sections moves its whole subtree; deleting, restoring and permanently deleting a parent apply to its subtree.
+
+The hierarchy is not a linked list: each page stores only its parent and sibling order. This keeps a single-page move local, allows arbitrary depth, and makes interrupted synchronization easier to validate and repair.
+
 ## Private notes
 
 Notes marked as private wrap the complete note envelope (title, preview, Markdown objects, history and note-local metadata) in AES-256-GCM. The key is derived from the configured SSH password with PBKDF2-HMAC-SHA256 (310,000 iterations); the note ID is authenticated as additional data. Electron and Android reject a wrong password or modified ciphertext without replacing local content. Binary resource objects are not encrypted by this layer and continue to rely on SSH transport, account permissions and server-disk protection.

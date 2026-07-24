@@ -94,6 +94,48 @@ describe('legacy SSH conflict merge', () => {
     expect(merged.bundle.readingPositions[0]).toMatchObject({ anchorUtf16Offset: 90, deviceId: 'android' })
   })
 
+  test('does not let a legacy Android body edit flatten a newer Electron page tree', () => {
+    const local = bundle(page({
+      sectionId: 'section-a',
+      parentPageId: 'parent-a',
+      sortOrder: 2000,
+      treeUpdatedAt: '2026-07-22T02:00:00.000Z',
+      syncStatus: 'synced',
+      legacyVersion: 1,
+    }), document('local'))
+    const remote = bundle(page({
+      sectionId: 'section-a',
+      legacyVersion: 2,
+      updatedAt: '2026-07-22T03:00:00.000Z',
+    }), document('android edit', '2026-07-22T03:00:00.000Z'))
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('android edit', '2026-07-22T03:00:00.000Z').tiptapJson)
+    expect(merged.bundle.pages[0]).toMatchObject({ parentPageId: 'parent-a', sortOrder: 2000, treeUpdatedAt: '2026-07-22T02:00:00.000Z' })
+  })
+
+  test('merges a newer remote tree move independently even when the page body conflicts', () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'revision-id' })
+    const local = bundle(page({
+      sectionId: 'section-a',
+      parentPageId: 'parent-old',
+      treeUpdatedAt: '2026-07-22T01:00:00.000Z',
+      syncStatus: 'pending',
+      legacyVersion: 2,
+    }), document('local edit'))
+    const remote = bundle(page({
+      sectionId: 'section-b',
+      parentPageId: 'parent-new',
+      sortOrder: 3000,
+      treeUpdatedAt: '2026-07-22T03:00:00.000Z',
+      legacyVersion: 3,
+      updatedAt: '2026-07-22T03:00:00.000Z',
+    }), document('remote edit', '2026-07-22T03:00:00.000Z'))
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.conflicts).toEqual([pageId])
+    expect(merged.bundle.pages[0]).toMatchObject({ sectionId: 'section-b', parentPageId: 'parent-new', sortOrder: 3000 })
+    vi.unstubAllGlobals()
+  })
+
   test('publishes unrelated edits while leaving a conflicted page at its remote version', () => {
     const otherId = '30000000-0000-4000-8000-000000000099'
     const merged = bundle(page({ syncStatus: 'conflict' }), document('local conflict'))
@@ -104,5 +146,38 @@ describe('legacy SSH conflict merge', () => {
     expect(publication.pages.find((item) => item.id === pageId)?.title).toBe('remote winner')
     expect(publication.documents.find((item) => item.pageId === pageId)?.tiptapJson).toEqual(document('remote conflict').tiptapJson)
     expect(publication.pages.find((item) => item.id === otherId)?.title).toBe('unrelated local edit')
+  })
+
+  test('keeps precise block, group and embed backlink identities from a pulled page', () => {
+    const remote = bundle(page({ legacyVersion: 2 }), {
+      ...document('remote markdown'),
+      schemaVersion: 3,
+      markdown: '[[page:target#^b-one]]\n\n![[page:target#group:g-one]]',
+    })
+    remote.pageLinks.push(
+      {
+        id: `markdown-reference:${pageId}:target:link:block:b-one`,
+        workspaceId,
+        sourcePageId: pageId,
+        targetPageId: 'target',
+        kind: 'link',
+        excerpt: 'block:b-one',
+        createdAt: timestamp,
+      },
+      {
+        id: `markdown-reference:${pageId}:target:embed:group:g-one`,
+        workspaceId,
+        sourcePageId: pageId,
+        targetPageId: 'target',
+        kind: 'embed',
+        excerpt: 'group:g-one',
+        createdAt: timestamp,
+      },
+    )
+    const merged = mergeBundles(bundle(), remote, new Map(), new Map())
+    expect(merged.bundle.pageLinks.map((link) => `${link.kind}:${link.excerpt}`)).toEqual([
+      'link:block:b-one',
+      'embed:group:g-one',
+    ])
   })
 })

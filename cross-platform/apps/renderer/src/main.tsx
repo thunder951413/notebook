@@ -1,9 +1,37 @@
-import { StrictMode, useEffect, useState } from 'react'
+import { Component, StrictMode, useEffect, useState, type ErrorInfo, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { FluentProvider, webDarkTheme, webLightTheme } from '@fluentui/react-components'
 import { App } from './App'
 import { flushPendingEdits } from './data/flushCoordinator'
 import './styles.css'
+
+document.documentElement.dataset.platform = /Mac/i.test(navigator.platform)
+  ? 'mac'
+  : /Win/i.test(navigator.platform)
+    ? 'windows'
+    : 'linux'
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {}
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Notebook renderer failed', error, info.componentStack)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return <main className="app-error-fallback" role="alert">
+      <h1>Notebook 无法显示当前界面</h1>
+      <p>你的笔记数据没有被删除。可以重新载入界面继续使用。</p>
+      <details><summary>错误详情</summary><pre>{this.state.error.message}</pre></details>
+      <button onClick={() => location.reload()}>重新载入</button>
+    </main>
+  }
+}
 
 function Root() {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -22,4 +50,4 @@ function Root() {
   )
 }
 
-createRoot(document.getElementById('root')!).render(<Root />)
+createRoot(document.getElementById('root')!).render(<AppErrorBoundary><Root /></AppErrorBoundary>)

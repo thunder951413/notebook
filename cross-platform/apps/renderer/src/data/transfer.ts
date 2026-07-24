@@ -62,7 +62,7 @@ function decodeBase64Text(value: string) {
   return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)))
 }
 
-export function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknown): LegacyEncryptedData {
+function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknown): LegacyEncryptedData {
   const encryptedFile = files.find((file) => /(^|\/)Config\/EncryptedData\.plist$/i.test(file.name))
   const folderFile = files.find((file) => /(^|\/)Config\/EncryptedFolders\.plist$/i.test(file.name))
   const encrypted = normalizeLegacyEncryptedData(encryptedFile ? parsePlist(strFromU8(encryptedFile.data)) : embedded)

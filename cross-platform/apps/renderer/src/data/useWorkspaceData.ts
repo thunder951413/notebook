@@ -1,20 +1,53 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Asset, Notebook, Page, PageDocument, Section } from '@notebook/domain'
+import type { Asset, Notebook, Page, PageDocument, PageLink, Section } from '@notebook/domain'
 import { indexPageForRetrieval } from '../ai/client'
 import { decodeImport, encodeExport, type ImportFile } from './transfer'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from '../editor/extensions'
 import { DexieNotebookRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import type { NotebookSummary, PageSummary } from '../model'
 import { DEFAULT_WORKSPACE_ID } from '../sync/syncSettings'
-import { synchronizeLegacySsh } from '../sync/legacySshSync'
+import { synchronizeLegacySsh, type LegacySyncMode } from '../sync/legacySshSync'
 import { legacyDeviceId } from '../sync/legacySshSettings'
-import { markdownToEditorCache } from '@notebook/sync-contract'
+import { extractNotebookReferences, normalizeReferenceTargetIds } from '@notebook/sync-contract'
+import { parseMarkdownForEditor } from './markdownParser'
+import { pageLinksFromMarkdown } from './referenceIndex'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 const db = new NotebookRendererDatabase(import.meta.env.VITE_NOTEBOOK_DATABASE_NAME ?? 'notebook-next')
 const repository = new DexieNotebookRepository(db)
 const pageMutationQueues = new Map<string, Promise<unknown>>()
+const documentLoadPromises = new Map<string, Promise<Record<string, unknown> | undefined>>()
 const isEmptyEditorCache = (value: Record<string, unknown>) => value.type === 'doc' && Array.isArray(value.content) && value.content.length === 0
+const REFERENCE_INDEX_VERSION_KEY = 'notebook-reference-index-version'
+const emptyEditorDocument = () => ({ type: 'doc', content: [{ type: 'paragraph' }] })
+
+function editorCacheVersion(document: PageDocument, assets: Asset[]) {
+  const assetVersion = assets
+    .map((asset) => `${asset.id}:${asset.checksum}`)
+    .sort()
+    .join('|')
+  return `${document.updatedAt}:${document.markdown?.length ?? 0}:${assetVersion}`
+}
+
+async function editorDocumentFromStorage(document: PageDocument, assets: Asset[]) {
+  if (document.markdown === undefined || !isEmptyEditorCache(document.tiptapJson)) return document.tiptapJson
+  const version = editorCacheVersion(document, assets)
+  const cached = await repository.getEditorCache(document.pageId, version)
+  if (cached) return cached
+  const parsed = await parseMarkdownForEditor(document.markdown, assets)
+  void repository.saveEditorCache(document.pageId, version, parsed)
+  return parsed
+}
+
+async function rebuildReferenceIndex() {
+  const pages = await repository.listPages({ includeDeleted: false, limit: 10_000 })
+  for (const page of pages.items) {
+    const document = await repository.getPageDocument(page.id)
+    if (!document) continue
+    const markdown = document.markdown ?? documentToMarkdown(document.tiptapJson)
+    await repository.replaceDerivedPageLinks(page.id, pageLinksFromMarkdown(page.id, markdown, document.updatedAt))
+  }
+}
 
 function enqueuePageMutation<T>(pageId: string, mutation: () => Promise<T>): Promise<T> {
   const previous = pageMutationQueues.get(pageId) ?? Promise.resolve()
@@ -52,6 +85,9 @@ const tagMap: Record<string, string[]> = {
 const toPageSummary = (page: Page): PageSummary => ({
   id: page.id,
   sectionId: page.sectionId ?? '',
+  parentPageId: page.parentPageId,
+  sortOrder: page.sortOrder,
+  treeUpdatedAt: page.treeUpdatedAt,
   title: page.title,
   preview: page.preview,
   updatedLabel: page.updatedAt.startsWith('2026-07-21') ? '刚刚' : new Date(page.updatedAt).toLocaleDateString(),
@@ -74,6 +110,7 @@ export function useWorkspaceData() {
   const [trashRecords, setTrashRecords] = useState<Page[]>([])
   const [pageTags, setPageTags] = useState<Record<string, string[]>>(tagMap)
   const [documents, setDocuments] = useState<Record<string, Record<string, unknown>>>({})
+  const documentsRef = useRef(documents)
   const loadedDocumentIds = useRef(new Set<string>())
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
   const [syncError, setSyncError] = useState<string>()
@@ -81,18 +118,36 @@ export function useWorkspaceData() {
   const privateNotebookIds = useMemo(() => new Set(notebookRecords.filter((notebook) => notebook.locked).map((notebook) => notebook.id)), [notebookRecords])
   const privateSectionIds = useMemo(() => new Set(sectionRecords.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id)), [privateNotebookIds, sectionRecords])
 
+  useEffect(() => {
+    documentsRef.current = documents
+  }, [documents])
+
   const reload = useCallback(async () => {
     const documentIds = [...loadedDocumentIds.current]
+    const loadEveryPage = async () => {
+      const items: Page[] = []
+      let cursor: string | undefined
+      do {
+        const batch = await repository.listPages({ includeDeleted: true, limit: 500, cursor })
+        items.push(...batch.items)
+        cursor = batch.nextCursor
+      } while (cursor)
+      return items
+    }
     const [loadedNotebooks, loadedPages, loadedDocuments] = await Promise.all([
-      repository.listNotebooks(WORKSPACE_ID), repository.listPages({ includeDeleted: true, limit: 500 }),
-      Promise.all(documentIds.map(async (pageId) => ({ document: await repository.getPageDocument(pageId), assets: await repository.listAssets(pageId) }))),
+      repository.listNotebooks(WORKSPACE_ID), loadEveryPage(),
+      Promise.all(documentIds.map(async (pageId) => {
+        const [document, assets] = await Promise.all([repository.getPageDocument(pageId), repository.listAssets(pageId)])
+        if (!document) return { document, assets }
+        return { document: { ...document, tiptapJson: await editorDocumentFromStorage(document, assets) }, assets }
+      })),
     ])
     const loadedSections = (await Promise.all(loadedNotebooks.map((item) => repository.listSections(item.id)))).flat()
     setNotebookRecords(loadedNotebooks)
     setSectionRecords(loadedSections)
-    const livePages = loadedPages.items.filter((page) => !page.deletedAt)
+    const livePages = loadedPages.filter((page) => !page.deletedAt)
     setPageRecords(livePages)
-    setTrashRecords(loadedPages.items.filter((page) => page.deletedAt))
+    setTrashRecords(loadedPages.filter((page) => page.deletedAt))
     const tags = await repository.listTags(WORKSPACE_ID)
     const names = new Map(tags.map((tag) => [tag.id, tag.name]))
     const associations = await Promise.all(livePages.map(async (page) => [page.id, (await repository.listPageTags(page.id)).flatMap((item) => names.get(item.tagId) ?? [])] as const))
@@ -101,11 +156,12 @@ export function useWorkspaceData() {
       setDocuments((current) => {
         const next = { ...current }
         documentIds.forEach((pageId, index) => {
-          const { document, assets } = loadedDocuments[index]!
-          if (document) next[pageId] = document.markdown !== undefined && isEmptyEditorCache(document.tiptapJson)
-            ? markdownToEditorCache(document.markdown, assets)
-            : document.tiptapJson
-          else delete next[pageId]
+          const { document } = loadedDocuments[index]!
+          if (document) next[pageId] = document.tiptapJson
+          // A legacy/seed page may not have a persisted body yet. Keep the
+          // already-open empty editor instead of replacing it with a permanent
+          // loading placeholder during an overlapping library refresh.
+          else if (!next[pageId]) next[pageId] = emptyEditorDocument()
         })
         return next
       })
@@ -124,17 +180,21 @@ export function useWorkspaceData() {
         })
       }
       if (!cancelled) await reload()
+      if (!cancelled && globalThis.localStorage?.getItem(REFERENCE_INDEX_VERSION_KEY) !== '1') {
+        await rebuildReferenceIndex()
+        globalThis.localStorage?.setItem(REFERENCE_INDEX_VERSION_KEY, '1')
+      }
     })()
     return () => { cancelled = true }
   }, [reload])
 
-  const syncNow = useCallback(async (options?: { signal?: AbortSignal; force?: boolean }) => {
+  const syncNow = useCallback(async (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode }) => {
       if (syncRunning.current) return false
       syncRunning.current = true
       setSyncState('syncing')
       setSyncError(undefined)
       try {
-        const result = await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force)
+        const result = await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         setSyncState(result.state)
         if (result.state !== 'offline') await reload()
         return result.state !== 'offline'
@@ -174,27 +234,44 @@ export function useWorkspaceData() {
 
   const loadDocument = useCallback(async (pageId: string) => {
     loadedDocumentIds.current.add(pageId)
-    if (documents[pageId]) return documents[pageId]
-    const document = await repository.getPageDocument(pageId)
-    if (!document) return undefined
-    const tiptapJson = document.markdown !== undefined && isEmptyEditorCache(document.tiptapJson)
-      ? markdownToEditorCache(document.markdown, await repository.listAssets(pageId))
-      : document.tiptapJson
-    setDocuments((current) => ({ ...current, [pageId]: tiptapJson }))
-    return tiptapJson
-  }, [documents])
+    if (documentsRef.current[pageId]) return documentsRef.current[pageId]
+    const inFlight = documentLoadPromises.get(pageId)
+    if (inFlight) return inFlight
+    const operation = (async () => {
+      const document = await repository.getPageDocument(pageId)
+      if (!document) {
+        const empty = emptyEditorDocument()
+        setDocuments((current) => ({ ...current, [pageId]: empty }))
+        return empty
+      }
+      const assets = document.markdown !== undefined && isEmptyEditorCache(document.tiptapJson)
+        ? await repository.listAssets(pageId)
+        : []
+      const tiptapJson = await editorDocumentFromStorage(document, assets)
+      setDocuments((current) => current[pageId] === tiptapJson ? current : ({ ...current, [pageId]: tiptapJson }))
+      return tiptapJson
+    })()
+    documentLoadPromises.set(pageId, operation)
+    try {
+      return await operation
+    } finally {
+      if (documentLoadPromises.get(pageId) === operation) documentLoadPromises.delete(pageId)
+    }
+  }, [])
 
   const saveDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
     loadedDocumentIds.current.add(pageId)
     const updatedAt = new Date().toISOString()
-    const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt }
+    const normalized = normalizeReferenceTargetIds(tiptapJson)
+    const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(normalized), tiptapJson: normalized, updatedAt }
     await repository.stageDraft(document)
     await enqueuePageMutation(pageId, async () => {
       const page = await repository.getPage(pageId)
       if (!page) return
       await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
-      setDocuments((current) => ({ ...current, [pageId]: tiptapJson }))
-      if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(tiptapJson)).catch(() => undefined)
+      await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
+      setDocuments((current) => ({ ...current, [pageId]: normalized }))
+      if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(normalized)).catch(() => undefined)
     })
   }, [privateSectionIds])
 
@@ -203,13 +280,59 @@ export function useWorkspaceData() {
     await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt })
   }, [])
 
-  const createPage = useCallback(async (sectionId: string, kind: Page['kind'] = 'document') => {
+  const loadBacklinks = useCallback((pageId: string) => repository.listBacklinks(pageId), [])
+  const loadUnlinkedMentions = useCallback(async (pageId: string, signal?: AbortSignal) => {
+    const target = pageRecords.find((page) => page.id === pageId)
+    const title = target?.title.trim()
+    if (!target || !title || title.length < 2) return []
+    const normalizedTitle = title.toLocaleLowerCase()
+    if (signal?.aborted) return []
+    const candidateIds = new Set(pageRecords
+      .filter((source) => source.id !== pageId && !source.deletedAt && !source.locked && !privateSectionIds.has(source.sectionId ?? ''))
+      .map((source) => source.id))
+    // Reuse the incremental workspace search cache to narrow the candidate
+    // set. Exact verification below prevents fuzzy search results from being
+    // reported as mentions while avoiding one IndexedDB read per page.
+    const candidates = (await repository.searchWorkspaceCandidates(WORKSPACE_ID, title, Math.max(50, candidateIds.size)))
+      .filter((source) => candidateIds.has(source.id))
+    const mentions: { pageId: string; excerpt: string }[] = []
+    for (let offset = 0; offset < candidates.length; offset += 8) {
+      if (signal?.aborted) return []
+      const batch = candidates.slice(offset, offset + 8)
+      const documents = await Promise.all(batch.map((source) => repository.getPageDocument(source.id)))
+      batch.forEach((source, index) => {
+        const document = documents[index]
+        if (!document) return
+        const markdown = document.markdown ?? documentToMarkdown(document.tiptapJson)
+        const withoutReferences = markdown.replace(/!?\[\[[^\]]+\]\]/g, '')
+        const matchIndex = withoutReferences.toLocaleLowerCase().indexOf(normalizedTitle)
+        if (matchIndex < 0) return
+        mentions.push({
+          pageId: source.id,
+          excerpt: withoutReferences.slice(Math.max(0, matchIndex - 38), matchIndex + title.length + 70).replace(/\s+/g, ' ').trim(),
+        })
+      })
+      if (offset + 8 < candidates.length) await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+    }
+    return mentions
+  }, [pageRecords, privateSectionIds])
+
+  const createPage = useCallback(async (sectionId: string, kind: Page['kind'] = 'document', parentPageId?: string) => {
     const now = new Date().toISOString()
-    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, kind, title: kind === 'task' ? '新任务' : '无标题页面', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
-    await repository.savePage(page)
-    await reload()
+    const siblings = pageRecords.filter((item) => item.sectionId === sectionId && item.parentPageId === parentPageId && !item.deletedAt)
+    const sortOrder = Math.max(0, ...siblings.map((item) => item.sortOrder ?? 0)) + 1000
+    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, kind, title: kind === 'task' ? '新任务' : '无标题页面', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
+    const tiptapJson = emptyEditorDocument()
+    const document: PageDocument = { pageId: page.id, schemaVersion: 3, markdown: '', tiptapJson, updatedAt: now }
+    // Create the page and its canonical empty body together. Updating the local
+    // React state directly avoids a full-library reload and ensures a new page
+    // opens as an editor immediately rather than showing a loading placeholder.
+    await repository.savePage(page, document)
+    loadedDocumentIds.current.add(page.id)
+    setPageRecords((current) => [page, ...current])
+    setDocuments((current) => ({ ...current, [page.id]: tiptapJson }))
     return page.id
-  }, [privateSectionIds, reload])
+  }, [pageRecords, privateSectionIds])
 
   const createNotebook = useCallback(async (name: string) => {
     const now = new Date().toISOString()
@@ -263,18 +386,46 @@ export function useWorkspaceData() {
     })
   }, [reload])
 
+  const movePageInTree = useCallback(async (pageId: string, sectionId: string, parentPageId: string | undefined, sortOrder: number) => {
+    await enqueuePageMutation(pageId, async () => {
+      const page = await repository.getPage(pageId)
+      if (!page) throw new Error(`Page not found: ${pageId}`)
+      if (parentPageId === pageId) throw new Error('页面不能成为自己的子页面')
+      const livePages = pageRecords.filter((item) => !item.deletedAt)
+      let cursor = parentPageId
+      const seen = new Set<string>()
+      while (cursor) {
+        if (cursor === pageId) throw new Error('不能把父页面移动到自己的子页面下')
+        if (seen.has(cursor)) throw new Error('检测到无效的页面循环')
+        seen.add(cursor)
+        cursor = livePages.find((item) => item.id === cursor)?.parentPageId
+      }
+      const now = new Date().toISOString()
+      await repository.savePage({ ...page, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+      if (page.sectionId !== sectionId) {
+        const descendants = treePageIds(livePages, pageId).slice(1)
+        for (const descendantId of descendants) {
+          const descendant = livePages.find((item) => item.id === descendantId)
+          if (descendant) await repository.savePage({ ...descendant, sectionId, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+        }
+      }
+      await reload()
+    })
+  }, [pageRecords, reload])
+
   const loadTaskSteps = useCallback((pageId: string) => repository.listTaskSteps(pageId), [])
   const saveTaskSteps = useCallback((pageId: string, steps: import('@notebook/domain').TaskStep[]) => repository.saveTaskSteps(pageId, steps), [])
 
   const importFiles = useCallback(async (files: ImportFile[], sectionId: string) => {
     const textFiles = files.filter((file) => /\.(md|markdown|txt|html?)$/i.test(file.name))
-    for (const file of textFiles) {
+    const firstOrder = Math.max(0, ...pageRecords.filter((page) => page.sectionId === sectionId && !page.parentPageId && !page.deletedAt).map((page) => page.sortOrder ?? 0)) + 1000
+    for (const [index, file] of textFiles.entries()) {
       const now = new Date().toISOString()
       const id = crypto.randomUUID()
       const source = new TextDecoder().decode(file.data)
       const documentJson = /\.html?$/i.test(file.name) ? htmlToDocument(source) : markdownToDocument(source)
       const title = file.name.replace(/\.(md|markdown|txt|html?)$/i, '') || '导入页面'
-      const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
+      const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId, sortOrder: firstOrder + index * 1000, treeUpdatedAt: now, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
       await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown: /\.html?$/i.test(file.name) ? documentToMarkdown(documentJson) : source, tiptapJson: documentJson, updatedAt: now })
     }
     const bundleFiles = files.filter((file) => !/\.(md|markdown|txt|html?)$/i.test(file.name))
@@ -286,7 +437,7 @@ export function useWorkspaceData() {
     }
     await reload()
     return textFiles.length + (decoded?.bundle.pages.length ?? 0)
-  }, [reload])
+  }, [pageRecords, reload])
 
   const exportWorkspace = useCallback(async () => {
     const bundle = await repository.exportData(WORKSPACE_ID)
@@ -313,9 +464,23 @@ export function useWorkspaceData() {
     const visible = includeLocked ? results : results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))
     return limit == null ? visible : visible.slice(0, limit)
   }, [privateSectionIds])
-  const moveToTrash = useCallback(async (pageId: string) => { await repository.movePageToTrash(pageId, new Date().toISOString(), legacyDeviceId()); await reload() }, [reload])
-  const restorePage = useCallback(async (pageId: string) => { await repository.restorePage(pageId); await reload() }, [reload])
-  const purgePage = useCallback(async (pageId: string) => { await repository.purgePage(pageId, new Date().toISOString(), legacyDeviceId()); await reload() }, [reload])
+  const moveToTrash = useCallback(async (pageId: string) => {
+    const ids = treePageIds(pageRecords, pageId)
+    const deletedAt = new Date().toISOString()
+    for (const id of [...ids].reverse()) await repository.movePageToTrash(id, deletedAt, legacyDeviceId())
+    await reload()
+  }, [pageRecords, reload])
+  const restorePage = useCallback(async (pageId: string) => {
+    const ids = treePageIds(trashRecords, pageId)
+    for (const id of ids) await repository.restorePage(id)
+    await reload()
+  }, [reload, trashRecords])
+  const purgePage = useCallback(async (pageId: string) => {
+    const ids = treePageIds(trashRecords, pageId)
+    const deletedAt = new Date().toISOString()
+    for (const id of [...ids].reverse()) await repository.purgePage(id, deletedAt, legacyDeviceId())
+    await reload()
+  }, [reload, trashRecords])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])
@@ -330,7 +495,21 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
+}
+
+function treePageIds(records: Page[], rootId: string) {
+  const result: string[] = []
+  const queue = [rootId]
+  const seen = new Set<string>()
+  while (queue.length) {
+    const id = queue.shift()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    result.push(id)
+    queue.push(...records.filter((page) => page.parentPageId === id).map((page) => page.id))
+  }
+  return result
 }
 
 function extractDocumentText(value: unknown): string {

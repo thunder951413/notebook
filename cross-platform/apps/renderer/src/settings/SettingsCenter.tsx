@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/react-components'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
+import type { LegacySyncMode } from '../sync/legacySshSync'
 
 type SettingsPage = 'general' | 'data' | 'services'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
@@ -22,7 +23,7 @@ interface SettingsCenterProps {
   privacyUnlocked: boolean
   onClose: () => void
   onToggleTheme: () => void
-  onSyncNow: () => Promise<boolean>
+  onSyncNow: (mode?: LegacySyncMode) => Promise<boolean>
   onImport: () => void
   onExportPage: (format: 'md' | 'html') => void
   onPrint: () => void
@@ -53,7 +54,7 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
   useEffect(() => setPage(initialPage), [initialPage])
   useEffect(() => { void hasLegacySshPassword().then(setStoredSshPassword) }, [])
 
-  const saveAndSync = async () => {
+  const saveAndSync = async (mode: LegacySyncMode = 'bidirectional') => {
     if (savingSync || syncState === 'syncing') return
     setSavingSync(true)
     setSyncMessage(undefined)
@@ -63,9 +64,9 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
       if (sshPassword) { setStoredSshPassword(true); setSshPassword('') }
       const saved = await saveSyncSettings(syncSettings)
       setSyncSettings(saved)
-      const succeeded = await onSyncNow()
+      const succeeded = await onSyncNow(mode)
       setSyncMessage(succeeded
-        ? '设置已保存，同步已完成。'
+        ? mode === 'pull' ? '设置已保存，远端内容已拉取并安全合并到本机。' : mode === 'push' ? '设置已保存，本机变化已在校验远端后安全推送。' : '设置已保存，双向同步已完成。'
         : !navigator.onLine
           ? `设置已保存；当前离线${saved.enabled ? '，将在联网后自动同步' : ''}。`
           : '设置已保存，但本次同步未完成，请查看上方同步状态。')
@@ -136,7 +137,13 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
                   <label><span>远端同步目录</span><Input value={sshSettings.remotePath} onChange={(_, data) => setSshSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="~/notebook_backup" aria-label="远端同步目录" /></label>
                   <label><span>服务器主机指纹</span><Input readOnly value={sshSettings.fingerprint} placeholder="首次成功连接后自动记录 SHA256 指纹" aria-label="SSH 主机指纹" /></label>
                 {sshSettings.fingerprint && <div className="settings-action-grid"><Button onClick={resetSshFingerprint}>重新核对主机指纹</Button></div>}
-                <div className="settings-action-grid"><Button appearance="primary" disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync()}>{savingSync || syncState === 'syncing' ? '正在同步…' : '保存并立即同步'}</Button>{storedSshPassword && <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void removeSshPassword()}>清除 SSH 密码</Button>}</div>
+                <div className="sync-mode-actions" aria-label="SSH 同步方式">
+                  <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync('push')}>推送本机变化</Button>
+                  <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync('pull')}>拉取并合并</Button>
+                  <Button appearance="primary" disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync('bidirectional')}>{savingSync || syncState === 'syncing' ? '正在同步…' : '双向同步'}</Button>
+                </div>
+                <p className="settings-note">“推送”会先读取并校验远端索引，发现其他设备的新内容时先安全合并，避免覆盖 Android 的修改；“拉取”只更新本机，不发布本机待同步内容；日常使用建议选择“双向同步”。</p>
+                {storedSshPassword && <div className="settings-action-grid"><Button disabled={savingSync || syncState === 'syncing'} onClick={() => void removeSshPassword()}>清除 SSH 密码</Button></div>}
                 {onPublishSshArchive && <label className="settings-file-action"><span>首次迁移遇到超大历史库时，可直接发布由迁移工具生成的 SSH 仓库 ZIP。</span><input type="file" accept=".zip,application/zip" aria-label="发布迁移仓库 ZIP" disabled={savingSync || syncState === 'syncing'} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file || savingSync || syncState === 'syncing') return; setSavingSync(true); setSyncMessage('正在发布迁移仓库…'); void onPublishSshArchive(file).then(() => setSyncMessage('迁移仓库已发布到 SSH 服务器。')).catch((error) => setSyncMessage(error instanceof Error ? error.message : '迁移仓库发布失败')).finally(() => setSavingSync(false)) }} /></label>}
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${syncError ? 'error' : ''}`} role="status">{syncError ?? syncMessage}</div>}
               <Text size={200}>Android 中填写相同的服务器、端口、用户名、密码和远端目录即可双向同步。首次连接后请核对各端显示的 SHA256 主机指纹；同一服务器可能按客户端能力提供不同算法的主机密钥。</Text>

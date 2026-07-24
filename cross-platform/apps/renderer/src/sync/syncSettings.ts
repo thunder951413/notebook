@@ -2,7 +2,7 @@ export const DEFAULT_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 import { loadSyncBackend } from './legacySshSettings'
 const SETTINGS_KEY = 'notebook-sync-settings-v1'
 const BROWSER_TOKEN_KEY = 'notebook-sync-token'
-export { loadSyncBackend, saveSyncBackend, type SyncBackend } from './legacySshSettings'
+export { saveSyncBackend } from './legacySshSettings'
 
 export interface SyncSettings {
   enabled: boolean
@@ -48,10 +48,6 @@ export async function saveSyncSettings(settings: Pick<SyncSettings, 'enabled' | 
 export async function getSyncToken(): Promise<string | undefined> {
   if (window.notebookDesktop) return window.notebookDesktop.secrets.get('sync-token')
   return window.sessionStorage?.getItem(BROWSER_TOKEN_KEY) ?? undefined
-}
-
-export async function hasSyncToken(): Promise<boolean> {
-  return Boolean(await getSyncToken())
 }
 
 export async function clearSyncToken(): Promise<void> {

@@ -23,7 +23,7 @@ import type {
   PageRevision,
   PageComment,
 } from '@notebook/domain'
-import { markdownToEditorCache, migrateLegacyPageDocument, sha256Hex, tiptapToMarkdown } from '@notebook/sync-contract'
+import { legacyTiptapToCanonicalMarkdown, markdownToEditorCache, migrateLegacyPageDocument, sha256Hex, tiptapToMarkdown } from '@notebook/sync-contract'
 
 export interface SyncOutboxItem {
   id: string
@@ -37,7 +37,7 @@ export interface SyncOutboxItem {
 }
 
 function compactRevisions(documents: PageDocument[], revisions: PageRevision[]) {
-  const signature = (document: PageDocument) => document.markdown ?? tiptapToMarkdown(document.tiptapJson)
+  const signature = (document: PageDocument) => document.markdown ?? legacyTiptapToCanonicalMarkdown(document.tiptapJson)
   const currentDocuments = new Map(documents.map((document) => [document.pageId, signature(document)]))
   const byPage = new Map<string, PageRevision[]>()
   for (const revision of revisions) {
@@ -129,6 +129,15 @@ interface SyncCursor { workspaceId: string; cursor: number }
 interface SyncVersion { id: string; version: number }
 interface AssetContent { id: string; data: Blob }
 interface PageDraft { pageId: string; document: PageDocument; createdAt: string }
+interface EditorCache {
+  pageId: string
+  sourceVersion: string
+  tiptapJson: Record<string, unknown>
+  byteSize: number
+  accessedAt: string
+}
+
+const MAX_EDITOR_CACHE_BYTES = 64 * 1024 * 1024
 
 export class NotebookRendererDatabase extends Dexie {
   notebooks!: EntityTable<Notebook, 'id'>
@@ -151,6 +160,7 @@ export class NotebookRendererDatabase extends Dexie {
   revisions!: EntityTable<PageRevision, 'id'>
   comments!: EntityTable<PageComment, 'id'>
   drafts!: EntityTable<PageDraft, 'pageId'>
+  editorCaches!: EntityTable<EditorCache, 'pageId'>
 
   constructor(name = 'notebook-next') {
     super(name)
@@ -194,7 +204,7 @@ export class NotebookRendererDatabase extends Dexie {
       const drafts = transaction.table<PageDraft>('drafts')
       const legacyDocuments = (await documents.toArray()).filter((document) => document.schemaVersion < 3 || document.markdown === undefined)
       for (const document of legacyDocuments) {
-        const previousMarkdown = tiptapToMarkdown(document.tiptapJson)
+        const previousMarkdown = legacyTiptapToCanonicalMarkdown(document.tiptapJson)
         const migrated = migrateLegacyPageDocument(document)
         await revisions.put({
           id: crypto.randomUUID(),
@@ -297,6 +307,31 @@ export class NotebookRendererDatabase extends Dexie {
         if (preview !== page.preview) await pages.put({ ...page, preview, syncStatus: 'pending' })
       }
     })
+    this.version(16).stores({
+      pages: 'id, workspaceId, sectionId, parentPageId, kind, updatedAt, treeUpdatedAt, deletedAt, syncStatus, *title, [sectionId+parentPageId+sortOrder]',
+    }).upgrade(async (transaction) => {
+      const pages = transaction.table<Page>('pages')
+      const records = (await pages.toArray()).sort((left, right) =>
+        (left.sectionId ?? '').localeCompare(right.sectionId ?? '')
+        || left.createdAt.localeCompare(right.createdAt)
+        || left.id.localeCompare(right.id))
+      const counters = new Map<string, number>()
+      for (const page of records) {
+        if (page.sortOrder !== undefined && page.treeUpdatedAt) continue
+        const key = `${page.sectionId ?? ''}:${page.parentPageId ?? ''}`
+        const sortOrder = page.sortOrder ?? (counters.get(key) ?? 0) + 1000
+        counters.set(key, Math.max(counters.get(key) ?? 0, sortOrder))
+        await pages.put({
+          ...page,
+          sortOrder,
+          treeUpdatedAt: page.treeUpdatedAt ?? page.createdAt,
+          syncStatus: page.syncStatus === 'conflict' ? 'conflict' : 'pending',
+        })
+      }
+    })
+    // Parsed editor JSON is device-local and disposable. Keeping it outside
+    // `documents` prevents it from entering sync, history, or exported data.
+    this.version(17).stores({ editorCaches: 'pageId, sourceVersion, accessedAt' })
   }
 }
 
@@ -361,6 +396,21 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   constructor(readonly db = new NotebookRendererDatabase()) {}
 
+  private async getSearchCache(workspaceId: UUID) {
+    let cached = this.searchCache.get(workspaceId)
+    if (!cached) {
+      const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
+      const pageIds = new Set(pages.map((page) => page.id))
+      const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
+      const textByPage = new Map(documents.map((document) => [document.pageId, document.markdown ?? extractText(document.tiptapJson)]))
+      const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
+      index.addAll(pages.map((page) => ({ id: page.id, title: page.title, preview: page.preview, content: textByPage.get(page.id) ?? '' })))
+      cached = { pages, textByPage, index }
+      this.searchCache.set(workspaceId, cached)
+    }
+    return cached
+  }
+
   async listNotebooks(workspaceId: UUID): Promise<Notebook[]> {
     return (await this.db.notebooks.where('workspaceId').equals(workspaceId).toArray())
       .filter((item) => !item.deletedAt)
@@ -391,6 +441,29 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   getPage(id: UUID) { return this.db.pages.get(id) }
   getPageDocument(pageId: UUID) { return this.db.documents.get(pageId) }
+  async getEditorCache(pageId: UUID, sourceVersion: string) {
+    const cached = await this.db.editorCaches.get(pageId)
+    if (!cached) return undefined
+    if (cached.sourceVersion !== sourceVersion) {
+      await this.db.editorCaches.delete(pageId)
+      return undefined
+    }
+    void this.db.editorCaches.update(pageId, { accessedAt: new Date().toISOString() })
+    return cached.tiptapJson
+  }
+  async saveEditorCache(pageId: UUID, sourceVersion: string, tiptapJson: Record<string, unknown>) {
+    const byteSize = new Blob([JSON.stringify(tiptapJson)]).size
+    await this.db.editorCaches.put({ pageId, sourceVersion, tiptapJson, byteSize, accessedAt: new Date().toISOString() })
+    const records = await this.db.editorCaches.orderBy('accessedAt').toArray()
+    let total = records.reduce((sum, item) => sum + item.byteSize, 0)
+    const expired: string[] = []
+    for (const item of records) {
+      if (total <= MAX_EDITOR_CACHE_BYTES) break
+      expired.push(item.pageId)
+      total -= item.byteSize
+    }
+    if (expired.length) await this.db.editorCaches.bulkDelete(expired)
+  }
   async saveNotebook(notebook: Notebook) {
     await this.db.transaction('rw', [this.db.notebooks, this.db.syncOutbox, this.db.syncVersions], async () => {
       await this.db.notebooks.put(notebook)
@@ -420,12 +493,14 @@ export class DexieNotebookRepository implements NotebookRepository {
     })
   }
   async deleteSection(sectionId: UUID, deletedAt: string, deviceId: string) {
+    const section = await this.db.sections.get(sectionId)
+    if (!section) return
+    const notebook = await this.db.notebooks.get(section.notebookId)
+    if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
+    const pages = await this.db.pages.where('sectionId').equals(sectionId).toArray()
+    for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
     await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions], async () => {
-      const section = await this.db.sections.get(sectionId)
-      if (!section) return
-      const notebook = await this.db.notebooks.get(section.notebookId)
-      if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
-      if (await this.db.pages.where('sectionId').equals(sectionId).count()) throw new Error('分区中仍有页面（含回收站页面），请先移动或永久删除这些页面')
+      if (await this.db.pages.where('sectionId').equals(sectionId).count()) throw new Error('分区内容正在变化，请重试删除')
       const tombstone: Tombstone = { id: `section:${sectionId}`, workspaceId: notebook.workspaceId, entityType: 'section', entityId: sectionId, deletedAt, deviceId }
       await this.db.sections.delete(sectionId)
       await this.db.tombstones.put(tombstone)
@@ -447,6 +522,8 @@ export class DexieNotebookRepository implements NotebookRepository {
       ...source,
       id: newPageId,
       title: `${source.title} 副本`,
+      sortOrder: (source.sortOrder ?? 0) + 1,
+      treeUpdatedAt: createdAt,
       createdAt,
       updatedAt: createdAt,
       deletedAt: undefined,
@@ -510,7 +587,7 @@ export class DexieNotebookRepository implements NotebookRepository {
           const revision: PageRevision = {
             id: crypto.randomUUID(),
             pageId: page.id,
-            document: { ...existing, markdown: existing.markdown ?? tiptapToMarkdown(existing.tiptapJson), tiptapJson: { type: 'doc', content: [] }, yjsState: undefined },
+            document: { ...existing, markdown: existing.markdown ?? legacyTiptapToCanonicalMarkdown(existing.tiptapJson), tiptapJson: { type: 'doc', content: [] }, yjsState: undefined },
             createdAt: document.updatedAt,
             reason: 'autosave',
           }
@@ -599,6 +676,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         this.db.revisions.where('pageId').equals(pageId).delete(),
         this.db.comments.where('pageId').equals(pageId).delete(),
         this.db.drafts.delete(pageId),
+        this.db.editorCaches.delete(pageId),
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
@@ -716,6 +794,7 @@ export class DexieNotebookRepository implements NotebookRepository {
   }
 
   listPageLinks(pageId: UUID) { return this.db.pageLinks.where('sourcePageId').equals(pageId).toArray() }
+  listBacklinks(pageId: UUID) { return this.db.pageLinks.where('targetPageId').equals(pageId).toArray() }
 
   async replacePageLinks(pageId: UUID, links: PageLink[]): Promise<void> {
     if (links.some((link) => link.sourcePageId !== pageId)) throw new Error('All links must originate from the requested page')
@@ -728,6 +807,14 @@ export class DexieNotebookRepository implements NotebookRepository {
       const nextIds = new Set(links.map((link) => link.id))
       for (const removed of previous.filter((link) => !nextIds.has(link.id))) await this.enqueueChange(page.workspaceId, 'page_link', removed.id, 'delete', {})
       for (const link of links) await this.enqueueChange(page.workspaceId, 'page_link', link.id, 'upsert', { ...link })
+    })
+  }
+
+  async replaceDerivedPageLinks(pageId: UUID, links: PageLink[]): Promise<void> {
+    if (links.some((link) => link.sourcePageId !== pageId)) throw new Error('All links must originate from the requested page')
+    await this.db.transaction('rw', this.db.pageLinks, async () => {
+      await this.db.pageLinks.where('sourcePageId').equals(pageId).delete()
+      await this.db.pageLinks.bulkPut(links)
     })
   }
 
@@ -897,17 +984,7 @@ export class DexieNotebookRepository implements NotebookRepository {
     return document
   }
   async searchWorkspace(workspaceId: UUID, query: string, limit = 50): Promise<Page[]> {
-    let cached = this.searchCache.get(workspaceId)
-    if (!cached) {
-      const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
-      const pageIds = new Set(pages.map((page) => page.id))
-      const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
-      const textByPage = new Map(documents.map((document) => [document.pageId, document.markdown ?? extractText(document.tiptapJson)]))
-      const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
-      index.addAll(pages.map((page) => ({ id: page.id, title: page.title, preview: page.preview, content: textByPage.get(page.id) ?? '' })))
-      cached = { pages, textByPage, index }
-      this.searchCache.set(workspaceId, cached)
-    }
+    const cached = await this.getSearchCache(workspaceId)
     const { pages, textByPage, index } = cached
     // A Chinese phrase yields both a full token and overlapping CJK bigrams.
     // MiniSearch's default OR combination can otherwise rank pages sharing one
@@ -926,6 +1003,23 @@ export class DexieNotebookRepository implements NotebookRepository {
     const strictIds = index.search(query, { prefix: true, fuzzy: 0.15, combineWith: 'AND' }).map((result) => String(result.id))
     const fallbackIds = index.search(query, { prefix: true, fuzzy: 0.15 }).map((result) => String(result.id))
     const ids = [...new Set([...exactIds, ...strictIds, ...fallbackIds])].slice(0, limit)
+    const byId = new Map(pages.map((page) => [page.id, page]))
+    return ids.flatMap((id) => byId.get(id) ?? [])
+  }
+
+  /**
+   * Returns a high-recall candidate set using only the cached inverted index.
+   * Unlike the user-facing search ranking above, this deliberately avoids the
+   * O(page count) exact-substring pass. Callers must verify the small result
+   * set before presenting an exact semantic such as an unlinked mention.
+   */
+  async searchWorkspaceCandidates(workspaceId: UUID, query: string, limit = 200): Promise<Page[]> {
+    const { pages, index } = await this.getSearchCache(workspaceId)
+    const strictIds = index.search(query, { prefix: true, fuzzy: false, combineWith: 'AND' }).map((result) => String(result.id))
+    const fallbackIds = strictIds.length
+      ? []
+      : index.search(query, { prefix: true, fuzzy: 0.15 }).map((result) => String(result.id))
+    const ids = [...new Set([...strictIds, ...fallbackIds])].slice(0, limit)
     const byId = new Map(pages.map((page) => [page.id, page]))
     return ids.flatMap((id) => byId.get(id) ?? [])
   }

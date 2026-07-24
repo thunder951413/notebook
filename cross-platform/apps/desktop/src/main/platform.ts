@@ -2,10 +2,19 @@ import { app, dialog, ipcMain, Notification, safeStorage, shell, type IpcMainInv
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
 import { pullLegacyRepository, pushLegacyRepository, type LegacySftpFile, type LegacySshConnection } from './legacySftp'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
+const execFileAsync = promisify(execFile)
+
+function macInputSourceHelperPath() {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'bin', 'notebook-input-source')
+    : join(app.getAppPath(), 'build', 'notebook-input-source')
+}
 
 function assertTrustedSender(event: IpcMainInvokeEvent) {
   const url = event.senderFrame?.url ?? event.sender.getURL()
@@ -96,6 +105,18 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     const url = new URL(value)
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Only HTTP(S) links may be opened externally')
     await shell.openExternal(url.toString())
+  })
+
+  ipcMain.handle('platform:useAbcInputSource', async (event) => {
+    assertTrustedSender(event)
+    if (process.platform !== 'darwin') return false
+    try {
+      await execFileAsync(macInputSourceHelperPath(), [], { timeout: 1_500, windowsHide: true })
+      return true
+    } catch (error) {
+      console.warn('Unable to switch the macOS input source to ABC', error)
+      return false
+    }
   })
 
   ipcMain.handle('files:pickOpen', async (event) => {
