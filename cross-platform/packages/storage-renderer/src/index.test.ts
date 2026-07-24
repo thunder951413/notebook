@@ -405,6 +405,38 @@ test('creates a compact manual revision and enqueues it for synchronization', as
   expect((await repository.listOutbox(value.workspaceId)).some((item) => item.entityType === 'revision' && item.entityId === revision.id)).toBe(true)
 })
 
+test('resets every page to one current-content baseline revision', async () => {
+  const repository = makeRepository()
+  const first = page('page-reset-first', 'First')
+  const second = page('page-reset-second', 'Second')
+  const empty = page('page-reset-empty', 'Empty')
+  const document = (value: typeof first, markdown: string): PageDocument => ({
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown,
+    tiptapJson: { type: 'doc', content: [] },
+    updatedAt: value.updatedAt,
+  })
+  await repository.importData({
+    notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
+    pages: [first, second, empty],
+    documents: [document(first, 'current first'), document(second, 'current second')],
+    revisions: [
+      { id: 'old-first-a', pageId: first.id, document: document(first, 'old A'), createdAt: first.createdAt, reason: 'import' },
+      { id: 'old-first-b', pageId: first.id, document: document(first, 'old B'), createdAt: first.updatedAt, reason: 'import' },
+      { id: 'old-second', pageId: second.id, document: document(second, 'old second'), createdAt: second.createdAt, reason: 'import' },
+    ],
+  })
+
+  const result = await repository.resetRevisionHistory(first.workspaceId)
+
+  expect(result).toEqual({ pageCount: 3, removedRevisionCount: 3 })
+  const exported = await repository.exportData(first.workspaceId)
+  expect(exported.revisions).toHaveLength(3)
+  expect(exported.revisions.map((item) => item.document.markdown).sort()).toEqual(['', 'current first', 'current second'])
+  expect(exported.pages.every((item) => item.syncStatus === 'pending' && typeof item.legacyMetadata?.historyResetAt === 'string')).toBe(true)
+})
+
 test('removes consecutive duplicate imported revisions and a revision identical to the current body', async () => {
   const repository = makeRepository()
   const value = page('page-compact-history', 'Compact history')
@@ -415,6 +447,24 @@ test('removes consecutive duplicate imported revisions and a revision identical 
     pages: [value], documents: [document('current', 5)], revisions,
   })
   expect((await repository.listRevisions(value.id)).map((item) => item.document.markdown).sort()).toEqual(['A', 'B'])
+})
+
+test('refuses to erase the only non-empty copy of a page from revision history', async () => {
+  const repository = makeRepository()
+  const value = page('page-history-only-content', 'Recover me')
+  const blank: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: '', tiptapJson: { type: 'doc', content: [{ type: 'paragraph' }] }, updatedAt: value.updatedAt }
+  const original: PageDocument = { ...blank, markdown: 'irreplaceable original content' }
+  await repository.importData({
+    notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
+    pages: [value],
+    documents: [blank],
+    revisions: [{ id: 'only-original', pageId: value.id, document: original, createdAt: value.createdAt, reason: 'import' }],
+  })
+
+  await expect(repository.resetRevisionHistory(value.workspaceId)).rejects.toThrow(/Recover me.*历史版本仍有内容/)
+  const exported = await repository.exportData(value.workspaceId)
+  expect(exported.revisions).toHaveLength(1)
+  expect(exported.revisions[0]?.document.markdown).toBe('irreplaceable original content')
 })
 
 test('history compaction is idempotent when revisions share a timestamp', async () => {

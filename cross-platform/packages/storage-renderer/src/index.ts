@@ -1011,6 +1011,73 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   getAssetContent(id: UUID) { return this.db.assetContents.get(id).then((value) => value?.data) }
   listRevisions(pageId: UUID) { return this.db.revisions.where('pageId').equals(pageId).reverse().sortBy('createdAt') }
+  async resetRevisionHistory(workspaceId: UUID): Promise<{ pageCount: number; removedRevisionCount: number }> {
+    return this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
+      const pages = await this.db.pages.where('workspaceId').equals(workspaceId).toArray()
+      const pageIds = new Set(pages.map((page) => page.id))
+      const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
+      const previousRevisions = (await this.db.revisions.toArray()).filter((revision) => pageIds.has(revision.pageId))
+      const staleRevisionOutboxIds = (await this.db.syncOutbox.where('workspaceId').equals(workspaceId).toArray())
+        .filter((item) => item.entityType === 'revision')
+        .map((item) => item.id)
+      const resetAt = new Date().toISOString()
+      const documentsByPage = new Map(documents.map((document) => [document.pageId, document]))
+      const documentMarkdown = (document: PageDocument) => document.markdown ?? tiptapToMarkdown(document.tiptapJson)
+      const pagesWithHistoryOnlyContent = pages.filter((page) => {
+        const current = documentsByPage.get(page.id)
+        if (current && documentMarkdown(current).trim()) return false
+        return previousRevisions.some((revision) => revision.pageId === page.id && documentMarkdown(revision.document).trim())
+      })
+      if (pagesWithHistoryOnlyContent.length) {
+        const titles = pagesWithHistoryOnlyContent.slice(0, 5).map((page) => `“${page.title || '无标题页面'}”`).join('、')
+        const remaining = pagesWithHistoryOnlyContent.length > 5 ? `等 ${pagesWithHistoryOnlyContent.length} 篇页面` : ''
+        throw new Error(`已停止清理：${titles}${remaining}当前正文为空，但历史版本仍有内容。请先在“版本”中恢复需要保留的内容，再重试。`)
+      }
+
+      await this.db.revisions.bulkDelete(previousRevisions.map((revision) => revision.id))
+      if (staleRevisionOutboxIds.length) await this.db.syncOutbox.bulkDelete(staleRevisionOutboxIds)
+
+      const baselines: PageRevision[] = []
+      for (const page of pages) {
+        const document = documentsByPage.get(page.id) ?? {
+          pageId: page.id,
+          schemaVersion: 3,
+          markdown: '',
+          tiptapJson: { type: 'doc', content: [] },
+          updatedAt: resetAt,
+        }
+        if (!documentsByPage.has(page.id)) await this.db.documents.put(document)
+        const markdown = document.markdown ?? tiptapToMarkdown(document.tiptapJson)
+        const baseline: PageRevision = {
+          id: crypto.randomUUID(),
+          pageId: page.id,
+          pageIcon: page.icon ?? null,
+          document: {
+            ...document,
+            schemaVersion: Math.max(3, document.schemaVersion),
+            markdown,
+            tiptapJson: { type: 'doc', content: [] },
+            yjsState: undefined,
+          },
+          createdAt: resetAt,
+          reason: 'manual',
+        }
+        const updatedPage: Page = {
+          ...page,
+          updatedAt: resetAt,
+          legacyVersion: Math.max((page.legacyVersion ?? 0) + 1, Date.parse(resetAt)),
+          syncStatus: 'pending',
+          legacyMetadata: { ...page.legacyMetadata, historyResetAt: resetAt },
+        }
+        baselines.push(baseline)
+        await this.db.pages.put(updatedPage)
+        await this.enqueueChange(workspaceId, 'page', page.id, 'upsert', { ...updatedPage })
+        await this.enqueueChange(workspaceId, 'revision', baseline.id, 'upsert', { ...baseline })
+      }
+      if (baselines.length) await this.db.revisions.bulkPut(baselines)
+      return { pageCount: baselines.length, removedRevisionCount: previousRevisions.length }
+    })
+  }
   async createManualRevision(pageId: UUID): Promise<PageRevision> {
     return this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
       const page = await this.db.pages.get(pageId)

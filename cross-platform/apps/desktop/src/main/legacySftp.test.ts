@@ -100,4 +100,8 @@ test.runIf(enabled)('round-trips a v3 Markdown repository with content-addressed
   const pulled = await pullLegacyRepository(settings)
   expect(JSON.parse(Buffer.from(pulled.files.find((item) => item.name === `notes/${noteId}.json`)!.dataBase64, 'base64').toString('utf8'))).toEqual(note)
   expect(pulled.files.find((item) => item.name === `objects/aa/${objectHash}`)?.dataBase64).toBe(Buffer.from([4, 5, 6]).toString('base64'))
+  expect(pulled.objectHashes).toContain(objectHash)
+  const incremental = await pullLegacyRepository(settings, { knownObjectHashes: [objectHash] })
+  expect(incremental.files.some((item) => item.name === `objects/aa/${objectHash}`)).toBe(false)
+  expect(incremental.reusedObjectCount).toBe(1)
 })

@@ -71,7 +71,7 @@ const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
 
 export function App({ theme = 'light', onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const importInput = useRef<HTMLInputElement>(null)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -103,8 +103,8 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [settingsPage, setSettingsPage] = useState<'general' | 'data' | 'services'>('general')
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [dataRoot, setDataRoot] = useState<{ path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }>()
-  const [createRequest, setCreateRequest] = useState<'notebook' | 'section'>()
-  const [renameRequest, setRenameRequest] = useState<{ kind: 'notebook' | 'section'; id: string; name: string }>()
+  const [createRequest, setCreateRequest] = useState<'notebook' | 'rootPage'>()
+  const [renameRequest, setRenameRequest] = useState<{ kind: 'notebook'; id: string; name: string }>()
   const [movePageRequest, setMovePageRequest] = useState<PageSummary>()
   const [iconPickerPage, setIconPickerPage] = useState<PageSummary>()
   const [encryptedExportOpen, setEncryptedExportOpen] = useState(false)
@@ -117,7 +117,6 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [referencePickerOpen, setReferencePickerOpen] = useState(false)
   const [referenceHelpOpen, setReferenceHelpOpen] = useState(false)
   const [expandedPageIds, setExpandedPageIds] = useState<Set<string>>(readExpandedPageIds)
-  const [expandedSectionIds, setExpandedSectionIds] = useState<Set<string>>(() => new Set(['product']))
   const [pageDropTarget, setPageDropTarget] = useState<{ id: string; position: 'before' | 'inside' | 'after' }>()
   const [referenceNavigationTarget, setReferenceNavigationTarget] = useState<NotebookReferenceTarget>()
   const accessiblePages = useMemo(() => privacyUnlocked ? pages : pages.filter((page) => !page.locked), [pages, privacyUnlocked])
@@ -168,10 +167,6 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     if (!ancestors.length || ancestors.every((id) => expandedPageIds.has(id))) return
     setExpandedPageIds((current) => new Set([...current, ...ancestors]))
   }, [activePage, expandedPageIds, sectionPages])
-  useEffect(() => {
-    if (!activeSection || expandedSectionIds.has(activeSection)) return
-    setExpandedSectionIds((current) => new Set([...current, activeSection]))
-  }, [activeSection, expandedSectionIds])
   useEffect(() => {
     globalThis.localStorage?.setItem(EXPANDED_PAGES_KEY, JSON.stringify([...expandedPageIds]))
   }, [expandedPageIds])
@@ -418,20 +413,39 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
 
   const togglePageExpanded = (pageId: string) => {
     const collapsing = expandedPageIds.has(pageId)
-    if (collapsing && descendantsOf(sectionPages, pageId).has(activePage)) setActivePage(pageId)
+    const descendants = descendantsOf(accessiblePages, pageId)
+    if (collapsing && descendants.has(activePage)) setActivePage(pageId)
     setExpandedPageIds((current) => {
       const next = new Set(current)
-      if (next.has(pageId)) next.delete(pageId)
+      if (next.has(pageId)) {
+        next.delete(pageId)
+        // Descendant expansion state is not useful while its ancestor is
+        // collapsed and was the source of the former top-level re-open race.
+        for (const id of descendants) next.delete(id)
+      }
       else next.add(pageId)
       return next
     })
   }
 
   const createTreePage = async (parentPageId?: string) => {
-    if (!currentSection) return
-    const id = await createPage(currentSection.id, 'document', parentPageId)
+    const sectionId = parentPageId
+      ? accessiblePages.find((page) => page.id === parentPageId)?.sectionId
+      : currentSection?.id
+    if (!sectionId) return
+    const id = await createPage(sectionId, 'document', parentPageId)
+    setActiveSection(sectionId)
     if (parentPageId) setExpandedPageIds((current) => new Set([...current, parentPageId]))
     setActivePage(id)
+  }
+
+  const createTopLevelPage = async (name = '无标题页面') => {
+    if (!currentNotebook) return
+    const created = await createSection(currentNotebook.id, name)
+    setActiveNotebook(currentNotebook.id)
+    setExpandedNotebook(currentNotebook.id)
+    setActiveSection(created.sectionId)
+    setActivePage(created.pageId)
   }
 
   const setDropPosition = (event: ReactDragEvent<HTMLElement>, pageId: string) => {
@@ -442,15 +456,24 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     setPageDropTarget({ id: pageId, position: ratio < 0.25 ? 'before' : ratio > 0.75 ? 'after' : 'inside' })
   }
 
-  const dropPage = async (event: ReactDragEvent<HTMLElement>, target: PageSummary) => {
-    event.preventDefault()
-    const sourceId = event.dataTransfer.getData(PAGE_TREE_DRAG_TYPE)
-    const position = pageDropTarget?.id === target.id ? pageDropTarget.position : 'inside'
-    setPageDropTarget(undefined)
+  const movePageRelative = async (sourceId: string, target: PageSummary, position: 'before' | 'inside' | 'after') => {
     if (!sourceId || sourceId === target.id) return
     const source = accessiblePages.find((page) => page.id === sourceId)
     if (!source || descendantsOf(accessiblePages, sourceId).has(target.id)) return
-    let parentPageId = position === 'inside' ? target.id : target.parentPageId
+    const targetOwner = notebooks.find((notebook) => notebook.sections.some((section) => section.id === target.sectionId))
+    if (source.notebookRoot && target.notebookRoot && position !== 'inside') {
+      const sectionId = await reorderNotebookRoot(sourceId, target.id, position)
+      if (sectionId) setActiveSection(sectionId)
+      if (targetOwner) { setActiveNotebook(targetOwner.id); setExpandedNotebook(targetOwner.id) }
+      return
+    }
+    if (!source.notebookRoot && target.notebookRoot && position !== 'inside') {
+      const sectionId = await promotePageToNotebookRoot(sourceId, target.id, position)
+      setActiveSection(sectionId)
+      if (targetOwner) { setActiveNotebook(targetOwner.id); setExpandedNotebook(targetOwner.id) }
+      return
+    }
+    const parentPageId = position === 'inside' ? target.id : target.parentPageId
     const sectionId = target.sectionId
     const siblings = accessiblePages
       .filter((page) => page.kind !== 'task' && page.sectionId === sectionId && page.parentPageId === parentPageId && page.id !== sourceId)
@@ -471,6 +494,15 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     await movePageInTree(sourceId, sectionId, parentPageId, sortOrder)
     if (parentPageId) setExpandedPageIds((current) => new Set([...current, parentPageId!]))
     setActiveSection(sectionId)
+    if (targetOwner) { setActiveNotebook(targetOwner.id); setExpandedNotebook(targetOwner.id) }
+  }
+
+  const dropPage = async (event: ReactDragEvent<HTMLElement>, target: PageSummary) => {
+    event.preventDefault()
+    const sourceId = event.dataTransfer.getData(PAGE_TREE_DRAG_TYPE)
+    const position = pageDropTarget?.id === target.id ? pageDropTarget.position : 'inside'
+    setPageDropTarget(undefined)
+    await movePageRelative(sourceId, target, position)
   }
 
   const trashPage = async (pageId: string, alwaysConfirm = false) => {
@@ -630,7 +662,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       currentSection && activeArea === 'notes' && { id: 'command:web-clip', group: 'command', title: '从剪贴板剪藏网页', subtitle: '保留正文结构，移除网页字体、颜色和布局', keywords: '网页剪藏 clipboard html markdown', run: () => { void clipFromClipboard() } },
       currentSection && { id: 'command:new-task', group: 'command', title: '新建任务', subtitle: currentSection.name, keywords: '待办 todo', run: () => { selectArea('tasks'); void createPage(currentSection.id, 'task').then(setActivePage) } },
       { id: 'command:new-notebook', group: 'command', title: '新建笔记本', keywords: '工作区', run: () => setCreateRequest('notebook') },
-      currentNotebook && (!currentNotebook.locked || privacyUnlocked) && { id: 'command:new-section', group: 'command', title: '新建分区', subtitle: currentNotebook.name, keywords: '文件夹 分类', run: () => setCreateRequest('section') },
+      currentNotebook && (!currentNotebook.locked || privacyUnlocked) && { id: 'command:new-section', group: 'command', title: '新建顶层页面', subtitle: currentNotebook.name, keywords: '根页面 文件夹 分类', run: () => setCreateRequest('rootPage') },
       { id: 'command:sync', group: 'command', title: syncState === 'syncing' ? '正在同步' : '立即同步', subtitle: syncLabels[syncState], keywords: 'ssh sftp 服务器 推送 拉取', run: () => { if (syncState !== 'syncing') void syncNow({ force: true }) } },
       { id: 'command:notes', group: 'command', title: '打开笔记', keywords: '页面', run: () => selectArea('notes') },
       { id: 'command:tasks', group: 'command', title: '打开任务', keywords: '待办 todo', run: () => selectArea('tasks') },
@@ -681,38 +713,11 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     documentPrefetchTimer.current = setTimeout(() => { void loadDocument(pageId) }, delay)
   }
 
-  const deleteSectionAndSelectFallback = async (sectionId: string, sectionName: string) => {
-    if (!window.confirm(`删除分区“${sectionName}”及其中全部页面、子页面、任务、附件和历史版本？此操作无法撤销。`)) return
-    const fallback = notebooks
-      .flatMap((notebook) => notebook.sections.map((section) => ({ notebookId: notebook.id, section })))
-      .filter((item) => item.section.id !== sectionId)
-      .sort((left, right) => Number(right.notebookId === activeNotebook) - Number(left.notebookId === activeNotebook))[0]
-    await deleteSection(sectionId)
-    setExpandedSectionIds((current) => {
-      const next = new Set(current)
-      next.delete(sectionId)
-      return next
-    })
-    if (activeSection !== sectionId) return
-    if (!fallback) {
-      setActiveSection('')
-      setActivePage('')
-      return
-    }
-    setActiveNotebook(fallback.notebookId)
-    setExpandedNotebook(fallback.notebookId)
-    setActiveSection(fallback.section.id)
-    setExpandedSectionIds((current) => new Set([...current, fallback.section.id]))
-    setActivePage(pages.find((page) => page.sectionId === fallback.section.id && !page.parentPageId)?.id
-      ?? pages.find((page) => page.sectionId === fallback.section.id)?.id
-      ?? '')
-  }
-
   const renderTreePage = (page: PageSummary, depth: number, hasChildren: boolean, pagesInSection: PageSummary[]) => (
     <ActionMenu openOnContext key={page.id} label={`${page.title}页面操作`} trigger={<div
       role="treeitem"
       tabIndex={0}
-      aria-level={depth + 3}
+      aria-level={depth + 2}
       aria-selected={activePage === page.id}
       aria-expanded={hasChildren ? expandedPageIds.has(page.id) : undefined}
       draggable
@@ -748,17 +753,24 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       {hasChildren && <span className="page-tree-child-count">{descendantsOf(pagesInSection, page.id).size}</span>}
     </div>}>
       <button onClick={() => { void createTreePage(page.id) }}>新建子页面</button>
-      <button onClick={() => { void createTreePage(page.parentPageId) }}>新建同级页面</button>
+      <button onClick={() => {
+        if (page.notebookRoot) {
+          setActiveNotebook(notebooks.find((notebook) => notebook.sections.some((section) => section.id === page.sectionId))?.id ?? activeNotebook)
+          setCreateRequest('rootPage')
+        } else void createTreePage(page.parentPageId)
+      }}>新建同级页面</button>
       <ActionMenuDivider />
       <button onClick={() => setIconPickerPage(page)}>更换图标…</button>
       {page.icon && <button onClick={() => void updatePage(page.id, { icon: undefined })}>恢复默认图标</button>}
       <button onClick={() => void updatePage(page.id, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
-      <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>
+      {!page.notebookRoot && <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>}
       {page.parentPageId && <button onClick={() => {
-        const roots = pagesInSection.filter((item) => !item.parentPageId && item.id !== page.id)
-        void movePageInTree(page.id, page.sectionId, undefined, Math.max(0, ...roots.map((item) => item.sortOrder ?? 0)) + 1000)
+        void promotePageToNotebookRoot(page.id).then((sectionId) => {
+          setActivePage(page.id)
+          setActiveSection(sectionId)
+        })
       }}>提升为顶层页面</button>}
-      <button onClick={() => setMovePageRequest(page)}>移动到其他分区…</button>
+      <button onClick={() => setMovePageRequest(page)}>移动到…</button>
       <ActionMenuDivider />
       <button className="destructive-menu-item" onClick={() => { void trashPage(page.id, true) }}>移到回收站</button>
     </ActionMenu>
@@ -783,14 +795,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
             <div className="pane-heading">
               <div><Text size={200}>工作区</Text><Text weight="semibold" size={400}>我的知识库</Text></div>
               <div className="navigation-heading-actions">
-                <Button appearance="subtle" size="small" icon={<Add20Regular />} aria-label="新建顶层页面" disabled={!currentSection} onClick={() => { void createTreePage() }} />
-                <ActionMenu label="文档树操作" trigger={<Button appearance="subtle" size="small" icon={<MoreHorizontal20Regular />} aria-label="文档树菜单" />}>
-                  <button onClick={() => setExpandedSectionIds(new Set(notebooks.flatMap((notebook) => notebook.sections.map((section) => section.id))))}>展开全部分区</button>
-                  <button onClick={() => setExpandedPageIds(new Set(accessiblePages.filter((page) => page.kind !== 'task').map((page) => page.id)))}>展开全部页面</button>
-                  <button onClick={() => { setExpandedSectionIds(new Set()); setExpandedPageIds(new Set()) }}>折叠全部</button>
-                  <ActionMenuDivider />
-                  <button onClick={() => setCreateRequest('section')}>新建分区</button>
+                <ActionMenu label="新建" trigger={<Button appearance="subtle" size="small" icon={<Add20Regular />} aria-label="新建" />}>
+                  <button disabled={!currentNotebook} onClick={() => { void createTopLevelPage() }}>新建页面</button>
                   <button onClick={() => setCreateRequest('notebook')}>新建笔记本</button>
+                </ActionMenu>
+                <ActionMenu label="文档树操作" trigger={<Button appearance="subtle" size="small" icon={<MoreHorizontal20Regular />} aria-label="文档树菜单" />}>
+                  <button onClick={() => setExpandedPageIds(new Set(accessiblePages.filter((page) => page.kind !== 'task').map((page) => page.id)))}>展开全部页面</button>
+                  <button onClick={() => setExpandedPageIds(new Set())}>折叠全部</button>
+                  <ActionMenuDivider />
                   <button onClick={() => { setNavOpen(false); setPagesOpen(false) }}>隐藏导航栏</button>
                 </ActionMenu>
               </div>
@@ -809,47 +821,20 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
                       {expanded ? <ChevronDown16Regular /> : <ChevronRight16Regular />}
                       <span>{notebook.emoji}</span><span>{notebook.name}</span>{notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen20Regular /> : <LockClosed20Regular />}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('section') }}>新建分区</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { if (window.confirm(`删除笔记本“${notebook.name}”及其中全部分区、页面、任务、附件和历史版本？此操作无法撤销。`)) void deleteNotebook(notebook.id).catch((error: unknown) => window.alert(error instanceof Error ? error.message : '无法删除笔记本')) }}>删除笔记本及全部内容</button></>}
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { if (window.confirm(`删除笔记本“${notebook.name}”及其中全部页面、任务、附件和历史版本？此操作无法撤销。`)) void deleteNotebook(notebook.id).catch((error: unknown) => window.alert(error instanceof Error ? error.message : '无法删除笔记本')) }}>删除笔记本及全部内容</button></>}
                     </ActionMenu>
                     {expanded && notebook.sections.map((section) => {
                       const pagesInSection = accessiblePages.filter((page) => page.kind !== 'task' && page.sectionId === section.id)
                       const treeRows = flattenPageTree(pagesInSection, expandedPageIds, matchingTreeIds)
-                      const sectionExpanded = expandedSectionIds.has(section.id)
-                      const searchActive = Boolean(query.trim())
-                      if (searchActive && treeRows.length === 0 && !section.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return null
-                      return <div className="section-tree-group" key={section.id} role="treeitem" aria-label={section.name} aria-expanded={sectionExpanded} aria-level={2}>
-                        <ActionMenu openOnContext label={`${section.name}分区操作`} trigger={<div className={`tree-row section-row ${activeSection === section.id ? 'active-section' : ''}`}>
-                          <button type="button" className={`section-tree-toggle ${pagesInSection.length ? '' : 'empty'}`} aria-label={pagesInSection.length ? sectionExpanded ? `折叠${section.name}` : `展开${section.name}` : undefined} onClick={() => setExpandedSectionIds((current) => {
-                            const next = new Set(current)
-                            if (next.has(section.id)) next.delete(section.id); else next.add(section.id)
-                            return next
-                          })}>{pagesInSection.length ? sectionExpanded ? <ChevronDown16Regular /> : <ChevronRight16Regular /> : <span />}</button>
-                          <button type="button" className="section-tree-main" onClick={() => {
-                            setActiveNotebook(notebook.id)
-                            setActiveSection(section.id)
-                            setExpandedSectionIds((current) => new Set([...current, section.id]))
-                            const firstPage = pagesInSection.find((page) => !page.parentPageId) ?? pagesInSection[0]
-                            if (firstPage) setActivePage(firstPage.id)
-                          }}>
-                            <span className="section-dot" style={{ background: section.color }} />
-                            <span>{section.name}</span><span className="tree-count">{notebook.locked && !privacyUnlocked ? '—' : section.pageCount}</span>
-                          </button>
-                        </div>}>
-                          <button onClick={() => { setActiveNotebook(notebook.id); setActiveSection(section.id); setExpandedSectionIds((current) => new Set([...current, section.id])); void createPage(section.id).then(setActivePage) }}>新建顶层页面</button>
-                          <button onClick={() => setRenameRequest({ kind: 'section', id: section.id, name: section.name })}>重命名分区</button>
-                          <ActionMenuDivider />
-                          <button className="destructive-menu-item" onClick={() => { void deleteSectionAndSelectFallback(section.id, section.name).catch((error: unknown) => window.alert(error instanceof Error ? error.message : '无法删除分区')) }}>删除分区及全部内容</button>
-                        </ActionMenu>
-                        {sectionExpanded && <div role="group" className="section-page-tree">
-                          {treeRows.length ? treeRows.map(({ page, depth, hasChildren }) => renderTreePage(page, depth, hasChildren, pagesInSection)) : <div className="inline-tree-empty">{searchActive ? '没有匹配页面' : '暂无页面'}</div>}
-                        </div>}
-                      </div>
+                      if (treeRows.length === 0) return null
+                      return <Fragment key={section.id}>
+                        {treeRows.map(({ page, depth, hasChildren }) => renderTreePage(page, depth, hasChildren, pagesInSection))}
+                      </Fragment>
                     })}
                   </div>
                 )
               })}
             </nav>
-            <div className="pane-footer"><Button appearance="subtle" icon={<Add20Regular />} disabled={!currentNotebook} onClick={() => setCreateRequest('section')}>新建分区</Button><Button appearance="subtle" icon={<Add20Regular />} onClick={() => setCreateRequest('notebook')}>新建笔记本</Button></div>
             <PanelResizer label="调整导航栏宽度" value={notebookWidth} min={240} max={520} onChange={setNotebookWidth} resetValue={320} />
           </aside>
         )}
@@ -948,7 +933,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
 
         <main className="content-pane">
           <div className="editor-toolbar">
-            <div className="breadcrumb"><span>{activeArea === 'notes' ? currentSection?.name ?? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
+            <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
             {activeArea === 'notes' && hasActivePage ? <div className="editor-mode-controls">
               <Button className={`vim-toggle ${vimEnabled && vimCommandMode ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑' : 'Vim INSERT：Esc 返回普通模式' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</Button>
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
@@ -985,6 +970,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               onDraft={(json) => stageDocument(currentPage.id, json)}
               onChange={(json) => saveDocument(currentPage.id, json)}
               loadAsset={getAssetContent}
+              saveAsset={saveAsset}
               forceRestore={restoreToken.startsWith(`${currentPage.id}:`)}
               vimEnabled={vimEnabled}
               onVimCommandModeChange={setVimCommandMode}
@@ -1050,6 +1036,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         onPrint={() => { setSettingsOpen(false); window.setTimeout(() => window.print(), 0) }}
         onExportWorkspace={() => { void runExport().catch((error: unknown) => setTransferMessage(error instanceof Error ? error.message : '导出失败')) }}
         onExportEncrypted={() => { setSettingsOpen(false); setEncryptedExportOpen(true) }}
+        onResetHistory={resetRevisionHistory}
         onChooseDataRoot={window.notebookDesktop ? () => { void window.notebookDesktop?.storage.chooseDataRoot().catch((error: unknown) => setTransferMessage(error instanceof Error ? error.message : '数据目录更改失败')) } : undefined}
         onPrivacyAction={() => { if (privacyUnlocked) lockPrivacy(); else { setSettingsOpen(false); requestPrivacyAccess() } }}
       />}
@@ -1062,18 +1049,22 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       {referenceHelpOpen && <ReferenceHelpDialog onClose={() => setReferenceHelpOpen(false)} />}
       {createRequest && <CreateItemDialog kind={createRequest} onClose={() => setCreateRequest(undefined)} onCreate={async (name) => {
         if (createRequest === 'notebook') { const notebookId = await createNotebook(name); setActiveNotebook(notebookId); setExpandedNotebook(notebookId) }
-        else setActiveSection(await createSection(activeNotebook, name))
+        else {
+          const created = await createSection(activeNotebook, name)
+          setActiveSection(created.sectionId)
+          setActivePage(created.pageId)
+          setExpandedNotebook(activeNotebook)
+        }
         setCreateRequest(undefined)
       }} />}
       {renameRequest && <RenameItemDialog request={renameRequest} onClose={() => setRenameRequest(undefined)} onRename={async (name) => {
-        if (renameRequest.kind === 'notebook') await renameNotebook(renameRequest.id, name)
-        else await renameSection(renameRequest.id, name)
+        await renameNotebook(renameRequest.id, name)
         setRenameRequest(undefined)
       }} />}
-      {movePageRequest && <MovePageDialog page={movePageRequest} notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)} onClose={() => setMovePageRequest(undefined)} onMove={async (sectionId) => {
-        const roots = accessiblePages.filter((page) => page.sectionId === sectionId && !page.parentPageId && page.id !== movePageRequest.id)
-        await movePageInTree(movePageRequest.id, sectionId, undefined, Math.max(0, ...roots.map((page) => page.sortOrder ?? 0)) + 1000)
-        if (movePageRequest.id === activePage && activeArea === 'notes') setActiveSection(sectionId)
+      {movePageRequest && <MovePageDialog page={movePageRequest} pages={accessiblePages.filter((page) => page.kind !== 'task')} notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)} onClose={() => setMovePageRequest(undefined)} onMove={async (targetPageId, position) => {
+        const target = accessiblePages.find((page) => page.id === targetPageId)
+        if (!target) throw new Error('目标页面不存在')
+        await movePageRelative(movePageRequest.id, target, position)
         setMovePageRequest(undefined)
       }} />}
       {iconPickerPage && <PageIconPicker
@@ -1245,10 +1236,10 @@ function ModePlaceholder({ icon, title, description, actionLabel = '开始使用
   return <div className="mode-placeholder"><div>{icon}</div><h2>{title}</h2><p>{description}</p>{onAction && <Button appearance="primary" onClick={onAction}>{actionLabel}</Button>}</div>
 }
 
-function CreateItemDialog({ kind, onClose, onCreate }: { kind: 'notebook' | 'section'; onClose: () => void; onCreate: (name: string) => Promise<void> }) {
+function CreateItemDialog({ kind, onClose, onCreate }: { kind: 'notebook' | 'rootPage'; onClose: () => void; onCreate: (name: string) => Promise<void> }) {
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
-  const label = kind === 'notebook' ? '笔记本' : '分区'
+  const label = kind === 'notebook' ? '笔记本' : '顶层页面'
   const submit = async () => {
     const normalized = name.trim()
     if (!normalized || saving) return
@@ -1258,11 +1249,11 @@ function CreateItemDialog({ kind, onClose, onCreate }: { kind: 'notebook' | 'sec
   return <div className="settings-backdrop" role="presentation"><section className="settings-dialog create-item-dialog" role="dialog" aria-label={`新建${label}`}><div><h2>新建{label}</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div><Input autoFocus value={name} onChange={(_, data) => setName(data.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submit() }} aria-label={`${label}名称`} placeholder={`输入${label}名称`} /><Button appearance="primary" disabled={!name.trim() || saving} onClick={() => void submit()}>{saving ? '正在创建' : '创建'}</Button></section></div>
 }
 
-function RenameItemDialog({ request, onClose, onRename }: { request: { kind: 'notebook' | 'section'; name: string }; onClose: () => void; onRename: (name: string) => Promise<void> }) {
+function RenameItemDialog({ request, onClose, onRename }: { request: { kind: 'notebook'; name: string }; onClose: () => void; onRename: (name: string) => Promise<void> }) {
   const [name, setName] = useState(request.name)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string>()
-  const label = request.kind === 'notebook' ? '笔记本' : '分区'
+  const label = '笔记本'
   const submit = async () => {
     const normalized = name.trim()
     if (!normalized || normalized === request.name || saving) return
@@ -1273,18 +1264,32 @@ function RenameItemDialog({ request, onClose, onRename }: { request: { kind: 'no
   return <div className="settings-backdrop" role="presentation"><section className="settings-dialog create-item-dialog" role="dialog" aria-label={`重命名${label}`}><div><h2>重命名{label}</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div><Input autoFocus value={name} onChange={(_, data) => setName(data.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submit() }} aria-label={`${label}名称`} />{error && <p role="alert">{error}</p>}<Button appearance="primary" disabled={!name.trim() || name.trim() === request.name || saving} onClick={() => void submit()}>{saving ? '正在保存' : '保存'}</Button></section></div>
 }
 
-function MovePageDialog({ page, notebooks, onClose, onMove }: { page: PageSummary; notebooks: Array<{ id: string; name: string; sections: Array<{ id: string; name: string }> }>; onClose: () => void; onMove: (sectionId: string) => Promise<void> }) {
-  const sections = notebooks.flatMap((notebook) => notebook.sections.map((section) => ({ ...section, notebookName: notebook.name })))
-  const [sectionId, setSectionId] = useState(page.sectionId)
+function MovePageDialog({ page, pages, notebooks, onClose, onMove }: {
+  page: PageSummary
+  pages: PageSummary[]
+  notebooks: Array<{ id: string; name: string; sections: Array<{ id: string; name: string }> }>
+  onClose: () => void
+  onMove: (targetPageId: string, position: 'before' | 'inside' | 'after') => Promise<void>
+}) {
+  const excluded = new Set([page.id, ...descendantsOf(pages, page.id)])
+  const targets = notebooks.flatMap((notebook) => notebook.sections.flatMap((section) => {
+    const sectionPages = pages.filter((candidate) => candidate.sectionId === section.id && !excluded.has(candidate.id))
+    return flattenPageTree(sectionPages, new Set(sectionPages.map((candidate) => candidate.id))).map(({ page: candidate, depth }) => ({
+      page: candidate,
+      label: `${notebook.name} / ${'\u00a0\u00a0'.repeat(depth)}${candidate.title || '无标题页面'}`,
+    }))
+  }))
+  const [targetPageId, setTargetPageId] = useState(targets[0]?.page.id ?? '')
+  const [position, setPosition] = useState<'before' | 'inside' | 'after'>('inside')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string>()
   const submit = async () => {
-    if (!sectionId || sectionId === page.sectionId || saving) return
+    if (!targetPageId || saving) return
     setSaving(true)
     setError(undefined)
-    try { await onMove(sectionId) } catch (cause) { setError(cause instanceof Error ? cause.message : '无法移动页面'); setSaving(false) }
+    try { await onMove(targetPageId, position) } catch (cause) { setError(cause instanceof Error ? cause.message : '无法移动页面'); setSaving(false) }
   }
-  return <div className="settings-backdrop" role="presentation"><section className="settings-dialog create-item-dialog" role="dialog" aria-label="移动到分区"><div><h2>移动“{page.title}”</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div><label className="dialog-field"><span>目标分区</span><select autoFocus aria-label="目标分区" value={sectionId} onChange={(event) => setSectionId(event.currentTarget.value)}>{sections.map((section) => <option key={section.id} value={section.id}>{section.notebookName} / {section.name}</option>)}</select></label>{error && <p role="alert">{error}</p>}<Button appearance="primary" disabled={!sectionId || sectionId === page.sectionId || saving} onClick={() => void submit()}>{saving ? '正在移动' : '移动'}</Button></section></div>
+  return <div className="settings-backdrop" role="presentation"><section className="settings-dialog create-item-dialog move-page-dialog" role="dialog" aria-label="移动页面"><div><h2>移动“{page.title}”</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div>{targets.length ? <><label className="dialog-field"><span>目标页面</span><select autoFocus aria-label="目标页面" value={targetPageId} onChange={(event) => setTargetPageId(event.currentTarget.value)}>{targets.map((target) => <option key={target.page.id} value={target.page.id}>{target.label}</option>)}</select></label><label className="dialog-field"><span>放置位置</span><select aria-label="放置位置" value={position} onChange={(event) => setPosition(event.currentTarget.value as 'before' | 'inside' | 'after')}><option value="inside">作为目标页面的子页面</option><option value="before">放在目标页面之前</option><option value="after">放在目标页面之后</option></select></label></> : <p>没有可用的目标页面。</p>}{error && <p role="alert">{error}</p>}<Button appearance="primary" disabled={!targetPageId || saving} onClick={() => void submit()}>{saving ? '正在移动' : '移动到这里'}</Button></section></div>
 }
 
 function BackupPasswordDialog({ mode, filename, onClose, onSubmit }: { mode: 'create' | 'unlock'; filename?: string; onClose: () => void; onSubmit: (passphrase: string) => Promise<void> }) {

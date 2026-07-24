@@ -100,6 +100,20 @@ export type StoredMarkdownNoteEnvelope = MarkdownNoteEnvelope | EncryptedMarkdow
 
 const PRIVACY_ITERATIONS = 310_000
 const PRIVACY_CHECK_TEXT = 'notebook-next-private-notes-v1'
+const PRIVACY_CACHE_LIMIT = 256
+const privacyKeyCache = new Map<string, Promise<CryptoKey>>()
+const decryptedNoteCache = new Map<string, MarkdownNoteEnvelope>()
+const encryptedNoteCache = new Map<string, EncryptedMarkdownNoteEnvelope>()
+const privacyCheckCache = new Map<string, PrivacyKeyCheck>()
+
+function cacheValue<T>(cache: Map<string, T>, key: string, value: T, limit = PRIVACY_CACHE_LIMIT) {
+  cache.delete(key)
+  cache.set(key, value)
+  while (cache.size > limit) cache.delete(cache.keys().next().value!)
+  return value
+}
+
+const secretFingerprint = (secret: string) => sha256Hex(secret)
 const toBase64 = (bytes: Uint8Array) => {
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
@@ -107,9 +121,22 @@ const toBase64 = (bytes: Uint8Array) => {
 }
 const fromBase64 = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
 
-async function privacyKey(secret: string, salt: Uint8Array, usage: KeyUsage[]) {
+async function privacyKey(secret: string, salt: Uint8Array, _usage: KeyUsage[]) {
+  const cacheKey = `${secretFingerprint(secret)}:${toBase64(salt)}`
+  const cached = privacyKeyCache.get(cacheKey)
+  if (cached) {
+    cacheValue(privacyKeyCache, cacheKey, cached)
+    return cached
+  }
   const material = await crypto.subtle.importKey('raw', encoder.encode(secret), 'PBKDF2', false, ['deriveKey'])
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: salt as BufferSource, iterations: PRIVACY_ITERATIONS }, material, { name: 'AES-GCM', length: 256 }, false, usage)
+  const derived = crypto.subtle.deriveKey(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: salt as BufferSource, iterations: PRIVACY_ITERATIONS },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  )
+  return cacheValue(privacyKeyCache, cacheKey, derived)
 }
 
 export interface PrivacyKeyCheck {
@@ -123,6 +150,9 @@ export interface PrivacyKeyCheck {
 }
 
 export async function createPrivacyKeyCheck(secret: string): Promise<PrivacyKeyCheck> {
+  const fingerprint = secretFingerprint(secret)
+  const cached = privacyCheckCache.get(fingerprint)
+  if (cached) return cached
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
@@ -130,7 +160,7 @@ export async function createPrivacyKeyCheck(secret: string): Promise<PrivacyKeyC
     await privacyKey(secret, salt, ['encrypt']),
     encoder.encode(PRIVACY_CHECK_TEXT) as BufferSource,
   ))
-  return { schemaVersion: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: PRIVACY_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(ciphertext) }
+  return cacheValue(privacyCheckCache, fingerprint, { schemaVersion: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: PRIVACY_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(ciphertext) }, 8)
 }
 
 export async function verifyPrivacyKeyCheck(check: PrivacyKeyCheck, secret?: string): Promise<void> {
@@ -149,15 +179,19 @@ export async function verifyPrivacyKeyCheck(check: PrivacyKeyCheck, secret?: str
 }
 
 async function encryptPrivateNote(note: MarkdownNoteEnvelope, secret: string): Promise<EncryptedMarkdownNoteEnvelope> {
+  const cleartext = JSON.stringify(note)
+  const cacheKey = `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(cleartext)}`
+  const cached = encryptedNoteCache.get(cacheKey)
+  if (cached) return cacheValue(encryptedNoteCache, cacheKey, cached)
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource, additionalData: encoder.encode(note.noteID) as BufferSource }, await privacyKey(secret, salt, ['encrypt']), encoder.encode(JSON.stringify(note)) as BufferSource))
-  return {
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource, additionalData: encoder.encode(note.noteID) as BufferSource }, await privacyKey(secret, salt, ['encrypt']), encoder.encode(cleartext) as BufferSource))
+  return cacheValue(encryptedNoteCache, cacheKey, {
     schemaVersion: 3, noteID: note.noteID,
     metadata: { ...note.metadata, title: '隐私笔记', preview: '', locked: true, legacyMetadata: undefined },
     currentContentHash: note.currentContentHash, contentObjects: {}, history: [], assets: [], taskSteps: [], tagIDs: [], linkedPageIDs: [],
     privacyEncryption: { version: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: PRIVACY_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(ciphertext) },
-  }
+  })
 }
 
 export async function decryptPrivateNote(note: StoredMarkdownNoteEnvelope, secret?: string): Promise<MarkdownNoteEnvelope> {
@@ -165,11 +199,16 @@ export async function decryptPrivateNote(note: StoredMarkdownNoteEnvelope, secre
   if (!secret) throw new Error(`隐私笔记 ${note.noteID} 已加密，请先配置相同的 SSH 密码`)
   const encryption = note.privacyEncryption
   if (encryption.version !== 1 || encryption.algorithm !== 'AES-256-GCM' || encryption.kdf !== 'PBKDF2-SHA256' || encryption.iterations !== PRIVACY_ITERATIONS) throw new Error(`隐私笔记 ${note.noteID} 使用了不支持的加密格式`)
+  const cacheKey = `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(encryption.ciphertext)}`
+  const cached = decryptedNoteCache.get(cacheKey)
+  if (cached) return cacheValue(decryptedNoteCache, cacheKey, cached)
   try {
     const cleartext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(encryption.iv) as BufferSource, additionalData: encoder.encode(note.noteID) as BufferSource }, await privacyKey(secret, fromBase64(encryption.salt), ['decrypt']), fromBase64(encryption.ciphertext) as BufferSource)
-    const decoded = JSON.parse(new TextDecoder().decode(cleartext)) as MarkdownNoteEnvelope
+    const decodedText = new TextDecoder().decode(cleartext)
+    const decoded = JSON.parse(decodedText) as MarkdownNoteEnvelope
     if (decoded.noteID !== note.noteID) throw new Error('note id mismatch')
-    return decoded
+    cacheValue(encryptedNoteCache, `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(decodedText)}`, note)
+    return cacheValue(decryptedNoteCache, cacheKey, decoded)
   } catch { throw new Error(`隐私笔记 ${note.noteID} 解密失败：SSH 密码不一致或远端数据已损坏`) }
 }
 
@@ -179,23 +218,76 @@ export interface EncodedMarkdownRepository {
   skippedPageIds: string[]
 }
 
-export async function encodeMarkdownRepository(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>, deviceId: string, privacySecret?: string): Promise<EncodedMarkdownRepository> {
+export async function encodeMarkdownRepository(
+  bundle: NotebookDataBundle,
+  assetContents: Map<string, Uint8Array>,
+  deviceId: string,
+  privacySecret?: string,
+  reuseNoteSignatures: Map<string, string> = new Map(),
+): Promise<EncodedMarkdownRepository> {
   const legacy = await encodeLegacyRepository({ ...bundle, revisions: [] }, assetContents, deviceId)
   const files = new Map([...legacy.files].filter(([name]) => !/^notes\/[0-9a-f-]{36}\.json$/i.test(name) && !name.startsWith('attachments/')))
   const manifests = new Map<string, { relativePath: string; contentHash: string; size: number }>()
   const indexEntries: Array<{ noteID: string; version: number; contentHash: string; historyCount: number }> = []
   const pageVersions = new Map<string, number>()
   const validPageIds = new Set(legacy.pageVersions.keys())
+  const documentsByPage = new Map(bundle.documents.map((document) => [document.pageId, document]))
+  const revisionsByPage = new Map<string, PageRevision[]>()
+  const assetsByPage = new Map<string, Asset[]>()
+  const taskStepsByPage = new Map<string, NotebookDataBundle['taskSteps']>()
+  const tagIdsByPage = new Map<string, string[]>()
+  for (const revision of bundle.revisions) {
+    const values = revisionsByPage.get(revision.pageId) ?? []
+    values.push(revision)
+    revisionsByPage.set(revision.pageId, values)
+  }
+  for (const asset of bundle.assets) {
+    const values = assetsByPage.get(asset.pageId) ?? []
+    values.push(asset)
+    assetsByPage.set(asset.pageId, values)
+  }
+  for (const step of bundle.taskSteps) {
+    const values = taskStepsByPage.get(step.pageId) ?? []
+    values.push(step)
+    taskStepsByPage.set(step.pageId, values)
+  }
+  for (const pageTag of bundle.pageTags) {
+    const values = tagIdsByPage.get(pageTag.pageId) ?? []
+    values.push(pageTag.tagId)
+    tagIdsByPage.set(pageTag.pageId, values)
+  }
 
   for (const page of bundle.pages.filter((item) => validPageIds.has(item.id))) {
-    const document = bundle.documents.find((item) => item.pageId === page.id)
+    const document = documentsByPage.get(page.id)
     if (!document) continue
     const currentMarkdown = markdownOf(document)
     const currentContentHash = sha256Hex(currentMarkdown)
+    const assets: MarkdownAssetReference[] = []
+    const presentations = imagePresentations(document)
+    for (const asset of assetsByPage.get(page.id) ?? []) {
+      const bytes = assetContents.get(asset.id)
+      const declaredHash = asset.checksum?.toLowerCase()
+      const objectHash = declaredHash && /^[0-9a-f]{64}$/.test(declaredHash) ? declaredHash : bytes ? sha256Hex(bytes) : undefined
+      if (bytes && objectHash) {
+        const relativePath = `objects/${objectHash.slice(0, 2)}/${objectHash}`
+        files.set(relativePath, bytes)
+        manifests.set(objectHash, { relativePath, contentHash: objectHash, size: bytes.byteLength })
+      }
+      assets.push({ ...asset, ...presentations.get(asset.id), ...(objectHash ? { objectHash, checksum: objectHash, localPath: `objects/${objectHash.slice(0, 2)}/${objectHash}` } : {}) })
+    }
+    const reusableSignature = reuseNoteSignatures.get(page.id)
+    const [reusedVersionText, reusedHash, reusedHistoryText] = reusableSignature?.split(':') ?? []
+    const reusedVersion = Number(reusedVersionText)
+    const reusedHistoryCount = Number(reusedHistoryText)
+    if (!page.deletedAt && page.syncStatus === 'synced' && reusedHash === currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)) {
+      pageVersions.set(page.id, reusedVersion)
+      indexEntries.push({ noteID: page.id, version: reusedVersion, contentHash: currentContentHash, historyCount: reusedHistoryCount })
+      continue
+    }
     const contentObjects: Record<string, string> = { [currentContentHash]: currentMarkdown }
     const history: MarkdownHistoryEntry[] = []
     let previousSignature: string | undefined
-    for (const revision of bundle.revisions.filter((item) => item.pageId === page.id).sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+    for (const revision of (revisionsByPage.get(page.id) ?? []).sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
       const markdown = markdownOf(revision.document)
       const contentHash = sha256Hex(markdown)
       const signature = `${contentHash}:${revision.pageIcon === undefined ? 'legacy' : revision.pageIcon ?? 'default'}`
@@ -207,23 +299,10 @@ export async function encodeMarkdownRepository(bundle: NotebookDataBundle, asset
     const latestHistory = history[history.length - 1]
     if (latestHistory && latestHistory.pageIcon === undefined && latestHistory.contentHash === currentContentHash) history.pop()
 
-    const assets: MarkdownAssetReference[] = []
-    const presentations = imagePresentations(document)
-    for (const asset of bundle.assets.filter((item) => item.pageId === page.id)) {
-      const bytes = assetContents.get(asset.id)
-      const objectHash = bytes ? sha256Hex(bytes) : asset.checksum
-      if (bytes && objectHash) {
-        const relativePath = `objects/${objectHash.slice(0, 2)}/${objectHash}`
-        files.set(relativePath, bytes)
-        manifests.set(objectHash, { relativePath, contentHash: objectHash, size: bytes.byteLength })
-      }
-      assets.push({ ...asset, ...presentations.get(asset.id), ...(objectHash ? { objectHash, checksum: objectHash, localPath: `objects/${objectHash.slice(0, 2)}/${objectHash}` } : {}) })
-    }
-
     const envelope: MarkdownNoteEnvelope = {
       schemaVersion: 3, noteID: page.id, metadata: page, currentContentHash, contentObjects, history, assets,
-      taskSteps: bundle.taskSteps.filter((item) => item.pageId === page.id),
-      tagIDs: bundle.pageTags.filter((item) => item.pageId === page.id).map((item) => item.tagId),
+      taskSteps: taskStepsByPage.get(page.id) ?? [],
+      tagIDs: tagIdsByPage.get(page.id) ?? [],
       // Compatibility summary for older clients. The canonical reference
       // identity remains in Markdown and is never sourced from a stale cache.
       linkedPageIDs: [...new Set(extractNotebookReferences(currentMarkdown).map((reference) => reference.pageId))],

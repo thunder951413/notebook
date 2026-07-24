@@ -38,13 +38,16 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(screen.queryByText('离线可编辑')).not.toBeInTheDocument()
   expect(screen.queryByText('YY')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: '版本' })).toBeInTheDocument()
-  expect(screen.getAllByRole('button', { name: '新建笔记本' })).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: '新建笔记本' })).not.toBeInTheDocument()
   expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   expect(screen.queryByRole('tablist', { name: '最近打开的笔记' })).not.toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: '全局搜索' })).not.toBeInTheDocument()
   expect(container.querySelector('.document-meta')).not.toBeInTheDocument()
 
-  fireEvent.click(screen.getByRole('button', { name: '新建顶层页面' }))
+  fireEvent.click(screen.getByRole('button', { name: '新建' }))
+  const createMenu = await screen.findByRole('dialog', { name: '新建' })
+  expect(within(createMenu).getByRole('button', { name: '新建笔记本' })).toBeInTheDocument()
+  fireEvent.click(within(createMenu).getByRole('button', { name: '新建页面' }))
   await waitFor(() => expect(screen.getByLabelText('页面标题')).toHaveValue('无标题页面'))
   expect(container.querySelector('.document-loading')).not.toBeInTheDocument()
   expect(await screen.findByLabelText('页面正文')).toBeInTheDocument()
@@ -155,8 +158,14 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(within(pageActions).getByRole('button', { name: '取消收藏' })).toBeInTheDocument()
   expect(container.querySelector('.app-shell')).not.toHaveAttribute('aria-hidden', 'true')
   expect(within(pageActions).getByRole('button', { name: '创建副本' })).toBeInTheDocument()
-  expect(within(pageActions).getByRole('button', { name: '移动到其他分区…' })).toBeInTheDocument()
-  fireEvent.keyDown(document, { key: 'Escape' })
+  fireEvent.click(within(pageActions).getByRole('button', { name: '移动到…' }))
+  const moveDialog = await within(container).findByRole('dialog', { name: '移动页面' })
+  expect(within(moveDialog).getByRole('combobox', { name: '目标页面' })).toBeInTheDocument()
+  expect(within(moveDialog).getByRole('combobox', { name: '放置位置' })).toHaveValue('inside')
+  expect(within(moveDialog).getByRole('option', { name: '作为目标页面的子页面' })).toBeInTheDocument()
+  expect(within(moveDialog).getByRole('option', { name: '放在目标页面之前' })).toBeInTheDocument()
+  expect(within(moveDialog).getByRole('option', { name: '放在目标页面之后' })).toBeInTheDocument()
+  fireEvent.click(within(moveDialog).getByRole('button', { name: '取消' }))
   fireEvent.keyDown(visionTreeItem, { key: 'F10', shiftKey: true })
   expect(await within(container).findByRole('dialog', { name: 'Notebook Next 产品愿景页面操作' })).toBeInTheDocument()
   fireEvent.keyDown(document, { key: 'Escape' })
@@ -165,14 +174,46 @@ test('renders the OneNote-style workspace and editor', async () => {
   fireEvent.contextMenu(within(notebookTree).getByRole('button', { name: '我的笔记本' }))
   expect(await within(container).findByRole('button', { name: '删除笔记本及全部内容' })).toBeInTheDocument()
   fireEvent.keyDown(document, { key: 'Escape' })
-  fireEvent.contextMenu(within(notebookTree).getByRole('button', { name: /^产品设计/ }))
-  const sectionActions = await within(container).findByRole('dialog', { name: '产品设计分区操作' })
-  expect(within(sectionActions).getByRole('button', { name: '重命名分区' })).toBeInTheDocument()
-  expect(within(sectionActions).getByRole('button', { name: '删除分区及全部内容' })).toBeEnabled()
+  const productRoot = within(notebookTree).getByText('产品设计').closest('[role="treeitem"]') as HTMLElement
+  const expandProduct = within(productRoot).queryByRole('button', { name: '展开子页面' })
+  if (expandProduct) fireEvent.click(expandProduct)
+  expect(within(notebookTree).getByRole('treeitem', { name: 'Notebook Next 产品愿景' })).toBeInTheDocument()
+  fireEvent.click(within(productRoot).getByRole('button', { name: '折叠子页面' }))
+  expect(within(notebookTree).queryByRole('treeitem', { name: 'Notebook Next 产品愿景' })).not.toBeInTheDocument()
+  fireEvent.contextMenu(productRoot)
+  const rootActions = await within(container).findByRole('dialog', { name: '产品设计页面操作' })
+  fireEvent.click(within(rootActions).getByRole('button', { name: '更换图标…' }))
+  const iconDialog = await within(container).findByRole('dialog', { name: '更换“产品设计”的图标' })
+  expect(within(iconDialog).getByRole('heading', { name: '文档' })).toBeInTheDocument()
+  expect(within(iconDialog).getByRole('heading', { name: '工作' })).toBeInTheDocument()
+  expect(within(iconDialog).getByRole('heading', { name: '主题' })).toBeInTheDocument()
+  expect(within(iconDialog).getAllByRole('button', { name: /^使用 / })).toHaveLength(36)
+  fireEvent.click(within(iconDialog).getByRole('button', { name: '取消' }))
+  fireEvent.contextMenu(productRoot)
+  const reopenedRootActions = await within(container).findByRole('dialog', { name: '产品设计页面操作' })
+  expect(within(reopenedRootActions).queryByRole('button', { name: '创建副本' })).not.toBeInTheDocument()
   fireEvent.keyDown(document, { key: 'Escape' })
 
+  fireEvent.click(within(productRoot).getByRole('button', { name: '展开子页面' }))
   fireEvent.click(within(pageList).getByRole('treeitem', { name: /AI 工作流设计/ }))
   expect(screen.getByLabelText('页面标题')).toHaveValue('AI 工作流设计')
+
+  // A root page is still a normal page: dragging its row into another page
+  // demotes it to a child and keeps the target expanded.
+  const dragValues = new Map<string, string>()
+  const dataTransfer = {
+    effectAllowed: 'none',
+    dropEffect: 'none',
+    setData: (type: string, value: string) => dragValues.set(type, value),
+    getData: (type: string) => dragValues.get(type) ?? '',
+  } as unknown as DataTransfer
+  const meetingRoot = within(notebookTree).getByRole('treeitem', { name: '会议记录' })
+  const productDropTarget = within(notebookTree).getByText('产品设计').closest('[role="treeitem"]') as HTMLElement
+  expect(meetingRoot).toHaveAttribute('draggable', 'true')
+  fireEvent.dragStart(meetingRoot, { dataTransfer })
+  fireEvent.dragOver(productDropTarget, { dataTransfer, clientY: 0.5 })
+  fireEvent.drop(productDropTarget, { dataTransfer, clientY: 0.5 })
+  await waitFor(() => expect(within(notebookTree).getByRole('treeitem', { name: '会议记录' })).toHaveAttribute('aria-level', '3'))
 
   fireEvent.click(screen.getByRole('button', { name: '设置' }))
   const settings = screen.getByRole('dialog', { name: '设置' })
@@ -182,6 +223,7 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(within(settings).getByRole('button', { name: '选择文件并导入' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '导出完整备份' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '导出加密备份' })).toBeInTheDocument()
+  expect(within(settings).getByRole('button', { name: '删除旧历史并重建基线' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '导出 Markdown' })).toBeInTheDocument()
   fireEvent.click(within(settings).getByRole('tab', { name: '同步与连接' }))
   expect(within(settings).getByText('SSH/SFTP 同步')).toBeInTheDocument()
@@ -193,6 +235,7 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(within(settings).getByRole('button', { name: '推送本机变化' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '拉取并合并' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '双向同步' })).toBeInTheDocument()
+  expect(within(settings).getByRole('button', { name: '显示 Android 配置二维码' })).toBeInTheDocument()
   fireEvent.click(within(settings).getByRole('button', { name: '关闭设置' }))
   expect(screen.queryByRole('dialog', { name: '设置' })).not.toBeInTheDocument()
 

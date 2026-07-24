@@ -44,20 +44,40 @@ function notebookImage(loadAsset?: AssetLoader) {
       }
     },
     addNodeView() {
-      return ({ node }) => {
+      return ({ node, getPos, editor }) => {
         const host = document.createElement('figure')
         const image = document.createElement('img')
         const placeholder = document.createElement('span')
+        const resizeHandle = document.createElement('button')
         host.className = 'inline-image-node'
         host.contentEditable = 'false'
         image.draggable = false
         placeholder.className = 'inline-image-placeholder'
         placeholder.textContent = '图片正在载入…'
-        host.append(image, placeholder)
+        resizeHandle.className = 'inline-image-resize-handle'
+        resizeHandle.type = 'button'
+        resizeHandle.tabIndex = -1
+        resizeHandle.setAttribute('aria-label', '拖动调整图片大小')
+        resizeHandle.title = '拖动调整图片大小'
+        host.append(image, placeholder, resizeHandle)
         let objectUrl: string | undefined
         let generation = 0
         let currentNode = node
         let visible = typeof IntersectionObserver === 'undefined'
+        let resizing = false
+        let resizeWidth: number | undefined
+        let stopResize: (() => void) | undefined
+
+        const applyPresentation = () => {
+          const width = Number(currentNode.attrs.width)
+          if (Number.isFinite(width) && width > 0) {
+            host.style.width = `${Math.round(width)}px`
+            image.style.width = '100%'
+          } else {
+            host.style.removeProperty('width')
+            image.style.removeProperty('width')
+          }
+        }
 
         const render = () => {
           generation += 1
@@ -67,6 +87,7 @@ function notebookImage(loadAsset?: AssetLoader) {
           image.removeAttribute('src')
           image.alt = String(currentNode.attrs.alt ?? '')
           image.title = String(currentNode.attrs.title ?? '')
+          applyPresentation()
           if (!visible) {
             image.hidden = true
             placeholder.hidden = false
@@ -109,15 +130,79 @@ function notebookImage(loadAsset?: AssetLoader) {
         }, { rootMargin: '900px 0px' })
         if (observer) observer.observe(host)
         render()
+        const selectImage = () => {
+          const position = typeof getPos === 'function' ? getPos() : undefined
+          if (typeof position === 'number') editor.commands.setNodeSelection(position)
+        }
+        const handleClick = (event: MouseEvent) => {
+          if (event.target === resizeHandle) return
+          selectImage()
+        }
+        const startResize = (event: PointerEvent) => {
+          if (event.button !== 0) return
+          event.preventDefault()
+          event.stopPropagation()
+          selectImage()
+          resizing = true
+          host.classList.add('is-resizing')
+          const startX = event.clientX
+          const startWidth = Math.max(120, image.getBoundingClientRect().width || host.getBoundingClientRect().width || Number(currentNode.attrs.width) || 320)
+          const editorWidth = Math.max(120, Math.min(920, editor.view.dom.getBoundingClientRect().width || startWidth))
+          const previousUserSelect = document.body.style.userSelect
+          document.body.style.userSelect = 'none'
+          const onMove = (moveEvent: PointerEvent) => {
+            if (!resizing) return
+            const width = Math.round(Math.min(editorWidth, Math.max(120, startWidth + moveEvent.clientX - startX)))
+            resizeWidth = width
+            host.style.width = `${width}px`
+            image.style.width = '100%'
+          }
+          const finish = () => {
+            if (!resizing) return
+            resizing = false
+            host.classList.remove('is-resizing')
+            document.body.style.userSelect = previousUserSelect
+            document.removeEventListener('pointermove', onMove)
+            document.removeEventListener('pointerup', finish)
+            document.removeEventListener('pointercancel', finish)
+            const position = typeof getPos === 'function' ? getPos() : undefined
+            const width = resizeWidth ?? Math.round(host.getBoundingClientRect().width)
+            resizeWidth = undefined
+            stopResize = undefined
+            if (typeof position === 'number' && width >= 120) {
+              editor.chain().setNodeSelection(position).updateAttributes('image', { width, height: null }).run()
+            }
+          }
+          stopResize = finish
+          document.addEventListener('pointermove', onMove)
+          document.addEventListener('pointerup', finish)
+          document.addEventListener('pointercancel', finish)
+        }
+        host.addEventListener('click', handleClick)
+        resizeHandle.addEventListener('pointerdown', startResize)
         return {
           dom: host,
+          selectNode: () => host.classList.add('is-selected'),
+          deselectNode: () => host.classList.remove('is-selected'),
           update: (updated) => {
             if (updated.type !== node.type) return false
+            const sourceChanged = updated.attrs.src !== currentNode.attrs.src
+              || updated.attrs.legacyAssetId !== currentNode.attrs.legacyAssetId
+              || updated.attrs.alt !== currentNode.attrs.alt
+              || updated.attrs.title !== currentNode.attrs.title
             currentNode = updated
-            render()
+            if (sourceChanged) render()
+            else applyPresentation()
             return true
           },
-          destroy: () => { generation += 1; observer?.disconnect(); if (objectUrl) URL.revokeObjectURL(objectUrl) },
+          destroy: () => {
+            generation += 1
+            stopResize?.()
+            host.removeEventListener('click', handleClick)
+            resizeHandle.removeEventListener('pointerdown', startResize)
+            observer?.disconnect()
+            if (objectUrl) URL.revokeObjectURL(objectUrl)
+          },
         }
       }
     },

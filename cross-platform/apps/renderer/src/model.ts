@@ -17,6 +17,8 @@ export interface PageSummary {
   id: string
   sectionId: string
   icon?: string
+  /** Ordinary page displayed directly below a notebook; Section is only a hidden legacy sync bucket. */
+  notebookRoot?: boolean
   parentPageId?: string
   sortOrder?: number
   treeUpdatedAt?: string

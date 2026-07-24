@@ -3,11 +3,12 @@ import { Button } from '@fluentui/react-components'
 import { Attach20Regular, Mic20Regular, Stop20Regular } from '@fluentui/react-icons'
 import type { Asset } from '@notebook/domain'
 import { ActionMenu } from '../ActionMenu'
+import { insertAssetIntoEditor } from './assetCommands'
 
 interface AttachmentPanelProps {
   pageId: string
   loadAssets(pageId: string): Promise<Asset[]>
-  saveAsset(pageId: string, file: File): Promise<unknown>
+  saveAsset(pageId: string, file: File): Promise<Asset>
   openAsset(asset: Asset): Promise<void>
 }
 
@@ -22,7 +23,10 @@ export function AttachmentPanel({ pageId, loadAssets, saveAsset, openAsset }: At
   useEffect(reload, [pageId])
 
   const addFiles = async (files: File[]) => {
-    for (const file of files) await saveAsset(pageId, file)
+    for (const file of files) {
+      const asset = await saveAsset(pageId, file)
+      insertAssetIntoEditor(pageId, asset)
+    }
     reload()
   }
   const toggleRecording = async () => {

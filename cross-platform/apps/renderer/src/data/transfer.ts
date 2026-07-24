@@ -80,7 +80,7 @@ function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknow
   return { ...encrypted, encryptedFolders: folders }
 }
 
-export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string): Promise<DecodedImport> {
+export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string, fallbackAssetContents: Map<string, Uint8Array> = new Map()): Promise<DecodedImport> {
   const expanded = expandFiles(files)
   const privacyCheckFile = expanded.find((file) => /(^|\/)notes\/privacy\.json$/i.test(file.name))
   if (privacyCheckFile) await verifyPrivacyKeyCheck(JSON.parse(strFromU8(privacyCheckFile.data)) as PrivacyKeyCheck, privacySecret)
@@ -146,28 +146,42 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
 
   let library: LegacyLibraryEnvelope | undefined
   let index: LegacyNoteIndex | undefined
+  let markdownRepositoryDetected = false
   let positions: LegacyReadingPositions | undefined
   const notes: LegacyNoteEnvelope[] = []
   const markdownNotes: StoredMarkdownNoteEnvelope[] = []
   for (const file of expanded.filter((item) => item.name.toLocaleLowerCase().endsWith('.json'))) {
     const value: unknown = JSON.parse(strFromU8(file.data))
+    if (value && typeof value === 'object' && (value as { repositoryFormat?: { version?: number } }).repositoryFormat?.version === 3) {
+      markdownRepositoryDetected = true
+    }
     if (value && typeof value === 'object' && (value as { schemaVersion?: unknown }).schemaVersion === 3 && typeof (value as { noteID?: unknown }).noteID === 'string') { markdownNotes.push(value as StoredMarkdownNoteEnvelope); continue }
     const note = noteEnvelopeSchema.safeParse(value)
     if (note.success) { notes.push(note.data); continue }
     const parsedLibrary = libraryEnvelopeSchema.safeParse(value)
     if (parsedLibrary.success) { library = parsedLibrary.data; continue }
     const parsedIndex = noteIndexSchema.safeParse(value)
-    if (parsedIndex.success) { index = parsedIndex.data; continue }
+    if (parsedIndex.success) {
+      index = parsedIndex.data
+      continue
+    }
     const parsedPositions = readingPositionsSchema.safeParse(value)
     if (parsedPositions.success) positions = parsedPositions.data
   }
   if (!library) throw new Error('迁移包中缺少 library-envelope.json')
-  if (markdownNotes.length) {
+  if (markdownNotes.length || markdownRepositoryDetected) {
     const bundle = await importMarkdownRepository({ library, notes: markdownNotes, readingPositions: positions, index, privacySecret }, workspaceId)
+    const fallbackByHash = new Map<string, Uint8Array>()
+    for (const bytes of fallbackAssetContents.values()) fallbackByHash.set(sha256Hex(bytes), bytes)
     const assetContents = new Map(bundle.assets.flatMap((asset) => {
       const normalized = asset.localPath?.replace(/^\.\//, '')
       const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
-      return file ? [[asset.id, file.data] as const] : []
+      const fallback = fallbackAssetContents.get(asset.id)
+        ?? ((asset as typeof asset & { objectHash?: string }).objectHash || asset.checksum
+          ? fallbackByHash.get(((asset as typeof asset & { objectHash?: string }).objectHash ?? asset.checksum)!.toLowerCase())
+          : undefined)
+      const data = file?.data ?? fallback
+      return data ? [[asset.id, data] as const] : []
     }))
     return verified(bundle, assetContents)
   }

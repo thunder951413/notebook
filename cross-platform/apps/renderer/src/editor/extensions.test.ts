@@ -287,6 +287,31 @@ describe('official Tiptap Markdown round trip', () => {
     editor.destroy()
   })
 
+  test('resizes an image with the drag handle and persists its width in the document', async () => {
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:resizable-image')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const host = document.createElement('div')
+    document.body.append(host)
+    const editor = new Editor({
+      element: host,
+      extensions: createContentExtensions(false, vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' }))),
+      content: { type: 'doc', content: [{ type: 'image', attrs: { legacyAssetId: 'asset-resize', alt: '可缩放图片', width: 320 } }] },
+    })
+    const image = editor.view.dom.querySelector<HTMLImageElement>('.inline-image-node img')!
+    const handle = editor.view.dom.querySelector<HTMLButtonElement>('.inline-image-resize-handle')!
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({ width: 320, height: 180, x: 0, y: 0, top: 0, right: 320, bottom: 180, left: 0, toJSON: () => ({}) })
+    vi.spyOn(editor.view.dom, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600, x: 0, y: 0, top: 0, right: 800, bottom: 600, left: 0, toJSON: () => ({}) })
+
+    handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 320 }))
+    document.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 500 }))
+    document.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 500 }))
+
+    expect(editor.getJSON().content?.[0]?.attrs?.width).toBe(500)
+    expect(editor.view.dom.querySelector<HTMLElement>('.inline-image-node')?.style.width).toBe('500px')
+    editor.destroy()
+    host.remove()
+  })
+
   test('defers image asset reads until the image is near the viewport', async () => {
     let intersect: ((entries: Array<{ isIntersecting: boolean }>) => void) | undefined
     vi.stubGlobal('IntersectionObserver', class {

@@ -4,6 +4,40 @@ import { build as buildPlist } from 'plist'
 import type { NotebookDataBundle } from '@notebook/domain'
 import { decodeImport, encodeExport } from './transfer'
 
+test('accepts a v3 incremental repository snapshot without downloaded note envelopes', async () => {
+  const decoded = await decodeImport([
+    {
+      name: 'library.json',
+      data: strToU8(JSON.stringify({
+        exportedAt: 1,
+        deviceID: 'desktop-test',
+        folders: [],
+        tags: [],
+        deletedFolders: [],
+        deletedTags: [],
+      })),
+    },
+    {
+      name: 'notes/index.json',
+      data: strToU8(JSON.stringify({
+        generatedAt: 1,
+        deviceID: 'desktop-test',
+        repositoryFormat: {
+          version: 3,
+          noteEncoding: 'gzip',
+          contentFormat: 'markdown-gfm',
+          assetAddressing: 'sha256',
+        },
+        entries: [],
+        deletedEntries: [],
+      })),
+    },
+  ], 'workspace-test')
+
+  expect(decoded.bundle.pages).toEqual([])
+  expect(decoded.bundle.documents).toEqual([])
+})
+
 test('imports the macOS document migration package as canonical Markdown without dropping assets', async () => {
   const noteId = '11111111-1111-4111-8111-111111111111'
   const folderId = '22222222-2222-4222-8222-222222222222'

@@ -295,6 +295,17 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('标题')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"width":480')
   expect(JSON.stringify(markdownToEditorCache(markdown, note.assets))).toContain('"textAlign":"center"')
+  const entry = index.entries[0]!
+  const reused = await encodeMarkdownRepository(
+    { ...bundle, pages: bundle.pages.map((page) => ({ ...page, syncStatus: 'synced' as const })) },
+    new Map([[assetId, new Uint8Array([1, 2, 3])]]),
+    'electron',
+    undefined,
+    new Map([[pageId, `${entry.version}:${entry.contentHash}:${entry.historyCount}:gzip`]]),
+  )
+  expect(reused.files.has(`notes/${pageId}.json`)).toBe(false)
+  expect(reused.files.has(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)).toBe(true)
+  expect(noteIndexSchema.parse(JSON.parse(new TextDecoder().decode(reused.files.get('notes/index.json')))).entries).toEqual(index.entries)
 })
 
 test('rejects missing or corrupted current and historical Markdown objects', async () => {

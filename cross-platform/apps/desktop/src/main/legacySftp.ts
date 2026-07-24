@@ -13,7 +13,18 @@ export interface LegacySshConnection {
 }
 
 export interface LegacySftpFile { name: string; dataBase64: string }
-export interface LegacySftpPullResult { files: LegacySftpFile[]; indexHash: string; fingerprint: string }
+export interface LegacySftpPullOptions {
+  knownObjectHashes?: string[]
+  knownNoteSignatures?: Array<{ noteID: string; signature: string }>
+}
+export interface LegacySftpPullResult {
+  files: LegacySftpFile[]
+  indexHash: string
+  fingerprint: string
+  objectHashes: string[]
+  reusedObjectCount: number
+  reusedNoteIds: string[]
+}
 
 const MAX_FILE_BYTES = 100 * 1024 * 1024
 const MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
@@ -32,6 +43,21 @@ const compressedRepositoryFormat = Object.freeze({
 })
 const pulledNoteCache = new Map<string, { signature: string; data: Buffer }>()
 const pulledObjectCache = new Map<string, { contentHash: string; data: Buffer }>()
+const MAX_NOTE_CACHE_BYTES = 128 * 1024 * 1024
+const MAX_OBJECT_CACHE_BYTES = 64 * 1024 * 1024
+
+function cacheBuffer<T extends { data: Buffer }>(cache: Map<string, T>, key: string, value: T, maximumBytes: number) {
+  cache.delete(key)
+  cache.set(key, value)
+  let total = 0
+  for (const item of cache.values()) total += item.data.byteLength
+  while (total > maximumBytes && cache.size > 1) {
+    const oldestKey = cache.keys().next().value
+    if (!oldestKey) break
+    total -= cache.get(oldestKey)!.data.byteLength
+    cache.delete(oldestKey)
+  }
+}
 
 const sha256 = (value: Buffer) => createHash('sha256').update(value).digest('hex')
 const fingerprint = (key: Buffer) => `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`
@@ -238,15 +264,16 @@ async function atomicWrite(client: SftpClient, path: string, data: Buffer) {
   }
 }
 
-export async function pullLegacyRepository(settings: LegacySshConnection): Promise<LegacySftpPullResult> {
+export async function pullLegacyRepository(settings: LegacySshConnection, options: LegacySftpPullOptions = {}): Promise<LegacySftpPullResult> {
   const { client, root, fingerprint: actualFingerprint } = await connect(settings)
-  let lock: { lockPath: string; ownerPath: string; owner: string } | undefined
-  let finishHeartbeat: (() => Promise<void>) | undefined
   try {
     await client.mkdir(root, true)
-    lock = await acquireLock(client, root)
-    finishHeartbeat = maintainLock(client, lock)
     const files = new Map<string, Buffer>()
+    const knownObjectHashes = new Set(options.knownObjectHashes?.filter((value) => /^[0-9a-f]{64}$/i.test(value)).map((value) => value.toLowerCase()) ?? [])
+    const knownNoteSignatures = new Map(options.knownNoteSignatures?.flatMap((item) => isUuid(item.noteID) && item.signature.length <= 256 ? [[item.noteID, item.signature] as const] : []) ?? [])
+    const remoteObjectHashes = new Set<string>()
+    const reusedNoteIds: string[] = []
+    let reusedObjectCount = 0
     const cacheNamespace = `${settings.host.trim()}:${settings.port}:${settings.username.trim()}:${root}`
     let totalBytes = 0
     const addValue = (name: string, value: Buffer) => {
@@ -261,8 +288,13 @@ export async function pullLegacyRepository(settings: LegacySshConnection): Promi
       const value = transform ? transform(remoteValue) : remoteValue
       addValue(name, value)
     }
-    await add('library.json'); await add('notes/index.json'); await add('notes/reading_positions.json'); await add('notes/assets_manifest.json'); await add('notes/privacy.json')
-    const remoteIndex = files.get('notes/index.json')
+    // Pulls are optimistic snapshots. Publishing clients write the index last;
+    // reading it both before and after avoids holding the cross-device write
+    // lock during a potentially large download and prevents killed readers
+    // from leaving Android blocked behind a stale lock.
+    const remoteIndex = await readOptional(client, posix.join(root, 'notes/index.json'))
+    if (remoteIndex) addValue('notes/index.json', remoteIndex)
+    await add('library.json'); await add('notes/reading_positions.json'); await add('notes/assets_manifest.json'); await add('notes/privacy.json')
     const index = remoteIndex ? normalizeRepositoryIndex(remoteIndex) : undefined
     if (index) files.set('notes/index.json', index)
     if (index) {
@@ -272,13 +304,17 @@ export async function pullLegacyRepository(settings: LegacySshConnection): Promi
         const name = `notes/${entry.noteID}.json`
         const cacheKey = `${cacheNamespace}:${entry.noteID}`
         const signature = `${entry.version ?? 0}:${entry.contentHash ?? ''}:${entry.historyCount ?? 0}:${compressed ? 'gzip' : 'json'}`
+        if (knownNoteSignatures.get(entry.noteID) === signature) {
+          reusedNoteIds.push(entry.noteID)
+          continue
+        }
         const cached = pulledNoteCache.get(cacheKey)
         if (cached?.signature === signature) addValue(name, cached.data)
         else {
           if (compressed) await add(name, compressedNotePath(entry.noteID), (value) => decodeCompressedNote(value, name))
           else await add(name)
           const data = files.get(name)
-          if (data) pulledNoteCache.set(cacheKey, { signature, data })
+          if (data) cacheBuffer(pulledNoteCache, cacheKey, { signature, data }, MAX_NOTE_CACHE_BYTES)
         }
       }
     }
@@ -288,22 +324,35 @@ export async function pullLegacyRepository(settings: LegacySshConnection): Promi
       for (const entry of parsed.entries ?? []) if (typeof entry.relativePath === 'string') {
         const relative = safeRelativePath(entry.relativePath)
         const name = relative.startsWith('objects/') ? relative : `attachments/${relative}`
+        const contentHash = entry.contentHash?.toLowerCase()
+        if (contentHash && /^[0-9a-f]{64}$/.test(contentHash)) remoteObjectHashes.add(contentHash)
+        if (contentHash && knownObjectHashes.has(contentHash)) {
+          reusedObjectCount += 1
+          continue
+        }
         const cacheKey = `${cacheNamespace}:${name}`
         const cached = entry.contentHash ? pulledObjectCache.get(cacheKey) : undefined
         if (cached && cached.contentHash === entry.contentHash) addValue(name, cached.data)
         else {
           await add(name)
           const data = files.get(name)
-          if (data && entry.contentHash) pulledObjectCache.set(cacheKey, { contentHash: entry.contentHash, data })
+          if (data && entry.contentHash) cacheBuffer(pulledObjectCache, cacheKey, { contentHash: entry.contentHash, data }, MAX_OBJECT_CACHE_BYTES)
         }
       }
     }
-    await finishHeartbeat()
-    finishHeartbeat = undefined
-    return { files: [...files].map(([name, data]) => ({ name, dataBase64: data.toString('base64') })), indexHash: remoteIndex ? sha256(remoteIndex) : '', fingerprint: actualFingerprint }
+    const finalIndex = await readOptional(client, posix.join(root, 'notes/index.json'))
+    if ((finalIndex ? sha256(finalIndex) : '') !== (remoteIndex ? sha256(remoteIndex) : '')) {
+      throw new Error('远端索引在拉取期间已变化，请重新同步')
+    }
+    return {
+      files: [...files].map(([name, data]) => ({ name, dataBase64: data.toString('base64') })),
+      indexHash: remoteIndex ? sha256(remoteIndex) : '',
+      fingerprint: actualFingerprint,
+      objectHashes: [...remoteObjectHashes],
+      reusedObjectCount,
+      reusedNoteIds,
+    }
   } finally {
-    if (finishHeartbeat) await finishHeartbeat().catch(() => undefined)
-    if (lock) await releaseLock(client, lock)
     await client.end().catch(() => undefined)
   }
 }
@@ -332,20 +381,20 @@ export async function pushLegacyRepository(settings: LegacySshConnection, files:
     entrySignatures(currentIndex, currentEntries)
     entrySignatures(normalized.find((file) => file.name === 'notes/index.json')?.data, nextEntries)
     const unchangedNoteIds = new Set([...nextEntries].flatMap(([id, signature]) => currentEntries.get(id) === signature ? [id] : []))
-    const encoded = normalized.map((file) => {
+    const encoded = normalized.flatMap((file) => {
       if (/^notes\/[0-9a-f-]{36}\.json$/i.test(file.name)) {
+        const noteId = file.name.slice('notes/'.length, -'.json'.length)
+        if (unchangedNoteIds.has(noteId)) return []
         const compact = compactJson(file.data)
-        return { name: `${file.name}.gz`, data: gzipSync(compact, { level: 9 }) }
+        return [{ name: `${file.name}.gz`, data: gzipSync(compact, { level: 9 }) }]
       }
-      if (file.name === 'notes/index.json') return { ...file, data: encodeCompressedIndex(file.data) }
-      if (file.name.endsWith('.json')) return { ...file, data: compactJson(file.data) }
-      return file
+      if (file.name === 'notes/index.json') return [{ ...file, data: encodeCompressedIndex(file.data) }]
+      if (file.name.endsWith('.json')) return [{ ...file, data: compactJson(file.data) }]
+      return [file]
     })
     const priority = (name: string) => name === 'library.json' ? 0 : name.startsWith('attachments/') || name.startsWith('objects/') ? 1 : name === 'notes/assets_manifest.json' ? 2 : /^notes\/[0-9a-f-]{36}\.json\.gz$/i.test(name) ? 3 : name === 'notes/privacy.json' ? 4 : name === 'notes/reading_positions.json' ? 5 : 6
     encoded.sort((left, right) => priority(left.name) - priority(right.name) || left.name.localeCompare(right.name))
     for (const file of encoded) {
-      const noteMatch = /^notes\/([0-9a-f-]{36})\.json\.gz$/i.exec(file.name)
-      if (noteMatch && unchangedNoteIds.has(noteMatch[1]!)) continue
       if (file.name.startsWith('objects/') && await client.exists(posix.join(root, file.name))) continue
       await atomicWrite(client, posix.join(root, file.name), file.data)
     }

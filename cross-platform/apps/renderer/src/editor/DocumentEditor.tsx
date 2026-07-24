@@ -6,11 +6,13 @@ import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { Extension, type Editor } from '@tiptap/core'
 import { Plugin, PluginKey, Selection, TextSelection, type EditorState } from 'prosemirror-state'
 import { Decoration, DecorationSet } from 'prosemirror-view'
+import type { Asset } from '@notebook/domain'
 import { useCollaborativeDocument } from '../collaboration/useCollaborativeDocument'
 import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from './extensions'
 import { registerFlushHandler } from '../data/flushCoordinator'
 import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail } from './referenceCommands'
 import { OUTLINE_JUMP_EVENT } from './OutlinePanel'
+import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
 
 export const initialContent = `
   <h1>Notebook Next 产品愿景</h1>
@@ -38,6 +40,7 @@ export interface DocumentEditorProps {
   onDraft?: (json: Record<string, unknown>) => void | Promise<void>
   forceRestore?: boolean
   loadAsset?: AssetLoader
+  saveAsset?: (pageId: string, file: File) => Promise<Asset>
   vimEnabled?: boolean
   onVimCommandModeChange?: (active: boolean) => void
   viewportPosition?: { scrollTop?: number; fraction: number }
@@ -164,13 +167,13 @@ const VimBlockCursor = Extension.create({
   },
 })
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} />
+  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveAsset={saveAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} />
 }
 
-function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const bodyRef = useRef<HTMLDivElement>(null)
   const restoreTimers = useRef<number[]>([])
@@ -271,6 +274,32 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         },
       },
       transformPastedHTML: sanitizeSupportedHtml,
+      handlePaste: (view, event) => {
+        const images = imageFilesFromTransfer(event.clipboardData)
+        if (images.length && saveAsset) {
+          event.preventDefault()
+          const position = view.state.selection.from
+          void saveImageFilesAtPosition(view, images, pageId, saveAsset, position)
+          return true
+        }
+        const readNativeImage = window.notebookDesktop?.clipboard?.readImage
+        if (!readNativeImage || !saveAsset) return false
+        const position = view.state.selection.from
+        void readNativeImage().then((value) => {
+          if (!value) return
+          const bytes = Uint8Array.from(atob(value.dataBase64), (character) => character.charCodeAt(0))
+          return saveImageFilesAtPosition(view, [new File([bytes], value.name, { type: value.mimeType })], pageId, saveAsset, position)
+        })
+        return false
+      },
+      handleDrop: (view, event) => {
+        const images = imageFilesFromTransfer(event.dataTransfer)
+        if (!images.length || !saveAsset) return false
+        event.preventDefault()
+        const position = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from
+        void saveImageFilesAtPosition(view, images, pageId, saveAsset, position)
+        return true
+      },
       handleTextInput: (view, from, _to, text) => {
         if (suppressedVimTransitionText.current === text.toLocaleLowerCase()) {
           suppressedVimTransitionText.current = undefined
@@ -420,7 +449,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         return true
       },
     },
-  }, [session.document, session.provider, loadAsset, pageId])
+  }, [session.document, session.provider, loadAsset, pageId, saveAsset])
 
   useEffect(() => {
     if (!editor || !content) return
@@ -504,6 +533,38 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     window.addEventListener(INSERT_REFERENCE_EVENT, insert)
     return () => window.removeEventListener(INSERT_REFERENCE_EVENT, insert)
   }, [editor])
+
+  useEffect(() => {
+    if (!editor) return
+    const insert = (event: Event) => {
+      const detail = (event as CustomEvent<InsertAssetDetail>).detail
+      if (!detail || detail.pageId !== pageId) return
+      const href = `notebook-asset:${detail.asset.id}`
+      let chain = editor.chain().focus()
+      if (typeof detail.position === 'number') {
+        chain = chain.setTextSelection(Math.min(detail.position, editor.state.doc.content.size))
+      }
+      if (detail.asset.kind === 'image') {
+        chain.insertContent({
+          type: 'image',
+          attrs: {
+            src: href,
+            legacyAssetId: detail.asset.id,
+            alt: detail.asset.filename,
+            title: detail.asset.filename,
+          },
+        }).run()
+        return
+      }
+      chain.insertContent({
+        type: 'text',
+        text: detail.asset.filename,
+        marks: [{ type: 'link', attrs: { href } }],
+      }).run()
+    }
+    window.addEventListener(INSERT_ASSET_EVENT, insert)
+    return () => window.removeEventListener(INSERT_ASSET_EVENT, insert)
+  }, [editor, pageId])
 
   useEffect(() => {
     if (!editor) return
@@ -630,6 +691,35 @@ function nextGraphemePosition(state: EditorState, position: number, blockEnd: nu
 }
 
 type ProseMirrorView = Editor['view']
+
+function imageFilesFromTransfer(transfer: DataTransfer | null) {
+  if (!transfer) return []
+  const images = [...transfer.files].filter((file) => file.type.startsWith('image/'))
+  for (const item of transfer.items) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+    const file = item.getAsFile()
+    if (file && !images.includes(file)) images.push(file)
+  }
+  return images
+}
+
+async function saveImageFilesAtPosition(
+  view: ProseMirrorView,
+  files: File[],
+  pageId: string,
+  saveAsset: NonNullable<DocumentEditorProps['saveAsset']>,
+  initialPosition: number,
+) {
+  let position = initialPosition
+  for (const source of files) {
+    const extension = source.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+    const file = source.name ? source : new File([source], `粘贴图片-${new Date().toISOString().replaceAll(':', '-')}.${extension}`, { type: source.type })
+    const asset = await saveAsset(pageId, file)
+    insertAssetIntoEditor(pageId, asset, position)
+    position = Math.min(view.state.selection.from, view.state.doc.content.size)
+  }
+  view.focus()
+}
 
 function convertMarkdownCodeFence(view: ProseMirrorView, cursorPosition: number) {
   const { state } = view

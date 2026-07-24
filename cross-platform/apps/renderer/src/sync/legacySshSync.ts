@@ -12,6 +12,55 @@ const bytesToBase64 = (value: Uint8Array) => {
   return btoa(result)
 }
 const base64ToBytes = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
+const decoder = new TextDecoder()
+const REMOTE_SIGNATURE_CACHE_PREFIX = 'notebook-ssh-remote-signatures-v1:'
+
+function repositoryEntrySignatures(indexBytes: Uint8Array | undefined) {
+  const signatures = new Map<string, string>()
+  if (!indexBytes) return signatures
+  const parsed = JSON.parse(decoder.decode(indexBytes)) as {
+    repositoryFormat?: { version?: number; noteEncoding?: string }
+    entries?: Array<{ noteID?: string; version?: number; contentHash?: string; historyCount?: number }>
+  }
+  const encoding = (parsed.repositoryFormat?.version === 2 || parsed.repositoryFormat?.version === 3) && parsed.repositoryFormat.noteEncoding === 'gzip' ? 'gzip' : 'json'
+  for (const entry of parsed.entries ?? []) if (entry.noteID) {
+    signatures.set(entry.noteID, `${entry.version ?? 0}:${entry.contentHash ?? ''}:${entry.historyCount ?? 0}:${encoding}`)
+  }
+  return signatures
+}
+
+function remoteSignatureCacheKey(connection: { host: string; port: number; username: string; remotePath: string }, workspaceId: string) {
+  return `${REMOTE_SIGNATURE_CACHE_PREFIX}${encodeURIComponent(`${connection.username}@${connection.host}:${connection.port}:${connection.remotePath}:${workspaceId}`)}`
+}
+
+function loadRemoteSignatureCache(key: string) {
+  try {
+    return new Map(Object.entries(JSON.parse(window.localStorage?.getItem(key) ?? '{}') as Record<string, string>))
+  } catch {
+    return new Map<string, string>()
+  }
+}
+
+function saveRemoteSignatureCache(key: string, signatures: Map<string, string>) {
+  window.localStorage?.setItem(key, JSON.stringify(Object.fromEntries(signatures)))
+}
+
+export function semanticallyEqualRepositoryJson(name: string, remote: Uint8Array | undefined, local: Uint8Array) {
+  if (!remote || !name.endsWith('.json')) return false
+  try {
+    const normalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(normalize).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+      if (!value || typeof value !== 'object') return value
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !['generatedAt', 'exportedAt', 'deviceID'].includes(key))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, normalize(item)]))
+    }
+    return JSON.stringify(normalize(JSON.parse(decoder.decode(remote)))) === JSON.stringify(normalize(JSON.parse(decoder.decode(local))))
+  } catch {
+    return false
+  }
+}
 
 function latestById<T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]) {
   const result = new Map(local.map((item) => [item.id, item]))
@@ -92,7 +141,23 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   }))
   const sourceItems = <T extends { pageId: string }>(left: T[], right: T[]) => [...new Set([...left.map((item) => item.pageId), ...right.map((item) => item.pageId)])].flatMap((pageId) => (sources.get(pageId) === 'remote' ? right : left).filter((item) => item.pageId === pageId))
   const sourceLinks = [...new Set([...local.pageLinks.map((item) => item.sourcePageId), ...remote.pageLinks.map((item) => item.sourcePageId)])].flatMap((pageId) => (sources.get(pageId) === 'remote' ? remote.pageLinks : local.pageLinks).filter((item) => item.sourcePageId === pageId))
-  const revisions = latestById(local.revisions, remote.revisions)
+  const historyResetAt = (page: Page | undefined) => typeof page?.legacyMetadata?.historyResetAt === 'string'
+    ? page.legacyMetadata.historyResetAt
+    : undefined
+  const revisionPageIds = new Set([
+    ...local.revisions.map((item) => item.pageId),
+    ...remote.revisions.map((item) => item.pageId),
+    ...sources.keys(),
+  ])
+  const revisions = [...revisionPageIds].flatMap((pageId) => {
+    const localResetAt = historyResetAt(localPages.get(pageId))
+    const remoteResetAt = historyResetAt(remotePages.get(pageId))
+    const localValues = local.revisions.filter((item) => item.pageId === pageId)
+    const remoteValues = remote.revisions.filter((item) => item.pageId === pageId)
+    if (localResetAt && (!remoteResetAt || localResetAt > remoteResetAt)) return localValues
+    if (remoteResetAt && (!localResetAt || remoteResetAt > localResetAt)) return remoteValues
+    return latestById(localValues, remoteValues)
+  })
   for (const [pageId, source] of sources) if (source === 'remote') {
     const oldDocument = localDocuments.get(pageId); const newDocument = remoteDocuments.get(pageId)
     if (oldDocument && newDocument && documentSignature(oldDocument) !== documentSignature(newDocument)) {
@@ -175,19 +240,60 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
   if (!password) throw new Error('请在设置中填写并保存 SSH 密码')
   if (!window.notebookDesktop) throw new Error('SSH/SFTP 同步仅在 Notebook Next Electron 桌面版中提供')
   const connection = { ...settings, password }
-  const pulled = await window.notebookDesktop.legacySftp.pull(connection)
+  const localBundle = await repository.exportData(workspaceId)
+  const localContents = await repository.exportAssetContents(new Set(localBundle.pages.map((page) => page.id)))
+  const localAssets = new Map(localBundle.assets.map((asset) => [asset.id, asset]))
+  const localDocumentsByPage = new Map(localBundle.documents.map((document) => [document.pageId, document]))
+  const knownObjectHashes = [...localContents].map(([assetId, bytes]) => {
+    const declared = localAssets.get(assetId)?.checksum?.toLowerCase()
+    return declared && /^[0-9a-f]{64}$/.test(declared) ? declared : sha256Hex(bytes)
+  })
+  const signatureCacheKey = remoteSignatureCacheKey(connection, workspaceId)
+  const cachedRemoteSignatures = loadRemoteSignatureCache(signatureCacheKey)
+  const knownNoteSignatures = localBundle.pages.flatMap((page) => {
+    const signature = cachedRemoteSignatures.get(page.id)
+      ?? (typeof page.legacyMetadata?.remoteIndexSignature === 'string' ? page.legacyMetadata.remoteIndexSignature : undefined)
+    const document = localDocumentsByPage.get(page.id)
+    if (!signature || !document) return []
+    const remoteHash = signature.split(':')[1]
+    const baselineHash = typeof page.legacyMetadata?.syncBaselineHash === 'string' ? page.legacyMetadata.syncBaselineHash : undefined
+    return remoteHash && (remoteHash === baselineHash || remoteHash === sha256Hex(documentSignature(document)))
+      ? [{ noteID: page.id, signature }]
+      : []
+  })
+  const pulled = await window.notebookDesktop.legacySftp.pull(connection, { knownObjectHashes, knownNoteSignatures })
   const remoteFiles: ImportFile[] = pulled.files.map((file) => ({ name: file.name, data: base64ToBytes(file.dataBase64) }))
   let trustedSettings = settings
   if (!settings.fingerprint && pulled.fingerprint) trustedSettings = await saveLegacySshSettings({ ...settings, fingerprint: pulled.fingerprint })
+  const remoteIndexBytes = remoteFiles.find((file) => file.name === 'notes/index.json')?.data
+  const remoteSignatures = repositoryEntrySignatures(remoteIndexBytes)
+  saveRemoteSignatureCache(signatureCacheKey, remoteSignatures)
   const hasRemoteNotes = remoteFiles.some((file) => /^notes\/[0-9a-f-]{36}\.json$/i.test(file.name))
-  const localBundle = await repository.exportData(workspaceId)
-  const localContents = await repository.exportAssetContents(new Set(localBundle.pages.map((page) => page.id)))
-  const decodedRemote = hasRemoteNotes ? await decodeImport(remoteFiles, workspaceId, password) : undefined
+  const hasMarkdownRepository = hasRemoteNotes || (remoteIndexBytes ? (() => {
+    try {
+      return (JSON.parse(decoder.decode(remoteIndexBytes)) as { repositoryFormat?: { version?: number } }).repositoryFormat?.version === 3
+    } catch {
+      return false
+    }
+  })() : false)
+  const decodedRemote = hasMarkdownRepository ? await decodeImport(remoteFiles, workspaceId, password, localContents) : undefined
   const merged = decodedRemote ? mergeBundles(localBundle, decodedRemote.bundle, localContents, decodedRemote.assetContents) : { bundle: localBundle, contents: localContents, conflicts: [] }
   const conflictIds = new Set(merged.conflicts)
   if (mode === 'pull') {
+    const documents = new Map(merged.bundle.documents.map((document) => [document.pageId, document]))
+    const pulledBundle: NotebookDataBundle = {
+      ...merged.bundle,
+      pages: merged.bundle.pages.map((page) => {
+        const document = documents.get(page.id)
+        const signature = remoteSignatures.get(page.id)
+        const remoteHash = signature?.split(':')[1]
+        return document && signature && remoteHash === sha256Hex(documentSignature(document))
+          ? { ...page, legacyMetadata: { ...page.legacyMetadata, remoteIndexSignature: signature } }
+          : page
+      }),
+    }
     await repository.importAssetContents(merged.contents)
-    await repository.importSyncResult(merged.bundle, localBundle)
+    await repository.importSyncResult(pulledBundle, localBundle)
     return merged.conflicts.length
       ? { state: 'conflict' as const, skipped: 0, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }
       : { state: 'synced' as const, skipped: 0, fingerprint: pulled.fingerprint }
@@ -202,11 +308,31 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
       if (content) publicationContents.set(asset.id, content)
     }
   }
-  const encoded = await encodeMarkdownRepository(publicationBundle, publicationContents, legacyDeviceId(), password)
-  const files = [...encoded.files].map(([name, data]) => ({ name, dataBase64: bytesToBase64(data) }))
-  await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash)
+  const publicationDocuments = new Map(publicationBundle.documents.map((document) => [document.pageId, document]))
+  const reusableNoteSignatures = new Map(publicationBundle.pages.flatMap((page) => {
+    const document = publicationDocuments.get(page.id)
+    const signature = remoteSignatures.get(page.id)
+    return page.syncStatus === 'synced' && document && signature?.split(':')[1] === sha256Hex(documentSignature(document))
+      ? [[page.id, signature] as const]
+      : []
+  }))
+  const encoded = await encodeMarkdownRepository(publicationBundle, publicationContents, legacyDeviceId(), password, reusableNoteSignatures)
+  const nextIndex = encoded.files.get('notes/index.json')
+  const nextSignatures = repositoryEntrySignatures(nextIndex)
+  const remoteObjectHashes = new Set(pulled.objectHashes ?? [])
+  const remoteFileMap = new Map(remoteFiles.map((file) => [file.name, file.data]))
+  const files = [...encoded.files].flatMap(([name, data]) => {
+    const noteMatch = /^notes\/([0-9a-f-]{36})\.json$/i.exec(name)
+    if (noteMatch && remoteSignatures.get(noteMatch[1]!) === nextSignatures.get(noteMatch[1]!)) return []
+    const objectMatch = /^objects\/[0-9a-f]{2}\/([0-9a-f]{64})$/i.exec(name)
+    if (objectMatch && remoteObjectHashes.has(objectMatch[1]!.toLowerCase())) return []
+    if (['library.json', 'notes/index.json', 'notes/reading_positions.json', 'notes/assets_manifest.json', 'notes/privacy.json'].includes(name)
+      && semanticallyEqualRepositoryJson(name, remoteFileMap.get(name), data)) return []
+    return [{ name, dataBase64: bytesToBase64(data) }]
+  })
+  if (files.length > 0) await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash)
   const documents = new Map(merged.bundle.documents.map((document) => [document.pageId, document]))
-  const syncedBundle: NotebookDataBundle = { ...merged.bundle, pages: merged.bundle.pages.map((page) => !conflictIds.has(page.id) && encoded.pageVersions.has(page.id) ? { ...page, legacyVersion: encoded.pageVersions.get(page.id), syncStatus: 'synced', legacyMetadata: { ...page.legacyMetadata, ...(documents.get(page.id) ? { syncBaselineHash: sha256Hex(documentSignature(documents.get(page.id)!)) } : {}) } } : page) }
+  const syncedBundle: NotebookDataBundle = { ...merged.bundle, pages: merged.bundle.pages.map((page) => !conflictIds.has(page.id) && encoded.pageVersions.has(page.id) ? { ...page, legacyVersion: encoded.pageVersions.get(page.id), syncStatus: 'synced', legacyMetadata: { ...page.legacyMetadata, ...(documents.get(page.id) ? { syncBaselineHash: sha256Hex(documentSignature(documents.get(page.id)!)) } : {}), ...(nextSignatures.get(page.id) ? { remoteIndexSignature: nextSignatures.get(page.id) } : {}) } } : page) }
   await repository.importAssetContents(merged.contents)
   await repository.importSyncResult(syncedBundle, localBundle)
   if (merged.conflicts.length) return { state: 'conflict' as const, skipped: encoded.skippedPageIds.length, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }

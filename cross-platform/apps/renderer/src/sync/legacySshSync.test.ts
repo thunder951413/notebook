@@ -1,6 +1,6 @@
 import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
 import { describe, expect, test, vi } from 'vitest'
-import { mergeBundles, publicationBundleWithRemoteConflicts } from './legacySshSync'
+import { mergeBundles, publicationBundleWithRemoteConflicts, semanticallyEqualRepositoryJson } from './legacySshSync'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -23,12 +23,42 @@ function bundle(currentPage?: Page, currentDocument?: PageDocument): NotebookDat
 }
 
 describe('legacy SSH conflict merge', () => {
+  test('skips repository metadata that only differs by volatile export fields or array order', () => {
+    const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
+    const remote = encode({ generatedAt: 1, deviceID: 'android', entries: [{ noteID: 'b' }, { noteID: 'a' }] })
+    const local = encode({ generatedAt: 2, deviceID: 'electron', entries: [{ noteID: 'a' }, { noteID: 'b' }] })
+    expect(semanticallyEqualRepositoryJson('notes/index.json', remote, local)).toBe(true)
+    expect(semanticallyEqualRepositoryJson('notes/index.json', remote, encode({ entries: [{ noteID: 'c' }] }))).toBe(false)
+  })
+
   test('keeps a pending local edit when the remote legacy version has not advanced', () => {
     const local = bundle(page({ syncStatus: 'pending', legacyVersion: 2, title: '本地编辑' }), document('local'))
     const remote = bundle(page({ legacyVersion: 2, title: '远端旧值' }), document('remote'))
     const merged = mergeBundles(local, remote, new Map(), new Map())
     expect(merged.bundle.pages[0]!.title).toBe('本地编辑')
     expect(merged.bundle.documents[0]!.tiptapJson).toEqual(document('local').tiptapJson)
+  })
+
+  test('a newer history reset discards every older remote revision', () => {
+    const resetAt = '2026-07-22T04:00:00.000Z'
+    const local = bundle(page({ syncStatus: 'pending', legacyMetadata: { historyResetAt: resetAt } }), document('current'))
+    local.revisions.push({
+      id: 'new-baseline',
+      pageId,
+      pageIcon: null,
+      document: document('current'),
+      createdAt: resetAt,
+      reason: 'manual',
+    })
+    const remote = bundle(page(), document('current'))
+    remote.revisions.push(
+      { id: 'old-a', pageId, document: document('old A'), createdAt: timestamp, reason: 'import' },
+      { id: 'old-b', pageId, document: document('old B'), createdAt: '2026-07-22T01:00:00.000Z', reason: 'import' },
+    )
+
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+
+    expect(merged.bundle.revisions.map((item) => item.id)).toEqual(['new-baseline'])
   })
 
   test('stops on concurrent edits, preserves the local body and archives the remote body', () => {

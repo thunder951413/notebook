@@ -12,6 +12,9 @@ declare global {
         pickOpen(): Promise<Array<{ name: string; dataBase64: string }>>
         pickSave(suggestedName: string, dataBase64: string): Promise<boolean>
       }
+      clipboard: {
+        readImage(): Promise<{ name: string; mimeType: string; dataBase64: string } | undefined>
+      }
       secrets: {
         set(key: string, value: string): Promise<void>
         get(key: string): Promise<string | undefined>
@@ -22,7 +25,7 @@ declare global {
         chooseDataRoot(): Promise<string | undefined>
       }
       legacySftp: {
-        pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string }>
+        pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }> }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[] }>
         push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
       }
       events: {

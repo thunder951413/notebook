@@ -10,6 +10,9 @@ export interface NotebookDesktopApi {
     pickOpen(): Promise<Array<{ name: string; dataBase64: string }>>
     pickSave(suggestedName: string, dataBase64: string): Promise<boolean>
   }
+  clipboard: {
+    readImage(): Promise<{ name: string; mimeType: string; dataBase64: string } | undefined>
+  }
   secrets: {
     set(key: string, value: string): Promise<void>
     get(key: string): Promise<string | undefined>
@@ -20,7 +23,7 @@ export interface NotebookDesktopApi {
     chooseDataRoot(): Promise<string | undefined>
   }
   legacySftp: {
-    pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string }>
+    pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }> }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[] }>
     push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
   }
   events: {
@@ -40,6 +43,9 @@ const api: NotebookDesktopApi = Object.freeze({
     pickOpen: () => ipcRenderer.invoke('files:pickOpen'),
     pickSave: (suggestedName: string, dataBase64: string) => ipcRenderer.invoke('files:pickSave', { suggestedName, dataBase64 }),
   }),
+  clipboard: Object.freeze({
+    readImage: () => ipcRenderer.invoke('clipboard:readImage'),
+  }),
   secrets: Object.freeze({
     set: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
     get: (key: string) => ipcRenderer.invoke('secrets:get', key),
@@ -50,7 +56,7 @@ const api: NotebookDesktopApi = Object.freeze({
     chooseDataRoot: () => ipcRenderer.invoke('storage:chooseDataRoot'),
   }),
   legacySftp: Object.freeze({
-    pull: (settings: Parameters<NotebookDesktopApi['legacySftp']['pull']>[0]) => ipcRenderer.invoke('legacySftp:pull', settings),
+    pull: (settings: Parameters<NotebookDesktopApi['legacySftp']['pull']>[0], options?: Parameters<NotebookDesktopApi['legacySftp']['pull']>[1]) => ipcRenderer.invoke('legacySftp:pull', settings, options),
     push: (settings: Parameters<NotebookDesktopApi['legacySftp']['push']>[0], files: Parameters<NotebookDesktopApi['legacySftp']['push']>[1], expectedIndexHash: string) => ipcRenderer.invoke('legacySftp:push', settings, files, expectedIndexHash),
   }),
   events: Object.freeze({

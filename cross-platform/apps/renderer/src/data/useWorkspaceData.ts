@@ -11,6 +11,7 @@ import { legacyDeviceId } from '../sync/legacySshSettings'
 import { extractNotebookReferences, normalizeReferenceTargetIds } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
+import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 const db = new NotebookRendererDatabase(import.meta.env.VITE_NOTEBOOK_DATABASE_NAME ?? 'notebook-next')
@@ -20,6 +21,35 @@ const documentLoadPromises = new Map<string, Promise<Record<string, unknown> | u
 const isEmptyEditorCache = (value: Record<string, unknown>) => value.type === 'doc' && Array.isArray(value.content) && value.content.length === 0
 const REFERENCE_INDEX_VERSION_KEY = 'notebook-reference-index-version'
 const emptyEditorDocument = () => ({ type: 'doc', content: [{ type: 'paragraph' }] })
+let notebookRootMigration: Promise<void> | undefined
+
+async function ensureNotebookPageRoots() {
+  if (notebookRootMigration) return notebookRootMigration
+  notebookRootMigration = (async () => {
+    const notebooks = await repository.listNotebooks(WORKSPACE_ID)
+    const sections = (await Promise.all(notebooks.map((notebook) => repository.listSections(notebook.id)))).flat()
+    const pages: Page[] = []
+    let cursor: string | undefined
+    do {
+      const batch = await repository.listPages({ includeDeleted: true, limit: 500, cursor })
+      pages.push(...batch.items)
+      cursor = batch.nextCursor
+    } while (cursor)
+    const now = new Date().toISOString()
+    const migration = planNotebookPageRootMigration(sections, pages, WORKSPACE_ID, now, () => crypto.randomUUID())
+    for (const root of migration.roots) {
+      await repository.savePage(root, {
+        pageId: root.id,
+        schemaVersion: 3,
+        markdown: '',
+        tiptapJson: emptyEditorDocument(),
+        updatedAt: now,
+      })
+    }
+    for (const page of migration.reparented) await repository.savePage(page)
+  })().finally(() => { notebookRootMigration = undefined })
+  return notebookRootMigration
+}
 
 function editorCacheVersion(document: PageDocument, assets: Asset[]) {
   const assetVersion = assets
@@ -86,6 +116,7 @@ const toPageSummary = (page: Page): PageSummary => ({
   id: page.id,
   sectionId: page.sectionId ?? '',
   icon: page.icon,
+  notebookRoot: Boolean(notebookRootSectionId(page)),
   parentPageId: page.parentPageId,
   sortOrder: page.sortOrder,
   treeUpdatedAt: page.treeUpdatedAt,
@@ -125,6 +156,7 @@ export function useWorkspaceData() {
   }, [documents])
 
   const reload = useCallback(async () => {
+    await ensureNotebookPageRoots()
     const documentIds = [...loadedDocumentIds.current]
     const loadEveryPage = async () => {
       const items: Page[] = []
@@ -347,7 +379,28 @@ export function useWorkspaceData() {
   const createSection = useCallback(async (notebookId: string, name: string) => {
     const now = new Date().toISOString()
     const section: Section = { id: crypto.randomUUID(), notebookId, name, color: '#7c3aed', sortOrder: sectionRecords.filter((item) => item.notebookId === notebookId).length, createdAt: now, updatedAt: now }
-    await repository.saveSection(section); await reload(); return section.id
+    const root: Page = {
+      id: crypto.randomUUID(),
+      workspaceId: WORKSPACE_ID,
+      sectionId: section.id,
+      sortOrder: section.sortOrder * 1000,
+      treeUpdatedAt: now,
+      kind: 'document',
+      title: name,
+      preview: '',
+      favorite: false,
+      createdAt: now,
+      updatedAt: now,
+      syncStatus: 'pending',
+      legacyMetadata: { notebookRootSectionId: section.id },
+    }
+    const tiptapJson = emptyEditorDocument()
+    await repository.saveSection(section)
+    await repository.savePage(root, { pageId: root.id, schemaVersion: 3, markdown: '', tiptapJson, updatedAt: now })
+    loadedDocumentIds.current.add(root.id)
+    setDocuments((current) => ({ ...current, [root.id]: tiptapJson }))
+    await reload()
+    return { sectionId: section.id, pageId: root.id }
   }, [reload, sectionRecords])
 
   const renameNotebook = useCallback(async (notebookId: string, name: string) => {
@@ -376,7 +429,9 @@ export function useWorkspaceData() {
 
   const duplicatePage = useCallback(async (pageId: string) => {
     const id = crypto.randomUUID()
-    await repository.duplicatePage(pageId, id, new Date().toISOString())
+    const copy = await repository.duplicatePage(pageId, id, new Date().toISOString())
+    const legacyMetadata = withoutNotebookRootMarker(copy.legacyMetadata)
+    if (legacyMetadata !== copy.legacyMetadata) await repository.savePage({ ...copy, legacyMetadata })
     await reload()
     return id
   }, [reload])
@@ -388,10 +443,16 @@ export function useWorkspaceData() {
       if (Object.prototype.hasOwnProperty.call(patch, 'icon') && patch.icon !== page.icon) {
         await repository.createManualRevision(pageId)
       }
-      await repository.savePage({ ...page, ...patch, id: page.id, updatedAt: new Date().toISOString(), syncStatus: 'pending' })
+      const updatedAt = new Date().toISOString()
+      await repository.savePage({ ...page, ...patch, id: page.id, updatedAt, syncStatus: 'pending' })
+      const rootSectionId = notebookRootSectionId(page)
+      if (rootSectionId && typeof patch.title === 'string') {
+        const section = sectionRecords.find((item) => item.id === rootSectionId)
+        if (section) await repository.saveSection({ ...section, name: patch.title, updatedAt })
+      }
       await reload()
     })
-  }, [reload])
+  }, [reload, sectionRecords])
 
   const movePageInTree = useCallback(async (pageId: string, sectionId: string, parentPageId: string | undefined, sortOrder: number) => {
     await enqueuePageMutation(pageId, async () => {
@@ -408,17 +469,116 @@ export function useWorkspaceData() {
         cursor = livePages.find((item) => item.id === cursor)?.parentPageId
       }
       const now = new Date().toISOString()
-      await repository.savePage({ ...page, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+      const rootSectionId = notebookRootSectionId(page)
+      await repository.savePage({
+        ...page,
+        sectionId,
+        parentPageId,
+        sortOrder,
+        treeUpdatedAt: now,
+        updatedAt: now,
+        syncStatus: 'pending',
+        legacyMetadata: rootSectionId ? withoutNotebookRootMarker(page.legacyMetadata) : page.legacyMetadata,
+      })
       if (page.sectionId !== sectionId) {
-        const descendants = treePageIds(livePages, pageId).slice(1)
-        for (const descendantId of descendants) {
+        const subtreeIds = new Set(treePageIds(livePages, pageId).slice(1))
+        // A top-level page owns a transparent legacy Section. When it becomes
+        // a child, move every remaining record (including tasks) out before
+        // deleting that now-empty compatibility bucket.
+        if (rootSectionId) {
+          for (const item of livePages) {
+            if (item.sectionId === rootSectionId && item.id !== pageId) subtreeIds.add(item.id)
+          }
+        }
+        for (const descendantId of subtreeIds) {
           const descendant = livePages.find((item) => item.id === descendantId)
           if (descendant) await repository.savePage({ ...descendant, sectionId, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
         }
+        if (rootSectionId) await repository.deleteSection(rootSectionId, now, legacyDeviceId())
       }
       await reload()
     })
   }, [pageRecords, reload])
+
+  const promotePageToNotebookRoot = useCallback(async (pageId: string, targetRootPageId?: string, position: 'before' | 'after' = 'after') => {
+    return enqueuePageMutation(pageId, async () => {
+      const page = await repository.getPage(pageId)
+      if (!page || page.deletedAt) throw new Error('找不到要提升的页面')
+      const sourceSection = sectionRecords.find((item) => item.id === page.sectionId)
+      if (!sourceSection) throw new Error('页面不属于有效笔记本')
+      const targetRoot = targetRootPageId ? pageRecords.find((item) => item.id === targetRootPageId) : undefined
+      const targetSection = targetRoot ? sectionRecords.find((item) => item.id === targetRoot.sectionId) : undefined
+      const notebookId = targetSection?.notebookId ?? sourceSection.notebookId
+      const notebookSections = sectionRecords
+        .filter((item) => item.notebookId === notebookId)
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+      const targetIndex = targetSection ? notebookSections.findIndex((item) => item.id === targetSection.id) : -1
+      const insertionIndex = targetIndex < 0 ? notebookSections.length : targetIndex + (position === 'after' ? 1 : 0)
+      const previousOrder = notebookSections[insertionIndex - 1]?.sortOrder
+      const nextOrder = notebookSections[insertionIndex]?.sortOrder
+      const sectionOrder = previousOrder !== undefined && nextOrder !== undefined ? (previousOrder + nextOrder) / 2
+        : previousOrder !== undefined ? previousOrder + 1
+          : nextOrder !== undefined ? nextOrder - 1
+            : 0
+      const now = new Date().toISOString()
+      const section: Section = {
+        id: crypto.randomUUID(),
+        notebookId,
+        name: page.title,
+        color: sourceSection.color,
+        sortOrder: sectionOrder,
+        createdAt: now,
+        updatedAt: now,
+      }
+      await repository.saveSection(section)
+      const descendants = treePageIds(pageRecords.filter((item) => !item.deletedAt), pageId).slice(1)
+      await repository.savePage({
+        ...page,
+        sectionId: section.id,
+        parentPageId: undefined,
+        treeUpdatedAt: now,
+        updatedAt: now,
+        syncStatus: 'pending',
+        legacyMetadata: {
+          ...withoutNotebookRootMarker(page.legacyMetadata),
+          notebookRootSectionId: section.id,
+        },
+      })
+      for (const descendantId of descendants) {
+        const descendant = pageRecords.find((item) => item.id === descendantId)
+        if (descendant) await repository.savePage({ ...descendant, sectionId: section.id, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+      }
+      await reload()
+      return section.id
+    })
+  }, [pageRecords, reload, sectionRecords])
+
+  const reorderNotebookRoot = useCallback(async (pageId: string, targetRootPageId: string, position: 'before' | 'after') => {
+    const page = await repository.getPage(pageId)
+    const target = await repository.getPage(targetRootPageId)
+    const sourceSectionId = page ? notebookRootSectionId(page) : undefined
+    const targetSectionId = target ? notebookRootSectionId(target) : undefined
+    if (!page || !target || !sourceSectionId || !targetSectionId || sourceSectionId === targetSectionId) return page?.sectionId
+    const sourceSection = sectionRecords.find((item) => item.id === sourceSectionId)
+    const targetSection = sectionRecords.find((item) => item.id === targetSectionId)
+    if (!sourceSection || !targetSection) throw new Error('顶层页面位置无效')
+    const siblings = sectionRecords
+      .filter((item) => item.notebookId === targetSection.notebookId && item.id !== sourceSection.id)
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+    const targetIndex = siblings.findIndex((item) => item.id === targetSection.id)
+    const insertionIndex = Math.max(0, targetIndex + (position === 'after' ? 1 : 0))
+    const previousOrder = siblings[insertionIndex - 1]?.sortOrder
+    const nextOrder = siblings[insertionIndex]?.sortOrder
+    const sortOrder = previousOrder !== undefined && nextOrder !== undefined ? (previousOrder + nextOrder) / 2
+      : previousOrder !== undefined ? previousOrder + 1
+        : nextOrder !== undefined ? nextOrder - 1
+          : 0
+    const now = new Date().toISOString()
+    await repository.saveSection({ ...sourceSection, notebookId: targetSection.notebookId, sortOrder, updatedAt: now })
+    await repository.savePage({ ...page, sortOrder: sortOrder * 1000, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+    await reload()
+    return sourceSection.id
+  }, [reload, sectionRecords])
 
   const loadTaskSteps = useCallback((pageId: string) => repository.listTaskSteps(pageId), [])
   const saveTaskSteps = useCallback((pageId: string, steps: import('@notebook/domain').TaskStep[]) => repository.saveTaskSteps(pageId, steps), [])
@@ -483,6 +643,13 @@ export function useWorkspaceData() {
     await reload()
   }, [reload, trashRecords])
   const purgePage = useCallback(async (pageId: string) => {
+    const page = await repository.getPage(pageId)
+    const rootSectionId = page ? notebookRootSectionId(page) : undefined
+    if (rootSectionId) {
+      await repository.deleteSection(rootSectionId, new Date().toISOString(), legacyDeviceId())
+      await reload()
+      return
+    }
     const ids = treePageIds(trashRecords, pageId)
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.purgePage(id, deletedAt, legacyDeviceId())
@@ -490,6 +657,11 @@ export function useWorkspaceData() {
   }, [reload, trashRecords])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
+  const resetRevisionHistory = useCallback(async () => {
+    const result = await repository.resetRevisionHistory(WORKSPACE_ID)
+    await reload()
+    return result
+  }, [reload])
   const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])
   const saveReadingPosition = useCallback(async (pageId: string, viewportOffsetFraction: number) => {
@@ -503,7 +675,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

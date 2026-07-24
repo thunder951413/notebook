@@ -1,11 +1,11 @@
-import { app, dialog, ipcMain, Notification, safeStorage, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { app, clipboard, dialog, ipcMain, Notification, safeStorage, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
-import { pullLegacyRepository, pushLegacyRepository, type LegacySftpFile, type LegacySshConnection } from './legacySftp'
+import { pullLegacyRepository, pushLegacyRepository, type LegacySftpFile, type LegacySftpPullOptions, type LegacySshConnection } from './legacySftp'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
 const execFileAsync = promisify(execFile)
@@ -146,6 +146,19 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     return true
   })
 
+  ipcMain.handle('clipboard:readImage', (event) => {
+    assertTrustedSender(event)
+    const image = clipboard.readImage()
+    if (image.isEmpty()) return undefined
+    const png = image.toPNG()
+    if (!png.byteLength || png.byteLength > MAX_IMPORT_BYTES) return undefined
+    return {
+      name: `粘贴图片-${new Date().toISOString().replaceAll(':', '-')}.png`,
+      mimeType: 'image/png',
+      dataBase64: png.toString('base64'),
+    }
+  })
+
   ipcMain.handle('storage:getInfo', (event) => {
     assertTrustedSender(event)
     return { path: app.getPath('userData'), source: options.dataRootSource }
@@ -180,9 +193,9 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     await writeCredentialStore(store)
   })
 
-  ipcMain.handle('legacySftp:pull', async (event, settings: LegacySshConnection) => {
+  ipcMain.handle('legacySftp:pull', async (event, settings: LegacySshConnection, options?: LegacySftpPullOptions) => {
     assertTrustedSender(event)
-    return pullLegacyRepository(settings)
+    return pullLegacyRepository(settings, options)
   })
   ipcMain.handle('legacySftp:push', async (event, settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string) => {
     assertTrustedSender(event)

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/react-components'
+import QRCode from 'qrcode'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
-import { clearLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
+import { clearLegacySshPassword, getLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
 import type { LegacySyncMode } from '../sync/legacySshSync'
+import { serializeNotebookSyncQrPayload } from '../sync/sshQrConfig'
 
 type SettingsPage = 'general' | 'data' | 'services'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
@@ -29,6 +31,7 @@ interface SettingsCenterProps {
   onPrint: () => void
   onExportWorkspace: () => void
   onExportEncrypted: () => void
+  onResetHistory: () => Promise<{ pageCount: number; removedRevisionCount: number }>
   onChooseDataRoot?: () => void
   onPrivacyAction: () => void
   onPublishSshArchive?: (file: File) => Promise<void>
@@ -42,7 +45,7 @@ const syncLabels: Record<SyncState, string> = {
   error: '同步失败',
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage)
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => loadSyncSettings())
   const [sshSettings, setSshSettings] = useState<LegacySshSettings>(() => loadLegacySshSettings())
@@ -50,9 +53,11 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
   const [storedSshPassword, setStoredSshPassword] = useState(false)
   const [savingSync, setSavingSync] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string>()
+  const [sshQrDataUrl, setSshQrDataUrl] = useState<string>()
 
   useEffect(() => setPage(initialPage), [initialPage])
   useEffect(() => { void hasLegacySshPassword().then(setStoredSshPassword) }, [])
+  useEffect(() => setSshQrDataUrl(undefined), [sshPassword, sshSettings])
 
   const saveAndSync = async (mode: LegacySyncMode = 'bidirectional') => {
     if (savingSync || syncState === 'syncing') return
@@ -87,6 +92,38 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
     setSyncMessage('已清除已填写的主机指纹。下次连接会显示并记录服务器当前指纹，请先与服务器管理员核对。')
   }
 
+  const toggleSshQrCode = async () => {
+    if (sshQrDataUrl) {
+      setSshQrDataUrl(undefined)
+      return
+    }
+    setSyncMessage(undefined)
+    try {
+      const password = sshPassword || await getLegacySshPassword() || ''
+      const payload = serializeNotebookSyncQrPayload(sshSettings, password)
+      setSshQrDataUrl(await QRCode.toDataURL(payload, { width: 320, margin: 2, errorCorrectionLevel: 'M' }))
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '无法生成 Android 配置二维码')
+    }
+  }
+
+  const resetHistory = async () => {
+    if (savingSync || !window.confirm('这会永久删除所有旧历史版本，并将每篇笔记的当前内容设为唯一初始版本。随后需要同步覆盖远端。确定继续吗？')) return
+    setSavingSync(true)
+    setSyncMessage(undefined)
+    try {
+      const result = await onResetHistory()
+      const synchronized = await onSyncNow('push')
+      setSyncMessage(synchronized
+        ? `已删除 ${result.removedRevisionCount} 个旧版本；${result.pageCount} 篇笔记已设为初始版本并覆盖远端。`
+        : `已在本机删除 ${result.removedRevisionCount} 个旧版本并重建 ${result.pageCount} 个初始版本，但远端同步尚未完成。`)
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '无法重置版本历史')
+    } finally {
+      setSavingSync(false)
+    }
+  }
+
   return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <section className="settings-dialog settings-center" role="dialog" aria-label="设置">
       <header className="settings-center-header"><div><h2>Notebook 设置</h2><p>应用的外观、数据、服务和安全选项都集中在这里。</p></div><Button appearance="subtle" aria-label="关闭设置" onClick={onClose}>关闭</Button></header>
@@ -114,6 +151,10 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
             <SettingsSection title="完整备份" description="导出全部笔记本、页面、附件和版本。">
               <div className="settings-action-grid"><Button onClick={onExportWorkspace}>导出完整备份</Button><Button onClick={onExportEncrypted}>导出加密备份</Button></div>
             </SettingsSection>
+            <SettingsSection title="版本历史" description="永久移除旧版本，只把每篇笔记的当前正文保留为新的初始版本。">
+              <div className="settings-action-grid"><Button appearance="secondary" disabled={savingSync || syncState === 'syncing'} onClick={() => void resetHistory()}>删除旧历史并重建基线</Button></div>
+              <Text size={200}>此操作不会删除当前正文、图片或附件；完成后会立即通过 SSH 覆盖远端历史。</Text>
+            </SettingsSection>
             <SettingsSection title="当前页面" description={currentPageTitle}>
               <div className="settings-action-grid"><Button onClick={() => onExportPage('md')}>导出 Markdown</Button><Button onClick={() => onExportPage('html')}>导出 HTML</Button><Button onClick={onPrint}>打印 / 导出 PDF</Button></div>
             </SettingsSection>
@@ -137,6 +178,13 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
                   <label><span>远端同步目录</span><Input value={sshSettings.remotePath} onChange={(_, data) => setSshSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="~/notebook_backup" aria-label="远端同步目录" /></label>
                   <label><span>服务器主机指纹</span><Input readOnly value={sshSettings.fingerprint} placeholder="首次成功连接后自动记录 SHA256 指纹" aria-label="SSH 主机指纹" /></label>
                 {sshSettings.fingerprint && <div className="settings-action-grid"><Button onClick={resetSshFingerprint}>重新核对主机指纹</Button></div>}
+                <div className="ssh-qr-actions">
+                  <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void toggleSshQrCode()}>{sshQrDataUrl ? '隐藏 Android 配置二维码' : '显示 Android 配置二维码'}</Button>
+                  {sshQrDataUrl && <div className="ssh-qr-card" role="region" aria-label="Android SSH 配置二维码">
+                    <img src={sshQrDataUrl} alt="供 Android Notebook 扫描的 SSH 配置二维码" />
+                    <div><strong>在 Android“设置与同步”中扫描</strong><p>二维码包含服务器、用户名、密码、目录和主机指纹。仅在可信环境展示，扫描完成后立即隐藏。</p></div>
+                  </div>}
+                </div>
                 <div className="sync-mode-actions" aria-label="SSH 同步方式">
                   <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync('push')}>推送本机变化</Button>
                   <Button disabled={savingSync || syncState === 'syncing'} onClick={() => void saveAndSync('pull')}>拉取并合并</Button>
