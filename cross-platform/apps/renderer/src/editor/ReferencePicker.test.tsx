@@ -170,3 +170,44 @@ test('creates one stable range for adjacent paragraphs and blocks self-embedding
   }])
   window.removeEventListener(INSERT_REFERENCE_EVENT, captureInsert)
 })
+
+test('shows the complete block content in a hover preview without truncating it', async () => {
+  const page: PageSummary = {
+    id: 'target-page',
+    sectionId: 'section-a',
+    title: '长内容页面',
+    preview: '页面摘要',
+    updatedLabel: '刚刚',
+    tags: [],
+    kind: 'document',
+  }
+  const completeContent = `这是一个超过列表标题长度的内容块，列表本身仍然应该保持紧凑。${'完整预览内容'.repeat(12)}\n第二行也必须原样显示。`
+  const document = {
+    type: 'doc',
+    content: [{ type: 'codeBlock', content: [{ type: 'text', text: completeContent }] }],
+  }
+
+  render(
+    <FluentProvider theme={webLightTheme}>
+      <ReferencePicker
+        pages={[page]}
+        currentPageId="source-page"
+        loadDocument={vi.fn(async () => document)}
+        saveDocument={vi.fn(async () => undefined)}
+        onClose={vi.fn()}
+      />
+    </FluentProvider>,
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: /长内容页面.*页面摘要/ }))
+  const candidateButton = await screen.findByRole('button', { name: /代码 · 这是一个超过列表标题长度的内容块.*嵌入此段/ })
+  const candidateRow = candidateButton.closest('.reference-target-row')
+  expect(candidateRow).not.toBeNull()
+
+  fireEvent.mouseEnter(candidateRow!)
+
+  const preview = screen.getByRole('tooltip', { name: '块完整内容' })
+  expect(preview).toBeVisible()
+  expect(preview).toHaveTextContent('完整预览内容完整预览内容完整预览内容')
+  expect(preview).toHaveTextContent('第二行也必须原样显示。')
+})

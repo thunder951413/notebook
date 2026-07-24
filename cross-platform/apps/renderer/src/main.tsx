@@ -1,7 +1,8 @@
 import { Component, StrictMode, useEffect, useState, type ErrorInfo, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { FluentProvider, webDarkTheme, webLightTheme } from '@fluentui/react-components'
+import { FluentProvider } from '@fluentui/react-components'
 import { App } from './App'
+import { accentCssVariables, loadAccentColor, notebookFluentTheme, saveAccentColor, type AccentColor } from './appearance/accent'
 import { flushPendingEdits } from './data/flushCoordinator'
 import './styles.css'
 
@@ -36,15 +37,23 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error?: Erro
 function Root() {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('notebook-theme') as 'light' | 'dark' | null) ?? (prefersDark ? 'dark' : 'light'))
+  const [accentColor, setAccentColor] = useState<AccentColor>(() => loadAccentColor())
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('notebook-theme', theme) }, [theme])
+  useEffect(() => {
+    document.documentElement.dataset.accent = accentColor
+    for (const [name, value] of Object.entries(accentCssVariables(accentColor))) {
+      if (typeof value === 'string' || typeof value === 'number') document.documentElement.style.setProperty(name, String(value))
+    }
+    saveAccentColor(accentColor)
+  }, [accentColor])
   useEffect(() => {
     void navigator.storage?.persist?.().catch(() => false)
     return window.notebookDesktop?.events.onFlushRequested(flushPendingEdits)
   }, [])
   return (
     <StrictMode>
-      <FluentProvider theme={theme === 'dark' ? webDarkTheme : webLightTheme} className={`fluent-root theme-${theme}`}>
-        <App theme={theme} onToggleTheme={() => setTheme((value) => value === 'dark' ? 'light' : 'dark')} />
+      <FluentProvider theme={notebookFluentTheme(theme, accentColor)} style={accentCssVariables(accentColor)} className={`fluent-root theme-${theme}`}>
+        <App theme={theme} accentColor={accentColor} onAccentColorChange={setAccentColor} onToggleTheme={() => setTheme((value) => value === 'dark' ? 'light' : 'dark')} />
       </FluentProvider>
     </StrictMode>
   )

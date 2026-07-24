@@ -5,6 +5,7 @@ import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/s
 import { clearLegacySshPassword, getLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
 import type { LegacySyncMode } from '../sync/legacySshSync'
 import { serializeNotebookSyncQrPayload } from '../sync/sshQrConfig'
+import { ACCENT_PRESETS, type AccentColor } from '../appearance/accent'
 
 type SettingsPage = 'general' | 'data' | 'services'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
@@ -12,6 +13,7 @@ type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
 interface SettingsCenterProps {
   initialPage?: SettingsPage
   theme: 'light' | 'dark'
+  accentColor: AccentColor
   syncState: SyncState
   syncError?: string
   currentPageTitle: string
@@ -25,6 +27,7 @@ interface SettingsCenterProps {
   privacyUnlocked: boolean
   onClose: () => void
   onToggleTheme: () => void
+  onAccentColorChange: (color: AccentColor) => void
   onSyncNow: (mode?: LegacySyncMode) => Promise<boolean>
   onImport: () => void
   onExportPage: (format: 'md' | 'html') => void
@@ -45,7 +48,7 @@ const syncLabels: Record<SyncState, string> = {
   error: '同步失败',
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, accentColor, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, onClose, onToggleTheme, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onPublishSshArchive }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage)
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => loadSyncSettings())
   const [sshSettings, setSshSettings] = useState<LegacySshSettings>(() => loadLegacySshSettings())
@@ -138,6 +141,20 @@ export function SettingsCenter({ initialPage = 'general', theme, syncState, sync
           {page === 'general' && <>
             <SettingsSection title="外观" description="主题设置按当前设备保存。">
               <SettingsRow title="颜色主题" description={`当前使用${theme === 'dark' ? '深色' : '浅色'}模式`}><Button onClick={onToggleTheme}>切换为{theme === 'dark' ? '浅色' : '深色'}模式</Button></SettingsRow>
+              <div className="accent-setting">
+                <div><strong>高亮色</strong><span>用于选中项、主按钮、链接和编辑器焦点</span></div>
+                <div className="accent-options" role="radiogroup" aria-label="高亮色">
+                  {ACCENT_PRESETS.map((preset) => <button
+                    key={preset.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={accentColor === preset.id}
+                    aria-label={preset.label}
+                    className={accentColor === preset.id ? 'selected' : ''}
+                    onClick={() => onAccentColorChange(preset.id)}
+                  ><span style={{ background: preset.main }} /><small>{preset.label}</small></button>)}
+                </div>
+              </div>
             </SettingsSection>
             <SettingsSection title="工作状态" description="Notebook 会优先保存到本机，再按服务配置进行同步。">
               <SettingsRow title="同步状态" description={syncLabels[syncState]}><Badge appearance="tint" color={syncState === 'error' || syncState === 'conflict' ? 'danger' : syncState === 'offline' ? 'informative' : 'success'}>{syncLabels[syncState]}</Badge></SettingsRow>

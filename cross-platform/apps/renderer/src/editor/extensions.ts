@@ -276,6 +276,24 @@ function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
         header.type = 'button'
         header.className = 'notebook-embed-header'
         body.className = 'notebook-embed-body'
+        // A nested editable island gives the browser a native text selection
+        // surface inside ProseMirror's otherwise atomic NodeView. All mutation
+        // events are cancelled below, so referenced content remains read-only.
+        body.setAttribute('contenteditable', 'true')
+        body.setAttribute('aria-readonly', 'true')
+        body.spellcheck = false
+        body.style.userSelect = 'text'
+        body.style.setProperty('-webkit-user-select', 'text')
+        const preventMutation = (event: Event) => event.preventDefault()
+        const preventEditingKey = (event: KeyboardEvent) => {
+          if (event.metaKey || event.ctrlKey || event.altKey) return
+          if (event.key.length === 1 || event.key === 'Backspace' || event.key === 'Delete' || event.key === 'Enter') event.preventDefault()
+        }
+        body.addEventListener('beforeinput', preventMutation)
+        body.addEventListener('paste', preventMutation)
+        body.addEventListener('cut', preventMutation)
+        body.addEventListener('drop', preventMutation)
+        body.addEventListener('keydown', preventEditingKey)
         host.append(header, body)
         let generation = 0
         let currentNode = node
@@ -357,6 +375,7 @@ function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
         void render()
         return {
           dom: host,
+          stopEvent: (event) => event.target instanceof Node && body.contains(event.target),
           update: (updated) => {
             if (updated.type.name !== 'notebookEmbed') return false
             const previousPageId = String(currentNode.attrs.pageId ?? '')

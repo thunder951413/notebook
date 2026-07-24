@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button, Input } from '@fluentui/react-components'
 import { Document20Regular, Search20Regular } from '@fluentui/react-icons'
 import type { PageSummary } from '../model'
@@ -11,13 +12,26 @@ type Candidate = {
   kind: 'block' | 'group'
   title: string
   subtitle: string
+  fullContent: string
   targetId?: string
   path?: number[]
 }
+type CandidatePreview = {
+  candidate: Candidate
+  left: number
+  top: number
+}
 
-function textContent(node: ContentNode): string {
+function fullBlockContent(node: ContentNode): string {
   if (node.text) return node.text
-  return (node.content ?? []).map(textContent).join(' ')
+  const children = (node.content ?? []).filter((child) => child.type !== 'blockAnchor')
+  if (node.type === 'doc' || node.type === 'blockGroup') {
+    return children.map(fullBlockContent).filter(Boolean).join('\n\n')
+  }
+  if (node.type === 'paragraph' || node.type === 'heading' || node.type === 'codeBlock') {
+    return children.map(fullBlockContent).join('')
+  }
+  return children.map(fullBlockContent).filter(Boolean).join('\n')
 }
 
 function compactPreview(value: string) {
@@ -30,18 +44,21 @@ function referenceCandidates(document: Record<string, unknown>): Candidate[] {
   const visit = (node: ContentNode, path: number[]) => {
     if (node.type === 'blockGroup') {
       const groupId = typeof node.attrs?.groupId === 'string' ? node.attrs.groupId : ''
+      const fullContent = fullBlockContent(node).trim()
       if (groupId) result.push({
         key: `group:${groupId}`,
         kind: 'group',
         targetId: groupId,
         title: typeof node.attrs?.title === 'string' && node.attrs.title ? node.attrs.title : '连续内容',
-        subtitle: textContent(node).replace(/\s+/g, ' ').trim().slice(0, 100),
+        subtitle: fullContent.replace(/\s+/g, ' ').slice(0, 100),
+        fullContent: fullContent || '这个连续内容块目前没有文字',
       })
     }
     if (node.type === 'paragraph' || node.type === 'heading' || node.type === 'codeBlock') {
       const anchor = node.content?.find((child) => child.type === 'blockAnchor')
       const anchorId = typeof anchor?.attrs?.anchorId === 'string' ? anchor.attrs.anchorId : undefined
-      const text = textContent({ ...node, content: node.content?.filter((child) => child.type !== 'blockAnchor') }).replace(/\s+/g, ' ').trim()
+      const fullContent = fullBlockContent(node).trim()
+      const text = fullContent.replace(/\s+/g, ' ')
       if (text) result.push({
         key: `${path.join('.')}:${anchorId ?? text.slice(0, 24)}`,
         kind: 'block',
@@ -49,6 +66,7 @@ function referenceCandidates(document: Record<string, unknown>): Candidate[] {
         path,
         title: node.type === 'heading' ? `标题 · ${text.slice(0, 70)}` : node.type === 'codeBlock' ? `代码 · ${text.slice(0, 70)}` : text.slice(0, 70),
         subtitle: node.type === 'heading' ? '标题及定位点' : '单个内容块',
+        fullContent,
       })
     }
     node.content?.forEach((child, index) => visit(child, [...path, index]))
@@ -109,6 +127,8 @@ export function ReferencePicker({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [selectedCandidateKeys, setSelectedCandidateKeys] = useState<string[]>([])
+  const [candidatePreview, setCandidatePreview] = useState<CandidatePreview>()
+  const previewCloseTimer = useRef<number | undefined>(undefined)
   const visiblePages = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
     return pages.filter((page) => page.kind !== 'task' && (!normalized || `${page.title} ${page.preview}`.toLocaleLowerCase().includes(normalized))).slice(0, 100)
@@ -121,11 +141,43 @@ export function ReferencePicker({
     setDocument(undefined)
     setError(undefined)
     setSelectedCandidateKeys([])
+    setCandidatePreview(undefined)
     void loadDocument(pageId).then((value) => { if (!cancelled) setDocument(value ?? null) }).catch((cause) => {
       if (!cancelled) setError(`读取目标失败：${cause instanceof Error ? cause.message : '无法读取目标页面'}`)
     })
     return () => { cancelled = true }
   }, [loadDocument, pageId])
+
+  useEffect(() => () => {
+    if (previewCloseTimer.current !== undefined) window.clearTimeout(previewCloseTimer.current)
+  }, [])
+
+  const cancelPreviewClose = () => {
+    if (previewCloseTimer.current === undefined) return
+    window.clearTimeout(previewCloseTimer.current)
+    previewCloseTimer.current = undefined
+  }
+
+  const openCandidatePreview = (candidate: Candidate, element: HTMLElement) => {
+    cancelPreviewClose()
+    const bounds = element.getBoundingClientRect()
+    const previewWidth = Math.min(400, window.innerWidth - 24)
+    const previewHeight = Math.min(360, window.innerHeight - 24)
+    const gap = 10
+    const left = bounds.right + gap + previewWidth <= window.innerWidth - 12
+      ? bounds.right + gap
+      : Math.max(12, bounds.left - previewWidth - gap)
+    const top = Math.max(12, Math.min(bounds.top, window.innerHeight - previewHeight - 12))
+    setCandidatePreview({ candidate, left, top })
+  }
+
+  const schedulePreviewClose = () => {
+    cancelPreviewClose()
+    previewCloseTimer.current = window.setTimeout(() => {
+      setCandidatePreview(undefined)
+      previewCloseTimer.current = undefined
+    }, 120)
+  }
 
   const finish = (target: NotebookReferenceTarget) => {
     insertNotebookReference({ target, embed, ...(alias.trim() ? { alias: alias.trim() } : {}) })
@@ -198,11 +250,18 @@ export function ReferencePicker({
         <div className="reference-target-column">
           <div className="reference-target-heading"><strong>{selectedPage?.title ?? '选择页面'}</strong><div><Button size="small" appearance="subtle" disabled={selectedCandidateKeys.length < 2 || loading} onClick={() => void createGroup()}>{embed ? '嵌入所选段落' : '链接所选段落'}</Button><Button size="small" appearance="primary" disabled={!selectedPage || (embed && selectedPage.id === currentPageId)} onClick={() => selectedPage && finish({ pageId: selectedPage.id, kind: 'page' })}>{embed ? '嵌入整篇' : '链接整篇'}</Button></div></div>
           {embed && selectedPage?.id === currentPageId && <p className="reference-hint">当前页面不能嵌入自身，但可以创建普通链接或选择其他页面。</p>}
-          <div className="reference-target-list">
+          <div className="reference-target-list" onScroll={() => setCandidatePreview(undefined)}>
             {document === undefined && !error && <p>正在读取页面内容…</p>}
             {document === null && !error && <p>这个页面还没有正文，可以先链接整篇。</p>}
             {document && candidates.length === 0 && <p>这个页面还没有可引用的正文。</p>}
-            {candidates.map((candidate) => <div className="reference-target-row" key={candidate.key}>
+            {candidates.map((candidate) => <div
+              className="reference-target-row"
+              key={candidate.key}
+              onMouseEnter={(event) => openCandidatePreview(candidate, event.currentTarget)}
+              onMouseLeave={schedulePreviewClose}
+              onFocus={(event) => openCandidatePreview(candidate, event.currentTarget)}
+              onBlur={schedulePreviewClose}
+            >
               {candidate.kind === 'block' && candidate.path?.length === 1 ? <input type="checkbox" checked={selectedCandidateKeys.includes(candidate.key)} aria-label={`选择${candidate.title}`} onChange={(event) => {
                 const checked = event.currentTarget.checked
                 setSelectedCandidateKeys((current) => checked ? [...current, candidate.key] : current.filter((key) => key !== candidate.key))
@@ -214,5 +273,19 @@ export function ReferencePicker({
       </div>
       {error && <p className="reference-error" role="alert">{error}</p>}
     </section>
+    {candidatePreview && createPortal(<aside
+        className="reference-candidate-preview"
+        role="tooltip"
+        aria-label="块完整内容"
+        style={{ left: candidatePreview.left, top: candidatePreview.top }}
+        onMouseEnter={cancelPreviewClose}
+        onMouseLeave={schedulePreviewClose}
+      >
+        <header>
+          <strong>{candidatePreview.candidate.kind === 'group' ? '连续内容预览' : '内容块预览'}</strong>
+          <span>完整内容</span>
+        </header>
+        <div>{candidatePreview.candidate.fullContent}</div>
+      </aside>, window.document.body)}
   </div>
 }

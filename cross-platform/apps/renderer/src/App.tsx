@@ -6,7 +6,9 @@ import {
 } from '@fluentui/react-components'
 import {
   Add20Regular,
+  ArrowLeft20Regular,
   ArrowReply20Regular,
+  ArrowRight20Regular,
   ArrowSync20Regular,
   Bot20Filled,
   Bot20Regular,
@@ -46,6 +48,7 @@ import { VersionHistory } from './history/VersionHistory'
 import { documentToHtml, documentToMarkdown, htmlToDocument, markdownToDocument } from './editor/extensions'
 import { decryptBackup, encryptBackup } from './crypto/encryptedBackup'
 import { SettingsCenter } from './settings/SettingsCenter'
+import type { AccentColor } from './appearance/accent'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
 import { publishPreparedLegacyArchive } from './sync/legacySshSync'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
@@ -61,6 +64,7 @@ import { referenceTargetElement } from './editor/referenceContent'
 import { ReferenceHelpDialog } from './editor/ReferenceHelpDialog'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
+import { emptyPageVisitHistory, pageVisitTarget, recordPageVisit } from './pageVisitHistory'
 
 const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
@@ -68,9 +72,14 @@ type RightPanel = 'outline' | 'backlinks' | 'ai'
 type ViewportPosition = { scrollTop?: number; fraction: number }
 const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 
-export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
+export interface AppProps {
+  theme?: 'light' | 'dark'
+  accentColor?: AccentColor
+  onAccentColorChange?: (color: AccentColor) => void
+  onToggleTheme?: () => void
+}
 
-export function App({ theme = 'light', onToggleTheme }: AppProps) {
+export function App({ theme = 'light', accentColor = 'purple', onAccentColorChange, onToggleTheme }: AppProps) {
   const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const importInput = useRef<HTMLInputElement>(null)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -82,6 +91,8 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [expandedNotebook, setExpandedNotebook] = useState<string | undefined>('team')
   const [activeSection, setActiveSection] = useState('product')
   const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? 'vision')
+  const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
+  const historyNavigationTarget = useRef<string | undefined>(undefined)
   const [recentPageIds, setRecentPageIds] = useState<string[]>(() => readRecentPageIds())
   const [vimEnabled, setVimEnabled] = useState(readVimEnabled)
   const [vimCommandMode, setVimCommandMode] = useState(readVimEnabled)
@@ -160,6 +171,9 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const showNotebookPane = activeArea === 'notes' && navigationOpen
   const showPagePane = activeArea !== 'notes' && navigationOpen
   const currentPageAncestors = useMemo(() => ancestorsOf(sectionPages, currentPage.id).flatMap((id) => sectionPages.find((page) => page.id === id) ?? []), [currentPage.id, sectionPages])
+  const accessibleDocumentPageIds = useMemo(() => new Set(accessiblePages.filter((page) => page.kind !== 'task').map((page) => page.id)), [accessiblePages])
+  const previousPageVisit = pageVisitTarget(pageHistory, -1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
+  const nextPageVisit = pageVisitTarget(pageHistory, 1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
 
   useEffect(() => {
     if (!activePage) return
@@ -199,6 +213,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       void saveReadingPosition(pageId, position.fraction)
     }
   }, [activeArea, currentPage.id, hasCurrentPage, loadReadingPosition, saveReadingPosition])
+  useEffect(() => {
+    if (activeArea !== 'notes' || !hasCurrentPage || currentPage.kind === 'task') return
+    if (historyNavigationTarget.current === currentPage.id) {
+      historyNavigationTarget.current = undefined
+      return
+    }
+    setPageHistory((history) => recordPageVisit(history, currentPage.id))
+  }, [activeArea, currentPage.id, currentPage.kind, hasCurrentPage])
   useEffect(() => {
     if (activeArea !== 'notes' || !hasCurrentPage || currentPage.kind === 'task') return
     setRecentPageIds((current) => {
@@ -409,6 +431,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     setActivePage(page.id)
     setActiveSection(page.sectionId)
     if (notebook) { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id) }
+  }
+
+  const navigatePageHistory = (direction: -1 | 1) => {
+    const result = pageVisitTarget(pageHistory, direction, (pageId) => accessibleDocumentPageIds.has(pageId))
+    if (!result.pageId) return
+    historyNavigationTarget.current = result.pageId
+    setPageHistory(result.history)
+    openRecentPage(result.pageId)
   }
 
   const togglePageExpanded = (pageId: string) => {
@@ -935,6 +965,10 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           <div className="editor-toolbar">
             <div className="breadcrumb"><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
             {activeArea === 'notes' && hasActivePage ? <div className="editor-mode-controls">
+              <div className="page-history-controls" role="group" aria-label="笔记浏览历史">
+                <Button appearance="subtle" size="small" icon={<ArrowLeft20Regular />} aria-label="后退到上一笔记" title="后退到上一笔记" disabled={!previousPageVisit} onClick={() => navigatePageHistory(-1)} />
+                <Button appearance="subtle" size="small" icon={<ArrowRight20Regular />} aria-label="前进到下一笔记" title="前进到下一笔记" disabled={!nextPageVisit} onClick={() => navigatePageHistory(1)} />
+              </div>
               <Button className={`vim-toggle ${vimEnabled && vimCommandMode ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑' : 'Vim INSERT：Esc 返回普通模式' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</Button>
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">
@@ -1016,6 +1050,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       {settingsOpen && <SettingsCenter
         initialPage={settingsPage}
         theme={theme}
+        accentColor={accentColor}
         syncState={syncState}
         syncError={syncError}
         currentPageTitle={currentPage.title}
@@ -1029,6 +1064,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         privacyUnlocked={privacyUnlocked}
         onClose={() => setSettingsOpen(false)}
         onToggleTheme={() => onToggleTheme?.()}
+        onAccentColorChange={(color) => onAccentColorChange?.(color)}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}
         onPublishSshArchive={async (file) => { await publishPreparedLegacyArchive(file) }}
         onImport={chooseImport}
