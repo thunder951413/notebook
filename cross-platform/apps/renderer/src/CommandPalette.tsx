@@ -96,7 +96,11 @@ export function CommandPalette({ open, items, searchPageIds, onClose }: CommandP
 
   useEffect(() => {
     const normalized = query.trim()
-    if (!open || !normalized || !searchPageIds) {
+    // A single character is already covered by the small in-memory title and
+    // preview index above. Starting a full-body search for "u" or one CJK
+    // character is both noisy and used to trigger the expensive cold index
+    // build on the first keystroke.
+    if (!open || normalized.length < 2 || !searchPageIds) {
       setContentPageIds([])
       return
     }
@@ -108,7 +112,7 @@ export function CommandPalette({ open, items, searchPageIds, onClose }: CommandP
       }).catch(() => {
         if (!cancelled) setContentPageIds([])
       })
-    }, 80)
+    }, 160)
     return () => {
       cancelled = true
       window.clearTimeout(timer)

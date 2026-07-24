@@ -85,6 +85,7 @@ const tagMap: Record<string, string[]> = {
 const toPageSummary = (page: Page): PageSummary => ({
   id: page.id,
   sectionId: page.sectionId ?? '',
+  icon: page.icon,
   parentPageId: page.parentPageId,
   sortOrder: page.sortOrder,
   treeUpdatedAt: page.treeUpdatedAt,
@@ -110,6 +111,7 @@ export function useWorkspaceData() {
   const [trashRecords, setTrashRecords] = useState<Page[]>([])
   const [pageTags, setPageTags] = useState<Record<string, string[]>>(tagMap)
   const [documents, setDocuments] = useState<Record<string, Record<string, unknown>>>({})
+  const [referenceIndexRevision, setReferenceIndexRevision] = useState(0)
   const documentsRef = useRef(documents)
   const loadedDocumentIds = useRef(new Set<string>())
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
@@ -166,6 +168,7 @@ export function useWorkspaceData() {
         return next
       })
     }
+    setReferenceIndexRevision((current) => current + 1)
   }, [])
 
   useEffect(() => {
@@ -270,6 +273,7 @@ export function useWorkspaceData() {
       if (!page) return
       await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
       await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
+      setReferenceIndexRevision((current) => current + 1)
       setDocuments((current) => ({ ...current, [pageId]: normalized }))
       if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(normalized)).catch(() => undefined)
     })
@@ -381,6 +385,9 @@ export function useWorkspaceData() {
     await enqueuePageMutation(pageId, async () => {
       const page = await repository.getPage(pageId)
       if (!page) throw new Error(`Page not found: ${pageId}`)
+      if (Object.prototype.hasOwnProperty.call(patch, 'icon') && patch.icon !== page.icon) {
+        await repository.createManualRevision(pageId)
+      }
       await repository.savePage({ ...page, ...patch, id: page.id, updatedAt: new Date().toISOString(), syncStatus: 'pending' })
       await reload()
     })
@@ -482,6 +489,7 @@ export function useWorkspaceData() {
     await reload()
   }, [reload, trashRecords])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
+  const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
   const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])
   const saveReadingPosition = useCallback(async (pageId: string, viewportOffsetFraction: number) => {
@@ -495,7 +503,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

@@ -5,6 +5,12 @@ cross-platform/**/dist/
 cross-platform/**/out/
 cross-platform/**/release/
 cross-platform/apps/desktop/build/
+!cross-platform/apps/desktop/build/
+cross-platform/apps/desktop/build/*
+!cross-platform/apps/desktop/build/icon.svg
+!cross-platform/apps/desktop/build/icon.png
+!cross-platform/apps/desktop/build/icon.icns
+!cross-platform/apps/desktop/build/icon.ico
 cross-platform/**/.venv/
 cross-platform/**/__pycache__/
 cross-platform/**/.pytest_cache/

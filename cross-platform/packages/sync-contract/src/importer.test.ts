@@ -257,8 +257,11 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   const document = { pageId, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '缓存不应同步' }] }] }, updatedAt: now }
   const bundle: NotebookDataBundle = {
     notebooks: [{ id: notebookId, workspaceId, name: '测试', sortOrder: 0, createdAt: now, updatedAt: now }], sections: [{ id: sectionId, notebookId, name: '分区', sortOrder: 0, createdAt: now, updatedAt: now }],
-    pages: [{ id: pageId, workspaceId, sectionId, kind: 'document', title: '混合 Markdown', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }], documents: [document],
-    assets: [{ id: assetId, pageId, kind: 'image', filename: 'image.png', mimeType: 'image/png', createdAt: now, caption: '说明', displayWidth: 480, alignment: 'center' }], revisions: [{ id: '50000000-0000-4000-8000-000000000001', pageId, document: { ...document, markdown: '历史正文' }, createdAt: now, reason: 'import' }],
+    pages: [{ id: pageId, workspaceId, sectionId, icon: '🚀', kind: 'document', title: '混合 Markdown', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }], documents: [document],
+    assets: [{ id: assetId, pageId, kind: 'image', filename: 'image.png', mimeType: 'image/png', createdAt: now, caption: '说明', displayWidth: 480, alignment: 'center' }], revisions: [
+      { id: '50000000-0000-4000-8000-000000000001', pageId, pageIcon: '📝', document: { ...document, markdown: '历史正文' }, createdAt: '2026-07-22T04:00:00.000Z', reason: 'import' },
+      { id: '50000000-0000-4000-8000-000000000002', pageId, pageIcon: '📌', document: { ...document, markdown: '历史正文' }, createdAt: now, reason: 'manual' },
+    ],
     tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
   const encoded = await encodeMarkdownRepository(bundle, new Map([[assetId, new Uint8Array([1, 2, 3])]]), 'electron')
@@ -268,6 +271,9 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(note.contentObjects[note.currentContentHash]).toBe(markdown)
   expect(JSON.stringify(note)).not.toContain('缓存不应同步')
   expect(note.history[0]).not.toHaveProperty('snapshot')
+  expect(note.metadata.icon).toBe('🚀')
+  expect(note.history[0]?.pageIcon).toBe('📝')
+  expect(note.history[1]?.pageIcon).toBe('📌')
   expect(note.history[0]?.contentHash).toHaveLength(64)
   expect(note.assets[0]?.objectHash).toHaveLength(64)
   expect(note.linkedPageIDs).toEqual(['target-page'])
@@ -277,6 +283,9 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(imported.documents[0]?.markdown).toBe(markdown)
   expect(imported.documents[0]?.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.revisions[0]?.document.markdown).toBe('历史正文')
+  expect(imported.pages[0]?.icon).toBe('🚀')
+  expect(imported.revisions[0]?.pageIcon).toBe('📝')
+  expect(imported.revisions[1]?.pageIcon).toBe('📌')
   expect(imported.revisions[0]?.document.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.pageLinks.map((link) => `${link.kind}:${link.excerpt ?? 'page'}`)).toEqual([
     'link:page',

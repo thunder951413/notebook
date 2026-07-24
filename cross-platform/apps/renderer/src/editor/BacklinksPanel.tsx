@@ -10,12 +10,14 @@ export function BacklinksSidebar({
   load,
   loadMentions,
   openPage,
+  refreshKey = 0,
 }: {
   pageId: string
   pages: PageSummary[]
   load: (pageId: string) => Promise<PageLink[]>
   loadMentions: (pageId: string, signal?: AbortSignal) => Promise<{ pageId: string; excerpt: string }[]>
   openPage: (pageId: string) => void
+  refreshKey?: number
 }) {
   const [links, setLinks] = useState<PageLink[]>([])
   const [mentions, setMentions] = useState<{ pageId: string; excerpt: string }[]>([])
@@ -63,7 +65,7 @@ export function BacklinksSidebar({
       refreshGeneration.current += 1
       mentionsRequest.current?.abort()
     }
-  }, [pageId])
+  }, [pageId, refreshKey])
 
   return <section className="right-panel-content backlinks-sidebar" aria-label="引用当前页面的笔记">
     <header><div><strong>引用</strong><small>链接或提到当前页面的笔记</small></div><Button size="small" appearance="subtle" onClick={() => void refresh()}>刷新</Button></header>

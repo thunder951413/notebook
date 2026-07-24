@@ -367,22 +367,42 @@ test('never trims imported legacy history while bounding new autosave revisions'
 
 test('lazily rebuilds a Markdown revision editor cache only when restoring it', async () => {
   const repository = makeRepository()
-  const value = page('page-markdown-history', 'Markdown history')
+  const value = { ...page('page-markdown-history', 'Markdown history'), icon: '🚀' }
   const current: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: '当前正文', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt }
   const historical: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: '## 历史标题\n\n![图片](notebook-asset:asset-history)', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.createdAt }
   await repository.importData({
     notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
     pages: [value], documents: [current],
     assets: [{ id: 'asset-history', pageId: value.id, kind: 'image', filename: 'history.png', mimeType: 'image/png', createdAt: value.createdAt, caption: '历史图片', displayWidth: 360, alignment: 'right' }],
-    revisions: [{ id: 'markdown-revision', pageId: value.id, document: historical, createdAt: value.createdAt, reason: 'import' }],
+    revisions: [{ id: 'markdown-revision', pageId: value.id, pageIcon: '📝', document: historical, createdAt: value.createdAt, reason: 'import' }],
   })
   expect((await repository.listRevisions(value.id))[0]?.document.tiptapJson).toEqual({ type: 'doc', content: [] })
   const restored = await repository.restoreRevision('markdown-revision')
   const cache = JSON.stringify(restored.tiptapJson)
   expect(restored.markdown).toBe(historical.markdown)
+  expect((await repository.getPage(value.id))?.icon).toBe('📝')
   expect(cache).toContain('历史标题')
   expect(cache).toContain('"width":360')
   expect(cache).toContain('"textAlign":"right"')
+})
+
+test('creates a compact manual revision and enqueues it for synchronization', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-manual-history', 'Manual history'), icon: '📌' }
+  const document: PageDocument = {
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown: '# 当前正文',
+    tiptapJson: { type: 'doc', content: [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: '当前正文' }] }] },
+    updatedAt: value.updatedAt,
+  }
+  await repository.savePage(value, document)
+  const revision = await repository.createManualRevision(value.id)
+  expect(revision.reason).toBe('manual')
+  expect(revision.pageIcon).toBe('📌')
+  expect(revision.document.markdown).toBe('# 当前正文')
+  expect(revision.document.tiptapJson).toEqual({ type: 'doc', content: [] })
+  expect((await repository.listOutbox(value.workspaceId)).some((item) => item.entityType === 'revision' && item.entityId === revision.id)).toBe(true)
 })
 
 test('removes consecutive duplicate imported revisions and a revision identical to the current body', async () => {
@@ -415,6 +435,20 @@ test('history compaction is idempotent when revisions share a timestamp', async 
   const first = await repository.exportData(value.workspaceId)
   await repository.importData(first)
   expect((await repository.listRevisions(value.id)).map((item) => item.id).sort()).toEqual(first.revisions.map((item) => item.id).sort())
+})
+
+test('keeps icon-only history without duplicating the canonical body', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-icon-history', 'Icon history'), icon: '🚀' }
+  const document: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: 'same body', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt }
+  await repository.importData({
+    notebooks: [], sections: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], comments: [], tombstones: [],
+    pages: [value], documents: [document], revisions: [
+      { id: 'icon-default', pageId: value.id, pageIcon: null, document, createdAt: '2026-01-01T00:00:00.000Z', reason: 'manual' },
+      { id: 'icon-pin', pageId: value.id, pageIcon: '📌', document, createdAt: '2026-01-02T00:00:00.000Z', reason: 'manual' },
+    ],
+  })
+  expect((await repository.exportData(value.workspaceId)).revisions.map((item) => item.pageIcon)).toEqual([null, '📌'])
 })
 
 test('re-import replaces stale attachment children for imported pages', async () => {

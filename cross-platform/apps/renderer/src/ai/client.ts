@@ -1,4 +1,5 @@
 import { createParser } from 'eventsource-parser'
+import type { AIContextBundle } from '@notebook/sync-contract'
 
 export interface AIContextPage { id: string; title: string; excerpt: string }
 
@@ -11,7 +12,7 @@ async function requestHeaders() {
 
 export async function streamNotebookAnswer(
   prompt: string,
-  context: AIContextPage[],
+  context: AIContextBundle,
   onToken: (token: string) => void,
   signal?: AbortSignal,
 ) {
@@ -21,8 +22,15 @@ export async function streamNotebookAnswer(
     credentials: 'include',
     signal,
     body: JSON.stringify({
-      messages: [{ role: 'user', content: prompt }],
-      citations: context.map((page) => ({ page_id: page.id, title: page.title, excerpt: page.excerpt })),
+      messages: [{ role: 'user', content: `${context.markdown}\n\n用户请求：${prompt}` }],
+      citations: context.items.map((item) => ({
+        page_id: item.pageId,
+        title: item.title,
+        excerpt: item.markdown.slice(0, 4_000),
+        relationship: item.relationship,
+        depth: item.depth,
+      })),
+      context_warnings: context.warnings,
     }),
   })
   if (!response.ok) throw new Error(`AI 服务返回 ${response.status}`)

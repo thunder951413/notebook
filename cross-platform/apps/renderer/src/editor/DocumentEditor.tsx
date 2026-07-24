@@ -3,8 +3,9 @@ import { useEditor, EditorContent } from '@tiptap/react'
 import Placeholder from '@tiptap/extension-placeholder'
 import Collaboration from '@tiptap/extension-collaboration'
 import CollaborationCaret from '@tiptap/extension-collaboration-caret'
-import type { Editor } from '@tiptap/core'
-import { Selection, TextSelection, type EditorState } from 'prosemirror-state'
+import { Extension, type Editor } from '@tiptap/core'
+import { Plugin, PluginKey, Selection, TextSelection, type EditorState } from 'prosemirror-state'
+import { Decoration, DecorationSet } from 'prosemirror-view'
 import { useCollaborativeDocument } from '../collaboration/useCollaborativeDocument'
 import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from './extensions'
 import { registerFlushHandler } from '../data/flushCoordinator'
@@ -45,6 +46,124 @@ export interface DocumentEditorProps {
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
 
+const vimBlockCursorPluginKey = new PluginKey<boolean>('vimBlockCursor')
+
+const VimBlockCursor = Extension.create({
+  name: 'vimBlockCursor',
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<boolean>({
+        key: vimBlockCursorPluginKey,
+        state: {
+          init: () => false,
+          apply: (transaction, active) => {
+            const next = transaction.getMeta(vimBlockCursorPluginKey)
+            return typeof next === 'boolean' ? next : active
+          },
+        },
+        props: {
+          attributes(state) {
+            return { class: vimBlockCursorPluginKey.getState(state) ? 'vim-block-cursor-mode' : '' }
+          },
+          decorations(state) {
+            if (!vimBlockCursorPluginKey.getState(state) || !state.selection.empty || !(state.selection instanceof TextSelection)) return null
+            const position = state.selection.from
+            const resolved = state.doc.resolve(position)
+            if (!resolved.parent.isTextblock) return null
+
+            const blockEnd = resolved.end()
+            if (position < blockEnd) {
+              return DecorationSet.create(state.doc, [
+                Decoration.inline(position, nextGraphemePosition(state, position, blockEnd), {
+                  class: 'vim-block-cursor',
+                }),
+              ])
+            }
+
+            return null
+          },
+        },
+        view(editorView) {
+          const cursor = document.createElement('span')
+          cursor.className = 'vim-block-cursor-overlay'
+          cursor.setAttribute('aria-hidden', 'true')
+          document.body.appendChild(cursor)
+          let frame: number | undefined
+
+          const render = () => {
+            frame = undefined
+            const { state } = editorView
+            const selection = state.selection
+            if (!vimBlockCursorPluginKey.getState(state) || !editorView.hasFocus() || !selection.empty || !(selection instanceof TextSelection)) {
+              cursor.hidden = true
+              return
+            }
+            const resolved = state.doc.resolve(selection.from)
+            if (!resolved.parent.isTextblock || selection.from < resolved.end()) {
+              cursor.hidden = true
+              return
+            }
+            try {
+              const editorStyle = getComputedStyle(editorView.dom)
+              const fontSize = Number.parseFloat(editorStyle.fontSize) || 16
+              let coordinates = editorView.coordsAtPos(selection.from, -1)
+              let left = coordinates.left
+              let top = coordinates.top
+              let height = Math.max(16, coordinates.bottom - coordinates.top)
+
+              const domAtCursor = editorView.domAtPos(selection.from, -1)
+              const cursorElement = domAtCursor.node instanceof Element ? domAtCursor.node : domAtCursor.node.parentElement
+              const codeBlock = cursorElement?.closest('pre')
+              if (resolved.parent.type.name === 'codeBlock' && codeBlock instanceof HTMLElement) {
+                const textBeforeCursor = resolved.parent.textBetween(0, resolved.parentOffset, '', '')
+                const currentLine = textBeforeCursor.slice(textBeforeCursor.lastIndexOf('\n') + 1)
+                if (!currentLine) {
+                  const nodeStyle = getComputedStyle(codeBlock)
+                  const bounds = codeBlock.getBoundingClientRect()
+                  const lineHeight = Number.parseFloat(nodeStyle.lineHeight) || fontSize * 1.7
+                  const lineIndex = textBeforeCursor.split('\n').length - 1
+                  left = bounds.left + (Number.parseFloat(nodeStyle.paddingLeft) || 0)
+                  top = bounds.top + (Number.parseFloat(nodeStyle.paddingTop) || 0) + lineIndex * lineHeight
+                  height = lineHeight
+                }
+              }
+
+              cursor.style.left = `${left}px`
+              cursor.style.top = `${top}px`
+              cursor.style.width = `${Math.max(8, fontSize * .62)}px`
+              cursor.style.height = `${height}px`
+              cursor.hidden = false
+            } catch {
+              cursor.hidden = true
+            }
+          }
+          const schedule = () => {
+            if (frame !== undefined) cancelAnimationFrame(frame)
+            frame = requestAnimationFrame(render)
+          }
+
+          document.addEventListener('scroll', schedule, true)
+          window.addEventListener('resize', schedule)
+          editorView.dom.addEventListener('focus', schedule)
+          editorView.dom.addEventListener('blur', schedule)
+          schedule()
+          return {
+            update: schedule,
+            destroy: () => {
+              if (frame !== undefined) cancelAnimationFrame(frame)
+              document.removeEventListener('scroll', schedule, true)
+              window.removeEventListener('resize', schedule)
+              editorView.dom.removeEventListener('focus', schedule)
+              editorView.dom.removeEventListener('blur', schedule)
+              cursor.remove()
+            },
+          }
+        },
+      }),
+    ]
+  },
+})
+
 export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
@@ -58,6 +177,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const restoringViewport = useRef(false)
   const userMovedViewport = useRef(false)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
+  const latestJsonSignature = useRef<string | undefined>(content ? JSON.stringify(content) : undefined)
   const lastAppliedContent = useRef(content)
   const onChangeRef = useRef(onChange)
   const onDraftRef = useRef(onDraft)
@@ -66,6 +186,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const vimEnabledRef = useRef(vimEnabled)
   const vimModeRef = useRef<'normal' | 'insert'>('insert')
   const pendingVimKey = useRef<string | undefined>(undefined)
+  const suppressedVimTransitionText = useRef<string | undefined>(undefined)
   const [vimMode, setVimMode] = useState<'normal' | 'insert'>('insert')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -82,10 +203,19 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     setVimMode(mode)
     onVimCommandModeChangeRef.current?.(vimEnabledRef.current && mode === 'normal')
   }
+  const enterVimInsertMode = (trigger: string) => {
+    const expectedText = trigger.toLocaleLowerCase()
+    suppressedVimTransitionText.current = expectedText
+    window.setTimeout(() => {
+      if (suppressedVimTransitionText.current === expectedText) suppressedVimTransitionText.current = undefined
+    }, 500)
+    changeVimMode('insert')
+  }
   const collaborative = Boolean(session.provider)
   const editor = useEditor({
     extensions: [
       ...createContentExtensions(collaborative, loadAsset, pageId),
+      VimBlockCursor,
       Placeholder.configure({ placeholder: '开始记录，或输入 / 插入内容…' }),
       ...(collaborative ? [Collaboration.configure({ document: session.document })] : []),
       ...(session.provider ? [CollaborationCaret.configure({
@@ -107,6 +237,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         return current === next ? current : next
       })
       latestJson.current = currentEditor.getJSON()
+      latestJsonSignature.current = JSON.stringify(latestJson.current)
       void Promise.resolve(onDraftRef.current?.(latestJson.current)).catch(() => undefined)
       clearTimeout(saveTimer.current)
       saveTimer.current = setTimeout(() => {
@@ -118,8 +249,34 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         class: 'document-editor-content',
         'aria-label': '页面正文',
       },
+      handleDOMEvents: {
+        beforeinput: (_view, event) => {
+          const input = event as InputEvent
+          if (input.inputType === 'insertText' && input.data === ' ' && convertMarkdownCodeFence(_view, _view.state.selection.from)) {
+            event.preventDefault()
+            return true
+          }
+          if (input.inputType !== 'insertText' || !input.data || suppressedVimTransitionText.current !== input.data.toLocaleLowerCase()) return false
+          event.preventDefault()
+          suppressedVimTransitionText.current = undefined
+          return true
+        },
+        keyup: (_view, event) => {
+          const key = event.key.toLocaleLowerCase()
+          if (suppressedVimTransitionText.current !== key) return false
+          window.setTimeout(() => {
+            if (suppressedVimTransitionText.current === key) suppressedVimTransitionText.current = undefined
+          }, 30)
+          return false
+        },
+      },
       transformPastedHTML: sanitizeSupportedHtml,
       handleTextInput: (view, from, _to, text) => {
+        if (suppressedVimTransitionText.current === text.toLocaleLowerCase()) {
+          suppressedVimTransitionText.current = undefined
+          return true
+        }
+        if (text === ' ' && convertMarkdownCodeFence(view, from)) return true
         if (text === '/' && view.state.selection.$from.parent.isTextblock && view.state.selection.$from.parent.textContent === '') {
           queueMicrotask(() => {
             try {
@@ -139,6 +296,14 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       },
       handleKeyDown: (view, event) => {
         if (!vimEnabledRef.current || event.metaKey || event.altKey) return false
+        if (vimModeRef.current === 'insert' && suppressedVimTransitionText.current) {
+          if (suppressedVimTransitionText.current === event.key.toLocaleLowerCase()) {
+            event.preventDefault()
+            suppressedVimTransitionText.current = undefined
+            return true
+          }
+          suppressedVimTransitionText.current = undefined
+        }
         if (event.key === 'Escape') {
           event.preventDefault()
           setSlashMenu(undefined)
@@ -146,7 +311,15 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
           changeVimMode('normal')
           return true
         }
-        if (vimModeRef.current === 'insert') return false
+        if (vimModeRef.current === 'insert') {
+          if (event.key === 'Enter' && view.state.selection.$from.parent.type.name === 'codeBlock') {
+            event.preventDefault()
+            const { from, to } = view.state.selection
+            view.dispatch(view.state.tr.insertText('\n', from, to).scrollIntoView())
+            return true
+          }
+          return false
+        }
         if (event.ctrlKey && (event.key.toLocaleLowerCase() === 'p' || event.key.toLocaleLowerCase() === 'n')) {
           event.preventDefault()
           moveVertical(view, event.key.toLocaleLowerCase() === 'p' ? -1 : 1)
@@ -156,27 +329,28 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         if (event.key === 'i' || event.key === 'I') {
           event.preventDefault()
           if (event.key === 'I') moveToTextblockEdge(view, 'start')
-          changeVimMode('insert')
+          enterVimInsertMode(event.key)
           return true
         }
         if (event.key === 'a' || event.key === 'A') {
           event.preventDefault()
           if (event.key === 'A') moveToTextblockEdge(view, 'end')
           else moveAfterCursor(view)
-          changeVimMode('insert')
+          enterVimInsertMode(event.key)
           return true
         }
         if (event.key === 'o' || event.key === 'O') {
           event.preventDefault()
+          if (event.repeat) return true
           insertOpenLine(view, event.key === 'O' ? 'above' : 'below')
-          changeVimMode('insert')
+          enterVimInsertMode(event.key)
           return true
         }
         if (event.key === 's' || event.key === 'S') {
           event.preventDefault()
           if (event.key === 'S') clearCurrentTextblock(view)
           else deleteCharacter(view)
-          changeVimMode('insert')
+          enterVimInsertMode(event.key)
           return true
         }
         if (event.key === '/') {
@@ -251,7 +425,8 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   useEffect(() => {
     if (!editor || !content) return
     if (lastAppliedContent.current === content) return
-    if (latestJson.current === content) {
+    const contentSignature = JSON.stringify(content)
+    if (latestJsonSignature.current === contentSignature) {
       lastAppliedContent.current = content
       return
     }
@@ -263,6 +438,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     clearTimeout(saveTimer.current)
     editor.commands.setContent(content, { emitUpdate: false })
     latestJson.current = editor.getJSON()
+    latestJsonSignature.current = JSON.stringify(latestJson.current)
     lastAppliedContent.current = content
     setLargeDocument(isLargeEditorDocument(editor))
   }, [content, editor])
@@ -355,6 +531,11 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     return () => onVimCommandModeChangeRef.current?.(false)
   }, [vimEnabled])
 
+  useEffect(() => {
+    if (!editor) return
+    editor.view.dispatch(editor.state.tr.setMeta(vimBlockCursorPluginKey, vimEnabled && vimMode === 'normal'))
+  }, [editor, vimEnabled, vimMode])
+
   const findNext = () => {
     if (!editor || !searchQuery.trim()) return
     const query = searchQuery.toLocaleLowerCase()
@@ -438,7 +619,38 @@ function isLargeEditorDocument(editor: Editor) {
   return editor.state.doc.childCount > 120 || editor.state.doc.content.size > 250_000
 }
 
+function nextGraphemePosition(state: EditorState, position: number, blockEnd: number) {
+  const remaining = state.doc.textBetween(position, Math.min(blockEnd, position + 32), '', '')
+  if (!remaining) return Math.min(blockEnd, position + 1)
+  if (typeof Intl.Segmenter === 'function') {
+    const first = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(remaining)[Symbol.iterator]().next().value
+    return Math.min(blockEnd, position + Math.max(1, first?.segment.length ?? 1))
+  }
+  return Math.min(blockEnd, position + Math.max(1, Array.from(remaining)[0]?.length ?? 1))
+}
+
 type ProseMirrorView = Editor['view']
+
+function convertMarkdownCodeFence(view: ProseMirrorView, cursorPosition: number) {
+  const { state } = view
+  const { selection } = state
+  const { $from } = selection
+  if (!selection.empty || cursorPosition !== selection.from || $from.parent.type.name !== 'paragraph') return false
+  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset, '', '')
+  const match = /^```([a-z]+)?$/i.exec(textBeforeCursor)
+  const codeBlock = state.schema.nodes.codeBlock
+  if (!match || !codeBlock) return false
+
+  const blockStart = $from.before()
+  const blockEnd = $from.after()
+  const contentStart = $from.start()
+  const transaction = state.tr
+    .setBlockType(blockStart, blockEnd, codeBlock, { language: match[1] || null })
+    .delete(contentStart, $from.pos)
+  transaction.setSelection(TextSelection.create(transaction.doc, contentStart)).scrollIntoView()
+  view.dispatch(transaction)
+  return true
+}
 
 function moveSelection(view: ProseMirrorView, selection: Selection) {
   view.dispatch(view.state.tr.setSelection(selection).scrollIntoView())
@@ -495,6 +707,19 @@ function moveAfterCursor(view: ProseMirrorView) {
 function insertOpenLine(view: ProseMirrorView, direction: 'above' | 'below') {
   const { state } = view
   const { $head } = state.selection
+
+  if ($head.parent.type.name === 'codeBlock') {
+    const text = $head.parent.textContent
+    const offset = $head.parentOffset
+    const lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1
+    const nextBreak = text.indexOf('\n', offset)
+    const lineEnd = nextBreak < 0 ? text.length : nextBreak
+    const insertAt = $head.start() + (direction === 'above' ? lineStart : lineEnd)
+    const transaction = state.tr.insertText('\n', insertAt)
+    transaction.setSelection(TextSelection.create(transaction.doc, insertAt + (direction === 'above' ? 0 : 1))).scrollIntoView()
+    view.dispatch(transaction)
+    return
+  }
 
   for (let depth = $head.depth; depth > 0; depth -= 1) {
     const node = $head.node(depth)

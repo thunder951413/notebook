@@ -15,6 +15,8 @@ import {
   ChevronRight16Regular,
   Document20Filled,
   Document20Regular,
+  Folder20Regular,
+  FolderOpen20Regular,
   FullScreenMaximize20Regular,
   FullScreenMinimize20Regular,
   LockClosed20Regular,
@@ -34,7 +36,8 @@ import {
 import type { PageSummary } from './model'
 import { useWorkspaceData, WORKSPACE_ID } from './data/useWorkspaceData'
 import { DocumentEditor } from './editor/DocumentEditor'
-import { semanticSearch, streamNotebookAnswer } from './ai/client'
+import { streamNotebookAnswer } from './ai/client'
+import { buildNotebookAIContext, type NotebookAIContextScope } from './ai/notebookContext'
 import { TaskDetail } from './tasks/TaskDetail'
 import { base64ToBytes, bytesToBase64, type ImportFile } from './data/transfer'
 import { AttachmentPanel } from './assets/AttachmentPanel'
@@ -57,6 +60,7 @@ import { useAbcInputSourceForVimNormal } from './editor/vimInputSource'
 import { referenceTargetElement } from './editor/referenceContent'
 import { ReferenceHelpDialog } from './editor/ReferenceHelpDialog'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
+import { findQuickCaptureTarget } from './workspaceNavigation'
 
 const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
@@ -67,7 +71,7 @@ const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 export interface AppProps { theme?: 'light' | 'dark'; onToggleTheme?: () => void }
 
 export function App({ theme = 'light', onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const importInput = useRef<HTMLInputElement>(null)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -92,6 +96,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiAnswer, setAiAnswer] = useState('')
   const [aiState, setAiState] = useState<'idle' | 'streaming' | 'error'>('idle')
+  const [aiContextScope, setAiContextScope] = useState<NotebookAIContextScope>('embeds')
   const [transferMessage, setTransferMessage] = useState<string>()
   const [restoreToken, setRestoreToken] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -101,6 +106,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   const [createRequest, setCreateRequest] = useState<'notebook' | 'section'>()
   const [renameRequest, setRenameRequest] = useState<{ kind: 'notebook' | 'section'; id: string; name: string }>()
   const [movePageRequest, setMovePageRequest] = useState<PageSummary>()
+  const [iconPickerPage, setIconPickerPage] = useState<PageSummary>()
   const [encryptedExportOpen, setEncryptedExportOpen] = useState(false)
   const [encryptedImportRequest, setEncryptedImportRequest] = useState<{ file: ImportFile; rest: ImportFile[] }>()
   const [pageSort, setPageSort] = useState<'recent' | 'title'>('recent')
@@ -277,11 +283,16 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
   }, [focusMode])
 
   useEffect(() => window.notebookDesktop?.events.onQuickCapture(() => {
+    const target = findQuickCaptureTarget(notebooks)
+    if (!target) {
+      setTransferMessage('请先创建一个可用的笔记本和分区')
+      return
+    }
     setActiveArea('notes')
-    setActiveNotebook('personal')
-    setActiveSection('inbox')
-    void createPage('inbox').then(setActivePage)
-  }), [createPage])
+    setActiveNotebook(target.notebookId)
+    setActiveSection(target.sectionId)
+    void createPage(target.sectionId).then(setActivePage)
+  }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
 
   const askAI = (prompt = aiPrompt) => {
@@ -290,12 +301,16 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
     setAiPrompt(normalized)
     setAiAnswer('')
     setAiState('streaming')
-    void Promise.all([searchWorkspace(normalized, 5, privacyUnlocked), semanticSearch(WORKSPACE_ID, normalized, 5)]).then(([matches, semantic]) => {
-      const accessibleIds = new Set(accessiblePages.map((page) => page.id))
-      const visibleSemantic = semantic.filter((page) => accessibleIds.has(page.id))
-      const context = [{ id: currentPage.id, title: currentPage.title, excerpt: currentPage.preview }, ...visibleSemantic, ...matches.map((page) => ({ id: page.id, title: page.title, excerpt: page.preview }))].filter((page, index, all) => all.findIndex((item) => item.id === page.id) === index).slice(0, 8)
-      return streamNotebookAnswer(normalized, context, (token) => setAiAnswer((current) => current + token))
-    }).then(() => setAiState('idle')).catch((error: unknown) => {
+    void buildNotebookAIContext({
+      rootPageId: currentPage.id,
+      scope: aiContextScope,
+      pages,
+      trashPages,
+      privacyUnlocked,
+      loadDocument,
+      loadAssets,
+    }).then((context) => streamNotebookAnswer(normalized, context, (token) => setAiAnswer((current) => current + token)))
+      .then(() => setAiState('idle')).catch((error: unknown) => {
       setAiAnswer(error instanceof TypeError || (error instanceof Error && error.message === 'Failed to fetch')
         ? 'AI 服务暂时不可用。请确认本机 AI 服务已启动，或稍后再试。'
         : error instanceof Error ? error.message : 'AI 服务暂时不可用，请稍后再试。')
@@ -727,7 +742,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       onDragEnd={() => setPageDropTarget(undefined)}
     >
       <button type="button" className={`page-tree-toggle ${hasChildren ? '' : 'empty'}`} tabIndex={-1} aria-label={hasChildren ? expandedPageIds.has(page.id) ? '折叠子页面' : '展开子页面' : undefined} onClick={(event) => { event.stopPropagation(); if (hasChildren) togglePageExpanded(page.id) }}>{hasChildren ? expandedPageIds.has(page.id) ? <ChevronDown16Regular /> : <ChevronRight16Regular /> : <span />}</button>
-      {activePage === page.id ? <Document20Filled className="page-tree-icon" /> : <Document20Regular className="page-tree-icon" />}
+      <PageTreeIconButton page={page} hasChildren={hasChildren} expanded={expandedPageIds.has(page.id)} onChange={() => setIconPickerPage(page)} />
       <span className="page-tree-title" title={page.title}>{page.title || '无标题页面'}</span>
       {page.favorite && <Star16Filled className="favorite" />}
       {hasChildren && <span className="page-tree-child-count">{descendantsOf(pagesInSection, page.id).size}</span>}
@@ -735,6 +750,8 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       <button onClick={() => { void createTreePage(page.id) }}>新建子页面</button>
       <button onClick={() => { void createTreePage(page.parentPageId) }}>新建同级页面</button>
       <ActionMenuDivider />
+      <button onClick={() => setIconPickerPage(page)}>更换图标…</button>
+      {page.icon && <button onClick={() => void updatePage(page.id, { icon: undefined })}>恢复默认图标</button>}
       <button onClick={() => void updatePage(page.id, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
       <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>
       {page.parentPageId && <button onClick={() => {
@@ -878,7 +895,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
                 onDragEnd={() => setPageDropTarget(undefined)}
               >
                 <button type="button" className={`page-tree-toggle ${hasChildren ? '' : 'empty'}`} tabIndex={-1} aria-label={expandedPageIds.has(page.id) ? '折叠子页面' : '展开子页面'} onClick={(event) => { event.stopPropagation(); if (hasChildren) togglePageExpanded(page.id) }}>{hasChildren ? expandedPageIds.has(page.id) ? <ChevronDown16Regular /> : <ChevronRight16Regular /> : <span />}</button>
-                {activePage === page.id ? <Document20Filled className="page-tree-icon" /> : <Document20Regular className="page-tree-icon" />}
+                <PageTreeIconButton page={page} hasChildren={hasChildren} expanded={expandedPageIds.has(page.id)} onChange={() => setIconPickerPage(page)} />
                 <span className="page-tree-title" title={page.title}>{page.title || '无标题页面'}</span>
                 {page.favorite && <Star16Filled className="favorite" />}
                 {hasChildren && <span className="page-tree-child-count">{descendantsOf(sectionPages, page.id).size}</span>}
@@ -886,6 +903,8 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
                 <button onClick={() => { void createTreePage(page.id) }}>新建子页面</button>
                 <button onClick={() => { void createTreePage(page.parentPageId) }}>新建同级页面</button>
                 <ActionMenuDivider />
+                <button onClick={() => setIconPickerPage(page)}>更换图标…</button>
+                {page.icon && <button onClick={() => void updatePage(page.id, { icon: undefined })}>恢复默认图标</button>}
                 <button onClick={() => void updatePage(page.id, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
                 <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>
                 {page.parentPageId && <button onClick={() => {
@@ -934,7 +953,7 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
               <Button className={`vim-toggle ${vimEnabled && vimCommandMode ? 'selected' : ''}`} appearance="subtle" aria-pressed={vimEnabled} size="small" title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑' : 'Vim INSERT：Esc 返回普通模式' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</Button>
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">
-              {activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} currentMarkdown={documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /></>}
+              {activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} currentMarkdown={documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} create={async (pageId) => { const current = documents[pageId]; if (current) await saveDocument(pageId, current); return createManualRevision(pageId) }} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /></>}
               <ActionMenu label="同步状态详情" trigger={<Button className={`compact-sync-button ${syncState}`} appearance="subtle" icon={<ArrowSync20Regular />} aria-label={`同步状态：${syncLabels[syncState]}`} title={syncLabels[syncState]} />}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
@@ -989,12 +1008,12 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
           {aiOpen && <div className="right-sidebar-panel">
             <PanelResizer label="调整右侧面板宽度" value={aiWidth} min={280} max={520} onChange={setAiWidth} resetValue={320} side="left" />
             {rightPanel === 'outline' && <OutlineSidebar document={documents[currentPage.id]} />}
-            {rightPanel === 'backlinks' && <BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} />}
+            {rightPanel === 'backlinks' && <BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} refreshKey={referenceIndexRevision} />}
             {rightPanel === 'ai' && <div className="ai-pane" role="region" aria-label="AI 助手">
               <div className="ai-header"><div className="ai-title"><span className="ai-orb"><Bot20Filled /></span><div><Text weight="semibold">Notebook AI</Text><Text size={200}>基于当前页面</Text></div></div><div className="ai-header-actions"><ActionMenu label="AI 操作" trigger={<Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="AI 菜单" />}><button onClick={() => { setAiAnswer(''); setAiPrompt(''); setAiState('idle') }}>新建对话</button><button onClick={() => { setAiAnswer(''); setAiPrompt('') }}>清空上下文</button></ActionMenu></div></div>
-              <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{hasActivePage ? currentPage.title : '未选择页面'}</strong><small>{hasActivePage ? `页面 · ${currentSection?.name ?? '当前分区'}` : '请先新建或选择页面'}</small></span></div></div>
+              <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{hasActivePage ? currentPage.title : '未选择页面'}</strong><small>{hasActivePage ? `页面 · ${currentSection?.name ?? '当前分区'}` : '请先新建或选择页面'}</small></span></div><label className="ai-context-scope"><span>引用范围</span><select aria-label="AI 引用范围" value={aiContextScope} onChange={(event) => setAiContextScope(event.target.value as NotebookAIContextScope)}><option value="current">仅当前页面</option><option value="embeds">当前页面和嵌入内容</option><option value="all">全部链接与嵌入内容</option></select></label></div>
               <div className="ai-conversation"><div className="ai-message"><div className="ai-message-icon"><Bot20Filled /></div><div><p>{aiAnswer || '我可以基于这篇页面帮助你继续工作。'}</p>{!aiAnswer && <div className="suggestion-grid"><button onClick={() => askAI('把当前页面总结为执行计划')}>总结为执行计划</button><button onClick={() => askAI('找出当前方案缺失的风险')}>找出缺失的风险</button><button onClick={() => askAI('整理当前页面的关键概念和大纲')}>整理关键概念</button><button onClick={() => askAI('把当前页面改写为结构清晰的产品文档')}>改写为产品文档</button></div>}{aiState === 'streaming' && <span className="streaming-indicator">正在生成…</span>}{aiAnswer && aiState === 'idle' && <div className="ai-writeback"><Button size="small" onClick={() => void applyAiAnswer(false)}>追加到笔记</Button><Button size="small" appearance="subtle" onClick={() => { if (window.confirm('这会用 AI 结果替换当前正文，并自动保留一个历史版本。确定继续吗？')) void applyAiAnswer(true) }}>替换正文</Button></div>}</div></div></div>
-              <div className="ai-composer"><textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askAI() } }} placeholder="询问此页面，输入 @ 引用其他内容…" aria-label="询问 Notebook AI" /><div><Text size={200}>当前页面作为引用来源</Text><Button appearance="primary" icon={<Bot20Regular />} disabled={aiState === 'streaming' || !aiPrompt.trim()} onClick={() => askAI()}>{aiState === 'streaming' ? '生成中' : '发送'}</Button></div></div>
+              <div className="ai-composer"><textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askAI() } }} placeholder="询问当前页面及其引用内容…" aria-label="询问 Notebook AI" /><div><Text size={200}>{aiContextScope === 'current' ? '仅发送当前页面' : aiContextScope === 'embeds' ? '包含嵌入的正文' : '包含链接和嵌入的正文'}</Text><Button appearance="primary" icon={<Bot20Regular />} disabled={aiState === 'streaming' || !aiPrompt.trim()} onClick={() => askAI()}>{aiState === 'streaming' ? '生成中' : '发送'}</Button></div></div>
             </div>}
           </div>}
           <nav className="right-sidebar-rail" aria-label="页面辅助工具">
@@ -1057,6 +1076,14 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
         if (movePageRequest.id === activePage && activeArea === 'notes') setActiveSection(sectionId)
         setMovePageRequest(undefined)
       }} />}
+      {iconPickerPage && <PageIconPicker
+        page={iconPickerPage}
+        onClose={() => setIconPickerPage(undefined)}
+        onSelect={async (icon) => {
+          await updatePage(iconPickerPage.id, { icon })
+          setIconPickerPage(undefined)
+        }}
+      />}
       {encryptedExportOpen && <BackupPasswordDialog mode="create" onClose={() => setEncryptedExportOpen(false)} onSubmit={async (passphrase) => { await runEncryptedExport(passphrase); setEncryptedExportOpen(false) }} />}
       {encryptedImportRequest && <BackupPasswordDialog mode="unlock" filename={encryptedImportRequest.file.name} onClose={() => setEncryptedImportRequest(undefined)} onSubmit={async (passphrase) => {
         const request = encryptedImportRequest
@@ -1077,6 +1104,54 @@ export function App({ theme = 'light', onToggleTheme }: AppProps) {
       {referencePickerOpen && <ReferencePicker pages={accessiblePages} currentPageId={currentPage.id} loadDocument={loadDocument} saveDocument={saveDocument} onClose={() => setReferencePickerOpen(false)} />}
     </div>
   )
+}
+
+const PAGE_ICON_GROUPS = [
+  { label: '文档', icons: ['📄', '📝', '📒', '📓', '📔', '📕', '📗', '📘', '📙', '📚', '📖', '🔖'] },
+  { label: '工作', icons: ['✅', '📌', '📋', '📅', '🗓️', '💼', '🎯', '🚀', '💡', '⚙️', '🧪', '🔧'] },
+  { label: '主题', icons: ['🏠', '👤', '👥', '💬', '❤️', '⭐', '🌱', '🌍', '🎨', '🎵', '📷', '🔐'] },
+] as const
+
+function PageTreeIconButton({ page, hasChildren, expanded, onChange }: { page: PageSummary; hasChildren: boolean; expanded: boolean; onChange(): void }) {
+  const label = page.icon ? `${page.title}的图标：${page.icon}` : `${page.title}使用默认${hasChildren ? '文件夹' : '文档'}图标`
+  return <button type="button" className={`page-tree-icon-button ${page.icon ? 'custom' : ''}`} aria-label={`${label}，点击更换`} title={`${label}；点击更换`} onClick={(event) => {
+    event.stopPropagation()
+    onChange()
+  }}>
+    {page.icon
+      ? <span className="page-tree-emoji" aria-hidden="true">{page.icon}</span>
+      : hasChildren
+        ? expanded ? <FolderOpen20Regular aria-hidden="true" /> : <Folder20Regular aria-hidden="true" />
+        : <Document20Regular aria-hidden="true" />}
+  </button>
+}
+
+function PageIconPicker({ page, onClose, onSelect }: { page: PageSummary; onClose(): void; onSelect(icon: string | undefined): Promise<void> }) {
+  const [customIcon, setCustomIcon] = useState(page.icon ?? '')
+  const [saving, setSaving] = useState(false)
+  const choose = async (icon: string | undefined) => {
+    if (saving) return
+    setSaving(true)
+    try { await onSelect(icon) } finally { setSaving(false) }
+  }
+  const normalizedCustomIcon = customIcon.trim().slice(0, 32)
+  return <div className="settings-backdrop page-icon-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target === event.currentTarget) onClose()
+  }}>
+    <section className="settings-dialog page-icon-dialog" role="dialog" aria-modal="true" aria-label={`更换“${page.title}”的图标`}>
+      <header><div><span className="page-icon-preview" aria-hidden="true">{page.icon || '📄'}</span><div><h2>页面图标</h2><p>{page.title || '无标题页面'}</p></div></div><Button appearance="subtle" onClick={onClose}>取消</Button></header>
+      <div className="page-icon-groups">
+        {PAGE_ICON_GROUPS.map((group) => <section key={group.label}><h3>{group.label}</h3><div className="page-icon-grid">
+          {group.icons.map((icon) => <button key={icon} type="button" className={page.icon === icon ? 'selected' : ''} aria-label={`使用 ${icon}`} aria-pressed={page.icon === icon} disabled={saving} onClick={() => void choose(icon)}>{icon}</button>)}
+        </div></section>)}
+      </div>
+      <label className="page-icon-custom"><span>粘贴其他 Emoji</span><div><Input value={customIcon} maxLength={32} aria-label="自定义 Emoji" placeholder="例如 🧭" onChange={(_, data) => setCustomIcon(data.value)} onKeyDown={(event) => {
+        if (event.key === 'Enter' && normalizedCustomIcon) void choose(normalizedCustomIcon)
+        if (event.key === 'Escape') onClose()
+      }} /><Button appearance="primary" disabled={!normalizedCustomIcon || saving} onClick={() => void choose(normalizedCustomIcon)}>使用</Button></div></label>
+      <Button appearance="subtle" disabled={!page.icon || saving} onClick={() => void choose(undefined)}>恢复自动文档/文件夹图标</Button>
+    </section>
+  </div>
 }
 
 const LAYOUT_KEY = 'notebook-layout-v1'

@@ -40,6 +40,8 @@ export interface Page {
   id: UUID
   workspaceId: UUID
   sectionId?: UUID
+  /** Optional user-selected emoji. Empty/undefined uses the tree's document/folder fallback icon. */
+  icon?: string
   /** Parent document in the section's ordered document tree. */
   parentPageId?: UUID
   /** Sparse sibling order. Values are local metadata and sync independently from Markdown. */
@@ -165,6 +167,8 @@ export interface ReadingPosition {
 export interface PageRevision {
   id: UUID
   pageId: UUID
+  /** Page icon at the time of the snapshot. Older revisions omit this field. */
+  pageIcon?: string | null
   document: PageDocument
   createdAt: IsoDate
   reason: 'autosave' | 'manual' | 'restore' | 'import'
@@ -245,6 +249,7 @@ export interface NotebookRepository {
   listPageLinks(pageId: UUID): Promise<PageLink[]>
   listBacklinks(pageId: UUID): Promise<PageLink[]>
   replacePageLinks(pageId: UUID, links: PageLink[]): Promise<void>
+  createManualRevision(pageId: UUID): Promise<PageRevision>
   saveNotebook(notebook: Notebook): Promise<void>
   deleteNotebook(notebookId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   saveSection(section: Section): Promise<void>

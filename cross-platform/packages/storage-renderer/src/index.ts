@@ -48,13 +48,13 @@ function compactRevisions(documents: PageDocument[], revisions: PageRevision[]) 
   return [...byPage.values()].flatMap((values) => {
     let previous: string | undefined
     const compacted = values.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).filter((revision) => {
-      const value = signature(revision.document)
+      const value = `${signature(revision.document)}\u0000${revision.pageIcon === undefined ? 'legacy' : revision.pageIcon ?? 'default'}`
       if (value === previous) return false
       previous = value
       return true
     })
     const last = compacted[compacted.length - 1]
-    if (last && signature(last.document) === currentDocuments.get(last.pageId)) compacted.pop()
+    if (last && last.pageIcon === undefined && signature(last.document) === currentDocuments.get(last.pageId)) compacted.pop()
     return compacted.map((revision) => ({
       ...revision,
       document: {
@@ -138,6 +138,8 @@ interface EditorCache {
 }
 
 const MAX_EDITOR_CACHE_BYTES = 64 * 1024 * 1024
+const SEARCH_INDEX_CHUNK_SIZE = 24
+const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 export class NotebookRendererDatabase extends Dexie {
   notebooks!: EntityTable<Notebook, 'id'>
@@ -393,22 +395,58 @@ export class DexieNotebookRepository implements NotebookRepository {
     textByPage: Map<string, string>
     index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
   }>()
+  private readonly searchCachePromises = new Map<string, Promise<{
+    pages: Page[]
+    textByPage: Map<string, string>
+    index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
+  }>>()
+  private readonly searchCacheGeneration = new Map<string, number>()
 
   constructor(readonly db = new NotebookRendererDatabase()) {}
 
+  private invalidateSearchCache(workspaceId: string) {
+    this.searchCache.delete(workspaceId)
+    this.searchCachePromises.delete(workspaceId)
+    this.searchCacheGeneration.set(workspaceId, (this.searchCacheGeneration.get(workspaceId) ?? 0) + 1)
+  }
+
   private async getSearchCache(workspaceId: UUID) {
-    let cached = this.searchCache.get(workspaceId)
-    if (!cached) {
+    const cached = this.searchCache.get(workspaceId)
+    if (cached) return cached
+    const pending = this.searchCachePromises.get(workspaceId)
+    if (pending) return pending
+    const generation = this.searchCacheGeneration.get(workspaceId) ?? 0
+    const build = (async () => {
       const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
       const pageIds = new Set(pages.map((page) => page.id))
       const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
-      const textByPage = new Map(documents.map((document) => [document.pageId, document.markdown ?? extractText(document.tiptapJson)]))
+      const textByPage = new Map<string, string>()
+      for (let offset = 0; offset < documents.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
+        for (const document of documents.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)) {
+          textByPage.set(document.pageId, document.markdown ?? extractText(document.tiptapJson))
+        }
+        await yieldToEventLoop()
+      }
       const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
-      index.addAll(pages.map((page) => ({ id: page.id, title: page.title, preview: page.preview, content: textByPage.get(page.id) ?? '' })))
-      cached = { pages, textByPage, index }
-      this.searchCache.set(workspaceId, cached)
+      for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
+        index.addAll(pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE).map((page) => ({
+          id: page.id,
+          title: page.title,
+          preview: page.preview,
+          content: textByPage.get(page.id) ?? '',
+        })))
+        await yieldToEventLoop()
+      }
+      const result = { pages, textByPage, index }
+      if ((this.searchCacheGeneration.get(workspaceId) ?? 0) === generation) this.searchCache.set(workspaceId, result)
+      return result
+    })()
+    this.searchCachePromises.set(workspaceId, build)
+    try {
+      return await build
+    } finally {
+      if (this.searchCachePromises.get(workspaceId) === build) this.searchCachePromises.delete(workspaceId)
     }
-    return cached
   }
 
   async listNotebooks(workspaceId: UUID): Promise<Notebook[]> {
@@ -482,7 +520,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.notebooks.delete(notebookId)
       await this.enqueueChange(notebook.workspaceId, 'notebook', notebookId, 'delete', {})
     })
-    this.searchCache.delete(notebook.workspaceId)
+    this.invalidateSearchCache(notebook.workspaceId)
   }
   async saveSection(section: Section) {
     await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
@@ -587,6 +625,7 @@ export class DexieNotebookRepository implements NotebookRepository {
           const revision: PageRevision = {
             id: crypto.randomUUID(),
             pageId: page.id,
+            pageIcon: page.icon ?? null,
             document: { ...existing, markdown: existing.markdown ?? legacyTiptapToCanonicalMarkdown(existing.tiptapJson), tiptapJson: { type: 'doc', content: [] }, yjsState: undefined },
             createdAt: document.updatedAt,
             reason: 'autosave',
@@ -606,7 +645,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
     })
-    this.searchCache.delete(page.workspaceId)
+    this.invalidateSearchCache(page.workspaceId)
   }
 
   async stageDraft(document: PageDocument): Promise<void> {
@@ -635,7 +674,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     })
-    this.searchCache.delete(page.workspaceId)
+    this.invalidateSearchCache(page.workspaceId)
   }
 
   async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
@@ -647,7 +686,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.delete(`page:${pageId}`)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', restored)
     })
-    this.searchCache.delete(page.workspaceId)
+    this.invalidateSearchCache(page.workspaceId)
   }
 
   async purgePage(pageId: UUID, deletedAt = new Date().toISOString(), deviceId = 'electron'): Promise<void> {
@@ -680,7 +719,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
-    this.searchCache.delete(page.workspaceId)
+    this.invalidateSearchCache(page.workspaceId)
   }
 
   async listTags(workspaceId: UUID): Promise<Tag[]> {
@@ -790,7 +829,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       }
       await this.db.syncCursors.put({ workspaceId, cursor })
     })
-    this.searchCache.delete(workspaceId)
+    this.invalidateSearchCache(workspaceId)
   }
 
   listPageLinks(pageId: UUID) { return this.db.pageLinks.where('sourcePageId').equals(pageId).toArray() }
@@ -863,7 +902,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         this.db.revisions.bulkPut(compactedRevisions),
       ])
     })
-    for (const workspaceId of new Set([...bundle.notebooks.map((item) => item.workspaceId), ...bundle.pages.map((item) => item.workspaceId)])) this.searchCache.delete(workspaceId)
+    for (const workspaceId of new Set([...bundle.notebooks.map((item) => item.workspaceId), ...bundle.pages.map((item) => item.workspaceId)])) this.invalidateSearchCache(workspaceId)
   }
 
   async importSyncResult(bundle: NotebookDataBundle, snapshot: NotebookDataBundle): Promise<NotebookDataBundle> {
@@ -972,6 +1011,32 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   getAssetContent(id: UUID) { return this.db.assetContents.get(id).then((value) => value?.data) }
   listRevisions(pageId: UUID) { return this.db.revisions.where('pageId').equals(pageId).reverse().sortBy('createdAt') }
+  async createManualRevision(pageId: UUID): Promise<PageRevision> {
+    return this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
+      const page = await this.db.pages.get(pageId)
+      const document = await this.db.documents.get(pageId)
+      if (!page || !document) throw new Error('页面内容不存在')
+      const markdown = document.markdown ?? tiptapToMarkdown(document.tiptapJson)
+      const createdAt = new Date().toISOString()
+      const revision: PageRevision = {
+        id: crypto.randomUUID(),
+        pageId,
+        pageIcon: page.icon ?? null,
+        document: {
+          ...document,
+          schemaVersion: Math.max(3, document.schemaVersion),
+          markdown,
+          tiptapJson: { type: 'doc', content: [] },
+          yjsState: undefined,
+        },
+        createdAt,
+        reason: 'manual',
+      }
+      await this.db.revisions.add(revision)
+      await this.enqueueChange(page.workspaceId, 'revision', revision.id, 'upsert', { ...revision })
+      return revision
+    })
+  }
   async restoreRevision(revisionId: UUID) {
     const revision = await this.db.revisions.get(revisionId)
     if (!revision) throw new Error('版本不存在')
@@ -980,7 +1045,12 @@ export class DexieNotebookRepository implements NotebookRepository {
     const now = new Date().toISOString()
     const assets = await this.db.assets.where('pageId').equals(revision.pageId).toArray()
     const document = { ...revision.document, ...(revision.document.markdown !== undefined ? { tiptapJson: markdownToEditorCache(revision.document.markdown, assets) } : {}), updatedAt: now }
-    await this.savePage({ ...page, updatedAt: now, syncStatus: 'pending' }, document)
+    await this.savePage({
+      ...page,
+      ...(revision.pageIcon !== undefined ? { icon: revision.pageIcon ?? undefined } : {}),
+      updatedAt: now,
+      syncStatus: 'pending',
+    }, document)
     return document
   }
   async searchWorkspace(workspaceId: UUID, query: string, limit = 50): Promise<Page[]> {
@@ -992,8 +1062,13 @@ export class DexieNotebookRepository implements NotebookRepository {
     // the front, then require all query tokens, and use fuzzy OR only as a
     // last-resort completion set.
     const normalizedQuery = query.normalize('NFKC').toLocaleLowerCase().trim()
-    const exactIds = pages
-      .filter((page) => `${page.title}\n${page.preview}\n${textByPage.get(page.id) ?? ''}`.normalize('NFKC').toLocaleLowerCase().includes(normalizedQuery))
+    const exactMatches: Page[] = []
+    for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
+      exactMatches.push(...pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
+        .filter((page) => `${page.title}\n${page.preview}\n${textByPage.get(page.id) ?? ''}`.normalize('NFKC').toLocaleLowerCase().includes(normalizedQuery)))
+      await yieldToEventLoop()
+    }
+    const exactIds = exactMatches
       .sort((left, right) => {
         const leftTitle = left.title.normalize('NFKC').toLocaleLowerCase()
         const rightTitle = right.title.normalize('NFKC').toLocaleLowerCase()

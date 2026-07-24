@@ -16,6 +16,7 @@ export interface NotebookSummary {
 export interface PageSummary {
   id: string
   sectionId: string
+  icon?: string
   parentPageId?: string
   sortOrder?: number
   treeUpdatedAt?: string

@@ -96,14 +96,14 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   for (const [pageId, source] of sources) if (source === 'remote') {
     const oldDocument = localDocuments.get(pageId); const newDocument = remoteDocuments.get(pageId)
     if (oldDocument && newDocument && documentSignature(oldDocument) !== documentSignature(newDocument)) {
-      const revision: PageRevision = { id: crypto.randomUUID(), pageId, document: oldDocument, createdAt: newDocument.updatedAt, reason: 'import' }
+      const revision: PageRevision = { id: crypto.randomUUID(), pageId, pageIcon: localPages.get(pageId)?.icon ?? null, document: oldDocument, createdAt: newDocument.updatedAt, reason: 'import' }
       revisions.push(revision)
     }
   }
   for (const pageId of conflicts) {
     const remoteDocument = remoteDocuments.get(pageId)
     if (remoteDocument && !revisions.some((item) => item.pageId === pageId && documentSignature(item.document) === documentSignature(remoteDocument))) {
-      revisions.push({ id: crypto.randomUUID(), pageId, document: remoteDocument, createdAt: remoteDocument.updatedAt, reason: 'import' })
+      revisions.push({ id: crypto.randomUUID(), pageId, pageIcon: remotePages.get(pageId)?.icon ?? null, document: remoteDocument, createdAt: remoteDocument.updatedAt, reason: 'import' })
     }
   }
   const tombstones = latestById(local.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt })), remote.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt }))).map(({ updatedAt: _, ...item }) => item)

@@ -295,7 +295,10 @@ function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
 export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader, currentPageId?: string) {
   return [
     StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false }),
-    CodeBlockLowlight.configure({ lowlight }),
+    // The stock triple-enter exit rule counts the newline used to create an
+    // empty fenced block, so a user's first blank line can unexpectedly leave
+    // the block. ArrowDown at the end still provides an explicit way out.
+    CodeBlockLowlight.configure({ lowlight, exitOnTripleEnter: false }),
     TaskList,
     TaskItem.configure({ nested: true }),
     TableKit.configure({ table: { resizable: true } }),

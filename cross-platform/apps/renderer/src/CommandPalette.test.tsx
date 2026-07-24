@@ -33,6 +33,24 @@ test('merges full-text page matches into Cmd+P results', async () => {
   expect(run).toHaveBeenCalledOnce()
 })
 
+test('does not start a full-body search for the first character', async () => {
+  const searchPageIds = vi.fn().mockResolvedValue([])
+  render(
+    <FluentProvider theme={webLightTheme}>
+      <CommandPalette
+        open
+        items={[{ id: 'page:uboot', group: 'page', title: 'Uboot', subtitle: '页面 · 工作', run: vi.fn() }]}
+        searchPageIds={searchPageIds}
+        onClose={() => undefined}
+      />
+    </FluentProvider>,
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: '搜索命令、页面和设置' }), { target: { value: 'u' } })
+  expect(screen.getByRole('button', { name: /Uboot/ })).toBeInTheDocument()
+  await new Promise((resolve) => window.setTimeout(resolve, 220))
+  expect(searchPageIds).not.toHaveBeenCalled()
+})
+
 test('requires an explicit second confirmation before running a dangerous command', async () => {
   const run = vi.fn()
   render(

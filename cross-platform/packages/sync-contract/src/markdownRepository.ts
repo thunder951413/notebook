@@ -63,6 +63,8 @@ export interface MarkdownHistoryEntry {
   updatedAt: string
   reason: PageRevision['reason']
   contentHash: string
+  /** Page icon captured with this revision. Missing means the revision predates page icons. */
+  pageIcon?: string | null
 }
 
 export interface MarkdownAssetReference extends Asset { objectHash?: string }
@@ -192,16 +194,18 @@ export async function encodeMarkdownRepository(bundle: NotebookDataBundle, asset
     const currentContentHash = sha256Hex(currentMarkdown)
     const contentObjects: Record<string, string> = { [currentContentHash]: currentMarkdown }
     const history: MarkdownHistoryEntry[] = []
-    let previousHash: string | undefined
+    let previousSignature: string | undefined
     for (const revision of bundle.revisions.filter((item) => item.pageId === page.id).sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
       const markdown = markdownOf(revision.document)
       const contentHash = sha256Hex(markdown)
-      if (contentHash === previousHash) continue
-      previousHash = contentHash
+      const signature = `${contentHash}:${revision.pageIcon === undefined ? 'legacy' : revision.pageIcon ?? 'default'}`
+      if (signature === previousSignature) continue
+      previousSignature = signature
       contentObjects[contentHash] = markdown
-      history.push({ id: revision.id, createdAt: revision.createdAt, updatedAt: revision.document.updatedAt, reason: revision.reason, contentHash })
+      history.push({ id: revision.id, createdAt: revision.createdAt, updatedAt: revision.document.updatedAt, reason: revision.reason, contentHash, pageIcon: revision.pageIcon })
     }
-    if (history[history.length - 1]?.contentHash === currentContentHash) history.pop()
+    const latestHistory = history[history.length - 1]
+    if (latestHistory && latestHistory.pageIcon === undefined && latestHistory.contentHash === currentContentHash) history.pop()
 
     const assets: MarkdownAssetReference[] = []
     const presentations = imagePresentations(document)
@@ -272,7 +276,7 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
     const markdown = note.contentObjects[entry.contentHash]!
     // History is cold data. Its Markdown is authoritative and the editor tree is
     // rebuilt only when this exact revision is restored.
-    return [{ id: entry.id, pageId: note.noteID, createdAt: entry.createdAt, reason: entry.reason, document: { pageId: note.noteID, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: entry.updatedAt } }]
+    return [{ id: entry.id, pageId: note.noteID, pageIcon: entry.pageIcon, createdAt: entry.createdAt, reason: entry.reason, document: { pageId: note.noteID, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: entry.updatedAt } }]
   }))
   return {
     notebooks: [library.notebook, ...(library.privateNotebook ? [library.privateNotebook] : [])], sections: library.sections, pages, documents,

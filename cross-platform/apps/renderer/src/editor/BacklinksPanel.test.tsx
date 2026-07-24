@@ -33,3 +33,25 @@ test('opens backlinks without scanning every document for unlinked mentions', as
   await waitFor(() => expect(loadMentions).toHaveBeenCalledWith('target', expect.any(AbortSignal)))
   expect(await screen.findByText('没有发现未链接的标题提及。')).toBeInTheDocument()
 })
+
+test('refreshes backlinks after the derived reference index changes', async () => {
+  const load = vi.fn().mockResolvedValue([])
+  const view = render(<FluentProvider theme={webLightTheme}><BacklinksSidebar
+    pageId="target"
+    pages={pages}
+    load={load}
+    loadMentions={vi.fn().mockResolvedValue([])}
+    openPage={vi.fn()}
+    refreshKey={0}
+  /></FluentProvider>)
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1))
+  view.rerender(<FluentProvider theme={webLightTheme}><BacklinksSidebar
+    pageId="target"
+    pages={pages}
+    load={load}
+    loadMentions={vi.fn().mockResolvedValue([])}
+    openPage={vi.fn()}
+    refreshKey={1}
+  /></FluentProvider>)
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2))
+})
