@@ -1,4 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { DesktopUpdateState } from '../updateContract'
+import type { AutomationApiState, AutomationBridgeRequest, AutomationBridgeResponse } from '../automationContract'
+import type { DesktopAIChatRequest, DesktopAIChatResponse } from '../aiContract'
+
+type DiagnosticEventInput = {
+  level: 'info' | 'warning' | 'error'
+  category: string
+  action: string
+  status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'
+  message?: string
+  durationMs?: number
+}
+type DiagnosticEntry = DiagnosticEventInput & { id: string; timestamp: string }
 
 export interface NotebookDesktopApi {
   platform: NodeJS.Platform
@@ -22,13 +35,39 @@ export interface NotebookDesktopApi {
     getInfo(): Promise<{ path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }>
     chooseDataRoot(): Promise<string | undefined>
   }
+  updates: {
+    getState(): Promise<DesktopUpdateState>
+    check(): Promise<DesktopUpdateState>
+    download(): Promise<DesktopUpdateState>
+    install(): Promise<boolean>
+    openReleasePage(): Promise<void>
+    onStateChanged(callback: (state: DesktopUpdateState) => void): () => void
+  }
+  diagnostics: {
+    record(event: DiagnosticEventInput): Promise<void>
+    list(limit?: number): Promise<DiagnosticEntry[]>
+    export(): Promise<string | undefined>
+    reveal(): Promise<void>
+  }
+  automation: {
+    getState(): Promise<AutomationApiState>
+    configure(enabled: boolean, port: number): Promise<AutomationApiState>
+    regenerateToken(): Promise<AutomationApiState>
+    onRequest(callback: (request: AutomationBridgeRequest) => void): () => void
+    respond(response: AutomationBridgeResponse): void
+  }
+  ai: {
+    complete(request: DesktopAIChatRequest): Promise<DesktopAIChatResponse>
+  }
   legacySftp: {
+    test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
     pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }> }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[] }>
     push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
   }
   events: {
     onQuickCapture(callback: () => void): () => void
     onCommandPalette(callback: () => void): () => void
+    onUpdateCenter(callback: () => void): () => void
     onFlushRequested(callback: () => void | Promise<void>): () => void
   }
 }
@@ -55,7 +94,40 @@ const api: NotebookDesktopApi = Object.freeze({
     getInfo: () => ipcRenderer.invoke('storage:getInfo'),
     chooseDataRoot: () => ipcRenderer.invoke('storage:chooseDataRoot'),
   }),
+  updates: Object.freeze({
+    getState: () => ipcRenderer.invoke('updates:getState'),
+    check: () => ipcRenderer.invoke('updates:check'),
+    download: () => ipcRenderer.invoke('updates:download'),
+    install: () => ipcRenderer.invoke('updates:install'),
+    openReleasePage: () => ipcRenderer.invoke('updates:openReleasePage'),
+    onStateChanged: (callback: (state: DesktopUpdateState) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: DesktopUpdateState) => callback(state)
+      ipcRenderer.on('notebook:update-state', listener)
+      return () => ipcRenderer.removeListener('notebook:update-state', listener)
+    },
+  }),
+  diagnostics: Object.freeze({
+    record: (event: DiagnosticEventInput) => ipcRenderer.invoke('diagnostics:record', event),
+    list: (limit?: number) => ipcRenderer.invoke('diagnostics:list', limit),
+    export: () => ipcRenderer.invoke('diagnostics:export'),
+    reveal: () => ipcRenderer.invoke('diagnostics:reveal'),
+  }),
+  automation: Object.freeze({
+    getState: () => ipcRenderer.invoke('automation:getState'),
+    configure: (enabled: boolean, port: number) => ipcRenderer.invoke('automation:configure', { enabled, port }),
+    regenerateToken: () => ipcRenderer.invoke('automation:regenerateToken'),
+    onRequest: (callback: (request: AutomationBridgeRequest) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, request: AutomationBridgeRequest) => callback(request)
+      ipcRenderer.on('notebook:automation-request', listener)
+      return () => ipcRenderer.removeListener('notebook:automation-request', listener)
+    },
+    respond: (response: AutomationBridgeResponse) => ipcRenderer.send('automation:response', response),
+  }),
+  ai: Object.freeze({
+    complete: (request: DesktopAIChatRequest) => ipcRenderer.invoke('ai:complete', request),
+  }),
   legacySftp: Object.freeze({
+    test: (settings: Parameters<NotebookDesktopApi['legacySftp']['test']>[0]) => ipcRenderer.invoke('legacySftp:test', settings),
     pull: (settings: Parameters<NotebookDesktopApi['legacySftp']['pull']>[0], options?: Parameters<NotebookDesktopApi['legacySftp']['pull']>[1]) => ipcRenderer.invoke('legacySftp:pull', settings, options),
     push: (settings: Parameters<NotebookDesktopApi['legacySftp']['push']>[0], files: Parameters<NotebookDesktopApi['legacySftp']['push']>[1], expectedIndexHash: string) => ipcRenderer.invoke('legacySftp:push', settings, files, expectedIndexHash),
   }),
@@ -69,6 +141,11 @@ const api: NotebookDesktopApi = Object.freeze({
       const listener = () => callback()
       ipcRenderer.on('notebook:command-palette', listener)
       return () => ipcRenderer.removeListener('notebook:command-palette', listener)
+    },
+    onUpdateCenter: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('notebook:update-center', listener)
+      return () => ipcRenderer.removeListener('notebook:update-center', listener)
     },
     onFlushRequested: (callback: () => void | Promise<void>) => {
       const listener = (_event: Electron.IpcRendererEvent, requestId: string) => {

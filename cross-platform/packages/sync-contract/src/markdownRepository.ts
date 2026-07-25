@@ -357,6 +357,17 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
     // rebuilt only when this exact revision is restored.
     return [{ id: entry.id, pageId: note.noteID, pageIcon: entry.pageIcon, createdAt: entry.createdAt, reason: entry.reason, document: { pageId: note.noteID, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: entry.updatedAt } }]
   }))
+  const livePageIds = new Set(pages.filter((page) => !page.deletedAt).map((page) => page.id))
+  const readingPositions = (input.readingPositions?.positions ?? [])
+    .filter((position) => livePageIds.has(position.noteID))
+    .map((position) => ({
+      id: position.noteID,
+      pageId: position.noteID,
+      anchorUtf16Offset: position.anchorUTF16Offset,
+      viewportOffsetFraction: position.viewportOffsetFraction,
+      updatedAt: position.updatedAt,
+      deviceId: position.deviceID,
+    }))
   return {
     notebooks: [library.notebook, ...(library.privateNotebook ? [library.privateNotebook] : [])], sections: library.sections, pages, documents,
     tags: library.tags, pageTags: notes.flatMap((note) => note.tagIDs.map((tagId) => ({ pageId: note.noteID, tagId }))),
@@ -367,7 +378,7 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
       note.contentObjects[note.currentContentHash]!,
       note.metadata.updatedAt || now,
     )),
-    knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], revisions, comments: [], tombstones: library.tombstones,
+    knowledgeEntities: [], knowledgeRelations: [], readingPositions, revisions, comments: [], tombstones: library.tombstones,
   } satisfies NotebookDataBundle
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Asset, Notebook, Page, PageDocument, PageLink, Section } from '@notebook/domain'
+import type { Asset, Notebook, Page, PageDocument, Section } from '@notebook/domain'
 import { indexPageForRetrieval } from '../ai/client'
 import { decodeImport, encodeExport, type ImportFile } from './transfer'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from '../editor/extensions'
@@ -8,20 +8,25 @@ import type { NotebookSummary, PageSummary } from '../model'
 import { DEFAULT_WORKSPACE_ID } from '../sync/syncSettings'
 import { synchronizeLegacySsh, type LegacySyncMode } from '../sync/legacySshSync'
 import { legacyDeviceId } from '../sync/legacySshSettings'
-import { extractNotebookReferences, normalizeReferenceTargetIds } from '@notebook/sync-contract'
+import { normalizeReferenceTargetIds } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
+import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 const db = new NotebookRendererDatabase(import.meta.env.VITE_NOTEBOOK_DATABASE_NAME ?? 'notebook-next')
 const repository = new DexieNotebookRepository(db)
+export const automationRepository = repository
 const pageMutationQueues = new Map<string, Promise<unknown>>()
 const documentLoadPromises = new Map<string, Promise<Record<string, unknown> | undefined>>()
 const isEmptyEditorCache = (value: Record<string, unknown>) => value.type === 'doc' && Array.isArray(value.content) && value.content.length === 0
 const REFERENCE_INDEX_VERSION_KEY = 'notebook-reference-index-version'
 const emptyEditorDocument = () => ({ type: 'doc', content: [{ type: 'paragraph' }] })
 let notebookRootMigration: Promise<void> | undefined
+let pagePrivacyNormalization: Promise<void> | undefined
+let lastDocumentSaveDiagnosticAt = 0
 
 async function ensureNotebookPageRoots() {
   if (notebookRootMigration) return notebookRootMigration
@@ -31,7 +36,7 @@ async function ensureNotebookPageRoots() {
     const pages: Page[] = []
     let cursor: string | undefined
     do {
-      const batch = await repository.listPages({ includeDeleted: true, limit: 500, cursor })
+      const batch = await repository.listPages({ workspaceId: WORKSPACE_ID, includeDeleted: true, limit: 500, cursor })
       pages.push(...batch.items)
       cursor = batch.nextCursor
     } while (cursor)
@@ -49,6 +54,26 @@ async function ensureNotebookPageRoots() {
     for (const page of migration.reparented) await repository.savePage(page)
   })().finally(() => { notebookRootMigration = undefined })
   return notebookRootMigration
+}
+
+async function ensurePagePrivacyMatchesNotebook() {
+  if (pagePrivacyNormalization) return pagePrivacyNormalization
+  pagePrivacyNormalization = (async () => {
+    const notebooks = await repository.listNotebooks(WORKSPACE_ID)
+    const sections = (await Promise.all(notebooks.map((notebook) => repository.listSections(notebook.id)))).flat()
+    const pages: Page[] = []
+    let cursor: string | undefined
+    do {
+      const batch = await repository.listPages({ workspaceId: WORKSPACE_ID, includeDeleted: true, limit: 500, cursor })
+      pages.push(...batch.items)
+      cursor = batch.nextCursor
+    } while (cursor)
+    const changedAt = new Date().toISOString()
+    const changed = planPagePrivacyNormalization(pages, sections, notebooks, changedAt)
+    for (const page of changed) await repository.savePage(page)
+    if (changed.length) recordDiagnosticEvent({ level: 'info', category: 'privacy', action: 'normalize-page-placement', status: 'success', message: `${changed.length} pages` })
+  })().finally(() => { pagePrivacyNormalization = undefined })
+  return pagePrivacyNormalization
 }
 
 function editorCacheVersion(document: PageDocument, assets: Asset[]) {
@@ -70,7 +95,7 @@ async function editorDocumentFromStorage(document: PageDocument, assets: Asset[]
 }
 
 async function rebuildReferenceIndex() {
-  const pages = await repository.listPages({ includeDeleted: false, limit: 10_000 })
+  const pages = await repository.listPages({ workspaceId: WORKSPACE_ID, includeDeleted: false, limit: 10_000 })
   for (const page of pages.items) {
     const document = await repository.getPageDocument(page.id)
     if (!document) continue
@@ -157,12 +182,13 @@ export function useWorkspaceData() {
 
   const reload = useCallback(async () => {
     await ensureNotebookPageRoots()
+    await ensurePagePrivacyMatchesNotebook()
     const documentIds = [...loadedDocumentIds.current]
     const loadEveryPage = async () => {
       const items: Page[] = []
       let cursor: string | undefined
       do {
-        const batch = await repository.listPages({ includeDeleted: true, limit: 500, cursor })
+        const batch = await repository.listPages({ workspaceId: WORKSPACE_ID, includeDeleted: true, limit: 500, cursor })
         items.push(...batch.items)
         cursor = batch.nextCursor
       } while (cursor)
@@ -215,6 +241,7 @@ export function useWorkspaceData() {
         })
       }
       if (!cancelled) await reload()
+      if (!cancelled) recordDiagnosticEvent({ level: 'info', category: 'workspace', action: 'loaded', status: 'success' })
       if (!cancelled && globalThis.localStorage?.getItem(REFERENCE_INDEX_VERSION_KEY) !== '1') {
         await rebuildReferenceIndex()
         globalThis.localStorage?.setItem(REFERENCE_INDEX_VERSION_KEY, '1')
@@ -226,17 +253,32 @@ export function useWorkspaceData() {
   const syncNow = useCallback(async (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode }) => {
       if (syncRunning.current) return false
       syncRunning.current = true
+      const startedAt = performance.now()
+      const mode = options?.mode ?? 'bidirectional'
       setSyncState('syncing')
       setSyncError(undefined)
+      recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'started', message: mode })
       try {
         const result = await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         setSyncState(result.state)
         if (result.state !== 'offline') await reload()
+        recordDiagnosticEvent({
+          level: result.state === 'conflict' ? 'warning' : 'info',
+          category: 'sync',
+          action: 'run',
+          status: result.state === 'synced' ? 'success' : result.state === 'conflict' ? 'failed' : 'info',
+          message: result.retryCount ? `${result.state} · 远端并发更新后自动重试 ${result.retryCount} 次` : result.state,
+          durationMs: performance.now() - startedAt,
+        })
         return result.state !== 'offline'
       } catch (error) {
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          const message = error instanceof Error ? error.message : '同步失败'
           setSyncState('error')
-          setSyncError(error instanceof Error ? error.message : '同步失败')
+          setSyncError(message)
+          recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'run', status: 'failed', message, durationMs: performance.now() - startedAt })
+        } else {
+          recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'cancelled', durationMs: performance.now() - startedAt })
         }
         return false
       } finally { syncRunning.current = false }
@@ -307,6 +349,10 @@ export function useWorkspaceData() {
       await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
       setReferenceIndexRevision((current) => current + 1)
       setDocuments((current) => ({ ...current, [pageId]: normalized }))
+      if (Date.now() - lastDocumentSaveDiagnosticAt > 30_000) {
+        lastDocumentSaveDiagnosticAt = Date.now()
+        recordDiagnosticEvent({ level: 'info', category: 'page', action: 'autosave', status: 'success' })
+      }
       if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(normalized)).catch(() => undefined)
     })
   }, [privateSectionIds])
@@ -335,9 +381,9 @@ export function useWorkspaceData() {
     for (let offset = 0; offset < candidates.length; offset += 8) {
       if (signal?.aborted) return []
       const batch = candidates.slice(offset, offset + 8)
-      const documents = await Promise.all(batch.map((source) => repository.getPageDocument(source.id)))
+      const candidateDocuments = await Promise.all(batch.map((source) => repository.getPageDocument(source.id)))
       batch.forEach((source, index) => {
-        const document = documents[index]
+        const document = candidateDocuments[index]
         if (!document) return
         const markdown = document.markdown ?? documentToMarkdown(document.tiptapJson)
         const withoutReferences = markdown.replace(/!?\[\[[^\]]+\]\]/g, '')
@@ -367,6 +413,7 @@ export function useWorkspaceData() {
     loadedDocumentIds.current.add(page.id)
     setPageRecords((current) => [page, ...current])
     setDocuments((current) => ({ ...current, [page.id]: tiptapJson }))
+    recordDiagnosticEvent({ level: 'info', category: 'page', action: 'create', status: 'success', message: kind })
     return page.id
   }, [pageRecords, privateSectionIds])
 
@@ -412,6 +459,7 @@ export function useWorkspaceData() {
 
   const deleteNotebook = useCallback(async (notebookId: string) => {
     await repository.deleteNotebook(notebookId, new Date().toISOString(), legacyDeviceId())
+    recordDiagnosticEvent({ level: 'warning', category: 'notebook', action: 'delete', status: 'success' })
     await reload()
   }, [reload])
 
@@ -424,6 +472,7 @@ export function useWorkspaceData() {
 
   const deleteSection = useCallback(async (sectionId: string) => {
     await repository.deleteSection(sectionId, new Date().toISOString(), legacyDeviceId())
+    recordDiagnosticEvent({ level: 'warning', category: 'section', action: 'delete', status: 'success' })
     await reload()
   }, [reload])
 
@@ -470,9 +519,11 @@ export function useWorkspaceData() {
       }
       const now = new Date().toISOString()
       const rootSectionId = notebookRootSectionId(page)
+      const targetLocked = lockedForSection(sectionId, sectionRecords, notebookRecords)
       await repository.savePage({
         ...page,
         sectionId,
+        locked: targetLocked,
         parentPageId,
         sortOrder,
         treeUpdatedAt: now,
@@ -492,13 +543,13 @@ export function useWorkspaceData() {
         }
         for (const descendantId of subtreeIds) {
           const descendant = livePages.find((item) => item.id === descendantId)
-          if (descendant) await repository.savePage({ ...descendant, sectionId, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+          if (descendant) await repository.savePage({ ...descendant, sectionId, locked: targetLocked, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
         }
         if (rootSectionId) await repository.deleteSection(rootSectionId, now, legacyDeviceId())
       }
       await reload()
     })
-  }, [pageRecords, reload])
+  }, [notebookRecords, pageRecords, reload, sectionRecords])
 
   const promotePageToNotebookRoot = useCallback(async (pageId: string, targetRootPageId?: string, position: 'before' | 'after' = 'after') => {
     return enqueuePageMutation(pageId, async () => {
@@ -521,6 +572,7 @@ export function useWorkspaceData() {
           : nextOrder !== undefined ? nextOrder - 1
             : 0
       const now = new Date().toISOString()
+      const targetLocked = notebookRecords.find((item) => item.id === notebookId)?.locked ? true : undefined
       const section: Section = {
         id: crypto.randomUUID(),
         notebookId,
@@ -535,6 +587,7 @@ export function useWorkspaceData() {
       await repository.savePage({
         ...page,
         sectionId: section.id,
+        locked: targetLocked,
         parentPageId: undefined,
         treeUpdatedAt: now,
         updatedAt: now,
@@ -546,12 +599,12 @@ export function useWorkspaceData() {
       })
       for (const descendantId of descendants) {
         const descendant = pageRecords.find((item) => item.id === descendantId)
-        if (descendant) await repository.savePage({ ...descendant, sectionId: section.id, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+        if (descendant) await repository.savePage({ ...descendant, sectionId: section.id, locked: targetLocked, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
       }
       await reload()
       return section.id
     })
-  }, [pageRecords, reload, sectionRecords])
+  }, [notebookRecords, pageRecords, reload, sectionRecords])
 
   const reorderNotebookRoot = useCallback(async (pageId: string, targetRootPageId: string, position: 'before' | 'after') => {
     const page = await repository.getPage(pageId)
@@ -574,11 +627,22 @@ export function useWorkspaceData() {
         : nextOrder !== undefined ? nextOrder - 1
           : 0
     const now = new Date().toISOString()
+    const targetLocked = notebookRecords.find((item) => item.id === targetSection.notebookId)?.locked ? true : undefined
     await repository.saveSection({ ...sourceSection, notebookId: targetSection.notebookId, sortOrder, updatedAt: now })
-    await repository.savePage({ ...page, sortOrder: sortOrder * 1000, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' })
+    const sectionPages = await repository.listPages({ workspaceId: WORKSPACE_ID, sectionId: sourceSection.id, includeDeleted: true, limit: 500 })
+    for (const sectionPage of sectionPages.items) {
+      await repository.savePage({
+        ...sectionPage,
+        locked: targetLocked,
+        sortOrder: sectionPage.id === page.id ? sortOrder * 1000 : sectionPage.sortOrder,
+        treeUpdatedAt: now,
+        updatedAt: sectionPage.id === page.id ? now : sectionPage.updatedAt,
+        syncStatus: 'pending',
+      })
+    }
     await reload()
     return sourceSection.id
-  }, [reload, sectionRecords])
+  }, [notebookRecords, reload, sectionRecords])
 
   const loadTaskSteps = useCallback((pageId: string) => repository.listTaskSteps(pageId), [])
   const saveTaskSteps = useCallback((pageId: string, steps: import('@notebook/domain').TaskStep[]) => repository.saveTaskSteps(pageId, steps), [])
@@ -603,18 +667,24 @@ export function useWorkspaceData() {
       await repository.queueImportedData(decoded.bundle)
     }
     await reload()
-    return textFiles.length + (decoded?.bundle.pages.length ?? 0)
+    const imported = textFiles.length + (decoded?.bundle.pages.length ?? 0)
+    recordDiagnosticEvent({ level: 'info', category: 'data', action: 'import', status: 'success', message: `${imported} 个页面` })
+    return imported
   }, [pageRecords, reload])
 
   const exportWorkspace = useCallback(async () => {
+    const startedAt = performance.now()
     const bundle = await repository.exportData(WORKSPACE_ID)
-    return encodeExport(bundle, await repository.exportAssetContents(new Set(bundle.pages.map((page) => page.id))))
+    const result = await encodeExport(bundle, await repository.exportAssetContents(new Set(bundle.pages.map((page) => page.id))))
+    recordDiagnosticEvent({ level: 'info', category: 'data', action: 'export', status: 'success', message: `${bundle.pages.length} 个页面`, durationMs: performance.now() - startedAt })
+    return result
   }, [])
   const loadAssets = useCallback((pageId: string) => repository.listAssets(pageId), [])
   const saveAsset = useCallback(async (pageId: string, file: File) => {
     const kind: Asset['kind'] = file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('video/') ? 'video' : 'file'
     const asset: Asset = { id: crypto.randomUUID(), pageId, kind, filename: file.name, mimeType: file.type || 'application/octet-stream', byteSize: file.size, createdAt: new Date().toISOString() }
     await repository.saveAsset(asset, file)
+    recordDiagnosticEvent({ level: 'info', category: 'asset', action: 'save', status: 'success', message: `${kind} · ${file.size} bytes` })
     return asset
   }, [])
   const openAsset = useCallback(async (asset: Asset) => {
@@ -635,11 +705,13 @@ export function useWorkspaceData() {
     const ids = treePageIds(pageRecords, pageId)
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.movePageToTrash(id, deletedAt, legacyDeviceId())
+    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'trash', status: 'success', message: `${ids.length} 个页面` })
     await reload()
   }, [pageRecords, reload])
   const restorePage = useCallback(async (pageId: string) => {
     const ids = treePageIds(trashRecords, pageId)
     for (const id of ids) await repository.restorePage(id)
+    recordDiagnosticEvent({ level: 'info', category: 'page', action: 'restore', status: 'success', message: `${ids.length} 个页面` })
     await reload()
   }, [reload, trashRecords])
   const purgePage = useCallback(async (pageId: string) => {
@@ -653,6 +725,7 @@ export function useWorkspaceData() {
     const ids = treePageIds(trashRecords, pageId)
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.purgePage(id, deletedAt, legacyDeviceId())
+    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success', message: `${ids.length} 个页面` })
     await reload()
   }, [reload, trashRecords])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
@@ -675,7 +748,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

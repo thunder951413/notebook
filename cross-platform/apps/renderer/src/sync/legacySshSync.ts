@@ -86,24 +86,36 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   const remotePages = new Map(remote.pages.map((page) => [page.id, page]))
   const remoteDocuments = new Map(remote.documents.map((item) => [item.pageId, item]))
   const localDocuments = new Map(local.documents.map((item) => [item.pageId, item]))
+  const publicNotebookIds = new Set(local.notebooks.filter((notebook) => !notebook.locked).map((notebook) => notebook.id))
+  const knownSectionIds = new Set([...local.sections, ...remote.sections].map((section) => section.id))
+  const fallbackSection = local.sections.find((section) => publicNotebookIds.has(section.notebookId) && /^(快速记录|quick notes?)$/i.test(section.name.trim()))
+    ?? local.sections.find((section) => publicNotebookIds.has(section.notebookId))
+    ?? local.sections[0]
+  const placeInVisibleSection = <T extends Page>(page: T): T => page.sectionId && knownSectionIds.has(page.sectionId)
+    ? page
+    : fallbackSection
+      ? { ...page, sectionId: fallbackSection.id }
+      : page
   const sources = new Map<string, 'local' | 'remote'>()
+  const localContentUnchangedFromBaseline = new Map<string, boolean>()
   const conflicts: string[] = []
   const pages = [...new Set([...localPages.keys(), ...remotePages.keys()])].flatMap((id) => {
     const left = localPages.get(id); const right = remotePages.get(id)
-    if (!left && right) { sources.set(id, 'remote'); return [{ ...right, syncStatus: 'synced' as const }] }
-    if (left && !right) { sources.set(id, 'local'); return [left] }
-    if (!left || !right) return []
     const localDocument = localDocuments.get(id)
-    const remoteDocument = remoteDocuments.get(id)
     const localHash = localDocument ? sha256Hex(documentSignature(localDocument)) : undefined
+    const baselineHash = typeof left?.legacyMetadata?.syncBaselineHash === 'string' ? left.legacyMetadata.syncBaselineHash : undefined
+    localContentUnchangedFromBaseline.set(id, Boolean(localHash && baselineHash && localHash === baselineHash))
+    if (!left && right) { sources.set(id, 'remote'); return [placeInVisibleSection({ ...right, syncStatus: 'synced' as const })] }
+    if (left && !right) { sources.set(id, 'local'); return [placeInVisibleSection(left)] }
+    if (!left || !right) return []
+    const remoteDocument = remoteDocuments.get(id)
     const remoteHash = remoteDocument ? sha256Hex(documentSignature(remoteDocument)) : undefined
-    const baselineHash = typeof left.legacyMetadata?.syncBaselineHash === 'string' ? left.legacyMetadata.syncBaselineHash : undefined
     const localChanged = left.syncStatus === 'pending' || left.syncStatus === 'conflict' || Boolean(baselineHash && localHash !== baselineHash)
     const remoteChanged = baselineHash ? remoteHash !== baselineHash : (right.legacyVersion ?? 0) >= (left.legacyVersion ?? 0) && remoteHash !== localHash
     const localTreeTime = left.treeUpdatedAt ?? left.createdAt
     const remoteTreeTime = right.treeUpdatedAt ?? right.createdAt
     const tree = remoteTreeTime > localTreeTime ? right : left
-    const withTree = <T extends Page>(value: T): T => ({
+    const withTree = <T extends Page>(value: T): T => placeInVisibleSection({
       ...value,
       sectionId: tree.sectionId,
       parentPageId: tree.parentPageId,
@@ -174,7 +186,14 @@ export function mergeBundles(local: NotebookDataBundle, remote: NotebookDataBund
   const tombstones = latestById(local.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt })), remote.tombstones.map((item) => ({ ...item, updatedAt: item.deletedAt }))).map(({ updatedAt: _, ...item }) => item)
   const deletedAt = new Map(tombstones.filter((item) => item.entityType === 'page').map((item) => [item.entityId, item.deletedAt]))
   const deletedSections = new Map(tombstones.filter((item) => item.entityType === 'section').map((item) => [item.entityId, item.deletedAt]))
-  const mergedPages = pages.map((page) => deletedAt.get(page.id) && deletedAt.get(page.id)! >= page.updatedAt ? { ...page, deletedAt: deletedAt.get(page.id), syncStatus: 'synced' as const } : page)
+  const mergedPages = pages.map((page) => {
+    const deletionTime = deletedAt.get(page.id)
+    const deletionWins = deletionTime && (
+      deletionTime >= page.updatedAt
+      || localContentUnchangedFromBaseline.get(page.id)
+    )
+    return deletionWins ? { ...page, deletedAt: deletionTime, syncStatus: 'synced' as const } : page
+  })
   const mergedSections = latestById(local.sections, normalizedRemoteSections).filter((section) => !deletedSections.get(section.id) || section.updatedAt > deletedSections.get(section.id)!)
   const effectiveTombstones = tombstones.filter((item) => {
     if (item.entityType !== 'page') return true
@@ -232,7 +251,30 @@ export function publicationBundleWithRemoteConflicts(merged: NotebookDataBundle,
 
 export type LegacySyncMode = 'bidirectional' | 'pull' | 'push'
 
-export async function synchronizeLegacySsh(repository: DexieNotebookRepository, workspaceId: string, force = false, mode: LegacySyncMode = 'bidirectional') {
+const remoteIndexChanged = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('远端索引在同步期间已变化') || message.includes('远端索引在拉取期间已变化')
+}
+
+export async function retryRemoteIndexChanges<T>(
+  operation: (attempt: number) => Promise<T>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds)),
+  maximumAttempts = 3,
+) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    try {
+      return { value: await operation(attempt), retryCount: attempt }
+    } catch (error) {
+      lastError = error
+      if (!remoteIndexChanged(error) || attempt + 1 >= maximumAttempts) throw error
+      await wait(150 * (2 ** attempt))
+    }
+  }
+  throw lastError
+}
+
+async function synchronizeLegacySshAttempt(repository: DexieNotebookRepository, workspaceId: string, force = false, mode: LegacySyncMode = 'bidirectional') {
   if (!force && !loadSyncSettings().enabled) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
   const settings = loadLegacySshSettings()
   if (!settings.host || !settings.username || !settings.remotePath) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
@@ -337,6 +379,13 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
   await repository.importSyncResult(syncedBundle, localBundle)
   if (merged.conflicts.length) return { state: 'conflict' as const, skipped: encoded.skippedPageIds.length, fingerprint: pulled.fingerprint, conflicts: merged.conflicts }
   return { state: 'synced' as const, skipped: encoded.skippedPageIds.length, fingerprint: pulled.fingerprint }
+}
+
+export async function synchronizeLegacySsh(repository: DexieNotebookRepository, workspaceId: string, force = false, mode: LegacySyncMode = 'bidirectional') {
+  const { value, retryCount } = await retryRemoteIndexChanges(
+    () => synchronizeLegacySshAttempt(repository, workspaceId, force, mode),
+  )
+  return { ...value, retryCount }
 }
 
 export async function publishPreparedLegacyArchive(file: File) {

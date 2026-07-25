@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { afterAll, beforeAll, expect, test } from 'vitest'
-import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository } from './legacySftp'
+import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, testLegacyConnection } from './legacySftp'
 
 const enabled = process.env.NOTEBOOK_SFTP_E2E === '1'
 let root = ''
@@ -56,6 +56,9 @@ afterAll(async () => {
 
 test.runIf(enabled)('uploads atomically and pulls an Android-compatible SSH repository', async () => {
   const settings = { host: '127.0.0.1', port, username: 'notebook', password: 'test-password', remotePath: 'repository', fingerprint }
+  const connection = await testLegacyConnection(settings)
+  expect(connection).toMatchObject({ fingerprint, remotePathExists: false })
+  expect(connection.latencyMs).toBeGreaterThanOrEqual(0)
   const empty = await pullLegacyRepository(settings)
   expect(empty.indexHash).toBe('')
   expect(empty.fingerprint).toBe(fingerprint)

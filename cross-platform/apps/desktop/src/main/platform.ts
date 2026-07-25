@@ -5,7 +5,8 @@ import { basename, dirname, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
-import { pullLegacyRepository, pushLegacyRepository, type LegacySftpFile, type LegacySftpPullOptions, type LegacySshConnection } from './legacySftp'
+import { pullLegacyRepository, pushLegacyRepository, testLegacyConnection, type LegacySftpFile, type LegacySftpPullOptions, type LegacySshConnection } from './legacySftp'
+import { appendDiagnosticEvent, diagnosticLogPath, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
 const execFileAsync = promisify(execFile)
@@ -92,6 +93,25 @@ function requireEncryption() {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('Operating-system credential encryption is unavailable')
 }
 
+export async function getStoredSecret(key: string): Promise<string | undefined> {
+  requireEncryption()
+  const encrypted = (await readCredentialStore())[key]
+  return encrypted ? safeStorage.decryptString(Buffer.from(encrypted, 'base64')) : undefined
+}
+
+export async function setStoredSecret(key: string, value: string): Promise<void> {
+  requireEncryption()
+  const store = await readCredentialStore()
+  store[key] = safeStorage.encryptString(value).toString('base64')
+  await writeCredentialStore(store)
+}
+
+export async function deleteStoredSecret(key: string): Promise<void> {
+  const store = await readCredentialStore()
+  delete store[key]
+  await writeCredentialStore(store)
+}
+
 export function registerPlatformHandlers(options: { defaultUserDataPath: string; dataRootSource: DataRootSelection['source'] }) {
   ipcMain.handle('platform:showNotification', (event, value: { title: string; body: string }) => {
     assertTrustedSender(event)
@@ -176,26 +196,51 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
   })
 
   ipcMain.handle('secrets:set', async (event, key: string, value: string) => {
-    assertTrustedSender(event); requireEncryption()
-    const store = await readCredentialStore()
-    store[key] = safeStorage.encryptString(value).toString('base64')
-    await writeCredentialStore(store)
+    assertTrustedSender(event)
+    await setStoredSecret(key, value)
   })
   ipcMain.handle('secrets:get', async (event, key: string) => {
-    assertTrustedSender(event); requireEncryption()
-    const encrypted = (await readCredentialStore())[key]
-    return encrypted ? safeStorage.decryptString(Buffer.from(encrypted, 'base64')) : undefined
+    assertTrustedSender(event)
+    return getStoredSecret(key)
   })
   ipcMain.handle('secrets:delete', async (event, key: string) => {
     assertTrustedSender(event)
-    const store = await readCredentialStore()
-    delete store[key]
-    await writeCredentialStore(store)
+    await deleteStoredSecret(key)
   })
 
-  ipcMain.handle('legacySftp:pull', async (event, settings: LegacySshConnection, options?: LegacySftpPullOptions) => {
+  ipcMain.handle('diagnostics:record', async (event, value: DiagnosticEventInput) => {
     assertTrustedSender(event)
-    return pullLegacyRepository(settings, options)
+    await appendDiagnosticEvent(value)
+  })
+  ipcMain.handle('diagnostics:list', async (event, limit?: number) => {
+    assertTrustedSender(event)
+    return readDiagnosticEvents(limit)
+  })
+  ipcMain.handle('diagnostics:export', async (event) => {
+    assertTrustedSender(event)
+    const result = await dialog.showSaveDialog({
+      title: '导出 Notebook 诊断日志',
+      defaultPath: `notebook-diagnostics-${new Date().toISOString().slice(0, 10)}.jsonl`,
+      filters: [{ name: 'JSON Lines', extensions: ['jsonl'] }],
+    })
+    if (result.canceled || !result.filePath) return undefined
+    const entries = await readDiagnosticEvents(500)
+    await atomicWriteFile(result.filePath, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 0o600)
+    return result.filePath
+  })
+  ipcMain.handle('diagnostics:reveal', async (event) => {
+    assertTrustedSender(event)
+    await appendDiagnosticEvent({ level: 'info', category: 'diagnostics', action: 'reveal-log', status: 'success' })
+    shell.showItemInFolder(diagnosticLogPath())
+  })
+
+  ipcMain.handle('legacySftp:pull', async (event, settings: LegacySshConnection, pullOptions?: LegacySftpPullOptions) => {
+    assertTrustedSender(event)
+    return pullLegacyRepository(settings, pullOptions)
+  })
+  ipcMain.handle('legacySftp:test', async (event, settings: LegacySshConnection) => {
+    assertTrustedSender(event)
+    return testLegacyConnection(settings)
   })
   ipcMain.handle('legacySftp:push', async (event, settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string) => {
     assertTrustedSender(event)

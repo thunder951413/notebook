@@ -60,7 +60,8 @@ export function ActionMenu({ label, trigger, openOnContext = false, children }: 
       trigger.props.onClick?.(event)
       if (!openOnContext) {
         const rect = event.currentTarget.getBoundingClientRect()
-        open ? setPosition(undefined) : place(rect.left, rect.bottom + 4)
+        if (open) setPosition(undefined)
+        else place(rect.left, rect.bottom + 4)
       }
     },
     onContextMenu: (event: ReactMouseEvent<HTMLElement>) => {

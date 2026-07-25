@@ -20,7 +20,9 @@ export function AttachmentPanel({ pageId, loadAssets, saveAsset, openAsset }: At
   const [recording, setRecording] = useState(false)
   const [error, setError] = useState<string>()
   const reload = () => void loadAssets(pageId).then(setAssets)
-  useEffect(reload, [pageId])
+  useEffect(() => {
+    void loadAssets(pageId).then(setAssets)
+  }, [loadAssets, pageId])
 
   const addFiles = async (files: File[]) => {
     for (const file of files) {

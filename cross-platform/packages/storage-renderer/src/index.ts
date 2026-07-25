@@ -2,6 +2,7 @@ import Dexie, { type EntityTable } from 'dexie'
 import MiniSearch from 'minisearch'
 import { z } from 'zod'
 import type {
+  AutomationProposal,
   Notebook,
   NotebookRepository,
   Page,
@@ -125,6 +126,11 @@ export interface RemoteSyncChange {
   payload: Record<string, unknown>
 }
 
+export interface RemoteApplyResult {
+  cursor: number
+  conflicts: Array<{ entityType: string; entityId: string; pageIds: string[] }>
+}
+
 interface SyncCursor { workspaceId: string; cursor: number }
 interface SyncVersion { id: string; version: number }
 interface AssetContent { id: string; data: Blob }
@@ -163,6 +169,7 @@ export class NotebookRendererDatabase extends Dexie {
   comments!: EntityTable<PageComment, 'id'>
   drafts!: EntityTable<PageDraft, 'pageId'>
   editorCaches!: EntityTable<EditorCache, 'pageId'>
+  automationProposals!: EntityTable<AutomationProposal, 'id'>
 
   constructor(name = 'notebook-next') {
     super(name)
@@ -334,6 +341,7 @@ export class NotebookRendererDatabase extends Dexie {
     // Parsed editor JSON is device-local and disposable. Keeping it outside
     // `documents` prevents it from entering sync, history, or exported data.
     this.version(17).stores({ editorCaches: 'pageId, sourceVersion, accessedAt' })
+    this.version(18).stores({ automationProposals: 'id, workspaceId, status, createdAt' })
   }
 }
 
@@ -464,7 +472,10 @@ export class DexieNotebookRepository implements NotebookRepository {
   async listPages(query: PageListQuery): Promise<PageListResult> {
     let items = query.sectionId
       ? await this.db.pages.where('sectionId').equals(query.sectionId).toArray()
-      : await this.db.pages.toArray()
+      : await this.db.pages.where('workspaceId').equals(query.workspaceId).toArray()
+    // sectionId is globally unique by contract, but retain an explicit
+    // workspace boundary so malformed imports cannot leak pages across stores.
+    items = items.filter((item) => item.workspaceId === query.workspaceId)
     if (!query.includeDeleted) items = items.filter((item) => !item.deletedAt)
     if (query.kind) items = items.filter((item) => item.kind === query.kind)
     const search = normalizeSearch(query.search ?? '')
@@ -509,18 +520,20 @@ export class DexieNotebookRepository implements NotebookRepository {
     })
   }
   async deleteNotebook(notebookId: string, deletedAt: string, deviceId: string) {
-    const notebook = await this.db.notebooks.get(notebookId)
-    if (!notebook) return
-    const sections = await this.db.sections.where('notebookId').equals(notebookId).toArray()
-    const sectionIds = sections.map((section) => section.id)
-    const pages = sectionIds.length ? await this.db.pages.where('sectionId').anyOf(sectionIds).toArray() : []
-    for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
-    for (const section of sections) await this.deleteSection(section.id, deletedAt, deviceId)
-    await this.db.transaction('rw', [this.db.notebooks, this.db.syncOutbox, this.db.syncVersions], async () => {
+    let workspaceId: string | undefined
+    await this.db.transaction('rw', this.db.tables, async () => {
+      const notebook = await this.db.notebooks.get(notebookId)
+      if (!notebook) return
+      workspaceId = notebook.workspaceId
+      const sections = await this.db.sections.where('notebookId').equals(notebookId).toArray()
+      const sectionIds = sections.map((section) => section.id)
+      const pages = sectionIds.length ? await this.db.pages.where('sectionId').anyOf(sectionIds).toArray() : []
+      for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
+      for (const section of sections) await this.deleteSection(section.id, deletedAt, deviceId)
       await this.db.notebooks.delete(notebookId)
       await this.enqueueChange(notebook.workspaceId, 'notebook', notebookId, 'delete', {})
     })
-    this.invalidateSearchCache(notebook.workspaceId)
+    if (workspaceId) this.invalidateSearchCache(workspaceId)
   }
   async saveSection(section: Section) {
     await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
@@ -531,65 +544,68 @@ export class DexieNotebookRepository implements NotebookRepository {
     })
   }
   async deleteSection(sectionId: UUID, deletedAt: string, deviceId: string) {
-    const section = await this.db.sections.get(sectionId)
-    if (!section) return
-    const notebook = await this.db.notebooks.get(section.notebookId)
-    if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
-    const pages = await this.db.pages.where('sectionId').equals(sectionId).toArray()
-    for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
-    await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions], async () => {
+    let workspaceId: string | undefined
+    await this.db.transaction('rw', this.db.tables, async () => {
+      const section = await this.db.sections.get(sectionId)
+      if (!section) return
+      const notebook = await this.db.notebooks.get(section.notebookId)
+      if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
+      workspaceId = notebook.workspaceId
+      const pages = await this.db.pages.where('sectionId').equals(sectionId).toArray()
+      for (const page of pages) await this.purgePage(page.id, deletedAt, deviceId)
       if (await this.db.pages.where('sectionId').equals(sectionId).count()) throw new Error('分区内容正在变化，请重试删除')
       const tombstone: Tombstone = { id: `section:${sectionId}`, workspaceId: notebook.workspaceId, entityType: 'section', entityId: sectionId, deletedAt, deviceId }
       await this.db.sections.delete(sectionId)
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(notebook.workspaceId, 'section', sectionId, 'delete', {})
     })
+    if (workspaceId) this.invalidateSearchCache(workspaceId)
   }
 
   async duplicatePage(pageId: UUID, newPageId: UUID, createdAt: string): Promise<Page> {
-    const source = await this.db.pages.get(pageId)
-    if (!source || source.deletedAt) throw new Error('找不到要复制的页面')
-    const [document, pageTags, taskSteps, assets] = await Promise.all([
-      this.db.documents.get(pageId),
-      this.db.pageTags.where('pageId').equals(pageId).toArray(),
-      this.db.taskSteps.where('pageId').equals(pageId).toArray(),
-      this.db.assets.where('pageId').equals(pageId).toArray(),
-    ])
-    const assetIds = new Map(assets.map((asset) => [asset.id, crypto.randomUUID()]))
-    const copy: Page = {
-      ...source,
-      id: newPageId,
-      title: `${source.title} 副本`,
-      sortOrder: (source.sortOrder ?? 0) + 1,
-      treeUpdatedAt: createdAt,
-      createdAt,
-      updatedAt: createdAt,
-      deletedAt: undefined,
-      legacyVersion: undefined,
-      syncStatus: 'pending',
-    }
-    const copiedDocument = document ? {
-      ...document,
-      pageId: newPageId,
-      tiptapJson: remapAssetReferences(document.tiptapJson, assetIds) as Record<string, unknown>,
-      updatedAt: createdAt,
-    } : undefined
-    await this.savePage(copy, copiedDocument)
-    if (pageTags.length) await this.savePageTags(newPageId, pageTags.map((item) => item.tagId))
-    if (taskSteps.length) await this.saveTaskSteps(newPageId, taskSteps.map((step) => ({ ...step, id: crypto.randomUUID(), pageId: newPageId, createdAt })))
-    for (const asset of assets) {
-      const id = assetIds.get(asset.id)!
-      const copiedAsset: Asset = { ...asset, id, pageId: newPageId, parentAssetId: asset.parentAssetId ? assetIds.get(asset.parentAssetId) : undefined, createdAt }
-      const content = await this.getAssetContent(asset.id)
-      if (content) await this.saveAsset(copiedAsset, content)
-      else {
-        await this.db.transaction('rw', [this.db.assets, this.db.syncOutbox, this.db.syncVersions], async () => {
+    return this.db.transaction('rw', this.db.tables, async () => {
+      const source = await this.db.pages.get(pageId)
+      if (!source || source.deletedAt) throw new Error('找不到要复制的页面')
+      const [document, pageTags, taskSteps, assets] = await Promise.all([
+        this.db.documents.get(pageId),
+        this.db.pageTags.where('pageId').equals(pageId).toArray(),
+        this.db.taskSteps.where('pageId').equals(pageId).toArray(),
+        this.db.assets.where('pageId').equals(pageId).toArray(),
+      ])
+      const assetIds = new Map(assets.map((asset) => [asset.id, crypto.randomUUID()]))
+      const copy: Page = {
+        ...source,
+        id: newPageId,
+        title: `${source.title} 副本`,
+        sortOrder: (source.sortOrder ?? 0) + 1,
+        treeUpdatedAt: createdAt,
+        createdAt,
+        updatedAt: createdAt,
+        deletedAt: undefined,
+        legacyVersion: undefined,
+        syncStatus: 'pending',
+      }
+      const copiedDocument = document ? {
+        ...document,
+        pageId: newPageId,
+        tiptapJson: remapAssetReferences(document.tiptapJson, assetIds) as Record<string, unknown>,
+        updatedAt: createdAt,
+      } : undefined
+      await this.savePage(copy, copiedDocument)
+      if (pageTags.length) await this.savePageTags(newPageId, pageTags.map((item) => item.tagId))
+      if (taskSteps.length) await this.saveTaskSteps(newPageId, taskSteps.map((step) => ({ ...step, id: crypto.randomUUID(), pageId: newPageId, createdAt })))
+      for (const asset of assets) {
+        const id = assetIds.get(asset.id)!
+        const copiedAsset: Asset = { ...asset, id, pageId: newPageId, parentAssetId: asset.parentAssetId ? assetIds.get(asset.parentAssetId) : undefined, createdAt }
+        const content = await this.getAssetContent(asset.id)
+        if (content) await this.saveAsset(copiedAsset, content)
+        else {
           await this.db.assets.put(copiedAsset)
           await this.enqueueChange(copy.workspaceId, 'asset', id, 'upsert', { ...copiedAsset, localPath: undefined })
-        })
+        }
       }
-    }
-    return copy
+      return copy
+    })
   }
   listPageTags(pageId: UUID) { return this.db.pageTags.where('pageId').equals(pageId).toArray() }
   getReadingPosition(pageId: UUID) { return this.db.readingPositions.where('pageId').equals(pageId).first() }
@@ -621,7 +637,9 @@ export class DexieNotebookRepository implements NotebookRepository {
       if (document) {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
         const existing = await this.db.documents.get(page.id)
-        if (existing && JSON.stringify(existing.tiptapJson) !== JSON.stringify(document.tiptapJson)) {
+        const existingMarkdown = existing?.markdown ?? (existing ? legacyTiptapToCanonicalMarkdown(existing.tiptapJson) : undefined)
+        const nextMarkdown = document.markdown ?? legacyTiptapToCanonicalMarkdown(document.tiptapJson)
+        if (existing && existingMarkdown !== nextMarkdown) {
           const revision: PageRevision = {
             id: crypto.randomUUID(),
             pageId: page.id,
@@ -776,8 +794,52 @@ export class DexieNotebookRepository implements NotebookRepository {
     await this.db.pages.where('id').anyOf(entityIds).modify({ syncStatus: 'conflict' })
   }
 
-  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number) {
-    await this.db.transaction('rw', this.db.tables, async () => {
+  private async conflictPageIds(change: RemoteSyncChange, payload?: Record<string, unknown>) {
+    if (change.entityType === 'page' || change.entityType === 'document') return [change.entityId]
+    const directPageId = typeof payload?.pageId === 'string' ? payload.pageId : undefined
+    if (directPageId) return [directPageId]
+    if (change.entityType === 'page_link') {
+      const link = payload ?? await this.db.pageLinks.get(change.entityId)
+      return typeof link?.sourcePageId === 'string' ? [link.sourcePageId] : []
+    }
+    if (change.entityType === 'page_tag') {
+      const pageId = typeof payload?.pageId === 'string' ? payload.pageId : change.entityId.split(':')[0]
+      return pageId ? [pageId] : []
+    }
+    if (change.entityType === 'task_step') {
+      const step = await this.db.taskSteps.get(change.entityId)
+      return step ? [step.pageId] : []
+    }
+    if (change.entityType === 'asset') {
+      const asset = await this.db.assets.get(change.entityId)
+      return asset ? [asset.pageId] : []
+    }
+    if (change.entityType === 'reading_position') {
+      const position = await this.db.readingPositions.get(change.entityId)
+      return position ? [position.pageId] : []
+    }
+    if (change.entityType === 'revision') {
+      const revision = await this.db.revisions.get(change.entityId)
+      return revision ? [revision.pageId] : []
+    }
+    if (change.entityType === 'tag') {
+      return [...new Set((await this.db.pageTags.where('tagId').equals(change.entityId).toArray()).map((item) => item.pageId))]
+    }
+    if (change.entityType === 'section') {
+      return (await this.db.pages.where('sectionId').equals(change.entityId).toArray()).map((page) => page.id)
+    }
+    if (change.entityType === 'notebook') {
+      const sectionIds = (await this.db.sections.where('notebookId').equals(change.entityId).toArray()).map((section) => section.id)
+      return sectionIds.length ? (await this.db.pages.where('sectionId').anyOf(sectionIds).toArray()).map((page) => page.id) : []
+    }
+    return []
+  }
+
+  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number): Promise<RemoteApplyResult> {
+    return this.db.transaction('rw', this.db.tables, async () => {
+      const previousCursor = await this.getSyncCursor(workspaceId)
+      let appliedCursor = cursor
+      const conflicts: RemoteApplyResult['conflicts'] = []
       for (const change of changes) {
         const supportedEntityTypes = new Set(['notebook', 'section', 'page', 'document', 'tag', 'task_step', 'asset', 'page_link', 'reading_position', 'revision', 'page_tag'])
         if (!supportedEntityTypes.has(change.entityType) || !Number.isSafeInteger(change.version) || change.version < 0 || !['upsert', 'delete'].includes(change.operation)) {
@@ -792,11 +854,14 @@ export class DexieNotebookRepository implements NotebookRepository {
           ? await this.db.syncOutbox.where('[entityType+entityId]').equals(['page', change.entityId]).and((item) => item.workspaceId === workspaceId).first()
           : undefined
         if (pendingExact || pendingPage) {
-          const pageId = change.entityType === 'page' || change.entityType === 'document'
-            ? change.entityId
-            : typeof payload?.pageId === 'string' ? payload.pageId : undefined
-          if (pageId) await this.db.pages.update(pageId, { syncStatus: 'conflict' })
-          continue
+          const pageIds = await this.conflictPageIds(change, payload)
+          if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
+          conflicts.push({ entityType: change.entityType, entityId: change.entityId, pageIds })
+          // The skipped change must remain pullable. Stop at the first conflict
+          // and retain the cursor immediately before it instead of silently
+          // acknowledging data that was never applied.
+          appliedCursor = Math.max(previousCursor, change.cursor - 1)
+          break
         }
         if (change.operation === 'delete') {
           if (change.entityType === 'page') await this.db.pages.delete(change.entityId)
@@ -827,9 +892,13 @@ export class DexieNotebookRepository implements NotebookRepository {
         else if (change.entityType === 'page_tag') await this.db.pageTags.put(payload as unknown as PageTag)
         await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version: change.version })
       }
-      await this.db.syncCursors.put({ workspaceId, cursor })
+      await this.db.syncCursors.put({ workspaceId, cursor: appliedCursor })
+      return { cursor: appliedCursor, conflicts }
     })
-    this.invalidateSearchCache(workspaceId)
+      .then((result) => {
+        this.invalidateSearchCache(workspaceId)
+        return result
+      })
   }
 
   listPageLinks(pageId: UUID) { return this.db.pageLinks.where('sourcePageId').equals(pageId).toArray() }
@@ -1011,6 +1080,84 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   getAssetContent(id: UUID) { return this.db.assetContents.get(id).then((value) => value?.data) }
   listRevisions(pageId: UUID) { return this.db.revisions.where('pageId').equals(pageId).reverse().sortBy('createdAt') }
+  saveAutomationProposal(proposal: AutomationProposal) { return this.db.automationProposals.put(proposal) }
+  getAutomationProposal(id: UUID) { return this.db.automationProposals.get(id) }
+  listAutomationProposals(workspaceId: UUID) {
+    return this.db.automationProposals.where('workspaceId').equals(workspaceId).reverse().sortBy('createdAt')
+  }
+  async updateAutomationProposalStatus(id: UUID, status: AutomationProposal['status']) {
+    const proposal = await this.db.automationProposals.get(id)
+    if (!proposal) throw new Error('AI 修改提案不存在')
+    await this.db.automationProposals.put({ ...proposal, status, reviewedAt: new Date().toISOString() })
+  }
+  async applyAutomationProposal(
+    proposalId: UUID,
+    prepared: Array<{ page: Page; document?: PageDocument; previousPageId?: UUID; delete?: boolean; deviceId?: string }>,
+    acceptedChangeIds?: UUID[],
+  ) {
+    return this.db.transaction('rw', [this.db.automationProposals, this.db.pages, this.db.documents, this.db.revisions, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, this.db.drafts], async () => {
+      const proposal = await this.db.automationProposals.get(proposalId)
+      if (!proposal || proposal.status !== 'pending') throw new Error('AI 修改提案不存在或已经审阅')
+      const acceptedIds = new Set(acceptedChangeIds ?? proposal.changes.map((change) => change.id))
+      const acceptedChanges = proposal.changes.filter((change) => acceptedIds.has(change.id))
+      if (!acceptedChanges.length) throw new Error('至少需要接受一项 AI 修改')
+      for (const change of acceptedChanges) {
+        if (!change.before) continue
+        const current = await this.db.pages.get(change.before.pageId)
+        if (!current || current.updatedAt !== change.before.updatedAt) throw Object.assign(new Error(`“${change.before.title}”在提案生成后已变化`), { code: 'stale' })
+      }
+      for (const value of prepared) {
+        const existing = value.previousPageId ? await this.db.pages.get(value.previousPageId) : undefined
+        const existingDocument = value.previousPageId ? await this.db.documents.get(value.previousPageId) : undefined
+        if (existing && existingDocument) {
+          const revision: PageRevision = {
+            id: crypto.randomUUID(),
+            pageId: existing.id,
+            pageIcon: existing.icon ?? null,
+            document: {
+              ...existingDocument,
+              markdown: existingDocument.markdown ?? legacyTiptapToCanonicalMarkdown(existingDocument.tiptapJson),
+              tiptapJson: { type: 'doc', content: [] },
+              yjsState: undefined,
+            },
+            createdAt: value.document?.updatedAt ?? value.page.updatedAt,
+            reason: 'manual',
+          }
+          await this.db.revisions.put(revision)
+          await this.enqueueChange(existing.workspaceId, 'revision', revision.id, 'upsert', revision as unknown as Record<string, unknown>)
+        }
+        if (value.delete) {
+          const deletedAt = value.page.deletedAt ?? value.page.updatedAt
+          const tombstone: Tombstone = {
+            id: `page:${value.page.id}`,
+            workspaceId: value.page.workspaceId,
+            entityType: 'page',
+            entityId: value.page.id,
+            deletedAt,
+            deviceId: value.deviceId ?? 'electron-ai',
+          }
+          await this.db.pages.put({ ...value.page, deletedAt, syncStatus: 'pending', updatedAt: deletedAt })
+          await this.db.tombstones.put(tombstone)
+          await this.db.drafts.delete(value.page.id)
+          await this.enqueueChange(value.page.workspaceId, 'page', value.page.id, 'delete', {})
+          continue
+        }
+        if (!value.document) throw new Error(`AI 修改缺少页面正文：${value.page.title}`)
+        await this.db.pages.put(value.page)
+        await this.db.documents.put(value.document)
+        await this.db.drafts.delete(value.page.id)
+        await this.enqueueChange(value.page.workspaceId, 'page', value.page.id, 'upsert', value.page as unknown as Record<string, unknown>)
+        await this.enqueueChange(value.page.workspaceId, 'document', value.page.id, 'upsert', { ...value.document, yjsState: undefined })
+      }
+      await this.db.automationProposals.put({
+        ...proposal,
+        status: 'applied',
+        acceptedChangeIds: acceptedChanges.map((change) => change.id),
+        rejectedChangeIds: proposal.changes.filter((change) => !acceptedIds.has(change.id)).map((change) => change.id),
+        reviewedAt: new Date().toISOString(),
+      })
+    }).finally(() => this.invalidateSearchCache(prepared[0]?.page.workspaceId ?? ''))
+  }
   async resetRevisionHistory(workspaceId: UUID): Promise<{ pageCount: number; removedRevisionCount: number }> {
     return this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
       const pages = await this.db.pages.where('workspaceId').equals(workspaceId).toArray()

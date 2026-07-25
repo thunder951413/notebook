@@ -26,6 +26,13 @@ export interface LegacySftpPullResult {
   reusedNoteIds: string[]
 }
 
+export interface LegacySftpConnectionResult {
+  fingerprint: string
+  remotePath: string
+  remotePathExists: boolean
+  latencyMs: number
+}
+
 const MAX_FILE_BYTES = 100 * 1024 * 1024
 const MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
 const LOCK_RETRIES = 30
@@ -163,7 +170,7 @@ async function connect(settings: LegacySshConnection) {
     })
   } catch (error) {
     await client.end().catch(() => undefined)
-    if (expected && presented && presented !== expected) throw new Error(`SSH 主机指纹已变化|${expected}|${presented}`)
+    if (expected && presented && presented !== expected) throw new Error(`SSH 主机指纹已变化|${expected}|${presented}`, { cause: error })
     throw error
   }
   if (!presented) { await client.end(); throw new Error('服务器没有提供可校验的 SSH 主机密钥') }
@@ -171,6 +178,23 @@ async function connect(settings: LegacySshConnection) {
   const configured = settings.remotePath.trim()
   const root = configured === '~' ? home : configured.startsWith('~/') ? posix.join(home, configured.slice(2)) : configured.startsWith('/') ? posix.normalize(configured) : posix.join(home, configured)
   return { client, root, fingerprint: presented }
+}
+
+export async function testLegacyConnection(settings: LegacySshConnection): Promise<LegacySftpConnectionResult> {
+  const startedAt = Date.now()
+  const { client, root, fingerprint: actualFingerprint } = await connect(settings)
+  try {
+    const remotePathExists = Boolean(await client.exists(root))
+    if (remotePathExists) await client.stat(root)
+    return {
+      fingerprint: actualFingerprint,
+      remotePath: root,
+      remotePathExists,
+      latencyMs: Math.max(0, Date.now() - startedAt),
+    }
+  } finally {
+    await client.end().catch(() => undefined)
+  }
 }
 
 async function readOptional(client: SftpClient, path: string): Promise<Buffer | undefined> {

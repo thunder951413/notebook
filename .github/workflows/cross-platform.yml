@@ -28,9 +28,9 @@ jobs:
       - name: Install Electron dependencies
         working-directory: cross-platform
         run: pnpm install --frozen-lockfile
-      - name: Typecheck, test and build
+      - name: Lint, typecheck, test and build
         working-directory: cross-platform
-        run: pnpm typecheck && pnpm test && pnpm build
+        run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
       - name: Test Python AI service
         working-directory: cross-platform/services/ai
         run: |
@@ -54,10 +54,24 @@ jobs:
       - name: Install dependencies
         working-directory: cross-platform
         run: pnpm install --frozen-lockfile
+      - name: Require signing credentials for tagged releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_LINK || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_KEY_PASSWORD || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node -e "if (process.env.RUNNER_OS === 'macOS' && (!process.env.CSC_LINK || !process.env.CSC_KEY_PASSWORD || !process.env.APPLE_ID || !process.env.APPLE_APP_SPECIFIC_PASSWORD || !process.env.APPLE_TEAM_ID)) throw new Error('Tagged macOS releases require signing and notarization secrets'); if (process.env.RUNNER_OS === 'Windows' && (!process.env.CSC_LINK || !process.env.CSC_KEY_PASSWORD)) throw new Error('Tagged Windows releases require Authenticode secrets')"
       - name: Package desktop application
         working-directory: cross-platform
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_LINK || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_KEY_PASSWORD || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: pnpm --filter @notebook/desktop dist
       - uses: actions/upload-artifact@v5
         with:

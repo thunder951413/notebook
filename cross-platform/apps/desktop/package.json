@@ -1,6 +1,6 @@
 {
   "name": "@notebook/desktop",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "AI-native, offline-first cross-platform notebook",
   "author": "Notebook contributors",
   "private": true,
@@ -17,10 +17,12 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
+    "semver": "^7.8.5",
     "ssh2-sftp-client": "^12.1.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "@types/semver": "^7.7.1",
     "@types/ssh2-sftp-client": "^9.0.6",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.1.1",
@@ -33,6 +35,7 @@
   "build": {
     "appId": "app.notebook.next",
     "productName": "Notebook Next",
+    "afterSign": "scripts/notarize.mjs",
     "directories": {
       "output": "release"
     },
@@ -42,6 +45,10 @@
     ],
     "mac": {
       "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "target": [
         "dmg",
         "zip"
@@ -51,6 +58,18 @@
         {
           "from": "build/notebook-input-source",
           "to": "bin/notebook-input-source"
+        },
+        {
+          "from": "../renderer/public/notebook-trayTemplate.png",
+          "to": "tray/notebook-trayTemplate.png"
+        },
+        {
+          "from": "../renderer/public/notebook-trayTemplate@2x.png",
+          "to": "tray/notebook-trayTemplate@2x.png"
+        },
+        {
+          "from": "../renderer/public/notebook-icon.svg",
+          "to": "tray/notebook-icon.svg"
         }
       ]
     },
@@ -74,6 +93,7 @@
         "provider": "github",
         "owner": "thunder951413",
         "repo": "notebook",
+        "private": true,
         "releaseType": "draft"
       }
     ],

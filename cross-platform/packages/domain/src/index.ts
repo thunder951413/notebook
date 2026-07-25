@@ -185,6 +185,40 @@ export interface PageComment {
   resolvedAt?: IsoDate
 }
 
+export interface AutomationProposalPageState {
+  pageId: UUID
+  title: string
+  markdown: string
+  sectionId?: UUID
+  parentPageId?: UUID
+  sortOrder?: number
+  /** A delete proposal is staged as a recoverable move to trash. */
+  deletedAt?: IsoDate
+  updatedAt: IsoDate
+}
+
+export interface AutomationProposalChange {
+  id: UUID
+  type: 'update-page' | 'create-page' | 'delete-page'
+  before?: AutomationProposalPageState
+  after: AutomationProposalPageState
+}
+
+export interface AutomationProposal {
+  id: UUID
+  workspaceId: UUID
+  title: string
+  explanation?: string
+  source: string
+  status: 'pending' | 'applied' | 'rejected' | 'stale'
+  changes: AutomationProposalChange[]
+  /** Persisted review decisions make partial approval auditable. */
+  acceptedChangeIds?: UUID[]
+  rejectedChangeIds?: UUID[]
+  createdAt: IsoDate
+  reviewedAt?: IsoDate
+}
+
 export interface Tombstone {
   id: string
   workspaceId: UUID
@@ -218,6 +252,7 @@ export interface NotebookDataBundle {
 }
 
 export interface PageListQuery {
+  workspaceId: UUID
   sectionId?: UUID
   kind?: PageKind
   search?: string

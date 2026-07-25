@@ -413,12 +413,22 @@ export function createContentExtensions(collaborative = false, loadAsset?: Asset
   ]
 }
 
+let canonicalMarkdownManager: MarkdownManager | undefined
+
+function getCanonicalMarkdownManager() {
+  // Markdown conversion runs on every save, history snapshot and reference
+  // index rebuild. Building the extension graph and registering lowlight
+  // languages for each call adds measurable latency on large notes.
+  canonicalMarkdownManager ??= new MarkdownManager({ extensions: createContentExtensions() })
+  return canonicalMarkdownManager
+}
+
 export function markdownToDocument(markdown: string) {
-  return new MarkdownManager({ extensions: createContentExtensions() }).parse(markdown) as Record<string, unknown>
+  return getCanonicalMarkdownManager().parse(markdown) as Record<string, unknown>
 }
 
 export function documentToMarkdown(document: Record<string, unknown>) {
-  return new MarkdownManager({ extensions: createContentExtensions() }).serialize(document as JSONContent)
+  return getCanonicalMarkdownManager().serialize(document as JSONContent)
 }
 
 export function documentToHtml(document: Record<string, unknown>) {

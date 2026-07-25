@@ -25,7 +25,10 @@ export function useReminders(pages: PageSummary[], updatePage: (pageId: string, 
         if (!Number.isFinite(reminder) || reminder > now) continue
         delivered.current.add(`${page.id}:${page.reminderAt}`)
         if (window.notebookDesktop) void window.notebookDesktop.notifications.show(page.title, page.preview || '任务提醒')
-        else if ('Notification' in window && Notification.permission === 'granted') new Notification(page.title, { body: page.preview || '任务提醒', tag: `notebook-reminder-${page.id}` })
+        else if ('Notification' in window && Notification.permission === 'granted') {
+          const notification = new Notification(page.title, { body: page.preview || '任务提醒', tag: `notebook-reminder-${page.id}` })
+          void notification
+        }
         void updatePage(page.id, { reminderAt: nextReminderAt(page.reminderAt, page.recurrenceRule) })
       }
     }

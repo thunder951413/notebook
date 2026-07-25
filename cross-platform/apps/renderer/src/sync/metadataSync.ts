@@ -57,14 +57,20 @@ export async function synchronizeMetadata(repository: DexieNotebookRepository, w
     const changes: RemoteSyncChange[] = result.changes.map((item) => ({ cursor: item.cursor, entityType: item.entity_type, entityId: item.entity_id, version: item.version, operation: item.operation, payload: item.payload }))
     const downloadedAssets = new Map<string, Uint8Array>()
     for (const item of changes.filter((value) => value.entityType === 'asset' && value.operation !== 'delete')) {
-      const response = await fetch(`${baseUrl}/v1/sync/assets/${encodeURIComponent(item.entityId)}?workspace_id=${encodeURIComponent(workspaceId)}`, { headers: Object.fromEntries(Object.entries(headers).filter(([key]) => key !== 'Content-Type')), signal })
-      if (!response.ok) throw new Error(`附件下载失败：${response.status}`)
-      downloadedAssets.set(item.entityId, new Uint8Array(await response.arrayBuffer()))
+      const assetResponse = await fetch(`${baseUrl}/v1/sync/assets/${encodeURIComponent(item.entityId)}?workspace_id=${encodeURIComponent(workspaceId)}`, { headers: Object.fromEntries(Object.entries(headers).filter(([key]) => key !== 'Content-Type')), signal })
+      if (!assetResponse.ok) throw new Error(`附件下载失败：${assetResponse.status}`)
+      downloadedAssets.set(item.entityId, new Uint8Array(await assetResponse.arrayBuffer()))
     }
-    await repository.applyRemoteChanges(workspaceId, changes, result.cursor)
-    await repository.importAssetContents(downloadedAssets)
-    cursor = result.cursor
-    hasMore = result.has_more
+    const applied = await repository.applyRemoteChanges(workspaceId, changes, result.cursor)
+    const appliedAssets = new Map([...downloadedAssets].filter(([assetId]) =>
+      changes.some((change) => change.cursor <= applied.cursor && change.entityType === 'asset' && change.entityId === assetId)))
+    await repository.importAssetContents(appliedAssets)
+    conflicts += applied.conflicts.length
+    cursor = applied.cursor
+    // A blocked change remains intentionally pullable. End this cycle instead
+    // of spinning on the same cursor; the next user sync retries after the
+    // local conflict has been resolved.
+    hasMore = result.has_more && applied.conflicts.length === 0
   }
   return { state: conflicts ? 'conflict' as const : 'synced' as const, conflicts }
 }

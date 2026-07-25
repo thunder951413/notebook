@@ -1,5 +1,7 @@
 import { createParser } from 'eventsource-parser'
 import type { AIContextBundle } from '@notebook/sync-contract'
+import { readAIProviderSettings } from './providerSettings'
+import type { NotebookAgentProposalInput } from '../automation/automationBridge'
 
 export interface AIContextPage { id: string; title: string; excerpt: string }
 
@@ -16,6 +18,31 @@ export async function streamNotebookAnswer(
   onToken: (token: string) => void,
   signal?: AbortSignal,
 ) {
+  const provider = readAIProviderSettings()
+  if (provider.enabled && window.notebookDesktop?.ai) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const result = await window.notebookDesktop.ai.complete({
+      provider: provider.provider,
+      baseUrl: provider.baseUrl,
+      model: provider.model,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            '你是 Notebook 的内置 AI 助手。',
+            '用户通过 @ 明确选择了允许读取的笔记；只能依据下方提供的上下文回答，不要假装读取其他页面。',
+            '正文的唯一规范格式是 Markdown/GFM。保留标题、链接、代码、表格、任务列表、引用和 notebook 资源引用。',
+            '你不能直接修改、移动或删除笔记。用户可将你的 Markdown 回答暂存为修改提案，再逐页审阅并批准。',
+            '如果依据不足或上下文被截断，要明确说明。',
+          ].join('\n'),
+        },
+        { role: 'user', content: `${context.markdown}\n\n上下文提示：${context.warnings.join('；') || '无'}\n\n用户请求：${prompt}` },
+      ],
+    })
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    onToken(result.content)
+    return
+  }
   const response = await fetch(`${aiBaseUrl()}/v1/chat/stream`, {
     method: 'POST',
     headers: await requestHeaders(),
@@ -52,6 +79,80 @@ export async function streamNotebookAnswer(
   for await (const chunk of response.body) parser.feed(decoder.decode(chunk, { stream: true }))
   parser.feed(decoder.decode())
   if (serverError) throw new Error(serverError)
+}
+
+export interface NotebookAgentTopology {
+  notebooks: Array<{ id: string; name: string; sections: Array<{ id: string; name: string }> }>
+  pages: Array<{ id: string; title: string; sectionId: string; parentPageId?: string }>
+}
+
+export async function requestNotebookProposal(
+  prompt: string,
+  context: AIContextBundle,
+  topology: NotebookAgentTopology,
+  allowedPageIds: string[],
+  signal?: AbortSignal,
+): Promise<NotebookAgentProposalInput> {
+  const provider = readAIProviderSettings()
+  if (!provider.enabled || !window.notebookDesktop?.ai) {
+    throw new Error('生成结构化修改提案需要先在“设置 → AI 与自动化”中启用内置 AI 模型')
+  }
+  const result = await window.notebookDesktop.ai.complete({
+    provider: provider.provider,
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          '你是 Notebook 的结构化笔记整理 Agent。只输出一个 JSON 对象，不要 Markdown 代码围栏或解释。',
+          'JSON 格式：{"title":"提案标题","explanation":"说明","operations":[...]}。',
+          '已有页面仅可使用 update-page 或 delete-page，且 pageId 必须在 allowedPageIds 中。',
+          'update-page 可包含 title、markdown、sectionId、parentPageId、sortOrder；至少提供一个变化字段。',
+          'create-page 必须包含 title、markdown、sectionId，可包含 parentPageId、sortOrder。',
+          'delete-page 只包含 type 与 pageId；它仅代表移到回收站，不能永久删除。',
+          '只能使用 topology 中真实存在的 sectionId 和 parentPageId，不能形成父子循环。',
+          'Markdown/GFM 是唯一正文格式。保留 notebook-asset: 资源引用、双链与嵌入语法，不要生成 HTML 脚本、data: URL 或追踪图片。',
+          '不要修改上下文未授权的现有页面。信息不足时宁可减少操作。',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          `allowedPageIds=${JSON.stringify(allowedPageIds)}`,
+          `topology=${JSON.stringify(topology)}`,
+          context.markdown,
+          `用户要求：${prompt}`,
+        ].join('\n\n'),
+      },
+    ],
+  })
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  const proposal = parseNotebookProposal(result.content)
+  const allowed = new Set(allowedPageIds)
+  for (const operation of proposal.operations) {
+    if (operation.type !== 'create-page' && !allowed.has(operation.pageId)) {
+      throw new Error(`AI 尝试修改未通过 @ 授权的页面：${operation.pageId}`)
+    }
+  }
+  return proposal
+}
+
+export function parseNotebookProposal(content: string): NotebookAgentProposalInput {
+  const trimmed = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const start = trimmed.indexOf('{')
+  const end = trimmed.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('AI 没有返回可解析的修改提案')
+  let value: unknown
+  try {
+    value = JSON.parse(trimmed.slice(start, end + 1))
+  } catch {
+    throw new Error('AI 返回的修改提案不是有效 JSON，请重试或缩小要求')
+  }
+  if (!value || typeof value !== 'object' || !Array.isArray((value as { operations?: unknown }).operations)) {
+    throw new Error('AI 返回的修改提案缺少 operations')
+  }
+  return value as NotebookAgentProposalInput
 }
 
 export interface SemanticHit extends AIContextPage { score: number }

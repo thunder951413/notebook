@@ -506,7 +506,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       restoreTimers.current = []
       restoringViewport.current = false
     }
-  }, [content, editor, pageId, viewportPosition?.fraction, viewportPosition?.scrollTop])
+  }, [content, editor, pageId, viewportPosition])
 
   useEffect(() => () => {
     clearTimeout(saveTimer.current)

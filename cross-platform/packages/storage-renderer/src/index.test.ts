@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import type { Page, PageDocument } from '@notebook/domain'
 import { DexieNotebookRepository, NotebookRendererDatabase } from './index'
 
@@ -168,6 +168,37 @@ test('rejects malformed remote payloads and never overwrites a pending local bod
   expect(await repository.getPage(value.id)).toMatchObject({ title: 'Local' })
 })
 
+test('keeps a conflicted child entity pullable instead of advancing the cursor', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-asset-conflict', 'Local asset'), syncStatus: 'synced' as const }
+  await repository.savePage(value)
+  const localAsset = {
+    id: 'asset-conflict',
+    pageId: value.id,
+    kind: 'image' as const,
+    filename: 'local.png',
+    mimeType: 'image/png',
+    createdAt: value.createdAt,
+  }
+  await repository.saveAsset(localAsset, new Blob([new Uint8Array([1])], { type: 'image/png' }))
+  const applied = await repository.applyRemoteChanges('workspace-a', [{
+    cursor: 1,
+    entityType: 'asset',
+    entityId: localAsset.id,
+    version: 1,
+    operation: 'upsert',
+    payload: { ...localAsset, filename: 'remote.png' },
+  }], 1)
+
+  expect(applied).toEqual({
+    cursor: 0,
+    conflicts: [{ entityType: 'asset', entityId: localAsset.id, pageIds: [value.id] }],
+  })
+  expect(await repository.getSyncCursor('workspace-a')).toBe(0)
+  expect(await repository.db.assets.get(localAsset.id)).toMatchObject({ filename: 'local.png' })
+  expect(await repository.getPage(value.id)).toMatchObject({ syncStatus: 'conflict' })
+})
+
 test('queues notebook hierarchy and task steps for cross-device sync', async () => {
   const repository = makeRepository()
   const notebook = { id: 'notebook-a', workspaceId: 'workspace-a', name: 'Synced', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
@@ -202,6 +233,27 @@ test('duplicates a page with its body, task steps, tags and attachment reference
   expect(JSON.stringify((await repository.getPageDocument(copy.id))?.tiptapJson)).not.toContain('asset-source')
 })
 
+test('rolls back every copied entity when page duplication fails midway', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-copy-source', 'Source'), syncStatus: 'pending' as const }
+  await repository.savePage(value, { pageId: value.id, schemaVersion: 3, markdown: 'Body', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt })
+  await repository.savePageTags(value.id, ['tag-a'])
+  await repository.saveTaskSteps(value.id, [{ id: 'step-source', pageId: value.id, text: 'Step', checked: false, sortOrder: 0, createdAt: value.createdAt }])
+  await repository.saveAsset({ id: 'asset-copy-source', pageId: value.id, kind: 'file', filename: 'file.txt', mimeType: 'text/plain', createdAt: value.createdAt }, new Blob(['content']))
+  const saveAsset = vi.spyOn(repository, 'saveAsset').mockRejectedValueOnce(new Error('injected copy failure'))
+
+  await expect(repository.duplicatePage(value.id, 'page-copy-failed', '2026-01-04T00:00:00.000Z')).rejects.toThrow(/injected/)
+  saveAsset.mockRestore()
+
+  expect(await repository.getPage('page-copy-failed')).toBeUndefined()
+  expect(await repository.getPageDocument('page-copy-failed')).toBeUndefined()
+  expect(await repository.listTaskSteps('page-copy-failed')).toEqual([])
+  expect(await repository.listPageTags('page-copy-failed')).toEqual([])
+  expect(await repository.listAssets('page-copy-failed')).toEqual([])
+  expect((await repository.listOutbox('workspace-a')).some((item) =>
+    item.entityId === 'page-copy-failed' || item.payload.pageId === 'page-copy-failed')).toBe(false)
+})
+
 test('deletes a non-empty section with all page data and queues compatible tombstones', async () => {
   const repository = makeRepository()
   const notebook = { id: 'notebook-delete', workspaceId: 'workspace-a', name: 'Delete', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
@@ -222,6 +274,28 @@ test('deletes a non-empty section with all page data and queues compatible tombs
   expect(tombstones).toContainEqual(expect.objectContaining({ entityType: 'page', entityId: sectionPage.id, deviceId: 'test-device' }))
   expect(tombstones).toContainEqual(expect.objectContaining({ entityType: 'section', entityId: 'section-full', deviceId: 'test-device' }))
   expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'section')).toMatchObject({ operation: 'delete', entityId: 'section-full' })
+})
+
+test('rolls back a section cascade when a nested page purge fails', async () => {
+  const repository = makeRepository()
+  const notebook = { id: 'notebook-rollback', workspaceId: 'workspace-a', name: 'Rollback', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
+  await repository.saveNotebook(notebook)
+  await repository.saveSection({ id: 'section-rollback', notebookId: notebook.id, name: 'Full', sortOrder: 0, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt })
+  const sectionPage = page('page-rollback', 'Page', 'section-rollback')
+  await repository.savePage(sectionPage, { pageId: sectionPage.id, schemaVersion: 3, markdown: 'Body', tiptapJson: { type: 'doc', content: [] }, updatedAt: sectionPage.updatedAt })
+  const originalPurge = repository.purgePage.bind(repository)
+  const purge = vi.spyOn(repository, 'purgePage').mockImplementationOnce(async (...args) => {
+    await originalPurge(...args)
+    throw new Error('injected cascade failure')
+  })
+
+  await expect(repository.deleteSection('section-rollback', '2026-01-04T00:00:00.000Z', 'test-device')).rejects.toThrow(/injected/)
+  purge.mockRestore()
+
+  expect((await repository.listSections(notebook.id)).map((section) => section.id)).toContain('section-rollback')
+  expect(await repository.getPage(sectionPage.id)).toBeDefined()
+  expect(await repository.getPageDocument(sectionPage.id)).toBeDefined()
+  expect((await repository.exportData('workspace-a')).tombstones).not.toContainEqual(expect.objectContaining({ entityId: sectionPage.id }))
 })
 
 test('deletes a notebook together with non-empty sections and all page data', async () => {
@@ -269,17 +343,55 @@ test('stores reading progress without creating a page revision', async () => {
   expect((await repository.listOutbox('workspace-a')).filter((item) => item.entityType === 'reading_position')).toHaveLength(1)
 })
 
+test('creates history only when canonical Markdown changes', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-markdown-history', 'History'), syncStatus: 'pending' as const }
+  const initial: PageDocument = {
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown: 'same body',
+    tiptapJson: { type: 'doc', content: [{ type: 'paragraph', attrs: { normalized: false } }] },
+    updatedAt: value.updatedAt,
+  }
+  await repository.savePage(value, initial)
+  await repository.savePage({ ...value, updatedAt: '2026-01-03T00:00:00.000Z' }, {
+    ...initial,
+    tiptapJson: { type: 'doc', content: [{ type: 'paragraph', attrs: { normalized: true } }] },
+    updatedAt: '2026-01-03T00:00:00.000Z',
+  })
+  expect(await repository.listRevisions(value.id)).toEqual([])
+
+  await repository.savePage({ ...value, updatedAt: '2026-01-04T00:00:00.000Z' }, {
+    ...initial,
+    markdown: 'changed body',
+    updatedAt: '2026-01-04T00:00:00.000Z',
+  })
+  expect(await repository.listRevisions(value.id)).toEqual([
+    expect.objectContaining({ reason: 'autosave', document: expect.objectContaining({ markdown: 'same body' }) }),
+  ])
+})
+
+test('keeps page listing inside the requested workspace', async () => {
+  const repository = makeRepository()
+  await repository.savePage(page('page-workspace-a', 'Workspace A'))
+  await repository.savePage({ ...page('page-workspace-b', 'Workspace B'), workspaceId: 'workspace-b' })
+
+  expect((await repository.listPages({ workspaceId: 'workspace-a' })).items.map((item) => item.id)).toEqual(['page-workspace-a'])
+  expect((await repository.listPages({ workspaceId: 'workspace-b' })).items.map((item) => item.id)).toEqual(['page-workspace-b'])
+  expect((await repository.listPages({ workspaceId: 'workspace-a', sectionId: 'section-a' })).items.map((item) => item.id)).toEqual(['page-workspace-a'])
+})
+
 test('searches, soft deletes, restores and purges without leaking children', async () => {
   const repository = makeRepository()
   await repository.savePage(page('page-a', 'Product Notes'))
   await repository.savePage(page('page-b', 'Meeting Notes'))
-  expect((await repository.listPages({ search: 'product' })).items.map((item) => item.id)).toEqual(['page-a'])
+  expect((await repository.listPages({ workspaceId: 'workspace-a', search: 'product' })).items.map((item) => item.id)).toEqual(['page-a'])
   await repository.movePageToTrash('page-a', '2026-01-03T00:00:00.000Z')
   expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityId: 'page-a', deletedAt: '2026-01-03T00:00:00.000Z' }))
-  expect((await repository.listPages({})).items.map((item) => item.id)).toEqual(['page-b'])
-  expect((await repository.listPages({ includeDeleted: true })).items).toHaveLength(2)
+  expect((await repository.listPages({ workspaceId: 'workspace-a' })).items.map((item) => item.id)).toEqual(['page-b'])
+  expect((await repository.listPages({ workspaceId: 'workspace-a', includeDeleted: true })).items).toHaveLength(2)
   await repository.restorePage('page-a')
-  expect((await repository.listPages({})).items).toHaveLength(2)
+  expect((await repository.listPages({ workspaceId: 'workspace-a' })).items).toHaveLength(2)
   expect((await repository.exportData('workspace-a')).tombstones).not.toContainEqual(expect.objectContaining({ entityId: 'page-a' }))
   await repository.purgePage('page-a')
   expect(await repository.getPage('page-a')).toBeUndefined()
@@ -403,6 +515,134 @@ test('creates a compact manual revision and enqueues it for synchronization', as
   expect(revision.document.markdown).toBe('# 当前正文')
   expect(revision.document.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect((await repository.listOutbox(value.workspaceId)).some((item) => item.entityType === 'revision' && item.entityId === revision.id)).toBe(true)
+})
+
+test('persists external AI proposals without putting proposed content in the sync outbox', async () => {
+  const repository = makeRepository()
+  const proposal = {
+    id: 'proposal-a',
+    workspaceId: 'workspace-a',
+    title: '整理页面',
+    explanation: '测试提案',
+    source: 'test-agent',
+    status: 'pending' as const,
+    createdAt: '2026-07-25T00:00:00.000Z',
+    changes: [{
+      id: 'change-a',
+      type: 'update-page' as const,
+      before: { pageId: 'page-a', title: '原题', markdown: '原文', updatedAt: '2026-07-25T00:00:00.000Z' },
+      after: { pageId: 'page-a', title: '新题', markdown: '新文', updatedAt: '2026-07-25T00:01:00.000Z' },
+    }],
+  }
+  await repository.saveAutomationProposal(proposal)
+  expect(await repository.getAutomationProposal(proposal.id)).toEqual(proposal)
+  expect(await repository.listAutomationProposals(proposal.workspaceId)).toEqual([proposal])
+  expect(await repository.listOutbox(proposal.workspaceId)).toEqual([])
+
+  await repository.updateAutomationProposalStatus(proposal.id, 'rejected')
+  expect(await repository.getAutomationProposal(proposal.id)).toMatchObject({ status: 'rejected' })
+})
+
+test('atomically applies an AI proposal with a manual recovery revision and stale protection', async () => {
+  const repository = makeRepository()
+  const originalPage = page('page-ai-apply', '原题')
+  const originalDocument: PageDocument = { pageId: originalPage.id, schemaVersion: 3, markdown: '原文', tiptapJson: { type: 'doc', content: [] }, updatedAt: originalPage.updatedAt }
+  await repository.savePage(originalPage, originalDocument)
+  const proposal = {
+    id: 'proposal-apply',
+    workspaceId: originalPage.workspaceId,
+    title: 'AI 整理',
+    source: 'test-agent',
+    status: 'pending' as const,
+    createdAt: '2026-07-25T00:00:00.000Z',
+    changes: [{
+      id: 'change-apply',
+      type: 'update-page' as const,
+      before: { pageId: originalPage.id, title: originalPage.title, markdown: '原文', sectionId: originalPage.sectionId, updatedAt: originalPage.updatedAt },
+      after: { pageId: originalPage.id, title: '新题', markdown: '新文', sectionId: originalPage.sectionId, updatedAt: '2026-07-25T00:01:00.000Z' },
+    }],
+  }
+  await repository.saveAutomationProposal(proposal)
+  const updatedPage = { ...originalPage, title: '新题', updatedAt: '2026-07-25T00:01:00.000Z', syncStatus: 'pending' as const }
+  const updatedDocument: PageDocument = { ...originalDocument, markdown: '新文', updatedAt: updatedPage.updatedAt }
+  await repository.applyAutomationProposal(proposal.id, [{ page: updatedPage, document: updatedDocument, previousPageId: originalPage.id }])
+
+  expect(await repository.getAutomationProposal(proposal.id)).toMatchObject({ status: 'applied' })
+  expect(await repository.getPage(originalPage.id)).toMatchObject({ title: '新题' })
+  expect((await repository.listRevisions(originalPage.id)).some((revision) => revision.reason === 'manual' && revision.document.markdown === '原文')).toBe(true)
+  expect((await repository.listOutbox(originalPage.workspaceId)).some((item) => item.entityType === 'document' && item.entityId === originalPage.id)).toBe(true)
+
+  const staleProposal = { ...proposal, id: 'proposal-stale', status: 'pending' as const }
+  await repository.saveAutomationProposal(staleProposal)
+  await expect(repository.applyAutomationProposal(staleProposal.id, [{ page: updatedPage, document: updatedDocument, previousPageId: originalPage.id }])).rejects.toMatchObject({ code: 'stale' })
+  expect(await repository.getAutomationProposal(staleProposal.id)).toMatchObject({ status: 'pending' })
+})
+
+test('records partial AI review decisions and only applies accepted pages', async () => {
+  const repository = makeRepository()
+  const first = page('page-ai-first', 'First')
+  const second = page('page-ai-second', 'Second')
+  const firstDocument: PageDocument = { pageId: first.id, schemaVersion: 3, markdown: 'first', tiptapJson: { type: 'doc', content: [] }, updatedAt: first.updatedAt }
+  const secondDocument: PageDocument = { pageId: second.id, schemaVersion: 3, markdown: 'second', tiptapJson: { type: 'doc', content: [] }, updatedAt: second.updatedAt }
+  await repository.savePage(first, firstDocument)
+  await repository.savePage(second, secondDocument)
+  const proposal = {
+    id: 'proposal-partial',
+    workspaceId: first.workspaceId,
+    title: 'Partial',
+    source: 'test',
+    status: 'pending' as const,
+    createdAt: first.updatedAt,
+    changes: [
+      { id: 'accept', type: 'update-page' as const, before: { pageId: first.id, title: first.title, markdown: 'first', sectionId: first.sectionId, updatedAt: first.updatedAt }, after: { pageId: first.id, title: 'Accepted', markdown: 'accepted', sectionId: first.sectionId, updatedAt: '2026-07-25T00:01:00.000Z' } },
+      { id: 'reject', type: 'update-page' as const, before: { pageId: second.id, title: second.title, markdown: 'second', sectionId: second.sectionId, updatedAt: second.updatedAt }, after: { pageId: second.id, title: 'Rejected', markdown: 'rejected', sectionId: second.sectionId, updatedAt: '2026-07-25T00:01:00.000Z' } },
+    ],
+  }
+  await repository.saveAutomationProposal(proposal)
+  const acceptedPage = { ...first, title: 'Accepted', updatedAt: '2026-07-25T00:01:00.000Z', syncStatus: 'pending' as const }
+  await repository.applyAutomationProposal(proposal.id, [{
+    page: acceptedPage,
+    document: { ...firstDocument, markdown: 'accepted', updatedAt: acceptedPage.updatedAt },
+    previousPageId: first.id,
+  }], ['accept'])
+  expect(await repository.getPage(first.id)).toMatchObject({ title: 'Accepted' })
+  expect(await repository.getPage(second.id)).toMatchObject({ title: 'Second' })
+  expect(await repository.getAutomationProposal(proposal.id)).toMatchObject({
+    status: 'applied',
+    acceptedChangeIds: ['accept'],
+    rejectedChangeIds: ['reject'],
+  })
+})
+
+test('applies an AI delete as a recoverable trash move with history and a tombstone outbox entry', async () => {
+  const repository = makeRepository()
+  const original = page('page-ai-delete', 'Delete me')
+  const document: PageDocument = { pageId: original.id, schemaVersion: 3, markdown: 'recoverable', tiptapJson: { type: 'doc', content: [] }, updatedAt: original.updatedAt }
+  await repository.savePage(original, document)
+  const deletedAt = '2026-07-25T00:02:00.000Z'
+  const proposal = {
+    id: 'proposal-delete',
+    workspaceId: original.workspaceId,
+    title: 'Delete',
+    source: 'test',
+    status: 'pending' as const,
+    createdAt: original.updatedAt,
+    changes: [{
+      id: 'delete',
+      type: 'delete-page' as const,
+      before: { pageId: original.id, title: original.title, markdown: 'recoverable', sectionId: original.sectionId, updatedAt: original.updatedAt },
+      after: { pageId: original.id, title: original.title, markdown: 'recoverable', sectionId: original.sectionId, deletedAt, updatedAt: deletedAt },
+    }],
+  }
+  await repository.saveAutomationProposal(proposal)
+  await repository.applyAutomationProposal(proposal.id, [{
+    page: { ...original, deletedAt, updatedAt: deletedAt, syncStatus: 'pending' },
+    previousPageId: original.id,
+    delete: true,
+  }])
+  expect(await repository.getPage(original.id)).toMatchObject({ deletedAt })
+  expect((await repository.listRevisions(original.id)).some((revision) => revision.document.markdown === 'recoverable')).toBe(true)
+  expect((await repository.listOutbox(original.workspaceId)).some((item) => item.entityType === 'page' && item.entityId === original.id && item.operation === 'delete')).toBe(true)
 })
 
 test('resets every page to one current-content baseline revision', async () => {

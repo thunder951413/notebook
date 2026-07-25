@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@fluentui/react-components'
 import { Document20Regular } from '@fluentui/react-icons'
 import type { PageLink } from '@notebook/domain'
@@ -27,7 +27,7 @@ export function BacklinksSidebar({
   const mentionsRequest = useRef<AbortController | undefined>(undefined)
   const refreshGeneration = useRef(0)
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current
     setLoading(true)
     try {
@@ -36,7 +36,7 @@ export function BacklinksSidebar({
     } finally {
       if (refreshGeneration.current === generation) setLoading(false)
     }
-  }
+  }, [load, pageId])
 
   const scanMentions = async () => {
     mentionsRequest.current?.abort()
@@ -65,7 +65,7 @@ export function BacklinksSidebar({
       refreshGeneration.current += 1
       mentionsRequest.current?.abort()
     }
-  }, [pageId, refreshKey])
+  }, [pageId, refresh, refreshKey])
 
   return <section className="right-panel-content backlinks-sidebar" aria-label="引用当前页面的笔记">
     <header><div><strong>引用</strong><small>链接或提到当前页面的笔记</small></div><Button size="small" appearance="subtle" onClick={() => void refresh()}>刷新</Button></header>

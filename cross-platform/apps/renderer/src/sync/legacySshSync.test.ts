@@ -1,6 +1,7 @@
 import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
+import { sha256Hex } from '@notebook/sync-contract'
 import { describe, expect, test, vi } from 'vitest'
-import { mergeBundles, publicationBundleWithRemoteConflicts, semanticallyEqualRepositoryJson } from './legacySshSync'
+import { mergeBundles, publicationBundleWithRemoteConflicts, retryRemoteIndexChanges, semanticallyEqualRepositoryJson } from './legacySshSync'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -23,6 +24,53 @@ function bundle(currentPage?: Page, currentDocument?: PageDocument): NotebookDat
 }
 
 describe('legacy SSH conflict merge', () => {
+  test('re-pulls and retries when another device publishes during the sync window', async () => {
+    const operation = vi.fn()
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'legacySftp:push': Error: 远端索引在同步期间已变化，请重新同步"))
+      .mockRejectedValueOnce(new Error('远端索引在拉取期间已变化，请重新同步'))
+      .mockResolvedValue('synced')
+    const waits: number[] = []
+
+    await expect(retryRemoteIndexChanges(operation, async (milliseconds) => { waits.push(milliseconds) }))
+      .resolves.toEqual({ value: 'synced', retryCount: 2 })
+    expect(operation).toHaveBeenCalledTimes(3)
+    expect(waits).toEqual([150, 300])
+  })
+
+  test('does not retry authentication or data errors', async () => {
+    const operation = vi.fn().mockRejectedValue(new Error('SSH 密码错误'))
+    await expect(retryRemoteIndexChanges(operation, async () => undefined)).rejects.toThrow('SSH 密码错误')
+    expect(operation).toHaveBeenCalledOnce()
+  })
+
+  test('stops retrying a continuously changing remote index', async () => {
+    const operation = vi.fn().mockRejectedValue(new Error('远端索引在同步期间已变化，请重新同步'))
+    await expect(retryRemoteIndexChanges(operation, async () => undefined)).rejects.toThrow('远端索引在同步期间已变化')
+    expect(operation).toHaveBeenCalledTimes(3)
+  })
+
+  test('an empty new device adopts every populated remote page', () => {
+    const local = bundle()
+    local.sections.push({
+      id: '40000000-0000-4000-8000-000000000001',
+      notebookId,
+      name: '快速记录',
+      sortOrder: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+    const remote = bundle(page({ title: '远端已有笔记', legacyVersion: 8 }), document('existing remote body'))
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+    expect(merged.conflicts).toEqual([])
+    expect(merged.bundle.pages).toEqual([expect.objectContaining({
+      id: pageId,
+      title: '远端已有笔记',
+      sectionId: '40000000-0000-4000-8000-000000000001',
+      syncStatus: 'synced',
+    })])
+    expect(merged.bundle.documents[0]?.tiptapJson).toEqual(document('existing remote body').tiptapJson)
+  })
+
   test('skips repository metadata that only differs by volatile export fields or array order', () => {
     const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
     const remote = encode({ generatedAt: 1, deviceID: 'android', entries: [{ noteID: 'b' }, { noteID: 'a' }] })
@@ -102,6 +150,36 @@ describe('legacy SSH conflict merge', () => {
     const merged = mergeBundles(local, remote, new Map(), new Map())
     expect(merged.bundle.pages[0]!.deletedAt).toBe('2026-07-22T02:00:00.000Z')
     expect(merged.bundle.pages[0]!.syncStatus).toBe('synced')
+  })
+
+  test('honors a remote tombstone when an unchanged open editor only refreshed updatedAt', () => {
+    const local = bundle(page({
+      updatedAt: '2026-07-22T03:00:00.000Z',
+      syncStatus: 'pending',
+      legacyMetadata: { syncBaselineHash: sha256Hex(JSON.stringify(document('same body').tiptapJson)) },
+    }), document('same body'))
+    const remote = bundle()
+    remote.tombstones.push({ id: `page:${pageId}`, workspaceId, entityType: 'page', entityId: pageId, deletedAt: '2026-07-22T02:00:00.000Z', deviceId: 'android' })
+
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+
+    expect(merged.bundle.pages[0]!.deletedAt).toBe('2026-07-22T02:00:00.000Z')
+    expect(merged.bundle.tombstones).toHaveLength(1)
+  })
+
+  test('keeps a locally edited page when its content changed after an older remote deletion', () => {
+    const local = bundle(page({
+      updatedAt: '2026-07-22T03:00:00.000Z',
+      syncStatus: 'pending',
+      legacyMetadata: { syncBaselineHash: sha256Hex(JSON.stringify(document('old body').tiptapJson)) },
+    }), document('locally changed'))
+    const remote = bundle()
+    remote.tombstones.push({ id: `page:${pageId}`, workspaceId, entityType: 'page', entityId: pageId, deletedAt: '2026-07-22T02:00:00.000Z', deviceId: 'android' })
+
+    const merged = mergeBundles(local, remote, new Map(), new Map())
+
+    expect(merged.bundle.pages[0]!.deletedAt).toBeUndefined()
+    expect(merged.bundle.tombstones).toHaveLength(0)
   })
 
   test('does not resurrect a section deleted with a notebook cascade', () => {

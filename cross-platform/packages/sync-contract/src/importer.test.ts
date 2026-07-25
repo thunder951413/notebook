@@ -225,7 +225,9 @@ test('exports Notebook Next data as an Android-compatible SSH repository without
   expect(imported.document.markdown).toContain('## 混排页面')
   expect(imported.document.markdown).toContain(`notebook-asset:${assetId}`)
   expect(envelope.history).toHaveLength(120)
-  expect((envelope.history[0]?.snapshot as { document: { notebookNextTiptap: unknown } }).document.notebookNextTiptap).toEqual(revisions[0]?.document.tiptapJson)
+  const firstHistory = envelope.history[0]
+  expect(firstHistory).toBeDefined()
+  expect((firstHistory!.snapshot as { document: { notebookNextTiptap: unknown } }).document.notebookNextTiptap).toEqual(revisions[0]?.document.tiptapJson)
   expect(encoded.files.get(`attachments/${pageId}/${assetId}-image.png`)).toEqual(new Uint8Array([1, 2, 3]))
   expect(noteIndexSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('notes/index.json')))).entries[0]?.noteID).toBe(pageId)
 })
@@ -262,7 +264,16 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
       { id: '50000000-0000-4000-8000-000000000001', pageId, pageIcon: '📝', document: { ...document, markdown: '历史正文' }, createdAt: '2026-07-22T04:00:00.000Z', reason: 'import' },
       { id: '50000000-0000-4000-8000-000000000002', pageId, pageIcon: '📌', document: { ...document, markdown: '历史正文' }, createdAt: now, reason: 'manual' },
     ],
-    tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+    tags: [], pageTags: [], taskSteps: [], pageLinks: [],
+    readingPositions: [{
+      id: pageId,
+      pageId,
+      anchorUtf16Offset: 321,
+      viewportOffsetFraction: 0.35,
+      updatedAt: now,
+      deviceId: 'electron',
+    }],
+    tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
   const encoded = await encodeMarkdownRepository(bundle, new Map([[assetId, new Uint8Array([1, 2, 3])]]), 'electron')
   const note = JSON.parse(new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))) as MarkdownNoteEnvelope
@@ -279,13 +290,22 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(note.linkedPageIDs).toEqual(['target-page'])
   expect([...encoded.files.keys()]).toContain(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
-  const imported = await importMarkdownRepository({ library, notes: [note], index }, workspaceId)
+  const readingPositions = readingPositionsSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('notes/reading_positions.json'))))
+  const imported = await importMarkdownRepository({ library, notes: [note], index, readingPositions }, workspaceId)
   expect(imported.documents[0]?.markdown).toBe(markdown)
   expect(imported.documents[0]?.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.revisions[0]?.document.markdown).toBe('历史正文')
   expect(imported.pages[0]?.icon).toBe('🚀')
   expect(imported.revisions[0]?.pageIcon).toBe('📝')
   expect(imported.revisions[1]?.pageIcon).toBe('📌')
+  expect(imported.readingPositions).toEqual([{
+    id: pageId,
+    pageId,
+    anchorUtf16Offset: 321,
+    viewportOffsetFraction: 0.35,
+    updatedAt: now,
+    deviceId: 'electron',
+  }])
   expect(imported.revisions[0]?.document.tiptapJson).toEqual({ type: 'doc', content: [] })
   expect(imported.pageLinks.map((link) => `${link.kind}:${link.excerpt ?? 'page'}`)).toEqual([
     'link:page',

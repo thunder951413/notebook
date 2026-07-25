@@ -10,7 +10,6 @@ import {
   ArrowReply20Regular,
   ArrowRight20Regular,
   ArrowSync20Regular,
-  Bot20Filled,
   Bot20Regular,
   CheckmarkCircle20Regular,
   ChevronDown16Regular,
@@ -38,8 +37,6 @@ import {
 import type { PageSummary } from './model'
 import { useWorkspaceData, WORKSPACE_ID } from './data/useWorkspaceData'
 import { DocumentEditor } from './editor/DocumentEditor'
-import { streamNotebookAnswer } from './ai/client'
-import { buildNotebookAIContext, type NotebookAIContextScope } from './ai/notebookContext'
 import { TaskDetail } from './tasks/TaskDetail'
 import { base64ToBytes, bytesToBase64, type ImportFile } from './data/transfer'
 import { AttachmentPanel } from './assets/AttachmentPanel'
@@ -65,10 +62,13 @@ import { ReferenceHelpDialog } from './editor/ReferenceHelpDialog'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
 import { emptyPageVisitHistory, pageVisitTarget, recordPageVisit } from './pageVisitHistory'
+import { installRendererDiagnostics, recordDiagnosticEvent } from './diagnostics/diagnostics'
+import { useAutomationBridge } from './automation/automationBridge'
+import { AIWorkspace } from './ai-workspace/AIWorkspace'
 
 const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
-type RightPanel = 'outline' | 'backlinks' | 'ai'
+type RightPanel = 'outline' | 'backlinks'
 type ViewportPosition = { scrollTop?: number; fraction: number }
 const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 
@@ -80,8 +80,18 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', accentColor = 'purple', onAccentColorChange, onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const {
+    proposals: automationProposals,
+    createAutomationAgentProposal,
+    createAutomationWriteback,
+    applyAutomationProposal,
+    rejectAutomationProposal,
+  } = useAutomationBridge(reloadWorkspace)
   const importInput = useRef<HTMLInputElement>(null)
+  const previousSyncState = useRef(syncState)
+  const syncCompletionTimer = useRef<number | undefined>(undefined)
+  const [showSyncCompleted, setShowSyncCompleted] = useState(false)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const readingPositions = useRef(new Map<string, ViewportPosition>(Object.entries(readLocalReadingPositions())))
@@ -93,21 +103,43 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
   const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? 'vision')
   const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
   const historyNavigationTarget = useRef<string | undefined>(undefined)
+
+  useEffect(() => installRendererDiagnostics(), [])
+  useEffect(() => {
+    const previous = previousSyncState.current
+    previousSyncState.current = syncState
+    if (syncCompletionTimer.current) {
+      window.clearTimeout(syncCompletionTimer.current)
+      syncCompletionTimer.current = undefined
+    }
+    if (previous === 'syncing' && syncState === 'synced') {
+      setShowSyncCompleted(true)
+      syncCompletionTimer.current = window.setTimeout(() => {
+        setShowSyncCompleted(false)
+        syncCompletionTimer.current = undefined
+      }, 2_000)
+    } else if (syncState !== 'synced') {
+      setShowSyncCompleted(false)
+    }
+    return () => {
+      if (syncCompletionTimer.current) window.clearTimeout(syncCompletionTimer.current)
+    }
+  }, [syncState])
   const [recentPageIds, setRecentPageIds] = useState<string[]>(() => readRecentPageIds())
   const [vimEnabled, setVimEnabled] = useState(readVimEnabled)
   const [vimCommandMode, setVimCommandMode] = useState(readVimEnabled)
   const [aiOpen, setAiOpen] = useState(() => readLayout().aiOpen ?? (typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 1301px)').matches))
-  const [rightPanel, setRightPanel] = useState<RightPanel>(() => readLayout().rightPanel ?? 'ai')
+  const [rightPanel, setRightPanel] = useState<RightPanel>(() => {
+    const saved = readLayout().rightPanel
+    return saved === 'outline' || saved === 'backlinks' ? saved : 'outline'
+  })
+  const [aiWorkspaceOpen, setAiWorkspaceOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(() => readLayout().navOpen ?? true)
   const [pagesOpen, setPagesOpen] = useState(() => readLayout().pagesOpen ?? true)
   const [focusMode, setFocusMode] = useState(false)
   const [notebookWidth, setNotebookWidth] = useState(() => Math.min(520, Math.max(320, readLayout().notebookWidth ?? 0, readLayout().pageWidth ?? 0)))
   const [aiWidth, setAiWidth] = useState(() => readLayout().aiWidth ?? 320)
   const [query, setQuery] = useState('')
-  const [aiPrompt, setAiPrompt] = useState('')
-  const [aiAnswer, setAiAnswer] = useState('')
-  const [aiState, setAiState] = useState<'idle' | 'streaming' | 'error'>('idle')
-  const [aiContextScope, setAiContextScope] = useState<NotebookAIContextScope>('embeds')
   const [transferMessage, setTransferMessage] = useState<string>()
   const [restoreToken, setRestoreToken] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -132,6 +164,15 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
   const [referenceNavigationTarget, setReferenceNavigationTarget] = useState<NotebookReferenceTarget>()
   const accessiblePages = useMemo(() => privacyUnlocked ? pages : pages.filter((page) => !page.locked), [pages, privacyUnlocked])
   const accessibleTrashPages = useMemo(() => privacyUnlocked ? trashPages : trashPages.filter((page) => !page.locked), [privacyUnlocked, trashPages])
+  const publicAutomationProposals = useMemo(() => {
+    const publicSectionIds = new Set(notebooks.filter((notebook) => !notebook.locked).flatMap((notebook) => notebook.sections.map((section) => section.id)))
+    const publicPageIds = new Set(pages.filter((page) => !page.locked && publicSectionIds.has(page.sectionId)).map((page) => page.id))
+    return automationProposals.filter((proposal) => proposal.changes.every((change) => (
+        change.type === 'create-page'
+          ? Boolean(change.after.sectionId && publicSectionIds.has(change.after.sectionId))
+          : publicPageIds.has(change.after.pageId)
+      )))
+  }, [automationProposals, notebooks, pages])
   useReminders(accessiblePages, (pageId, patch) => updatePage(pageId, patch))
 
   useEffect(() => {
@@ -194,22 +235,23 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
       return
     }
     const pageId = currentPage.id
+    const savedPositions = readingPositions.current
     let cancelled = false
-    const local = readingPositions.current.get(pageId)
+    const local = savedPositions.get(pageId)
     setLoadedReadingPosition(local ? { pageId, position: local } : undefined)
     if (!local) void loadReadingPosition(pageId).then((position) => {
       if (cancelled || !position) return
       const restored = { fraction: position.viewportOffsetFraction }
-      readingPositions.current.delete(pageId)
-      readingPositions.current.set(pageId, restored)
+      savedPositions.delete(pageId)
+      savedPositions.set(pageId, restored)
       setLoadedReadingPosition({ pageId, position: restored })
     })
     return () => {
       cancelled = true
       clearTimeout(readingPositionTimer.current)
-      const position = readingPositions.current.get(pageId)
+      const position = savedPositions.get(pageId)
       if (!position) return
-      writeLocalReadingPositions(readingPositions.current)
+      writeLocalReadingPositions(savedPositions)
       void saveReadingPosition(pageId, position.fraction)
     }
   }, [activeArea, currentPage.id, hasCurrentPage, loadReadingPosition, saveReadingPosition])
@@ -311,36 +353,10 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
     void createPage(target.sectionId).then(setActivePage)
   }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
-
-  const askAI = (prompt = aiPrompt) => {
-    const normalized = prompt.trim()
-    if (!normalized || aiState === 'streaming' || !hasCurrentPage) return
-    setAiPrompt(normalized)
-    setAiAnswer('')
-    setAiState('streaming')
-    void buildNotebookAIContext({
-      rootPageId: currentPage.id,
-      scope: aiContextScope,
-      pages,
-      trashPages,
-      privacyUnlocked,
-      loadDocument,
-      loadAssets,
-    }).then((context) => streamNotebookAnswer(normalized, context, (token) => setAiAnswer((current) => current + token)))
-      .then(() => setAiState('idle')).catch((error: unknown) => {
-      setAiAnswer(error instanceof TypeError || (error instanceof Error && error.message === 'Failed to fetch')
-        ? 'AI 服务暂时不可用。请确认本机 AI 服务已启动，或稍后再试。'
-        : error instanceof Error ? error.message : 'AI 服务暂时不可用，请稍后再试。')
-      setAiState('error')
-    })
-  }
-
-  const applyAiAnswer = async (replace: boolean) => {
-    if (!aiAnswer.trim() || aiState === 'streaming' || !hasCurrentPage) return
-    const current = documents[currentPage.id] ?? { type: 'doc', content: [{ type: 'paragraph' }] }
-    const markdown = replace ? aiAnswer.trim() : `${documentToMarkdown(current).trimEnd()}\n\n${aiAnswer.trim()}`.trim()
-    await saveDocument(currentPage.id, markdownToDocument(markdown))
-  }
+  useEffect(() => window.notebookDesktop?.events.onUpdateCenter?.(() => {
+    setSettingsPage('general')
+    setSettingsOpen(true)
+  }), [])
 
   const runImport = async (files: ImportFile[]) => {
     try {
@@ -353,7 +369,9 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
       const count = await importFiles(files, activeSection)
       setTransferMessage(`已导入 ${count} 个页面`)
     } catch (error) {
-      setTransferMessage(error instanceof Error ? error.message : '导入失败')
+      const message = error instanceof Error ? error.message : '导入失败'
+      setTransferMessage(message)
+      recordDiagnosticEvent({ level: 'error', category: 'data', action: 'import', status: 'failed', message })
     }
   }
 
@@ -369,6 +387,7 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
     if (window.notebookDesktop) {
       const saved = await window.notebookDesktop.files.pickSave(name, bytesToBase64(data))
       setTransferMessage(saved ? '备份已导出' : undefined)
+      recordDiagnosticEvent({ level: 'info', category: 'data', action: 'save-export', status: saved ? 'success' : 'cancelled' })
       return
     }
     const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'application/zip' }))
@@ -381,9 +400,16 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
   const runEncryptedExport = async (passphrase: string) => {
     const data = await encryptBackup(await exportWorkspace(), passphrase)
     const name = `notebook-next-${new Date().toISOString().slice(0, 10)}.nbx`
-    if (window.notebookDesktop) await window.notebookDesktop.files.pickSave(name, bytesToBase64(data))
+    if (window.notebookDesktop) {
+      const saved = await window.notebookDesktop.files.pickSave(name, bytesToBase64(data))
+      if (!saved) {
+        recordDiagnosticEvent({ level: 'info', category: 'data', action: 'encrypted-export', status: 'cancelled' })
+        return
+      }
+    }
     else { const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'application/octet-stream' })); Object.assign(window.document.createElement('a'), { href: url, download: name }).click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }
     setTransferMessage('加密备份已导出')
+    recordDiagnosticEvent({ level: 'info', category: 'data', action: 'encrypted-export', status: 'success' })
   }
 
   const saveCurrentDocument = async (format: 'md' | 'html') => {
@@ -652,11 +678,11 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
     if (fallbackNotebook) activateNotebook(fallbackNotebook.id)
   }
 
-  const searchPalettePageIds = useCallback(async (query: string) => (
-    await searchWorkspace(query, 50, privacyUnlocked)
+  const searchPalettePageIds = useCallback(async (searchTerm: string) => (
+    await searchWorkspace(searchTerm, 50, privacyUnlocked)
   ).map((page) => page.id), [privacyUnlocked, searchWorkspace])
 
-  const paletteItems = useMemo<PaletteItem[]>(() => {
+  const paletteItems = (() => {
     const commands: Array<PaletteItem | false | undefined> = [
       currentSection && activeArea === 'notes' && { id: 'command:new-page', group: 'command', title: '新建页面', subtitle: currentSection.name, keywords: '笔记 新建 markdown', run: () => { void createPage(currentSection.id).then(setActivePage) } },
       currentSection && activeArea === 'notes' && { id: 'command:daily-note', group: 'command', title: '打开今天的日记', subtitle: '同一天只创建一篇', keywords: '每日笔记 日记 journal daily', run: () => { void openDailyNote() } },
@@ -700,10 +726,7 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
       { id: 'command:reference-help', group: 'command', title: '双链使用说明', subtitle: '页面链接、块引用与内容嵌入', keywords: '双链 双链说明 使用说明 帮助 教程 双向链接 wiki link backlink 引用 嵌入 [[', run: () => setReferenceHelpOpen(true) },
       hasActivePage && activeArea === 'notes' && { id: 'command:vim', group: 'command', title: vimEnabled ? '关闭 Vim 模式' : '启用 Vim 模式', keywords: 'normal insert esc', run: () => setVimEnabled((value) => !value) },
       { id: 'command:navigation', group: 'command', title: navigationOpen ? '隐藏导航窗格' : '显示导航窗格', keywords: '侧栏 左侧', run: toggleNavigation },
-      hasActivePage && { id: 'command:ai', group: 'command', title: aiOpen && rightPanel === 'ai' ? '关闭 AI 助手' : '打开 AI 助手', keywords: '智能 总结', run: () => {
-        if (aiOpen && rightPanel === 'ai') setAiOpen(false)
-        else { setRightPanel('ai'); setAiOpen(true) }
-      } },
+      { id: 'command:ai', group: 'command', title: '打开 AI 工作区', subtitle: '审阅全部笔记变化、逐行差异和 AI 对话', keywords: '智能 总结 修改 对比 @', run: () => setAiWorkspaceOpen(true) },
       hasActivePage && activeArea === 'notes' && { id: 'command:focus', group: 'command', title: focusMode ? '退出聚焦模式' : '进入聚焦模式', keywords: '全屏 最大化', run: () => setFocusMode((value) => !value) },
       { id: 'command:settings', group: 'command', title: '打开设置', keywords: '偏好 配置', run: () => { setSettingsPage('general'); setSettingsOpen(true) } },
       { id: 'command:import', group: 'command', title: '导入文件或备份', keywords: '迁移 markdown zip nbx', run: chooseImport },
@@ -729,13 +752,14 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
     const openSettings = (page: 'general' | 'data' | 'services') => { setSettingsPage(page); setSettingsOpen(true) }
     const settings: PaletteItem[] = [
       { id: 'setting:general', group: 'setting', title: '常规设置', subtitle: '外观、主题和工作状态', keywords: '颜色 深色 浅色 快速记录', run: () => openSettings('general') },
+      { id: 'setting:updates', group: 'setting', title: '检查应用更新', subtitle: '从 GitHub Release 检查 macOS、Windows 或 Linux 新版本', keywords: '升级 版本 release github update', run: () => { openSettings('general'); window.setTimeout(() => { void window.notebookDesktop?.updates.check() }, 0) } },
       { id: 'setting:data', group: 'setting', title: '数据与备份', subtitle: '导入、导出和数据目录', keywords: '迁移 markdown html pdf nbx zip', run: () => openSettings('data') },
       { id: 'setting:sync', group: 'setting', title: '同步与连接', subtitle: 'SSH/SFTP 服务器设置', keywords: '远端 地址 端口 密码 主机指纹 android', run: () => openSettings('services') },
       { id: 'setting:privacy', group: 'setting', title: '隐私笔记本', subtitle: '解锁、密码与加密说明', keywords: '安全 锁定 AES', run: () => openSettings('services') },
       { id: 'setting:ai', group: 'setting', title: 'AI 与协作服务', subtitle: '查看本机服务状态', keywords: '智能 hocuspocus yjs', run: () => openSettings('services') },
     ]
     return [...commands.filter((item): item is PaletteItem => Boolean(item)), ...pageItems, ...settings]
-  }, [accessiblePages, accessibleTrashPages, activeArea, aiOpen, createPage, currentNotebook, currentPage.id, currentPage.title, currentSection, deleteNotebook, focusMode, hasActivePage, navigationOpen, notebooks, pagesOpen, privacyUnlocked, purgePage, recentPageIds, restorePage, rightPanel, syncNow, syncState, vimEnabled])
+  })()
 
   const scheduleDocumentPrefetch = (pageId: string, delay = 160) => {
     clearTimeout(documentPrefetchTimer.current)
@@ -809,7 +833,26 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
   return (
     <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`}>
       <input ref={importInput} hidden type="file" accept=".md,.markdown,.txt,.html,.htm,.json,.zip,.nbx,application/json,application/zip" multiple onChange={(event) => { const selected = [...(event.target.files ?? [])]; void Promise.all(selected.map(async (file) => ({ name: file.name, data: new Uint8Array(await file.arrayBuffer()) }))).then(runImport); event.target.value = '' }} />
-      <div className={`workspace-grid ${navigationOpen ? '' : 'navigation-collapsed'} ${aiOpen ? '' : 'ai-collapsed'}`} style={{ '--notebook-pane-width': `${notebookWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
+      {aiWorkspaceOpen ? <AIWorkspace
+        currentPage={currentPage}
+        pages={accessiblePages.filter((page) => page.kind !== 'task')}
+        trashPages={accessibleTrashPages}
+        notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)}
+        proposals={publicAutomationProposals}
+        documents={documents}
+        privacyUnlocked={privacyUnlocked}
+        loadDocument={loadDocument}
+        loadAssets={loadAssets}
+        onClose={() => setAiWorkspaceOpen(false)}
+        onOpenPage={(pageId) => {
+          setAiWorkspaceOpen(false)
+          openRecentPage(pageId)
+        }}
+        onCreateWriteback={createAutomationWriteback}
+        onCreateAgentProposal={createAutomationAgentProposal}
+        onApplyProposal={applyAutomationProposal}
+        onRejectProposal={rejectAutomationProposal}
+      /> : <div className={`workspace-grid ${navigationOpen ? '' : 'navigation-collapsed'} ${aiOpen ? '' : 'ai-collapsed'}`} style={{ '--notebook-pane-width': `${notebookWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
         <aside className="app-rail" aria-label="主要功能">
           <div className="app-mark" role="img" aria-label="Notebook">N</div>
           <RailButton label={navigationOpen ? '隐藏导航窗格' : '显示导航窗格'} selected={false} pressed={navigationOpen} icon={<Navigation20Regular />} onClick={toggleNavigation} />
@@ -973,7 +1016,13 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
             </div> : <div className="area-toolbar-label">{activeArea === 'notes' ? '未选择页面' : activeArea === 'tasks' ? `${visiblePages.length} 项任务` : `${accessibleTrashPages.length} 个页面`}</div>}
             <div className="editor-actions">
               {activeArea === 'notes' && !sectionIsEmpty && <><div className="page-utilities"><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} currentMarkdown={documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} create={async (pageId) => { const current = documents[pageId]; if (current) await saveDocument(pageId, current); return createManualRevision(pageId) }} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></div><span className="editor-action-divider" /></>}
-              <ActionMenu label="同步状态详情" trigger={<Button className={`compact-sync-button ${syncState}`} appearance="subtle" icon={<ArrowSync20Regular />} aria-label={`同步状态：${syncLabels[syncState]}`} title={syncLabels[syncState]} />}>
+              <ActionMenu label="同步状态详情" trigger={<Button
+                className={`compact-sync-button ${syncState === 'syncing' ? 'syncing' : showSyncCompleted ? 'sync-complete' : syncState === 'synced' ? 'idle' : syncState}`}
+                appearance="subtle"
+                icon={<span className="sync-visual-icon" aria-hidden="true">{syncState === 'syncing' ? null : showSyncCompleted ? <span className="sync-checkmark">✓</span> : <ArrowSync20Regular />}</span>}
+                aria-label={`同步状态：${syncLabels[syncState]}`}
+                title={showSyncCompleted ? '同步完成' : syncLabels[syncState]}
+              />}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
                   <span>{syncState === 'offline' ? '尚未启用或配置 SSH 同步，当前修改只保存在本机。' : syncState === 'syncing' ? '正在与 SSH 服务器交换最新数据。' : syncState === 'synced' ? '本机与远端服务器已完成最近一次同步。' : syncState === 'conflict' ? '检测到多设备同时修改，请打开相关笔记的版本历史处理。' : '最近一次同步没有完成。'}</span>
@@ -1029,12 +1078,6 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
             <PanelResizer label="调整右侧面板宽度" value={aiWidth} min={280} max={520} onChange={setAiWidth} resetValue={320} side="left" />
             {rightPanel === 'outline' && <OutlineSidebar document={documents[currentPage.id]} />}
             {rightPanel === 'backlinks' && <BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} refreshKey={referenceIndexRevision} />}
-            {rightPanel === 'ai' && <div className="ai-pane" role="region" aria-label="AI 助手">
-              <div className="ai-header"><div className="ai-title"><span className="ai-orb"><Bot20Filled /></span><div><Text weight="semibold">Notebook AI</Text><Text size={200}>基于当前页面</Text></div></div><div className="ai-header-actions"><ActionMenu label="AI 操作" trigger={<Button appearance="subtle" icon={<MoreHorizontal20Regular />} aria-label="AI 菜单" />}><button onClick={() => { setAiAnswer(''); setAiPrompt(''); setAiState('idle') }}>新建对话</button><button onClick={() => { setAiAnswer(''); setAiPrompt('') }}>清空上下文</button></ActionMenu></div></div>
-              <div className="context-card"><Text size={200} weight="semibold">当前上下文</Text><div className="context-page"><Document20Regular /><span><strong>{hasActivePage ? currentPage.title : '未选择页面'}</strong><small>{hasActivePage ? `页面 · ${currentSection?.name ?? '当前分区'}` : '请先新建或选择页面'}</small></span></div><label className="ai-context-scope"><span>引用范围</span><select aria-label="AI 引用范围" value={aiContextScope} onChange={(event) => setAiContextScope(event.target.value as NotebookAIContextScope)}><option value="current">仅当前页面</option><option value="embeds">当前页面和嵌入内容</option><option value="all">全部链接与嵌入内容</option></select></label></div>
-              <div className="ai-conversation"><div className="ai-message"><div className="ai-message-icon"><Bot20Filled /></div><div><p>{aiAnswer || '我可以基于这篇页面帮助你继续工作。'}</p>{!aiAnswer && <div className="suggestion-grid"><button onClick={() => askAI('把当前页面总结为执行计划')}>总结为执行计划</button><button onClick={() => askAI('找出当前方案缺失的风险')}>找出缺失的风险</button><button onClick={() => askAI('整理当前页面的关键概念和大纲')}>整理关键概念</button><button onClick={() => askAI('把当前页面改写为结构清晰的产品文档')}>改写为产品文档</button></div>}{aiState === 'streaming' && <span className="streaming-indicator">正在生成…</span>}{aiAnswer && aiState === 'idle' && <div className="ai-writeback"><Button size="small" onClick={() => void applyAiAnswer(false)}>追加到笔记</Button><Button size="small" appearance="subtle" onClick={() => { if (window.confirm('这会用 AI 结果替换当前正文，并自动保留一个历史版本。确定继续吗？')) void applyAiAnswer(true) }}>替换正文</Button></div>}</div></div></div>
-              <div className="ai-composer"><textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); askAI() } }} placeholder="询问当前页面及其引用内容…" aria-label="询问 Notebook AI" /><div><Text size={200}>{aiContextScope === 'current' ? '仅发送当前页面' : aiContextScope === 'embeds' ? '包含嵌入的正文' : '包含链接和嵌入的正文'}</Text><Button appearance="primary" icon={<Bot20Regular />} disabled={aiState === 'streaming' || !aiPrompt.trim()} onClick={() => askAI()}>{aiState === 'streaming' ? '生成中' : '发送'}</Button></div></div>
-            </div>}
           </div>}
           <nav className="right-sidebar-rail" aria-label="页面辅助工具">
             <Button appearance="subtle" icon={<PanelRight20Regular />} aria-label={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} title={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} aria-pressed={aiOpen} onClick={() => setAiOpen((value) => !value)} />
@@ -1042,10 +1085,10 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
             <Button className={aiOpen && rightPanel === 'outline' ? 'selected' : ''} appearance="subtle" icon={<TextBulletListSquare20Regular />} aria-label="大纲" title="大纲" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('outline'); setAiOpen(true) }} />
             <Button appearance="subtle" icon={<Link20Regular />} aria-label="双链" title="插入双链" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => setReferencePickerOpen(true)} />
             <Button className={aiOpen && rightPanel === 'backlinks' ? 'selected' : ''} appearance="subtle" icon={<ArrowReply20Regular />} aria-label="引用" title="查看引用" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('backlinks'); setAiOpen(true) }} />
-            <Button className={aiOpen && rightPanel === 'ai' ? 'selected' : ''} appearance="subtle" icon={aiOpen && rightPanel === 'ai' ? <Bot20Filled /> : <Bot20Regular />} aria-label="AI" title="AI 助手" disabled={!hasActivePage} onClick={() => { setRightPanel('ai'); setAiOpen(true) }} />
+            <Button appearance="subtle" icon={<Bot20Regular />} aria-label="AI" title="打开 AI 工作区" onClick={() => setAiWorkspaceOpen(true)} />
           </nav>
         </aside>
-      </div>
+      </div>}
       {focusMode && <Button className="focus-exit" appearance="primary" shape="circular" icon={<FullScreenMinimize20Regular />} aria-label="退出聚焦模式" title="退出聚焦模式（Esc）" onClick={() => setFocusMode(false)} />}
       {settingsOpen && <SettingsCenter
         initialPage={settingsPage}
@@ -1059,6 +1102,11 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
         desktop={Boolean(window.notebookDesktop)}
         aiService={import.meta.env.VITE_NOTEBOOK_AI_URL}
         collaborationService={import.meta.env.VITE_NOTEBOOK_COLLAB_URL}
+        automationProposals={publicAutomationProposals}
+        automationNotebooks={notebooks.filter((notebook) => !notebook.locked)}
+        automationPages={pages.filter((page) => !page.locked)}
+        onApplyAutomationProposal={applyAutomationProposal}
+        onRejectAutomationProposal={rejectAutomationProposal}
         privacyAvailable={notebooks.some((notebook) => notebook.locked)}
         privacyConfigured={privacyConfigured}
         privacyUnlocked={privacyUnlocked}

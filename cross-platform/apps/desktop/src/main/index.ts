@@ -1,19 +1,26 @@
-import { app, BrowserWindow, dialog, globalShortcut, Menu, nativeImage, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
-import { flushRenderer, registerPlatformHandlers } from './platform'
+import { flushRenderer, getStoredSecret, registerPlatformHandlers } from './platform'
 import { resolveDataRoot } from './dataRoot'
-import electronUpdater from 'electron-updater'
+import { DesktopUpdateService } from './updater'
+import { appendDiagnosticEvent } from './diagnostics'
+import { AutomationApiServer } from './automationServer'
+import type { AutomationBridgeResponse } from '../automationContract'
+import { completeAIChat } from './aiProvider'
+import type { DesktopAIChatRequest } from '../aiContract'
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 let quitAfterFlush = false
 let flushInProgress = false
-const { autoUpdater } = electronUpdater
 const defaultUserDataPath = app.getPath('userData')
 const dataRoot = resolveDataRoot(defaultUserDataPath)
 app.setPath('userData', dataRoot.path)
-const hasUpdateMetadata = () => app.isPackaged && existsSync(join(process.resourcesPath, 'app-update.yml'))
+const updateService = new DesktopUpdateService(async () => getStoredSecret('github-release-token'), async () => {
+  await Promise.all(BrowserWindow.getAllWindows().map((window) => flushRenderer(window.webContents)))
+  quitAfterFlush = true
+})
+const automationApi = new AutomationApiServer(() => mainWindow?.webContents)
 
 const isAllowedExternalUrl = (value: string) => {
   try {
@@ -57,6 +64,7 @@ function createWindow() {
   })
   window.webContents.on('render-process-gone', (_event, details) => {
     console.error('Notebook renderer process exited', details)
+    void appendDiagnosticEvent({ level: 'error', category: 'renderer', action: 'process-gone', status: 'failed', message: details.reason })
     if (window.isDestroyed()) return
     const now = Date.now()
     if (now - lastRendererRecoveryAt > 30_000) {
@@ -97,36 +105,74 @@ function showMainWindow(quickCapture = false) {
 }
 
 function createTray() {
-  const icon = nativeImage.createFromPath(join(__dirname, '../renderer/notebook-icon.svg')).resize({ width: 18, height: 18 })
+  const iconName = process.platform === 'darwin' ? 'notebook-trayTemplate.png' : 'notebook-icon.svg'
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'tray', iconName)
+    : join(__dirname, '../renderer', iconName)
+  const icon = nativeImage.createFromPath(iconPath)
   if (icon.isEmpty()) return
   if (process.platform === 'darwin') icon.setTemplateImage(true)
-  tray = new Tray(icon)
+  tray = new Tray(process.platform === 'darwin' ? icon : icon.resize({ width: 18, height: 18 }))
   tray.setToolTip('Notebook Next')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '快速记录', click: () => showMainWindow(true) },
     { label: '打开 Notebook', click: () => showMainWindow() },
+    { label: '检查更新…', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:update-center'); void updateService.check(true) } },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ]))
   tray.on('click', () => showMainWindow())
 }
 
-function configureUpdates() {
-  if (!hasUpdateMetadata()) return
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.on('error', (error) => console.error('Update check failed', error))
-  void autoUpdater.checkForUpdatesAndNotify().catch((error) => console.error('Update metadata unavailable', error))
-  setInterval(() => { void autoUpdater.checkForUpdatesAndNotify().catch((error) => console.error('Update metadata unavailable', error)) }, 10 * 60 * 1000)
-}
-
 app.whenReady().then(() => {
   registerPlatformHandlers({ defaultUserDataPath, dataRootSource: dataRoot.source })
+  void appendDiagnosticEvent({ level: 'info', category: 'app', action: 'started', status: 'success', message: `Notebook ${app.getVersion()} · ${process.platform} ${process.arch}` })
+  ipcMain.handle('updates:getState', () => updateService.getState())
+  ipcMain.handle('updates:check', () => updateService.check(true))
+  ipcMain.handle('updates:download', () => updateService.download())
+  ipcMain.handle('updates:install', () => updateService.install())
+  ipcMain.handle('updates:openReleasePage', () => updateService.openReleasePage())
+  const assertMainRenderer = (sender: Electron.WebContents) => {
+    if (!mainWindow || sender !== mainWindow.webContents) throw new Error('Rejected automation IPC from untrusted renderer')
+  }
+  ipcMain.handle('automation:getState', (event) => { assertMainRenderer(event.sender); return automationApi.state(true) })
+  ipcMain.handle('automation:configure', (event, value: { enabled: boolean; port: number }) => { assertMainRenderer(event.sender); return automationApi.configure(Boolean(value.enabled), value.port) })
+  ipcMain.handle('automation:regenerateToken', (event) => { assertMainRenderer(event.sender); return automationApi.regenerateToken() })
+  ipcMain.on('automation:response', (event, response: AutomationBridgeResponse) => { assertMainRenderer(event.sender); automationApi.handleRendererResponse(response) })
+  ipcMain.handle('ai:complete', async (event, request: DesktopAIChatRequest) => {
+    assertMainRenderer(event.sender)
+    const startedAt = Date.now()
+    try {
+      const response = await completeAIChat(request)
+      void appendDiagnosticEvent({
+        level: 'info',
+        category: 'ai',
+        action: 'complete',
+        status: 'success',
+        message: `模型 ${response.model ?? request.model}`,
+        durationMs: Date.now() - startedAt,
+      })
+      return response
+    } catch (error) {
+      void appendDiagnosticEvent({
+        level: 'error',
+        category: 'ai',
+        action: 'complete',
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'AI 请求失败',
+        durationMs: Date.now() - startedAt,
+      })
+      throw error
+    }
+  })
   createWindow()
   createTray()
-  configureUpdates()
+  void automationApi.initialize().catch((error) => {
+    void appendDiagnosticEvent({ level: 'error', category: 'automation', action: 'server-start', status: 'failed', message: error instanceof Error ? error.message : '无法启动本地 AI 接口' })
+  })
+  updateService.configure()
   const menu = Menu.buildFromTemplate([
-    { label: 'Notebook', submenu: [{ role: 'about' }, { label: '命令面板…', accelerator: process.platform === 'darwin' ? 'Command+P' : 'Control+Shift+P', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:command-palette') } }, { label: '检查更新', enabled: hasUpdateMetadata(), click: () => { if (hasUpdateMetadata()) void autoUpdater.checkForUpdatesAndNotify().catch((error) => console.error('Update metadata unavailable', error)) } }, { type: 'separator' }, { role: 'quit' }] },
+    { label: 'Notebook', submenu: [{ role: 'about' }, { label: '命令面板…', accelerator: process.platform === 'darwin' ? 'Command+P' : 'Control+Shift+P', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:command-palette') } }, { label: '检查更新…', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:update-center'); void updateService.check(true) } }, { type: 'separator' }, { role: 'quit' }] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: '视图', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
   ])
@@ -158,6 +204,8 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
+  void appendDiagnosticEvent({ level: 'info', category: 'app', action: 'stopped', status: 'success' })
   globalShortcut.unregisterAll()
   tray?.destroy()
+  void automationApi.stop()
 })

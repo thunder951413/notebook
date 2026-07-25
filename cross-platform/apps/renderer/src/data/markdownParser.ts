@@ -134,7 +134,7 @@ function parseOnDedicatedWorker(
 }
 
 async function parseChunksInParallel(chunks: string[], assets: MarkdownAssetReference[]) {
-  const output = new Array<Record<string, unknown>>(chunks.length)
+  const output = Array.from<Record<string, unknown>>({ length: chunks.length })
   let cursor = 0
   const workers = Array.from(
     { length: Math.min(MAX_PARSER_WORKERS, chunks.length) },

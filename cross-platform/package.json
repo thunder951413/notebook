@@ -7,6 +7,11 @@
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
-    "lint": "pnpm -r --if-present lint"
+    "lint": "oxlint apps packages services --deny correctness --deny suspicious --react-plugin --allow react-in-jsx-scope --allow no-array-sort --allow no-array-reverse --allow consistent-function-scoping --allow require-module-specifiers --allow no-useless-fallback-in-spread --allow require-post-message-target-origin --deny-warnings",
+    "lint:fix": "pnpm lint --fix"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "oxlint": "^1.75.0"
   }
 }
