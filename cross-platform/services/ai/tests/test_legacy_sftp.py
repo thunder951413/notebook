@@ -74,6 +74,13 @@ def test_repository_path_allowlist_covers_v3_without_allowing_traversal() -> Non
 
 def test_v3_publication_compresses_notes_and_keeps_content_addressed_objects() -> None:
     index = json.dumps({
+        "repositoryFormat": {
+            "version": 3,
+            "noteEncoding": "gzip",
+            "contentFormat": "markdown-gfm",
+            "assetAddressing": "sha256",
+            "futureField": "kept",
+        },
         "entries": [{"noteID": NOTE_ID, "version": 2, "contentHash": "new", "historyCount": 1}],
     }).encode()
     note = json.dumps({"schemaVersion": 3, "noteID": NOTE_ID, "contentObjects": {"new": "body"}}, indent=2).encode()
@@ -84,12 +91,7 @@ def test_v3_publication_compresses_notes_and_keeps_content_addressed_objects() -
     ], None))
     assert f"notes/{NOTE_ID}.json" not in prepared
     assert json.loads(gzip.decompress(prepared[f"notes/{NOTE_ID}.json.gz"]))["noteID"] == NOTE_ID
-    assert json.loads(prepared["notes/index.json"])["repositoryFormat"] == {
-        "version": 3,
-        "noteEncoding": "gzip",
-        "contentFormat": "markdown-gfm",
-        "assetAddressing": "sha256",
-    }
+    assert json.loads(prepared["notes/index.json"])["repositoryFormat"]["futureField"] == "kept"
     assert prepared[f"objects/aa/{OBJECT_HASH}"] == b"asset"
 
 
@@ -103,6 +105,18 @@ def test_v3_publication_skips_an_unchanged_note() -> None:
     ], index))
     assert f"notes/{NOTE_ID}.json.gz" not in prepared
     assert "notes/index.json" in prepared
+
+
+def test_unmarked_index_uses_the_same_v2_gzip_fallback_as_electron() -> None:
+    index = json.dumps({"entries": [{"noteID": NOTE_ID, "version": 1}]}).encode()
+    prepared = dict(_prepare_repository_files([("notes/index.json", index)], None))
+    assert json.loads(prepared["notes/index.json"])["repositoryFormat"] == {
+        "version": 2,
+        "noteEncoding": "gzip",
+        "notePathPattern": "notes/{noteID}.json.gz",
+        "jsonEncoding": "utf-8",
+        "historyEncoding": "full-snapshot-deduplicated",
+    }
 
 
 def test_host_key_policy_rejects_a_changed_fingerprint() -> None:

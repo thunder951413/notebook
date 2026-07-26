@@ -17,6 +17,13 @@ MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 OBJECT_PATH_PATTERN = re.compile(r"^objects/[0-9a-f]{2}/[0-9a-f]{64}$", re.I)
+COMPRESSED_REPOSITORY_FORMAT = {
+    "version": 2,
+    "noteEncoding": "gzip",
+    "notePathPattern": "notes/{noteID}.json.gz",
+    "jsonEncoding": "utf-8",
+    "historyEncoding": "full-snapshot-deduplicated",
+}
 
 
 class SshConnection(BaseModel):
@@ -137,12 +144,12 @@ def _prepare_repository_files(files: list[tuple[str, bytes]], current_index: byt
             continue
         if name == "notes/index.json":
             parsed = json.loads(data)
-            parsed["repositoryFormat"] = {
-                "version": 3,
-                "noteEncoding": "gzip",
-                "contentFormat": "markdown-gfm",
-                "assetAddressing": "sha256",
-            }
+            repository_format = parsed.get("repositoryFormat")
+            # Keep the v3 format emitted by the Markdown contract verbatim so
+            # future protocol fields survive a browser bridge round-trip. For
+            # an older/unmarked index, mirror Electron's v2 gzip fallback.
+            if not isinstance(repository_format, dict) or repository_format.get("version") != 3 or repository_format.get("noteEncoding") != "gzip":
+                parsed["repositoryFormat"] = COMPRESSED_REPOSITORY_FORMAT
             prepared.append((name, json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode()))
             continue
         prepared.append((name, _compact_json(data) if name.endswith(".json") else data))
