@@ -10,11 +10,17 @@ const LOOPBACK_HOST = '127.0.0.1'
 const DEFAULT_PORT = 47831
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const REQUEST_TIMEOUT_MS = 20_000
+const MAX_PENDING_REQUESTS = 8
 
 interface AutomationConfig {
   enabled: boolean
   port: number
   token: string
+}
+
+interface AutomationTokenStore {
+  get(): Promise<string | undefined>
+  set(value: string): Promise<void>
 }
 
 type PendingRequest = {
@@ -112,11 +118,23 @@ export class AutomationApiServer {
   private server?: Server
   private pending = new Map<string, PendingRequest>()
 
-  constructor(private readonly renderer: () => WebContents | undefined) {}
+  constructor(
+    private readonly renderer: () => WebContents | undefined,
+    private readonly tokenStore?: AutomationTokenStore,
+  ) {}
+
+  private async persistConfig() {
+    await atomicWrite(configPath(), JSON.stringify(this.tokenStore
+      ? { enabled: this.config.enabled, port: this.config.port }
+      : this.config))
+  }
 
   async initialize() {
-    this.config = await loadConfig()
-    await atomicWrite(configPath(), JSON.stringify(this.config))
+    const loaded = await loadConfig()
+    const protectedToken = await this.tokenStore?.get()
+    this.config = { ...loaded, token: protectedToken ?? loaded.token }
+    if (this.tokenStore) await this.tokenStore.set(this.config.token)
+    await this.persistConfig()
     if (this.config.enabled) await this.start()
   }
 
@@ -135,7 +153,7 @@ export class AutomationApiServer {
     const nextPort = validPort(port)
     const changedPort = nextPort !== this.config.port
     this.config = { ...this.config, enabled, port: nextPort }
-    await atomicWrite(configPath(), JSON.stringify(this.config))
+    await this.persistConfig()
     if (!enabled) await this.stop()
     else if (changedPort && this.server) { await this.stop(); await this.start() }
     else if (!this.server) await this.start()
@@ -144,7 +162,8 @@ export class AutomationApiServer {
 
   async regenerateToken() {
     this.config = { ...this.config, token: newToken() }
-    await atomicWrite(configPath(), JSON.stringify(this.config))
+    if (this.tokenStore) await this.tokenStore.set(this.config.token)
+    await this.persistConfig()
     await appendDiagnosticEvent({ level: 'warning', category: 'automation', action: 'token-regenerated', status: 'success' })
     return this.state(true)
   }
@@ -159,6 +178,11 @@ export class AutomationApiServer {
   }
 
   async stop() {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(Object.assign(new Error('Notebook 自动化接口已停止'), { statusCode: 503 }))
+      this.pending.delete(id)
+    }
     const server = this.server
     this.server = undefined
     if (!server) return
@@ -197,14 +221,16 @@ export class AutomationApiServer {
           : value.code === 'not_found' ? 404
             : value.code === 'validation_error' || value.code === 'request_error' ? 400
               : 500)
-      sendJson(response, status, { error: { code: value.code ?? (status === 500 ? 'internal_error' : 'request_error'), message: value.message } })
-      void appendDiagnosticEvent({ level: status >= 500 ? 'error' : 'warning', category: 'automation', action: 'request', status: 'failed', message: value.message, durationMs: performance.now() - startedAt })
+      const publicMessage = status >= 500 && status !== 503 && status !== 504 ? 'Notebook 内部处理失败' : value.message
+      sendJson(response, status, { error: { code: value.code ?? (status === 500 ? 'internal_error' : 'request_error'), message: publicMessage } })
+      void appendDiagnosticEvent({ level: status >= 500 ? 'error' : 'warning', category: 'automation', action: 'request', status: 'failed', message: status >= 500 ? `HTTP ${status}` : value.message, durationMs: performance.now() - startedAt })
     }
   }
 
   private forward(operation: AutomationRequestOperation, payload: unknown) {
     const contents = this.renderer()
     if (!contents || contents.isDestroyed()) throw Object.assign(new Error('Notebook 界面尚未就绪'), { statusCode: 503 })
+    if (this.pending.size >= MAX_PENDING_REQUESTS) throw Object.assign(new Error('自动化请求过多，请稍后重试'), { statusCode: 429 })
     const id = randomUUID()
     const request: AutomationBridgeRequest = { id, operation, payload }
     return new Promise<unknown>((resolve, reject) => {

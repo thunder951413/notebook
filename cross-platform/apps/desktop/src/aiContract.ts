@@ -1,4 +1,5 @@
 export interface DesktopAIChatRequest {
+  requestId: string
   provider: 'openai' | 'deepseek' | 'custom'
   baseUrl: string
   model: string

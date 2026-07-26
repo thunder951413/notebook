@@ -1,12 +1,12 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { join } from 'node:path'
-import { flushRenderer, getStoredSecret, registerPlatformHandlers } from './platform'
+import { deleteStoredSecret, flushRenderer, getStoredSecret, registerPlatformHandlers, setStoredSecret } from './platform'
 import { resolveDataRoot } from './dataRoot'
 import { DesktopUpdateService } from './updater'
 import { appendDiagnosticEvent } from './diagnostics'
 import { AutomationApiServer } from './automationServer'
 import type { AutomationBridgeResponse } from '../automationContract'
-import { completeAIChat } from './aiProvider'
+import { aiProviderCredentialKey, completeAIChat } from './aiProvider'
 import type { DesktopAIChatRequest } from '../aiContract'
 
 let mainWindow: BrowserWindow | undefined
@@ -20,7 +20,14 @@ const updateService = new DesktopUpdateService(async () => getStoredSecret('gith
   await Promise.all(BrowserWindow.getAllWindows().map((window) => flushRenderer(window.webContents)))
   quitAfterFlush = true
 })
-const automationApi = new AutomationApiServer(() => mainWindow?.webContents)
+const automationApi = new AutomationApiServer(
+  () => mainWindow?.webContents,
+  {
+    get: () => getStoredSecret('automation-api-token'),
+    set: (value) => setStoredSecret('automation-api-token', value),
+  },
+)
+const aiRequests = new Map<string, AbortController>()
 
 const isAllowedExternalUrl = (value: string) => {
   try {
@@ -133,7 +140,7 @@ app.whenReady().then(() => {
   ipcMain.handle('updates:install', () => updateService.install())
   ipcMain.handle('updates:openReleasePage', () => updateService.openReleasePage())
   const assertMainRenderer = (sender: Electron.WebContents) => {
-    if (!mainWindow || sender !== mainWindow.webContents) throw new Error('Rejected automation IPC from untrusted renderer')
+    if (!mainWindow || sender !== mainWindow.webContents) throw new Error('Rejected IPC from untrusted renderer')
   }
   ipcMain.handle('automation:getState', (event) => { assertMainRenderer(event.sender); return automationApi.state(true) })
   ipcMain.handle('automation:configure', (event, value: { enabled: boolean; port: number }) => { assertMainRenderer(event.sender); return automationApi.configure(Boolean(value.enabled), value.port) })
@@ -141,9 +148,12 @@ app.whenReady().then(() => {
   ipcMain.on('automation:response', (event, response: AutomationBridgeResponse) => { assertMainRenderer(event.sender); automationApi.handleRendererResponse(response) })
   ipcMain.handle('ai:complete', async (event, request: DesktopAIChatRequest) => {
     assertMainRenderer(event.sender)
+    if (!request?.requestId || aiRequests.has(request.requestId)) throw new Error('AI 请求标识无效或重复')
+    const controller = new AbortController()
+    aiRequests.set(request.requestId, controller)
     const startedAt = Date.now()
     try {
-      const response = await completeAIChat(request)
+      const response = await completeAIChat(request, fetch, getStoredSecret, controller.signal)
       void appendDiagnosticEvent({
         level: 'info',
         category: 'ai',
@@ -154,16 +164,37 @@ app.whenReady().then(() => {
       })
       return response
     } catch (error) {
+      const cancelled = controller.signal.aborted
       void appendDiagnosticEvent({
-        level: 'error',
+        level: cancelled ? 'info' : 'error',
         category: 'ai',
         action: 'complete',
-        status: 'failed',
-        message: error instanceof Error ? error.message : 'AI 请求失败',
+        status: cancelled ? 'cancelled' : 'failed',
+        message: `服务商 ${String(request?.provider ?? 'unknown').slice(0, 30)} · 模型 ${String(request?.model ?? 'unknown').slice(0, 100)}`,
         durationMs: Date.now() - startedAt,
       })
       throw error
+    } finally {
+      aiRequests.delete(request.requestId)
     }
+  })
+  ipcMain.handle('ai:cancel', (event, requestId: string) => {
+    assertMainRenderer(event.sender)
+    aiRequests.get(requestId)?.abort()
+  })
+  ipcMain.handle('ai:key:set', async (event, value: { provider: DesktopAIChatRequest['provider']; baseUrl: string; value: string }) => {
+    assertMainRenderer(event.sender)
+    const secret = value?.value?.trim()
+    if (!secret || secret.length > 20_000) throw new Error('AI API Key 无效')
+    await setStoredSecret(aiProviderCredentialKey(value.provider, value.baseUrl), secret)
+  })
+  ipcMain.handle('ai:key:has', async (event, value: { provider: DesktopAIChatRequest['provider']; baseUrl: string }) => {
+    assertMainRenderer(event.sender)
+    return Boolean(await getStoredSecret(aiProviderCredentialKey(value.provider, value.baseUrl)))
+  })
+  ipcMain.handle('ai:key:delete', async (event, value: { provider: DesktopAIChatRequest['provider']; baseUrl: string }) => {
+    assertMainRenderer(event.sender)
+    await deleteStoredSecret(aiProviderCredentialKey(value.provider, value.baseUrl))
   })
   createWindow()
   createTray()
@@ -207,5 +238,7 @@ app.on('will-quit', () => {
   void appendDiagnosticEvent({ level: 'info', category: 'app', action: 'stopped', status: 'success' })
   globalShortcut.unregisterAll()
   tray?.destroy()
+  for (const controller of aiRequests.values()) controller.abort()
+  aiRequests.clear()
   void automationApi.stop()
 })

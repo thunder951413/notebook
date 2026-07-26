@@ -80,7 +80,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', accentColor = 'purple', onAccentColorChange, onToggleTheme }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -843,6 +843,10 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
         privacyUnlocked={privacyUnlocked}
         loadDocument={loadDocument}
         loadAssets={loadAssets}
+        searchWorkspace={async (searchText, limit) => {
+          const summaries = new Map(accessiblePages.map((page) => [page.id, page]))
+          return (await searchWorkspaceCandidates(searchText, limit)).flatMap((page) => summaries.get(page.id) ?? [])
+        }}
         onClose={() => setAiWorkspaceOpen(false)}
         onOpenPage={(pageId) => {
           setAiWorkspaceOpen(false)

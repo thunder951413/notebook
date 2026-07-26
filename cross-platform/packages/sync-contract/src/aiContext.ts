@@ -42,7 +42,7 @@ export interface AIContextPolicy {
 
 export interface AIContextItem {
   key: string
-  relationship: 'root' | 'link' | 'embed'
+  relationship: 'root' | 'link' | 'embed' | 'retrieved'
   depth: number
   target: NotebookReferenceTarget
   pageId: string

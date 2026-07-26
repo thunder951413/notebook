@@ -5,11 +5,17 @@ import { automationRepository, WORKSPACE_ID } from '../data/useWorkspaceData'
 import { documentToMarkdown, markdownToDocument } from '../editor/extensions'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 
+const safeTitle = z.string().trim().min(1).max(500).refine(
+  (value) => [...value].every((character) => character.codePointAt(0)! >= 32 && character.codePointAt(0) !== 127),
+  '标题不能包含控制字符',
+)
+const MAX_PROPOSAL_MARKDOWN_CHARACTERS = 8_000_000
+
 const updateOperationSchema = z.object({
   type: z.literal('update-page'),
   pageId: z.string().min(1),
   expectedUpdatedAt: z.string().min(1),
-  title: z.string().max(500).optional(),
+  title: safeTitle.optional(),
   markdown: z.string().max(2_000_000).optional(),
   sectionId: z.string().min(1).optional(),
   parentPageId: z.string().min(1).nullable().optional(),
@@ -18,7 +24,7 @@ const updateOperationSchema = z.object({
 
 const createOperationSchema = z.object({
   type: z.literal('create-page'),
-  title: z.string().min(1).max(500),
+  title: safeTitle,
   markdown: z.string().max(2_000_000).default(''),
   sectionId: z.string().min(1),
   parentPageId: z.string().min(1).nullable().optional(),
@@ -32,7 +38,7 @@ const deleteOperationSchema = z.object({
 })
 
 const proposalSchema = z.object({
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   explanation: z.string().max(4_000).optional(),
   source: z.string().min(1).max(200).default('external-ai'),
   operations: z.array(z.discriminatedUnion('type', [updateOperationSchema, createOperationSchema, deleteOperationSchema])).min(1).max(200),
@@ -41,7 +47,7 @@ const proposalSchema = z.object({
 const agentUpdateOperationSchema = z.object({
   type: z.literal('update-page'),
   pageId: z.string().min(1),
-  title: z.string().max(500).optional(),
+  title: safeTitle.optional(),
   markdown: z.string().max(2_000_000).optional(),
   sectionId: z.string().min(1).optional(),
   parentPageId: z.string().min(1).nullable().optional(),
@@ -52,12 +58,79 @@ const agentDeleteOperationSchema = z.object({
   pageId: z.string().min(1),
 })
 const agentProposalSchema = z.object({
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   explanation: z.string().max(4_000).optional(),
   operations: z.array(z.discriminatedUnion('type', [agentUpdateOperationSchema, createOperationSchema, agentDeleteOperationSchema])).min(1).max(200),
 })
 export type NotebookAgentProposalInput = z.input<typeof agentProposalSchema>
 let automationApplyRunning = false
+
+function referencedAssetIds(markdown: string) {
+  return new Set([...markdown.matchAll(/\bnotebook-asset:([a-z0-9._:-]+)/gi)].map((match) => match[1]!))
+}
+
+export function validateAutomationMarkdown(markdown: string, baseline = '') {
+  if (/<\s*(?:script|iframe|object|embed|link|meta|style|form|input|button|svg|math)\b/i.test(markdown)
+    || /\bon[a-z]+\s*=/i.test(markdown)
+    || /(?:\]\(\s*<?|(?:href|src)\s*=\s*["']?\s*)(?:javascript|vbscript|data):/i.test(markdown)) {
+    throw new Error('AI Markdown 包含脚本、事件处理器或危险 URI')
+  }
+  if (/<\s*img\b/i.test(markdown)) throw new Error('AI Markdown 不能使用 HTML 图片')
+  for (const match of markdown.matchAll(/!\[[^\]\n]*\]\(\s*<?([^)\s>]+)/g)) {
+    if (!match[1]!.toLowerCase().startsWith('notebook-asset:')) {
+      throw new Error('AI Markdown 图片只能引用 notebook-asset 资源')
+    }
+  }
+  const beforeAssets = referencedAssetIds(baseline)
+  const afterAssets = referencedAssetIds(markdown)
+  if ([...afterAssets].some((id) => !beforeAssets.has(id))) throw new Error('AI 不得新增或编造附件资源 ID')
+  if ([...beforeAssets].some((id) => !afterAssets.has(id))) throw new Error('AI 不得删除已有附件资源引用')
+}
+
+export function validateProposalOperations(operations: z.infer<typeof proposalSchema>['operations']) {
+  const existingPageIds = new Set<string>()
+  let markdownCharacters = 0
+  for (const operation of operations) {
+    if (operation.type !== 'create-page') {
+      if (existingPageIds.has(operation.pageId)) throw new Error(`同一提案不能多次操作同一页面：${operation.pageId}`)
+      existingPageIds.add(operation.pageId)
+    }
+    markdownCharacters += operation.type === 'delete-page' ? 0 : operation.markdown?.length ?? 0
+  }
+  if (markdownCharacters > MAX_PROPOSAL_MARKDOWN_CHARACTERS) throw new Error('AI 提案正文总量超过 8,000,000 字符限制')
+}
+
+export function isPublicAutomationPage(page: Page, publicSectionIds: Set<string>) {
+  return !page.deletedAt && !page.locked && Boolean(page.sectionId && publicSectionIds.has(page.sectionId))
+}
+
+export function externalProposalView(proposal: AutomationProposal, accessiblePageIds: Set<string>) {
+  const containsProtectedSnapshot = proposal.changes.some((change) => change.before && !accessiblePageIds.has(change.before.pageId))
+  if (!containsProtectedSnapshot) return proposal
+  const { changes, ...metadata } = proposal
+  return { ...metadata, changeCount: changes.length, redacted: true }
+}
+
+export function validateAcceptedStructuralDependencies(
+  proposal: AutomationProposal,
+  acceptedIds: Set<string>,
+  pages: Page[],
+) {
+  const acceptedChanges = proposal.changes.filter((change) => acceptedIds.has(change.id))
+  for (const change of acceptedChanges) {
+    const structural = change.type === 'delete-page' || (change.before && change.before.sectionId !== change.after.sectionId)
+    if (!structural) continue
+    for (const descendantId of descendantPageIds(pages, change.before?.pageId ?? change.after.pageId)) {
+      const dependency = proposal.changes.find((item) => item.after.pageId === descendantId)
+      const compatible = change.type === 'delete-page'
+        ? dependency?.type === 'delete-page'
+        : dependency?.type !== 'delete-page' && dependency?.after.sectionId === change.after.sectionId
+      if (!dependency || !acceptedIds.has(dependency.id) || !compatible) {
+        throw new Error(`“${change.before?.title ?? change.after.title}”的结构变化必须与全部子页面一起接受`)
+      }
+    }
+  }
+}
 
 const GUIDE = `# Notebook Next 外部 AI 修改接口
 
@@ -164,7 +237,16 @@ async function publicWorkspace() {
     pages.push(...batch.items)
     cursor = batch.nextCursor
   } while (cursor)
-  return { sections, sectionIds, pages: pages.filter((page) => !page.deletedAt && Boolean(page.sectionId && sectionIds.has(page.sectionId))) }
+  const pagesInPublicSections = pages.filter((page) => !page.deletedAt && Boolean(page.sectionId && sectionIds.has(page.sectionId)))
+  const visiblePages = pagesInPublicSections.filter((page) => isPublicAutomationPage(page, sectionIds))
+  return {
+    sections,
+    sectionIds,
+    pages: visiblePages,
+    pageIds: new Set(visiblePages.map((page) => page.id)),
+    protectedPageIds: new Set(pagesInPublicSections.filter((page) => page.locked).map((page) => page.id)),
+    pagesInPublicSections,
+  }
 }
 
 function assertValidParent(pageId: string | undefined, sectionId: string, parentPageId: string | undefined, pages: Page[]) {
@@ -240,7 +322,7 @@ async function handleRequest(operation: string, payload: unknown) {
     const workspace = await publicWorkspace()
     const offset = Math.max(0, Number.parseInt(value.cursor ?? '0', 10) || 0)
     const candidates = value.query.trim()
-      ? (await automationRepository.searchWorkspace(WORKSPACE_ID, value.query, offset + limit + 1)).filter((page) => workspace.sectionIds.has(page.sectionId ?? ''))
+      ? (await automationRepository.searchWorkspace(WORKSPACE_ID, value.query, offset + limit + 1)).filter((page) => workspace.pageIds.has(page.id))
       : workspace.pages
     const visible = candidates.slice(offset, offset + limit)
     return {
@@ -253,24 +335,30 @@ async function handleRequest(operation: string, payload: unknown) {
   }
   if (operation === 'get-page') {
     const { pageId } = z.object({ pageId: z.string().min(1) }).parse(payload)
-    const [{ sectionIds }, page, document] = await Promise.all([publicWorkspace(), automationRepository.getPage(pageId), automationRepository.getPageDocument(pageId)])
-    if (!page || page.deletedAt || !page.sectionId || !sectionIds.has(page.sectionId)) throw Object.assign(new Error('页面不存在或不可由外部 AI 访问'), { code: 'not_found' })
+    const [{ pageIds }, page, document] = await Promise.all([publicWorkspace(), automationRepository.getPage(pageId), automationRepository.getPageDocument(pageId)])
+    if (!page || !pageIds.has(page.id)) throw Object.assign(new Error('页面不存在或不可由外部 AI 访问'), { code: 'not_found' })
     return { id: page.id, title: page.title, markdown: markdownOf(document), sectionId: page.sectionId, parentPageId: page.parentPageId, sortOrder: page.sortOrder, updatedAt: page.updatedAt }
   }
   if (operation === 'create-proposal') {
     const value = proposalSchema.parse(payload)
-    const { sectionIds, pages } = await publicWorkspace()
+    validateProposalOperations(value.operations)
+    const { sectionIds, pages, pageIds, pagesInPublicSections, protectedPageIds } = await publicWorkspace()
     const now = new Date().toISOString()
     const changes: AutomationProposalChange[] = []
     for (const item of value.operations) {
       if (item.type === 'update-page') {
         const [page, document] = await Promise.all([automationRepository.getPage(item.pageId), automationRepository.getPageDocument(item.pageId)])
-        if (!page || page.deletedAt || !page.sectionId || !sectionIds.has(page.sectionId)) throw Object.assign(new Error(`页面不可修改：${item.pageId}`), { code: 'not_found' })
+        if (!page || !pageIds.has(page.id)) throw Object.assign(new Error(`页面不可修改：${item.pageId}`), { code: 'not_found' })
         if (page.updatedAt !== item.expectedUpdatedAt) throw Object.assign(new Error(`页面已变化，请重新读取后生成提案：${page.title}`), { code: 'stale' })
         if (item.sectionId && !sectionIds.has(item.sectionId)) throw new Error(`目标分区不存在或属于隐私笔记本：${item.sectionId}`)
         const targetSectionId = item.sectionId ?? page.sectionId
         const targetParentId = item.parentPageId === undefined ? page.parentPageId : item.parentPageId ?? undefined
         const before = { pageId: page.id, title: page.title, markdown: markdownOf(document), sectionId: page.sectionId, parentPageId: page.parentPageId, sortOrder: page.sortOrder, updatedAt: page.updatedAt }
+        if (item.markdown !== undefined) validateAutomationMarkdown(item.markdown, before.markdown)
+        if ((item.sectionId && item.sectionId !== page.sectionId) || item.parentPageId !== undefined) {
+          const protectedDescendants = descendantPageIds(pagesInPublicSections, page.id).filter((id) => protectedPageIds.has(id))
+          if (protectedDescendants.length) throw new Error('页面包含锁定子页，AI 不能移动它的层级或分区')
+        }
         changes.push({
           id: crypto.randomUUID(),
           type: 'update-page',
@@ -287,6 +375,7 @@ async function handleRequest(operation: string, payload: unknown) {
         })
       } else if (item.type === 'create-page') {
         if (!sectionIds.has(item.sectionId)) throw new Error(`目标分区不存在或属于隐私笔记本：${item.sectionId}`)
+        validateAutomationMarkdown(item.markdown)
         changes.push({
           id: crypto.randomUUID(),
           type: 'create-page',
@@ -302,8 +391,10 @@ async function handleRequest(operation: string, payload: unknown) {
         })
       } else {
         const [page, document] = await Promise.all([automationRepository.getPage(item.pageId), automationRepository.getPageDocument(item.pageId)])
-        if (!page || page.deletedAt || !page.sectionId || !sectionIds.has(page.sectionId)) throw Object.assign(new Error(`页面不可删除：${item.pageId}`), { code: 'not_found' })
+        if (!page || !pageIds.has(page.id)) throw Object.assign(new Error(`页面不可删除：${item.pageId}`), { code: 'not_found' })
         if (page.updatedAt !== item.expectedUpdatedAt) throw Object.assign(new Error(`页面已变化，请重新读取后生成提案：${page.title}`), { code: 'stale' })
+        const protectedDescendants = descendantPageIds(pagesInPublicSections, page.id).filter((id) => protectedPageIds.has(id))
+        if (protectedDescendants.length) throw new Error('页面包含锁定子页，AI 不能将其移到回收站')
         const before = { pageId: page.id, title: page.title, markdown: markdownOf(document), sectionId: page.sectionId, parentPageId: page.parentPageId, sortOrder: page.sortOrder, updatedAt: page.updatedAt }
         changes.push({
           id: crypto.randomUUID(),
@@ -382,7 +473,8 @@ async function handleRequest(operation: string, payload: unknown) {
     const { proposalId } = z.object({ proposalId: z.string().min(1) }).parse(payload)
     const proposal = await automationRepository.getAutomationProposal(proposalId)
     if (!proposal) throw Object.assign(new Error('提案不存在'), { code: 'not_found' })
-    return proposal
+    const { pageIds } = await publicWorkspace()
+    return externalProposalView(proposal, pageIds)
   }
   throw new Error(`不支持的自动化操作：${operation}`)
 }
@@ -453,12 +545,15 @@ export function useAutomationBridge(onApplied: () => Promise<void>) {
     const acceptedChanges = proposal.changes.filter((change) => acceptedIds.has(change.id))
     if (!acceptedChanges.length) throw new Error('至少需要接受一项 AI 修改')
     const { sectionIds, pages } = await publicWorkspace()
+    validateAcceptedStructuralDependencies(proposal, acceptedIds, pages)
     const finalPages = proposalTopology(pages, acceptedChanges)
     for (const change of acceptedChanges) {
       if (change.type === 'delete-page') {
         if (!change.before) throw new Error(`删除提案缺少原始页面：${change.after.title}`)
       } else {
       if (!change.after.sectionId || !sectionIds.has(change.after.sectionId)) throw new Error(`目标分区已经不存在：${change.after.title}`)
+      safeTitle.parse(change.after.title)
+      validateAutomationMarkdown(change.after.markdown, change.before?.markdown ?? '')
       assertValidParent(change.before?.pageId, change.after.sectionId, change.after.parentPageId, finalPages)
       }
       if (!change.before) continue

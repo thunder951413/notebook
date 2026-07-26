@@ -11,19 +11,24 @@ import {
 export function AIProviderSettingsPanel() {
   const [settings, setSettings] = useState<AIProviderSettings>(() => readAIProviderSettings())
   const [apiKey, setApiKey] = useState('')
-  const [storedKey, setStoredKey] = useState(false)
+  const [storedKeyFor, setStoredKeyFor] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string>()
   const desktop = Boolean(window.notebookDesktop?.ai)
+  const keyIdentity = `${settings.provider}:${settings.baseUrl}`
+  const storedKey = storedKeyFor === keyIdentity
 
   useEffect(() => {
     if (!desktop) return
-    setStoredKey(false)
+    setStoredKeyFor(undefined)
     setApiKey('')
-    void window.notebookDesktop?.secrets.get(`ai-provider-key:${settings.provider}`)
-      .then((value) => setStoredKey(Boolean(value)))
+    let valid = false
+    try { valid = new URL(settings.baseUrl).protocol === 'https:' } catch { valid = false }
+    if (!valid) return
+    void window.notebookDesktop?.ai.hasKey(settings.provider, settings.baseUrl)
+      .then((value) => setStoredKeyFor(value ? `${settings.provider}:${settings.baseUrl}` : undefined))
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : '无法读取 AI 密钥状态'))
-  }, [desktop, settings.provider])
+  }, [desktop, settings.baseUrl, settings.provider])
 
   const chooseProvider = (provider: AIProviderKind) => {
     setSettings((current) => ({
@@ -41,13 +46,14 @@ export function AIProviderSettingsPanel() {
       if ((settings.enabled || test) && !storedKey && !apiKey.trim()) throw new Error('请先填写此服务商的 API Key')
       const normalized = saveAIProviderSettings(settings)
       if (apiKey.trim()) {
-        await window.notebookDesktop.secrets.set(`ai-provider-key:${normalized.provider}`, apiKey.trim())
+        await window.notebookDesktop.ai.setKey(normalized.provider, normalized.baseUrl, apiKey.trim())
         setApiKey('')
-        setStoredKey(true)
+        setStoredKeyFor(`${normalized.provider}:${normalized.baseUrl}`)
       }
       setSettings(normalized)
       if (test) {
         const result = await window.notebookDesktop.ai.complete({
+          requestId: crypto.randomUUID(),
           provider: normalized.provider,
           baseUrl: normalized.baseUrl,
           model: normalized.model,
@@ -56,7 +62,9 @@ export function AIProviderSettingsPanel() {
             { role: 'user', content: '只回复 OK' },
           ],
         })
-        setMessage(`连接成功：${result.model ?? normalized.model}`)
+        setMessage(normalized.enabled
+          ? `连接成功：${result.model ?? normalized.model}。内置 AI 对话已启用。`
+          : `连接成功：${result.model ?? normalized.model}。当前开关仍处于关闭状态；打开后才能在 AI 工作区对话。`)
       } else {
         setMessage(normalized.enabled ? 'AI 配置已保存，Notebook AI 将使用此服务。' : 'AI 配置已保存，但内置模型调用仍处于关闭状态。')
       }
@@ -71,8 +79,8 @@ export function AIProviderSettingsPanel() {
     if (!window.notebookDesktop || busy || !window.confirm('确定删除本机保存的 AI API Key 吗？')) return
     setBusy(true)
     try {
-      await window.notebookDesktop.secrets.delete(`ai-provider-key:${settings.provider}`)
-      setStoredKey(false)
+      await window.notebookDesktop.ai.deleteKey(settings.provider, settings.baseUrl)
+      setStoredKeyFor(undefined)
       setApiKey('')
       setMessage('本机 AI API Key 已删除。')
     } catch (error) {
@@ -86,7 +94,7 @@ export function AIProviderSettingsPanel() {
 
   return <>
     <div className="settings-row">
-      <div><strong>内置 AI 对话</strong><span>关闭时继续使用已部署的本机 127.0.0.1:8787 服务</span></div>
+      <div><strong>内置 AI 对话</strong><span>关闭时不会把笔记内容发送给模型；打开并保存后才能在 AI 工作区对话</span></div>
       <div><Switch checked={settings.enabled} disabled={busy} onChange={(_, data) => setSettings((current) => ({ ...current, enabled: data.checked }))} label={settings.enabled ? '已启用' : '已关闭'} /></div>
     </div>
     <div className="automation-api-config ai-provider-config">

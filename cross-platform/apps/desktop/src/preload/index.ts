@@ -58,6 +58,10 @@ export interface NotebookDesktopApi {
   }
   ai: {
     complete(request: DesktopAIChatRequest): Promise<DesktopAIChatResponse>
+    cancel(requestId: string): Promise<void>
+    setKey(provider: DesktopAIChatRequest['provider'], baseUrl: string, value: string): Promise<void>
+    hasKey(provider: DesktopAIChatRequest['provider'], baseUrl: string): Promise<boolean>
+    deleteKey(provider: DesktopAIChatRequest['provider'], baseUrl: string): Promise<void>
   }
   legacySftp: {
     test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
@@ -125,6 +129,10 @@ const api: NotebookDesktopApi = Object.freeze({
   }),
   ai: Object.freeze({
     complete: (request: DesktopAIChatRequest) => ipcRenderer.invoke('ai:complete', request),
+    cancel: (requestId: string) => ipcRenderer.invoke('ai:cancel', requestId),
+    setKey: (provider: DesktopAIChatRequest['provider'], baseUrl: string, value: string) => ipcRenderer.invoke('ai:key:set', { provider, baseUrl, value }),
+    hasKey: (provider: DesktopAIChatRequest['provider'], baseUrl: string) => ipcRenderer.invoke('ai:key:has', { provider, baseUrl }),
+    deleteKey: (provider: DesktopAIChatRequest['provider'], baseUrl: string) => ipcRenderer.invoke('ai:key:delete', { provider, baseUrl }),
   }),
   legacySftp: Object.freeze({
     test: (settings: Parameters<NotebookDesktopApi['legacySftp']['test']>[0]) => ipcRenderer.invoke('legacySftp:test', settings),

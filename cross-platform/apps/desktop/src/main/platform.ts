@@ -197,14 +197,17 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
 
   ipcMain.handle('secrets:set', async (event, key: string, value: string) => {
     assertTrustedSender(event)
+    if (key.startsWith('ai-provider-key:')) throw new Error('AI API Key 只能通过专用安全接口修改')
     await setStoredSecret(key, value)
   })
   ipcMain.handle('secrets:get', async (event, key: string) => {
     assertTrustedSender(event)
+    if (key.startsWith('ai-provider-key:')) throw new Error('AI API Key 不能返回到界面进程')
     return getStoredSecret(key)
   })
   ipcMain.handle('secrets:delete', async (event, key: string) => {
     assertTrustedSender(event)
+    if (key.startsWith('ai-provider-key:')) throw new Error('AI API Key 只能通过专用安全接口修改')
     await deleteStoredSecret(key)
   })
 

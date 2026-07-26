@@ -45,7 +45,10 @@ export async function buildNotebookAIContext(options: NotebookAIContextOptions):
       if (deletedPage) return { status: 'deleted', pageId: target.pageId, title: deletedPage.title }
       const page = active.get(target.pageId)
       if (!page) return { status: 'missing', pageId: target.pageId }
-      if (page.locked && !options.privacyUnlocked) return { status: 'locked', pageId: page.id, title: page.title }
+      // Privacy content is never eligible for AI transmission. Unlocking only
+      // affects local viewing; it does not grant a model access to the page or
+      // to a locked page reached indirectly through a public page reference.
+      if (page.locked) return { status: 'locked', pageId: page.id, title: page.title }
       const document = await options.loadDocument(page.id)
       if (!document) return { status: 'missing', pageId: page.id, title: page.title }
       const fragment = findReferencedFragment(document, target)

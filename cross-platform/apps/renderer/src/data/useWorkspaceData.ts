@@ -701,6 +701,10 @@ export function useWorkspaceData() {
     const visible = includeLocked ? results : results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))
     return limit == null ? visible : visible.slice(0, limit)
   }, [privateSectionIds])
+  const searchWorkspaceCandidates = useCallback(async (query: string, limit = 50) => {
+    const results = await repository.searchWorkspaceCandidates(WORKSPACE_ID, query, limit)
+    return results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? '')).slice(0, limit)
+  }, [privateSectionIds])
   const moveToTrash = useCallback(async (pageId: string) => {
     const ids = treePageIds(pageRecords, pageId)
     const deletedAt = new Date().toISOString()
@@ -748,7 +752,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

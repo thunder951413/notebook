@@ -65,6 +65,7 @@ declare global {
       }
       ai: {
         complete(request: {
+          requestId: string
           provider: 'openai' | 'deepseek' | 'custom'
           baseUrl: string
           model: string
@@ -74,6 +75,10 @@ declare global {
           model?: string
           usage?: { promptTokens?: number; completionTokens?: number }
         }>
+        cancel(requestId: string): Promise<void>
+        setKey(provider: 'openai' | 'deepseek' | 'custom', baseUrl: string, value: string): Promise<void>
+        hasKey(provider: 'openai' | 'deepseek' | 'custom', baseUrl: string): Promise<boolean>
+        deleteKey(provider: 'openai' | 'deepseek' | 'custom', baseUrl: string): Promise<void>
       }
       legacySftp: {
         test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
