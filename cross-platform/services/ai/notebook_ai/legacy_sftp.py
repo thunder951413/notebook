@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import posixpath
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -13,7 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
-UUID_PATTERN = __import__("re").compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", __import__("re").I)
+UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+OBJECT_PATH_PATTERN = re.compile(r"^objects/[0-9a-f]{2}/[0-9a-f]{64}$", re.I)
 
 
 class SshConnection(BaseModel):
@@ -82,11 +85,68 @@ def _safe_relative(value: str) -> str:
 
 def _allowed_file(value: str) -> bool:
     name = _safe_relative(value)
-    if name in {"library.json", "notes/index.json", "notes/reading_positions.json", "notes/assets_manifest.json"}:
+    if name in {"library.json", "notes/index.json", "notes/reading_positions.json", "notes/assets_manifest.json", "notes/privacy.json"}:
         return True
-    if name.startswith("notes/") and name.endswith(".json"):
-        return bool(UUID_PATTERN.fullmatch(name[len("notes/") : -len(".json")]))
+    if name.startswith("notes/") and (name.endswith(".json") or name.endswith(".json.gz")):
+        suffix = ".json.gz" if name.endswith(".json.gz") else ".json"
+        return bool(UUID_PATTERN.fullmatch(name[len("notes/") : -len(suffix)]))
+    if OBJECT_PATH_PATTERN.fullmatch(name):
+        return True
     return name.startswith("attachments/") and len(name) > len("attachments/")
+
+
+def _uses_compressed_notes(index: bytes | None) -> bool:
+    if not index:
+        return False
+    try:
+        repository_format = json.loads(index).get("repositoryFormat", {})
+        return repository_format.get("version") in {2, 3} and repository_format.get("noteEncoding") == "gzip"
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def _compact_json(value: bytes) -> bytes:
+    return json.dumps(json.loads(value), ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _index_entry_signatures(value: bytes | None) -> dict[str, str]:
+    if not value:
+        return {}
+    parsed = json.loads(value)
+    signatures: dict[str, str] = {}
+    for entry in parsed.get("entries", []):
+        note_id = entry.get("noteID", "")
+        if UUID_PATTERN.fullmatch(note_id):
+            signatures[note_id] = f"{entry.get('version', 0)}:{entry.get('contentHash', '')}:{entry.get('historyCount', 0)}"
+    return signatures
+
+
+def _prepare_repository_files(files: list[tuple[str, bytes]], current_index: bytes | None) -> list[tuple[str, bytes]]:
+    """Encode canonical bridge files exactly like the Electron SFTP publisher."""
+    current_entries = _index_entry_signatures(current_index)
+    next_index = next((data for name, data in files if name == "notes/index.json"), None)
+    next_entries = _index_entry_signatures(next_index)
+    unchanged_note_ids = {note_id for note_id, signature in next_entries.items() if current_entries.get(note_id) == signature}
+    prepared: list[tuple[str, bytes]] = []
+    for name, data in files:
+        match = re.fullmatch(r"notes/([0-9a-f-]{36})\.json", name, re.I)
+        if match:
+            if match.group(1) in unchanged_note_ids:
+                continue
+            prepared.append((f"{name}.gz", gzip.compress(_compact_json(data), compresslevel=9)))
+            continue
+        if name == "notes/index.json":
+            parsed = json.loads(data)
+            parsed["repositoryFormat"] = {
+                "version": 3,
+                "noteEncoding": "gzip",
+                "contentFormat": "markdown-gfm",
+                "assetAddressing": "sha256",
+            }
+            prepared.append((name, json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode()))
+            continue
+        prepared.append((name, _compact_json(data) if name.endswith(".json") else data))
+    return prepared
 
 
 def _mkdirs(sftp: paramiko.SFTPClient, path: str) -> None:
@@ -259,29 +319,36 @@ def pull_repository(request: PullRequest) -> PullResponse:
         files: dict[str, bytes] = {}
         total_bytes = 0
 
-        def add(name: str) -> None:
+        def add(name: str, remote_name: str | None = None, decompress: bool = False) -> None:
             nonlocal total_bytes
             if name in files:
                 return
-            content = _read_optional(session.sftp, posixpath.join(session.root, name))
+            content = _read_optional(session.sftp, posixpath.join(session.root, remote_name or name))
             if content is not None:
+                if decompress:
+                    content = gzip.decompress(content)
+                    if len(content) > MAX_FILE_BYTES:
+                        raise ValueError(f"解压后的远端文件超过 100 MB：{posixpath.basename(name)}")
                 total_bytes += len(content)
                 if total_bytes > MAX_REPOSITORY_BYTES:
                     raise ValueError("远端同步仓库超过 512 MB 单次传输上限；请清理无用附件或拆分仓库后重试")
                 files[name] = content
             _refresh_lock(session.sftp, lock)
 
-        for name in ("library.json", "notes/index.json", "notes/reading_positions.json", "notes/assets_manifest.json"):
+        for name in ("library.json", "notes/index.json", "notes/reading_positions.json", "notes/assets_manifest.json", "notes/privacy.json"):
             add(name)
         if index := files.get("notes/index.json"):
+            compressed = _uses_compressed_notes(index)
             for entry in json.loads(index).get("entries", []):
                 note_id = entry.get("noteID", "")
                 if UUID_PATTERN.fullmatch(note_id):
-                    add(f"notes/{note_id}.json")
+                    name = f"notes/{note_id}.json"
+                    add(name, f"{name}.gz" if compressed else name, compressed)
         if manifest := files.get("notes/assets_manifest.json"):
             for entry in json.loads(manifest).get("entries", []):
                 if isinstance(entry.get("relativePath"), str):
-                    add(f"attachments/{_safe_relative(entry['relativePath'])}")
+                    relative = _safe_relative(entry["relativePath"])
+                    add(relative if relative.startswith("objects/") else f"attachments/{relative}")
         return PullResponse(files=[RepositoryFile(name=name, dataBase64=base64.b64encode(data).decode()) for name, data in files.items()], indexHash=hashlib.sha256(files.get("notes/index.json", b"")).hexdigest() if "notes/index.json" in files else "", fingerprint=session.fingerprint)
     finally:
         _release_lock(session.sftp, lock)
@@ -304,9 +371,10 @@ def push_repository(request: PushRequest) -> PushResponse:
         current_hash = hashlib.sha256(current).hexdigest() if current is not None else ""
         if current_hash != request.expectedIndexHash:
             raise RuntimeError("远端索引在同步期间已变化，请重新同步")
+        decoded = _prepare_repository_files(decoded, current)
 
         def priority(name: str) -> tuple[int, str]:
-            value = 0 if name == "library.json" else 1 if name.startswith("attachments/") else 2 if name == "notes/assets_manifest.json" else 3 if name.startswith("notes/") and name not in {"notes/index.json", "notes/reading_positions.json"} else 4 if name == "notes/reading_positions.json" else 5
+            value = 0 if name == "library.json" else 1 if name.startswith(("attachments/", "objects/")) else 2 if name == "notes/assets_manifest.json" else 3 if name.startswith("notes/") and name not in {"notes/index.json", "notes/reading_positions.json"} else 4 if name == "notes/reading_positions.json" else 5
             return value, name
 
         for name, data in sorted(decoded, key=lambda item: priority(item[0])):

@@ -9,4 +9,4 @@ COPY notebook_ai ./notebook_ai
 RUN pip install --no-cache-dir .
 
 EXPOSE 8787
-CMD ["uvicorn", "notebook_ai.main:app", "--host", "0.0.0.0", "--port", "8787", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "notebook_ai.main:app", "--host", "0.0.0.0", "--port", "8787"]

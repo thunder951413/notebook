@@ -3,6 +3,21 @@ export type IsoDate = string
 export type PageKind = 'document' | 'task'
 export type SyncStatus = 'local' | 'pending' | 'synced' | 'conflict' | 'error'
 
+/**
+ * Compatibility metadata that is not part of canonical Markdown content.
+ *
+ * Keeping cross-device fields explicit makes typos in synchronization code a
+ * compile-time error instead of silently disabling conflict detection.
+ */
+export interface PageLegacyMetadata {
+  syncBaselineHash?: string
+  remoteIndexSignature?: string
+  historyResetAt?: IsoDate
+  legacyEncryptedFolderId?: UUID
+  syncState?: unknown
+  notebookRootSectionId?: UUID
+}
+
 export interface Workspace {
   id: UUID
   name: string
@@ -64,7 +79,7 @@ export interface Page {
   syncStatus: SyncStatus
   legacyVersion?: number
   locked?: boolean
-  legacyMetadata?: Record<string, unknown>
+  legacyMetadata?: PageLegacyMetadata
 }
 
 export interface Tag {

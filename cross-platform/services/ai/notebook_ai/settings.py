@@ -13,7 +13,17 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./notebook-next.db"
     jwt_secret: str | None = None
     enable_local_sftp_bridge: bool = False
+    allowed_chat_models: str = "openai/gpt-4.1-mini"
+    allowed_embedding_models: str = "openai/text-embedding-3-small"
 
     @property
     def origins(self) -> list[str]:
         return [value.strip() for value in self.allowed_origins.split(",") if value.strip()]
+
+    @property
+    def chat_models(self) -> set[str]:
+        return {value.strip() for value in self.allowed_chat_models.split(",") if value.strip()}
+
+    @property
+    def embedding_models(self) -> set[str]:
+        return {value.strip() for value in self.allowed_embedding_models.split(",") if value.strip()}

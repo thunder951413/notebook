@@ -4,6 +4,7 @@ import { importLegacyLibrary } from './importer'
 import type { LegacyLibraryEnvelope, LegacyReadingPositions } from './schema'
 import { markdownToTiptap, tiptapToMarkdown } from './markdown'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { hmac } from '@noble/hashes/hmac.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { extractNotebookReferences, pageLinksFromNotebookMarkdown } from './references'
 
@@ -105,6 +106,7 @@ const privacyKeyCache = new Map<string, Promise<CryptoKey>>()
 const decryptedNoteCache = new Map<string, MarkdownNoteEnvelope>()
 const encryptedNoteCache = new Map<string, EncryptedMarkdownNoteEnvelope>()
 const privacyCheckCache = new Map<string, PrivacyKeyCheck>()
+const privacyCacheKey = crypto.getRandomValues(new Uint8Array(32))
 
 function cacheValue<T>(cache: Map<string, T>, key: string, value: T, limit = PRIVACY_CACHE_LIMIT) {
   cache.delete(key)
@@ -113,7 +115,10 @@ function cacheValue<T>(cache: Map<string, T>, key: string, value: T, limit = PRI
   return value
 }
 
-const secretFingerprint = (secret: string) => sha256Hex(secret)
+// A process-local keyed token avoids retaining a reusable SHA-256 password
+// verifier in memory while still allowing expensive PBKDF2 results to be
+// cached for the lifetime of this renderer process.
+const secretCacheToken = (secret: string) => bytesToHex(hmac(sha256, privacyCacheKey, encoder.encode(secret)))
 const toBase64 = (bytes: Uint8Array) => {
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
@@ -122,7 +127,7 @@ const toBase64 = (bytes: Uint8Array) => {
 const fromBase64 = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
 
 async function privacyKey(secret: string, salt: Uint8Array, _usage: KeyUsage[]) {
-  const cacheKey = `${secretFingerprint(secret)}:${toBase64(salt)}`
+  const cacheKey = `${secretCacheToken(secret)}:${toBase64(salt)}`
   const cached = privacyKeyCache.get(cacheKey)
   if (cached) {
     cacheValue(privacyKeyCache, cacheKey, cached)
@@ -150,7 +155,7 @@ export interface PrivacyKeyCheck {
 }
 
 export async function createPrivacyKeyCheck(secret: string): Promise<PrivacyKeyCheck> {
-  const fingerprint = secretFingerprint(secret)
+  const fingerprint = secretCacheToken(secret)
   const cached = privacyCheckCache.get(fingerprint)
   if (cached) return cached
   const salt = crypto.getRandomValues(new Uint8Array(16))
@@ -180,7 +185,7 @@ export async function verifyPrivacyKeyCheck(check: PrivacyKeyCheck, secret?: str
 
 async function encryptPrivateNote(note: MarkdownNoteEnvelope, secret: string): Promise<EncryptedMarkdownNoteEnvelope> {
   const cleartext = JSON.stringify(note)
-  const cacheKey = `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(cleartext)}`
+  const cacheKey = `${secretCacheToken(secret)}:${note.noteID}:${sha256Hex(cleartext)}`
   const cached = encryptedNoteCache.get(cacheKey)
   if (cached) return cacheValue(encryptedNoteCache, cacheKey, cached)
   const salt = crypto.getRandomValues(new Uint8Array(16))
@@ -199,7 +204,7 @@ export async function decryptPrivateNote(note: StoredMarkdownNoteEnvelope, secre
   if (!secret) throw new Error(`隐私笔记 ${note.noteID} 已加密，请先配置相同的 SSH 密码`)
   const encryption = note.privacyEncryption
   if (encryption.version !== 1 || encryption.algorithm !== 'AES-256-GCM' || encryption.kdf !== 'PBKDF2-SHA256' || encryption.iterations !== PRIVACY_ITERATIONS) throw new Error(`隐私笔记 ${note.noteID} 使用了不支持的加密格式`)
-  const cacheKey = `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(encryption.ciphertext)}`
+  const cacheKey = `${secretCacheToken(secret)}:${note.noteID}:${sha256Hex(encryption.ciphertext)}`
   const cached = decryptedNoteCache.get(cacheKey)
   if (cached) return cacheValue(decryptedNoteCache, cacheKey, cached)
   try {
@@ -207,7 +212,7 @@ export async function decryptPrivateNote(note: StoredMarkdownNoteEnvelope, secre
     const decodedText = new TextDecoder().decode(cleartext)
     const decoded = JSON.parse(decodedText) as MarkdownNoteEnvelope
     if (decoded.noteID !== note.noteID) throw new Error('note id mismatch')
-    cacheValue(encryptedNoteCache, `${secretFingerprint(secret)}:${note.noteID}:${sha256Hex(decodedText)}`, note)
+    cacheValue(encryptedNoteCache, `${secretCacheToken(secret)}:${note.noteID}:${sha256Hex(decodedText)}`, note)
     return cacheValue(decryptedNoteCache, cacheKey, decoded)
   } catch { throw new Error(`隐私笔记 ${note.noteID} 解密失败：SSH 密码不一致或远端数据已损坏`) }
 }

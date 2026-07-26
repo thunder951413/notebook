@@ -26,14 +26,14 @@ class IndexDocument(BaseModel):
 
 class IndexRequest(BaseModel):
     workspace_id: str
-    model: str = "openai/text-embedding-3-small"
+    model: str = Field(default="openai/text-embedding-3-small", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
     documents: list[IndexDocument] = Field(min_length=1, max_length=100)
 
 
 class SemanticSearchRequest(BaseModel):
     workspace_id: str
     query: str = Field(min_length=1, max_length=20_000)
-    model: str = "openai/text-embedding-3-small"
+    model: str = Field(default="openai/text-embedding-3-small", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
     limit: int = Field(default=8, ge=1, le=50)
 
 

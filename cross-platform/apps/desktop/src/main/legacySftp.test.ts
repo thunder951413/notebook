@@ -24,6 +24,16 @@ test('normalizes duplicate index rows by highest version and newest deletion', (
   expect(normalized.deletedEntries).toEqual([{ noteID: noteId, deletedAt: '2026-02-01T00:00:00.000Z' }])
 })
 
+test('normalizes equal-version index rows independently of JSON field order', () => {
+  const noteId = '30000000-0000-4000-8000-000000000001'
+  const left = { noteID: noteId, version: 9, contentHash: 'aaa', historyCount: 2 }
+  const right = { historyCount: 2, contentHash: 'bbb', version: 9, noteID: noteId }
+  const forward = normalizeRepositoryIndex(Buffer.from(JSON.stringify({ entries: [left, right] })))
+  const reverse = normalizeRepositoryIndex(Buffer.from(JSON.stringify({ entries: [right, left] })))
+  expect(forward.equals(reverse)).toBe(true)
+  expect(JSON.parse(forward.toString('utf8')).entries).toEqual([right])
+})
+
 async function availablePort() {
   const socket = createServer()
   await new Promise<void>((resolveReady) => socket.listen(0, '127.0.0.1', resolveReady))

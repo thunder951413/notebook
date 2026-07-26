@@ -444,6 +444,29 @@ test('preserves edits made while an SSH publication is in flight', async () => {
   expect((await repository.listOutbox('workspace-a')).some((item) => item.entityId === snapshotPage.id)).toBe(true)
 })
 
+test('rebases pages created and deleted while an SSH publication is in flight', async () => {
+  const repository = makeRepository()
+  const existing = { ...page('page-existing', 'Existing'), syncStatus: 'pending' as const }
+  const existingDocument: PageDocument = { pageId: existing.id, schemaVersion: 3, markdown: 'existing', tiptapJson: { type: 'doc' }, updatedAt: existing.updatedAt }
+  await repository.savePage(existing, existingDocument)
+  const snapshot = await repository.exportData('workspace-a')
+
+  const created = { ...page('page-created-during-sync', 'Created during sync'), syncStatus: 'pending' as const }
+  await repository.savePage(created, { pageId: created.id, schemaVersion: 3, markdown: 'new body', tiptapJson: { type: 'doc' }, updatedAt: created.updatedAt })
+  await repository.movePageToTrash(existing.id, '2026-01-04T00:00:00.000Z')
+
+  const published = {
+    ...snapshot,
+    pages: snapshot.pages.map((item) => ({ ...item, syncStatus: 'synced' as const })),
+  }
+  await repository.importSyncResult(published, snapshot)
+
+  expect(await repository.getPage(created.id)).toMatchObject({ title: 'Created during sync', syncStatus: 'pending' })
+  expect(await repository.getPageDocument(created.id)).toMatchObject({ markdown: 'new body' })
+  expect(await repository.getPage(existing.id)).toMatchObject({ deletedAt: '2026-01-04T00:00:00.000Z' })
+  expect((await repository.exportData('workspace-a')).tombstones).toContainEqual(expect.objectContaining({ entityId: existing.id }))
+})
+
 test('imports and exports a versioned workspace bundle without losing metadata', async () => {
   const repository = makeRepository()
   const value = page('page-imported', 'Imported')

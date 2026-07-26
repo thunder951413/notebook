@@ -1637,6 +1637,16 @@ body.resizing-panel .workspace-grid { transition: none; }
   .ssh-qr-card { grid-template-columns: 1fr; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}
+
 @media print {
   html, body, #root, .fluent-root, .app-shell, .workspace-grid, .content-pane, .document-surface, .document-editor-body { height: auto; overflow: visible; }
   .titlebar, .app-rail, .notebook-pane, .page-pane, .right-sidebar, .section-tabs, .editor-toolbar, .format-toolbar, .collaboration-status, .vim-search { display: none !important; }

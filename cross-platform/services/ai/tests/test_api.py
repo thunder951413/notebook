@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 from fastapi.testclient import TestClient
+from jose import jwt
 
 from notebook_ai.main import create_app
 from notebook_ai.legacy_sftp import PullResponse as LegacyPullResponse
@@ -56,6 +57,41 @@ def test_local_sftp_bridge_only_accepts_loopback_requests(monkeypatch, tmp_path)
         assert response.json()["fingerprint"] == "SHA256:test"
     with TestClient(create_app(settings, FakeGateway()), base_url="http://127.0.0.1", client=("198.51.100.20", 50000)) as client:
         assert client.post("/v1/local-sftp/pull", headers={"Authorization": "Bearer secret"}, json=payload).status_code == 404
+
+
+def test_local_sftp_bridge_does_not_leak_backend_errors(monkeypatch, tmp_path) -> None:
+    def fail(_):
+        raise RuntimeError("password=supersecret /private/server/path")
+
+    monkeypatch.setattr("notebook_ai.main.pull_repository", fail)
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'bridge-error.db'}", enable_local_sftp_bridge=True, api_token="secret")
+    payload = {"settings": {"host": "server", "port": 22, "username": "user", "password": "password", "remotePath": "~/notebook_backup"}}
+    with TestClient(create_app(settings, FakeGateway()), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+        response = client.post("/v1/local-sftp/pull", headers={"Authorization": "Bearer secret"}, json=payload)
+        assert response.status_code == 502
+        assert "SSH/SFTP" in response.json()["detail"]
+        assert "supersecret" not in response.text
+        assert "/private/server/path" not in response.text
+
+
+def test_ai_and_embedding_models_are_allowlisted(tmp_path) -> None:
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'models.db'}")
+    with TestClient(create_app(settings, FakeGateway())) as client:
+        chat = client.post("/v1/chat/stream", json={"model": "openai/expensive-unknown", "messages": [{"role": "user", "content": "hi"}]})
+        assert chat.status_code == 400
+        indexed = client.post("/v1/retrieval/index", json={"workspace_id": "workspace-a", "model": "openai/unknown-embedding", "documents": [{"page_id": "page-a", "title": "A", "content": "body"}]})
+        assert indexed.status_code == 400
+
+
+def test_workspace_jwt_cannot_cross_workspace_boundaries(tmp_path) -> None:
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'jwt.db'}", jwt_secret="jwt-secret")
+    token = jwt.encode({"sub": "device-a", "workspaces": ["workspace-a"]}, "jwt-secret", algorithm="HS256")
+    headers = {"Authorization": f"Bearer {token}"}
+    with TestClient(create_app(settings, FakeGateway())) as client:
+        allowed = client.get("/v1/sync/pull", headers=headers, params={"workspace_id": "workspace-a"})
+        denied = client.get("/v1/sync/pull", headers=headers, params={"workspace_id": "workspace-b"})
+        assert allowed.status_code == 200
+        assert denied.status_code == 403
 
 
 def test_provider_failures_are_safe_and_actionable(tmp_path) -> None:
@@ -128,6 +164,7 @@ def test_browser_and_packaged_electron_origins_can_preflight_asset_sync(tmp_path
             )
             assert response.status_code == 200
             assert response.headers["access-control-allow-origin"] == origin
+            assert response.headers.get("access-control-allow-credentials") != "true"
             assert "PUT" in response.headers["access-control-allow-methods"]
 
 

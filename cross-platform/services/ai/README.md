@@ -15,8 +15,9 @@ Production must set `NOTEBOOK_AI_API_TOKEN`; desktop development may keep the se
 The Electron desktop app connects to the old SSH repository directly. Choose
 `旧版 SSH/SFTP` in Settings and enter the same host, port, user, password and
 remote directory used by Android/Electron. It reads and writes `library.json`,
-`notes/index.json`, note envelopes, reading positions, attachment manifests and
-attachments with the legacy lock and atomic-write contract.
+`notes/index.json`, gzip-compressed v3 note envelopes, privacy probes, reading
+positions and content-addressed `objects/` with the same lock and atomic-write
+contract as Electron.
 
 A normal browser cannot open an SSH socket. For the local browser build, start
 the loopback-only helper together with the web app from the repository root:
@@ -44,6 +45,10 @@ The web app and Android app use the same `/v1/sync/push`, `/v1/sync/pull` and
 on both clients. For a hosted browser build, set `NOTEBOOK_AI_ALLOWED_ORIGINS` to
 the exact HTTPS origins allowed to call the service, separated by commas. The
 defaults only cover the packaged Electron renderer and local ports 5173/8057.
+AI chat and embedding models are denied unless listed in
+`NOTEBOOK_AI_ALLOWED_CHAT_MODELS` and
+`NOTEBOOK_AI_ALLOWED_EMBEDDING_MODELS`; keep these comma-separated allowlists
+limited to models you intentionally provisioned.
 
 ## Remote server with automatic HTTPS
 

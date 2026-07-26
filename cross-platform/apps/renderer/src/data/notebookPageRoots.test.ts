@@ -62,7 +62,8 @@ describe('notebook page roots', () => {
   })
 
   it('removes only the compatibility marker from a duplicated page', () => {
-    expect(withoutNotebookRootMarker({ notebookRootSectionId: section.id, source: 'import' })).toEqual({ source: 'import' })
+    const importedMetadata = { notebookRootSectionId: section.id, source: 'import' } as unknown as NonNullable<Page['legacyMetadata']>
+    expect(withoutNotebookRootMarker(importedMetadata)).toEqual({ source: 'import' })
     expect(withoutNotebookRootMarker({ notebookRootSectionId: section.id })).toBeUndefined()
   })
 })

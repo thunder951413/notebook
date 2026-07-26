@@ -3,7 +3,7 @@ import type { Page, Section } from '@notebook/domain'
 export const NOTEBOOK_ROOT_SECTION_KEY = 'notebookRootSectionId'
 
 export function notebookRootSectionId(page: Pick<Page, 'legacyMetadata'>) {
-  const value = page.legacyMetadata?.[NOTEBOOK_ROOT_SECTION_KEY]
+  const value = page.legacyMetadata?.notebookRootSectionId
   return typeof value === 'string' && value ? value : undefined
 }
 

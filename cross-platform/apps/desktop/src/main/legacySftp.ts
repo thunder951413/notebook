@@ -108,13 +108,16 @@ export function normalizeRepositoryIndex(value: Buffer): Buffer {
     deletedEntries?: Array<{ noteID?: string; deletedAt?: string | number; [key: string]: unknown }>
     [key: string]: unknown
   }
+  const stableEntrySignature = (entry: Record<string, unknown>) => JSON.stringify(
+    Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right))),
+  )
   const entries = new Map<string, NonNullable<typeof parsed.entries>[number]>()
   for (const entry of parsed.entries ?? []) {
     if (!isUuid(entry.noteID)) continue
     const current = entries.get(entry.noteID)
     const version = Number.isFinite(entry.version) ? Number(entry.version) : 0
     const currentVersion = Number.isFinite(current?.version) ? Number(current?.version) : 0
-    if (!current || version > currentVersion || (version === currentVersion && JSON.stringify(entry) > JSON.stringify(current))) entries.set(entry.noteID, entry)
+    if (!current || version > currentVersion || (version === currentVersion && stableEntrySignature(entry) > stableEntrySignature(current))) entries.set(entry.noteID, entry)
   }
   const deletedEntries = new Map<string, NonNullable<typeof parsed.deletedEntries>[number]>()
   for (const entry of parsed.deletedEntries ?? []) {
