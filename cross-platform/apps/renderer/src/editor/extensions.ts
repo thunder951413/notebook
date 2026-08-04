@@ -21,7 +21,9 @@ import xml from 'highlight.js/lib/languages/xml'
 import type { JSONContent } from '@tiptap/core'
 import { generateHTML, generateJSON } from '@tiptap/html'
 import DOMPurify from 'dompurify'
-import 'katex/dist/katex.min.css'
+// KaTeX ships every family in woff2/woff/ttf triplicates (~1.1 MB of fonts).
+// Chromium only ever requests woff2, so reference just those @font-face rules.
+import './katex.woff2.css'
 import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, type NotebookReferenceTarget } from '@notebook/sync-contract'
 import { openReferencedTarget, resolveNotebookReference, subscribeToReferenceRuntime } from './referenceRuntime'
 import { findReferencedFragment, referenceDynamicLabel } from './referenceContent'
