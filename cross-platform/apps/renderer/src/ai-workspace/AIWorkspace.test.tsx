@@ -94,6 +94,9 @@ describe('AI review workspace interaction', () => {
     fireEvent.click(screen.getByRole('button', { name: /实施步骤/ }))
     fireEvent.click(screen.getByRole('button', { name: '忽略此项' }))
     fireEvent.click(screen.getByRole('button', { name: '应用 1 项' }))
+    // findBy flushes the promise that settles after the click, so the
+    // post-apply state updates happen inside act instead of warning.
+    expect(await screen.findByText(/已应用 1 项/)).toBeInTheDocument()
     expect(apply).toHaveBeenCalledWith('proposal', ['change-content'])
   })
 })
