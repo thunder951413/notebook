@@ -5,6 +5,10 @@
 本文档是 SSH/SFTP 同步的优化设计，尚未实施。文中行号对应实施时的当前代码；
 实施前需重新核对。
 
+§2–§5（Phase 1–3，纯端侧优化）为已接受的方向；§6（v4）与 §7（服务端 helper）
+为开放讨论项。其中 **§7 需要讨论**：是否引入服务端组件、部署模型与能力取舍
+尚未定论，不构成已接受的设计。
+
 ## 目标
 
 在不改变 repository v3 协议（任何远端文件格式均不变）的前提下，降低同步延迟、
@@ -204,7 +208,7 @@ renderer (legacySshSync.ts)
 | Phase 1 | A1 连接复用、A2 目录列表、A3 读回收敛、A4 并发池、E1 | `apps/desktop/src/main/legacySftp.ts` + preload 参数 | 高延迟链路同步时间 -50%~-70% |
 | Phase 2 | B1 Uint8Array、C1 空同步快速路径、C2 push 元数据拉取 | preload + `legacySshSync.ts` + 两端调用 | 无变化同步近乎免费；IPC -25% |
 | Phase 3 | C3 资产按需导出、D1 编码快速路径、E2 重试 jitter | `legacySshSync.ts` + `sync-contract` | 大仓库本地 I/O 与 CPU 显著下降 |
-| Phase 4（可选） | 服务端 helper 增强层（§7） | 新增 `ssh exec` 通道 + 单文件脚本 | 首次全量同步 -80% 以上；孤儿对象可清理 |
+| Phase 4（待讨论） | 服务端 helper 增强层（§7，开放项） | 新增 `ssh exec` 通道 + 单文件脚本 | 首次全量同步 -80% 以上；孤儿对象可清理 |
 
 每个阶段独立可发布；Phase 1 完全不触碰协议与 renderer 编排，风险最低。
 Phase 1–3 保持 repository v3 协议不变；v4 格式方向（§6）与旧客户端兼容性解耦，
@@ -303,6 +307,14 @@ v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
 - 现有 `SyncContractFixtures` 保留，用于验证 v3 读取路径不被破坏。
 
 ## 7. 服务端 helper 盘点（可选增强层）
+
+> **⚠️ 本节需要讨论，尚未定论。**
+> 待讨论问题：① 是否接受"服务器上运行我们提供的脚本"这一信任与部署模型
+> （与纯 SFTP 的"零服务端假设"相比，是产品形态的转变）；② 服务器不满足
+> 部署条件（Windows、无 POSIX 环境、用户不愿上传脚本）时如何降级；
+> ③ 能力取舍（tar 全量加速 / verify+gc / pull --tail 各自是否值得引入）；
+> ④ 由谁维护与分发 helper 的版本。结论确定前，本节内容不构成已接受的设计，
+> Phase 4 不排期。
 
 服务端 helper 是**产品决策**而非客户端问题：需要用户在服务器放置一个
 可执行脚本，客户端通过 `ssh exec` 调用。与 §6 的 v4 方向正交，可独立取舍。
