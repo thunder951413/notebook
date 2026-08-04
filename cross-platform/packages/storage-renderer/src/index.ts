@@ -1,6 +1,3 @@
-import Dexie, { type EntityTable } from 'dexie'
-import MiniSearch from 'minisearch'
-import { z } from 'zod'
 import type {
   AutomationProposal,
   Notebook,
@@ -14,448 +11,28 @@ import type {
   TaskStep,
   UUID,
   PageLink,
-  KnowledgeEntity,
-  KnowledgeRelation,
   Asset,
   NotebookDataBundle,
   PageTag,
   ReadingPosition,
   Tombstone,
   PageRevision,
-  PageComment,
 } from '@notebook/domain'
-import { legacyTiptapToCanonicalMarkdown, markdownToEditorCache, migrateLegacyPageDocument, sha256Hex, tiptapToMarkdown } from '@notebook/sync-contract'
+import { legacyTiptapToCanonicalMarkdown, markdownToEditorCache, tiptapToMarkdown } from '@notebook/sync-contract'
+import { MAX_EDITOR_CACHE_BYTES, NotebookRendererDatabase } from './database'
+import { compactRevisionHistory, preserveChangesSinceSnapshot } from './rebase'
+import { parseRemotePayload, remapAssetReferences, type RemoteApplyResult, type RemoteSyncChange } from './remotePayload'
+import { normalizeSearch, SearchCache, searchWorkspaceCandidatesWith, searchWorkspaceWith } from './search'
 
-export interface SyncOutboxItem {
-  id: string
-  workspaceId: string
-  entityType: string
-  entityId: string
-  expectedVersion: number
-  operation: 'upsert' | 'delete'
-  payload: Record<string, unknown>
-  createdAt: string
-}
-
-function compactRevisions(documents: PageDocument[], revisions: PageRevision[]) {
-  const signature = (document: PageDocument) => document.markdown ?? legacyTiptapToCanonicalMarkdown(document.tiptapJson)
-  const currentDocuments = new Map(documents.map((document) => [document.pageId, signature(document)]))
-  const byPage = new Map<string, PageRevision[]>()
-  for (const revision of revisions) {
-    const values = byPage.get(revision.pageId) ?? []
-    values.push(revision)
-    byPage.set(revision.pageId, values)
-  }
-  return [...byPage.values()].flatMap((values) => {
-    let previous: string | undefined
-    const compacted = values.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).filter((revision) => {
-      const value = `${signature(revision.document)}\u0000${revision.pageIcon === undefined ? 'legacy' : revision.pageIcon ?? 'default'}`
-      if (value === previous) return false
-      previous = value
-      return true
-    })
-    const last = compacted[compacted.length - 1]
-    if (last && last.pageIcon === undefined && signature(last.document) === currentDocuments.get(last.pageId)) compacted.pop()
-    return compacted.map((revision) => ({
-      ...revision,
-      document: {
-        ...revision.document,
-        markdown: signature(revision.document),
-        tiptapJson: { type: 'doc', content: [] },
-        yjsState: undefined,
-      },
-    }))
-  })
-}
-
-function compactRevisionHistory(bundle: NotebookDataBundle) {
-  return compactRevisions(bundle.documents, bundle.revisions)
-}
-
-const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
-
-function keepChangesSinceSnapshot<T>(target: T[], snapshot: T[], current: T[], keyOf: (value: T) => string): T[] {
-  const result = new Map(target.map((value) => [keyOf(value), value]))
-  const before = new Map(snapshot.map((value) => [keyOf(value), value]))
-  const now = new Map(current.map((value) => [keyOf(value), value]))
-  for (const key of new Set([...before.keys(), ...now.keys()])) {
-    const previous = before.get(key)
-    const latest = now.get(key)
-    if (sameValue(previous, latest)) continue
-    if (latest === undefined) result.delete(key)
-    else result.set(key, latest)
-  }
-  return [...result.values()]
-}
-
-/**
- * Rebases changes made after a sync snapshot over the result that was actually
- * published. This is deliberately collection-wide: an attachment, task step,
- * tag, or reading-position edit made while SFTP is in flight must be protected
- * just as carefully as a page body.
- */
-export function preserveChangesSinceSnapshot(target: NotebookDataBundle, snapshot: NotebookDataBundle, current: NotebookDataBundle): NotebookDataBundle {
-  const byId = <T extends { id: string }>(value: T) => value.id
-  const byPage = <T extends { pageId: string }>(value: T) => value.pageId
-  const byPageTag = (value: PageTag) => `${value.pageId}:${value.tagId}`
-  return {
-    notebooks: keepChangesSinceSnapshot(target.notebooks, snapshot.notebooks, current.notebooks, byId),
-    sections: keepChangesSinceSnapshot(target.sections, snapshot.sections, current.sections, byId),
-    pages: keepChangesSinceSnapshot(target.pages, snapshot.pages, current.pages, byId),
-    documents: keepChangesSinceSnapshot(target.documents, snapshot.documents, current.documents, byPage),
-    tags: keepChangesSinceSnapshot(target.tags, snapshot.tags, current.tags, byId),
-    pageTags: keepChangesSinceSnapshot(target.pageTags, snapshot.pageTags, current.pageTags, byPageTag),
-    taskSteps: keepChangesSinceSnapshot(target.taskSteps, snapshot.taskSteps, current.taskSteps, byId),
-    assets: keepChangesSinceSnapshot(target.assets, snapshot.assets, current.assets, byId),
-    pageLinks: keepChangesSinceSnapshot(target.pageLinks, snapshot.pageLinks, current.pageLinks, byId),
-    knowledgeEntities: keepChangesSinceSnapshot(target.knowledgeEntities, snapshot.knowledgeEntities, current.knowledgeEntities, byId),
-    knowledgeRelations: keepChangesSinceSnapshot(target.knowledgeRelations, snapshot.knowledgeRelations, current.knowledgeRelations, byId),
-    readingPositions: keepChangesSinceSnapshot(target.readingPositions, snapshot.readingPositions, current.readingPositions, byId),
-    revisions: keepChangesSinceSnapshot(target.revisions, snapshot.revisions, current.revisions, byId),
-    comments: keepChangesSinceSnapshot(target.comments, snapshot.comments, current.comments, byId),
-    tombstones: keepChangesSinceSnapshot(target.tombstones, snapshot.tombstones, current.tombstones, byId),
-  }
-}
-
-export interface RemoteSyncChange {
-  cursor: number
-  entityType: string
-  entityId: string
-  version: number
-  operation: string
-  payload: Record<string, unknown>
-}
-
-export interface RemoteApplyResult {
-  cursor: number
-  conflicts: Array<{ entityType: string; entityId: string; pageIds: string[] }>
-}
-
-interface SyncCursor { workspaceId: string; cursor: number }
-interface SyncVersion { id: string; version: number }
-interface AssetContent { id: string; data: Blob }
-interface PageDraft { pageId: string; document: PageDocument; createdAt: string }
-interface EditorCache {
-  pageId: string
-  sourceVersion: string
-  tiptapJson: Record<string, unknown>
-  byteSize: number
-  accessedAt: string
-}
-
-const MAX_EDITOR_CACHE_BYTES = 64 * 1024 * 1024
-const SEARCH_INDEX_CHUNK_SIZE = 24
-const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
-
-export class NotebookRendererDatabase extends Dexie {
-  notebooks!: EntityTable<Notebook, 'id'>
-  sections!: EntityTable<Section, 'id'>
-  pages!: EntityTable<Page, 'id'>
-  documents!: EntityTable<PageDocument, 'pageId'>
-  tags!: EntityTable<Tag, 'id'>
-  taskSteps!: EntityTable<TaskStep, 'id'>
-  pageLinks!: EntityTable<PageLink, 'id'>
-  knowledgeEntities!: EntityTable<KnowledgeEntity, 'id'>
-  knowledgeRelations!: EntityTable<KnowledgeRelation, 'id'>
-  assets!: EntityTable<Asset, 'id'>
-  pageTags!: EntityTable<PageTag>
-  readingPositions!: EntityTable<ReadingPosition, 'id'>
-  tombstones!: EntityTable<Tombstone, 'id'>
-  syncOutbox!: EntityTable<SyncOutboxItem, 'id'>
-  syncCursors!: EntityTable<SyncCursor, 'workspaceId'>
-  syncVersions!: EntityTable<SyncVersion, 'id'>
-  assetContents!: EntityTable<AssetContent, 'id'>
-  revisions!: EntityTable<PageRevision, 'id'>
-  comments!: EntityTable<PageComment, 'id'>
-  drafts!: EntityTable<PageDraft, 'pageId'>
-  editorCaches!: EntityTable<EditorCache, 'pageId'>
-  automationProposals!: EntityTable<AutomationProposal, 'id'>
-
-  constructor(name = 'notebook-next') {
-    super(name)
-    this.version(1).stores({
-      notebooks: 'id, workspaceId, sortOrder, updatedAt, deletedAt',
-      sections: 'id, notebookId, parentSectionId, sortOrder, updatedAt, deletedAt',
-      pages: 'id, workspaceId, sectionId, kind, updatedAt, deletedAt, syncStatus, *title',
-      documents: 'pageId, updatedAt',
-      tags: 'id, workspaceId, name, updatedAt, deletedAt',
-      taskSteps: 'id, pageId, sortOrder',
-    })
-    this.version(2).stores({
-      pageLinks: 'id, workspaceId, sourcePageId, targetPageId, kind',
-      knowledgeEntities: 'id, workspaceId, name, type, *sourcePageIds, updatedAt',
-      knowledgeRelations: 'id, workspaceId, sourceEntityId, targetEntityId, type, evidencePageId, updatedAt',
-    })
-    this.version(3).stores({
-      assets: 'id, pageId, kind, checksum',
-      pageTags: '[pageId+tagId], pageId, tagId',
-      readingPositions: 'id, pageId, updatedAt',
-      tombstones: 'id, workspaceId, entityType, entityId, deletedAt',
-    })
-    this.version(4).stores({
-      syncOutbox: 'id, workspaceId, createdAt, [entityType+entityId]',
-      syncCursors: 'workspaceId',
-      syncVersions: 'id',
-    })
-    this.version(5).stores({ assetContents: 'id' })
-    this.version(6).stores({ revisions: 'id, pageId, createdAt' })
-    this.version(7).stores({ comments: 'id, workspaceId, pageId, createdAt, resolvedAt' })
-    this.version(8).stores({ drafts: 'pageId, createdAt' })
-    this.version(9).stores({}).upgrade(async (transaction) => {
-      await transaction.table<PageRevision>('revisions').toCollection().modify((revision) => {
-        revision.document = migrateLegacyPageDocument(revision.document)
-      })
-    })
-    this.version(10).stores({}).upgrade(async (transaction) => {
-      const documents = transaction.table<PageDocument>('documents')
-      const revisions = transaction.table<PageRevision>('revisions')
-      const pages = transaction.table<Page>('pages')
-      const drafts = transaction.table<PageDraft>('drafts')
-      const legacyDocuments = (await documents.toArray()).filter((document) => document.schemaVersion < 3 || document.markdown === undefined)
-      for (const document of legacyDocuments) {
-        const previousMarkdown = legacyTiptapToCanonicalMarkdown(document.tiptapJson)
-        const migrated = migrateLegacyPageDocument(document)
-        await revisions.put({
-          id: crypto.randomUUID(),
-          pageId: document.pageId,
-          // Keep a recovery point without retaining the obsolete rich-text
-          // cache. Markdown is the durable body; the editor JSON is disposable.
-          document: migrated,
-          createdAt: new Date().toISOString(),
-          reason: 'import',
-        })
-        await documents.put(migrated)
-        const page = await pages.get(document.pageId)
-        if (page) await pages.put({
-          ...page,
-          syncStatus: 'pending',
-          legacyMetadata: {
-            ...page.legacyMetadata,
-            // The current SSH v3 repository was produced from the old Tiptap
-            // cache using this exact serializer. Treat that body as the merge
-            // base so normalization publishes as a local edit instead of
-            // reporting a conflict on every migrated page.
-            syncBaselineHash: typeof page.legacyMetadata?.syncBaselineHash === 'string'
-              ? page.legacyMetadata.syncBaselineHash
-              : sha256Hex(previousMarkdown),
-          },
-        })
-      }
-      const legacyDrafts = (await drafts.toArray()).filter((draft) => draft.document.schemaVersion < 3 || draft.document.markdown === undefined)
-      for (const draft of legacyDrafts) await drafts.put({ ...draft, document: migrateLegacyPageDocument(draft.document) })
-    })
-    this.version(11).stores({}).upgrade(async (transaction) => {
-      const documents = await transaction.table<PageDocument>('documents').toArray()
-      const revisionTable = transaction.table<PageRevision>('revisions')
-      const revisions = (await revisionTable.toArray()).map((revision) => ({
-        ...revision,
-        document: migrateLegacyPageDocument(revision.document),
-      }))
-      const compacted = compactRevisions(documents, revisions)
-      await revisionTable.clear()
-      await revisionTable.bulkPut(compacted)
-    })
-    // Version 12 was exercised by a local pre-release build. Keep the version
-    // slot so that database 12 can move forward, but perform the final,
-    // idempotent normalization in version 13 below.
-    this.version(12).stores({})
-    this.version(13).stores({}).upgrade(async (transaction) => {
-      const documentTable = transaction.table<PageDocument>('documents')
-      const revisionTable = transaction.table<PageRevision>('revisions')
-      const pageTable = transaction.table<Page>('pages')
-      const draftTable = transaction.table<PageDraft>('drafts')
-      const documents = await documentTable.toArray()
-      const normalizedDocuments = documents.map(migrateLegacyPageDocument)
-      await documentTable.bulkPut(normalizedDocuments)
-      for (let index = 0; index < documents.length; index += 1) {
-        if (documents[index]?.markdown === normalizedDocuments[index]?.markdown) continue
-        const page = await pageTable.get(documents[index]!.pageId)
-        if (page) await pageTable.put({ ...page, syncStatus: 'pending' })
-      }
-      await pageTable.toCollection().modify((page) => {
-        const title = page.title.trim()
-        if (title !== page.title) {
-          page.title = title
-          page.syncStatus = 'pending'
-        }
-      })
-      const revisions = (await revisionTable.toArray()).map((revision) => ({
-        ...revision,
-        document: migrateLegacyPageDocument(revision.document),
-      }))
-      const compacted = compactRevisions(normalizedDocuments, revisions)
-      await revisionTable.clear()
-      await revisionTable.bulkPut(compacted)
-      await draftTable.toCollection().modify((draft) => {
-        draft.document = migrateLegacyPageDocument(draft.document)
-      })
-    })
-    this.version(14).stores({}).upgrade(async (transaction) => {
-      const pages = transaction.table<Page>('pages')
-      const sections = await transaction.table<Section>('sections').toArray()
-      const notebooks = await transaction.table<Notebook>('notebooks').toArray()
-      const publicInbox = sections.find((section) => section.id === 'inbox')
-        ?? sections.find((section) => !notebooks.find((notebook) => notebook.id === section.notebookId)?.locked)
-      const privateInbox = sections.find((section) => notebooks.find((notebook) => notebook.id === section.notebookId)?.locked)
-      await pages.toCollection().modify((page) => {
-        if (page.sectionId) return
-        const fallback = page.locked ? privateInbox : publicInbox
-        if (!fallback) return
-        page.sectionId = fallback.id
-        page.syncStatus = 'pending'
-      })
-    })
-    this.version(15).stores({}).upgrade(async (transaction) => {
-      const documents = await transaction.table<PageDocument>('documents').toArray()
-      const pages = transaction.table<Page>('pages')
-      for (const document of documents) {
-        if (document.markdown === undefined) continue
-        const page = await pages.get(document.pageId)
-        if (!page) continue
-        const preview = extractText(markdownToEditorCache(document.markdown)).replace(/\s+/g, ' ').trim().slice(0, 240)
-        if (preview !== page.preview) await pages.put({ ...page, preview, syncStatus: 'pending' })
-      }
-    })
-    this.version(16).stores({
-      pages: 'id, workspaceId, sectionId, parentPageId, kind, updatedAt, treeUpdatedAt, deletedAt, syncStatus, *title, [sectionId+parentPageId+sortOrder]',
-    }).upgrade(async (transaction) => {
-      const pages = transaction.table<Page>('pages')
-      const records = (await pages.toArray()).sort((left, right) =>
-        (left.sectionId ?? '').localeCompare(right.sectionId ?? '')
-        || left.createdAt.localeCompare(right.createdAt)
-        || left.id.localeCompare(right.id))
-      const counters = new Map<string, number>()
-      for (const page of records) {
-        if (page.sortOrder !== undefined && page.treeUpdatedAt) continue
-        const key = `${page.sectionId ?? ''}:${page.parentPageId ?? ''}`
-        const sortOrder = page.sortOrder ?? (counters.get(key) ?? 0) + 1000
-        counters.set(key, Math.max(counters.get(key) ?? 0, sortOrder))
-        await pages.put({
-          ...page,
-          sortOrder,
-          treeUpdatedAt: page.treeUpdatedAt ?? page.createdAt,
-          syncStatus: page.syncStatus === 'conflict' ? 'conflict' : 'pending',
-        })
-      }
-    })
-    // Parsed editor JSON is device-local and disposable. Keeping it outside
-    // `documents` prevents it from entering sync, history, or exported data.
-    this.version(17).stores({ editorCaches: 'pageId, sourceVersion, accessedAt' })
-    this.version(18).stores({ automationProposals: 'id, workspaceId, status, createdAt' })
-  }
-}
-
-const normalizeSearch = (value: string) => value.trim().toLocaleLowerCase()
-const searchTokenize = (value: string) => {
-  const normalized = value.normalize('NFKC').toLocaleLowerCase()
-  const words = normalized.match(/[\p{L}\p{N}_-]+/gu) ?? []
-  const cjk = [...normalized.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)].flatMap((match) => {
-    const characters = [...match[0]]
-    return characters.length === 1 ? characters : characters.slice(0, -1).map((character, index) => character + characters[index + 1])
-  })
-  return [...words, ...cjk]
-}
-
-const recordSchema = z.record(z.string(), z.unknown())
-const isoSchema = z.string().min(1)
-const notebookSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), name: z.string(), sortOrder: z.number(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
-const sectionSchema = z.object({ id: z.string().min(1), notebookId: z.string().min(1), name: z.string(), sortOrder: z.number(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
-const pageSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), kind: z.enum(['document', 'task']), title: z.string(), preview: z.string(), favorite: z.boolean(), createdAt: isoSchema, updatedAt: isoSchema, syncStatus: z.enum(['local', 'pending', 'synced', 'conflict', 'error']) }).passthrough()
-const documentSchema = z.object({ pageId: z.string().min(1), schemaVersion: z.number().int().nonnegative(), tiptapJson: recordSchema, updatedAt: isoSchema }).passthrough()
-const tagSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), name: z.string(), color: z.string(), createdAt: isoSchema, updatedAt: isoSchema }).passthrough()
-const taskStepSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), text: z.string(), checked: z.boolean(), sortOrder: z.number(), createdAt: isoSchema }).passthrough()
-const assetSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), kind: z.enum(['image', 'audio', 'video', 'file']), filename: z.string(), mimeType: z.string(), createdAt: isoSchema }).passthrough()
-const pageLinkSchema = z.object({ id: z.string().min(1), workspaceId: z.string().min(1), sourcePageId: z.string().min(1), targetPageId: z.string().min(1), kind: z.enum(['link', 'mention', 'embed']), createdAt: isoSchema }).passthrough()
-const readingPositionSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), anchorUtf16Offset: z.number().int().nonnegative(), viewportOffsetFraction: z.number(), updatedAt: isoSchema, deviceId: z.string() }).passthrough()
-const revisionSchema = z.object({ id: z.string().min(1), pageId: z.string().min(1), document: documentSchema, createdAt: isoSchema, reason: z.enum(['autosave', 'manual', 'restore', 'import']) }).passthrough()
-const pageTagSchema = z.object({ pageId: z.string().min(1), tagId: z.string().min(1) }).passthrough()
-
-function parseRemotePayload(change: RemoteSyncChange) {
-  const schemas: Record<string, z.ZodType> = {
-    notebook: notebookSchema, section: sectionSchema, page: pageSchema, document: documentSchema,
-    tag: tagSchema, task_step: taskStepSchema, asset: assetSchema, page_link: pageLinkSchema,
-    reading_position: readingPositionSchema, revision: revisionSchema, page_tag: pageTagSchema,
-  }
-  const schema = schemas[change.entityType]
-  if (!schema) throw new Error(`Unsupported remote entity type: ${change.entityType}`)
-  const value = schema.parse(change.payload) as Record<string, unknown>
-  const payloadId = change.entityType === 'document' ? value.pageId
-    : change.entityType === 'page_tag' ? `${value.pageId}:${value.tagId}`
-      : value.id
-  if (payloadId !== change.entityId) throw new Error(`Remote ${change.entityType} payload id does not match change id`)
-  return value
-}
-
-function remapAssetReferences(value: unknown, assetIds: Map<string, string>): unknown {
-  if (typeof value === 'string') {
-    let result = value
-    for (const [sourceId, targetId] of assetIds) result = result.replaceAll(`notebook-asset:${sourceId}`, `notebook-asset:${targetId}`)
-    return assetIds.get(result) ?? result
-  }
-  if (Array.isArray(value)) return value.map((item) => remapAssetReferences(item, assetIds))
-  if (!value || typeof value !== 'object') return value
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, remapAssetReferences(item, assetIds)]))
-}
+export type { RemoteSyncChange, RemoteApplyResult } from './remotePayload'
+export type { SyncOutboxItem } from './database'
+export { NotebookRendererDatabase, MAX_EDITOR_CACHE_BYTES } from './database'
+export { preserveChangesSinceSnapshot } from './rebase'
 
 export class DexieNotebookRepository implements NotebookRepository {
-  private readonly searchCache = new Map<string, {
-    pages: Page[]
-    textByPage: Map<string, string>
-    index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
-  }>()
-  private readonly searchCachePromises = new Map<string, Promise<{
-    pages: Page[]
-    textByPage: Map<string, string>
-    index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
-  }>>()
-  private readonly searchCacheGeneration = new Map<string, number>()
+  private readonly searchIndex = new SearchCache()
 
   constructor(readonly db = new NotebookRendererDatabase()) {}
-
-  private invalidateSearchCache(workspaceId: string) {
-    this.searchCache.delete(workspaceId)
-    this.searchCachePromises.delete(workspaceId)
-    this.searchCacheGeneration.set(workspaceId, (this.searchCacheGeneration.get(workspaceId) ?? 0) + 1)
-  }
-
-  private async getSearchCache(workspaceId: UUID) {
-    const cached = this.searchCache.get(workspaceId)
-    if (cached) return cached
-    const pending = this.searchCachePromises.get(workspaceId)
-    if (pending) return pending
-    const generation = this.searchCacheGeneration.get(workspaceId) ?? 0
-    const build = (async () => {
-      const pages = (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
-      const pageIds = new Set(pages.map((page) => page.id))
-      const documents = (await this.db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
-      const textByPage = new Map<string, string>()
-      for (let offset = 0; offset < documents.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
-        for (const document of documents.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)) {
-          textByPage.set(document.pageId, document.markdown ?? extractText(document.tiptapJson))
-        }
-        await yieldToEventLoop()
-      }
-      const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
-      for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
-        index.addAll(pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE).map((page) => ({
-          id: page.id,
-          title: page.title,
-          preview: page.preview,
-          content: textByPage.get(page.id) ?? '',
-        })))
-        await yieldToEventLoop()
-      }
-      const result = { pages, textByPage, index }
-      if ((this.searchCacheGeneration.get(workspaceId) ?? 0) === generation) this.searchCache.set(workspaceId, result)
-      return result
-    })()
-    this.searchCachePromises.set(workspaceId, build)
-    try {
-      return await build
-    } finally {
-      if (this.searchCachePromises.get(workspaceId) === build) this.searchCachePromises.delete(workspaceId)
-    }
-  }
 
   async listNotebooks(workspaceId: UUID): Promise<Notebook[]> {
     return (await this.db.notebooks.where('workspaceId').equals(workspaceId).toArray())
@@ -533,7 +110,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.notebooks.delete(notebookId)
       await this.enqueueChange(notebook.workspaceId, 'notebook', notebookId, 'delete', {})
     })
-    if (workspaceId) this.invalidateSearchCache(workspaceId)
+    if (workspaceId) this.searchIndex.invalidate(workspaceId)
   }
   async saveSection(section: Section) {
     await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
@@ -559,7 +136,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(notebook.workspaceId, 'section', sectionId, 'delete', {})
     })
-    if (workspaceId) this.invalidateSearchCache(workspaceId)
+    if (workspaceId) this.searchIndex.invalidate(workspaceId)
   }
 
   async duplicatePage(pageId: UUID, newPageId: UUID, createdAt: string): Promise<Page> {
@@ -663,7 +240,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
     })
-    this.invalidateSearchCache(page.workspaceId)
+    this.searchIndex.invalidate(page.workspaceId)
   }
 
   async stageDraft(document: PageDocument): Promise<void> {
@@ -692,7 +269,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     })
-    this.invalidateSearchCache(page.workspaceId)
+    this.searchIndex.invalidate(page.workspaceId)
   }
 
   async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
@@ -704,7 +281,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       await this.db.tombstones.delete(`page:${pageId}`)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', restored)
     })
-    this.invalidateSearchCache(page.workspaceId)
+    this.searchIndex.invalidate(page.workspaceId)
   }
 
   async purgePage(pageId: UUID, deletedAt = new Date().toISOString(), deviceId = 'electron'): Promise<void> {
@@ -737,7 +314,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
-    this.invalidateSearchCache(page.workspaceId)
+    this.searchIndex.invalidate(page.workspaceId)
   }
 
   async listTags(workspaceId: UUID): Promise<Tag[]> {
@@ -896,7 +473,7 @@ export class DexieNotebookRepository implements NotebookRepository {
       return { cursor: appliedCursor, conflicts }
     })
       .then((result) => {
-        this.invalidateSearchCache(workspaceId)
+        this.searchIndex.invalidate(workspaceId)
         return result
       })
   }
@@ -971,7 +548,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         this.db.revisions.bulkPut(compactedRevisions),
       ])
     })
-    for (const workspaceId of new Set([...bundle.notebooks.map((item) => item.workspaceId), ...bundle.pages.map((item) => item.workspaceId)])) this.invalidateSearchCache(workspaceId)
+    for (const workspaceId of new Set([...bundle.notebooks.map((item) => item.workspaceId), ...bundle.pages.map((item) => item.workspaceId)])) this.searchIndex.invalidate(workspaceId)
   }
 
   async importSyncResult(bundle: NotebookDataBundle, snapshot: NotebookDataBundle): Promise<NotebookDataBundle> {
@@ -1156,7 +733,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         rejectedChangeIds: proposal.changes.filter((change) => !acceptedIds.has(change.id)).map((change) => change.id),
         reviewedAt: new Date().toISOString(),
       })
-    }).finally(() => this.invalidateSearchCache(prepared[0]?.page.workspaceId ?? ''))
+    }).finally(() => this.searchIndex.invalidate(prepared[0]?.page.workspaceId ?? ''))
   }
   async resetRevisionHistory(workspaceId: UUID): Promise<{ pageCount: number; removedRevisionCount: number }> {
     return this.db.transaction('rw', this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, async () => {
@@ -1268,32 +845,7 @@ export class DexieNotebookRepository implements NotebookRepository {
     return document
   }
   async searchWorkspace(workspaceId: UUID, query: string, limit = 50): Promise<Page[]> {
-    const cached = await this.getSearchCache(workspaceId)
-    const { pages, textByPage, index } = cached
-    // A Chinese phrase yields both a full token and overlapping CJK bigrams.
-    // MiniSearch's default OR combination can otherwise rank pages sharing one
-    // common bigram above an exact title match. Keep exact substring matches at
-    // the front, then require all query tokens, and use fuzzy OR only as a
-    // last-resort completion set.
-    const normalizedQuery = query.normalize('NFKC').toLocaleLowerCase().trim()
-    const exactMatches: Page[] = []
-    for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
-      exactMatches.push(...pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
-        .filter((page) => `${page.title}\n${page.preview}\n${textByPage.get(page.id) ?? ''}`.normalize('NFKC').toLocaleLowerCase().includes(normalizedQuery)))
-      await yieldToEventLoop()
-    }
-    const exactIds = exactMatches
-      .sort((left, right) => {
-        const leftTitle = left.title.normalize('NFKC').toLocaleLowerCase()
-        const rightTitle = right.title.normalize('NFKC').toLocaleLowerCase()
-        return Number(rightTitle === normalizedQuery) - Number(leftTitle === normalizedQuery) || right.updatedAt.localeCompare(left.updatedAt)
-      })
-      .map((page) => page.id)
-    const strictIds = index.search(query, { prefix: true, fuzzy: 0.15, combineWith: 'AND' }).map((result) => String(result.id))
-    const fallbackIds = index.search(query, { prefix: true, fuzzy: 0.15 }).map((result) => String(result.id))
-    const ids = [...new Set([...exactIds, ...strictIds, ...fallbackIds])].slice(0, limit)
-    const byId = new Map(pages.map((page) => [page.id, page]))
-    return ids.flatMap((id) => byId.get(id) ?? [])
+    return searchWorkspaceWith(this.db, this.searchIndex, workspaceId, query, limit)
   }
 
   /**
@@ -1303,21 +855,6 @@ export class DexieNotebookRepository implements NotebookRepository {
    * set before presenting an exact semantic such as an unlinked mention.
    */
   async searchWorkspaceCandidates(workspaceId: UUID, query: string, limit = 200): Promise<Page[]> {
-    const { pages, index } = await this.getSearchCache(workspaceId)
-    const strictIds = index.search(query, { prefix: true, fuzzy: false, combineWith: 'AND' }).map((result) => String(result.id))
-    const fallbackIds = strictIds.length
-      ? []
-      : index.search(query, { prefix: true, fuzzy: 0.15 }).map((result) => String(result.id))
-    const ids = [...new Set([...strictIds, ...fallbackIds])].slice(0, limit)
-    const byId = new Map(pages.map((page) => [page.id, page]))
-    return ids.flatMap((id) => byId.get(id) ?? [])
+    return searchWorkspaceCandidatesWith(this.db, this.searchIndex, workspaceId, query, limit)
   }
-}
-
-function extractText(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) return value.map(extractText).join(' ')
-  if (!value || typeof value !== 'object') return ''
-  const record = value as Record<string, unknown>
-  return [record.text, record.content].map(extractText).filter(Boolean).join(' ')
 }
