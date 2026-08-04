@@ -16,21 +16,21 @@
     "dist": "pnpm build:native && pnpm build && electron-builder"
   },
   "dependencies": {
-    "electron-updater": "^6.8.9",
-    "semver": "^7.8.5",
-    "ssh2-sftp-client": "^12.1.1"
+    "electron-updater": "6.8.9",
+    "semver": "7.8.5",
+    "ssh2-sftp-client": "12.1.1"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
-    "@types/semver": "^7.7.1",
-    "@types/ssh2-sftp-client": "^9.0.6",
-    "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^43.1.1",
-    "electron-builder": "^26.0.12",
-    "electron-vite": "^5.0.0",
-    "typescript": "^7.0.2",
-    "vite": "^7.3.6",
-    "vitest": "^4.0.18"
+    "@types/node": "24.13.3",
+    "@types/semver": "7.7.1",
+    "@types/ssh2-sftp-client": "9.0.6",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "typescript": "7.0.2",
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
   },
   "build": {
     "appId": "app.notebook.next",

@@ -9,65 +9,65 @@ importers:
   .:
     devDependencies:
       '@electron/notarize':
-        specifier: ^3.1.1
+        specifier: 3.1.1
         version: 3.1.1
       oxlint:
-        specifier: ^1.75.0
+        specifier: 1.75.0
         version: 1.75.0
 
   apps/desktop:
     dependencies:
       electron-updater:
-        specifier: ^6.8.9
+        specifier: 6.8.9
         version: 6.8.9
       semver:
-        specifier: ^7.8.5
+        specifier: 7.8.5
         version: 7.8.5
       ssh2-sftp-client:
-        specifier: ^12.1.1
+        specifier: 12.1.1
         version: 12.1.1
     devDependencies:
       '@types/node':
-        specifier: ^24.10.0
+        specifier: 24.13.3
         version: 24.13.3
       '@types/semver':
-        specifier: ^7.7.1
+        specifier: 7.7.1
         version: 7.7.1
       '@types/ssh2-sftp-client':
-        specifier: ^9.0.6
+        specifier: 9.0.6
         version: 9.0.6
       '@vitejs/plugin-react':
-        specifier: ^5.2.0
+        specifier: 5.2.0
         version: 5.2.0(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
       electron:
-        specifier: ^43.1.1
+        specifier: 43.1.1
         version: 43.1.1
       electron-builder:
-        specifier: ^26.0.12
+        specifier: 26.15.3
         version: 26.15.3(electron-builder-squirrel-windows@26.15.3)
       electron-vite:
-        specifier: ^5.0.0
+        specifier: 5.0.0
         version: 5.0.0(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vite:
-        specifier: ^7.3.6
+        specifier: 7.3.6
         version: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1)
       vitest:
-        specifier: ^4.0.18
+        specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
   apps/renderer:
     dependencies:
       '@fluentui/react-components':
-        specifier: ^9.74.4
+        specifier: 9.74.4
         version: 9.74.4(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(scheduler@0.27.0)
       '@fluentui/react-icons':
-        specifier: ^2.0.319
+        specifier: 2.0.333
         version: 2.0.333(react@19.2.7)
       '@hocuspocus/provider':
-        specifier: ^4.4.0
+        specifier: 4.4.0
         version: 4.4.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       '@notebook/domain':
         specifier: workspace:*
@@ -79,137 +79,137 @@ importers:
         specifier: workspace:*
         version: link:../../packages/sync-contract
       '@tiptap/core':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/pm@3.28.0)
       '@tiptap/extension-code-block-lowlight':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/extension-code-block@3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(highlight.js@11.11.1)(lowlight@3.3.0)
       '@tiptap/extension-collaboration':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(@tiptap/y-tiptap@3.0.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.1)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(yjs@13.6.31)
       '@tiptap/extension-collaboration-caret':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(@tiptap/y-tiptap@3.0.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.1)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))
       '@tiptap/extension-image':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))
       '@tiptap/extension-list':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/extension-mathematics':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(katex@0.18.1)
       '@tiptap/extension-placeholder':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/extensions@3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0))
       '@tiptap/extension-table':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/html':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(happy-dom@20.11.0)
       '@tiptap/markdown':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/react':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@floating-ui/dom@1.8.0)(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tiptap/starter-kit':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0
       diff:
-        specifier: ^9.0.0
+        specifier: 9.0.0
         version: 9.0.0
       dompurify:
-        specifier: ^3.3.3
+        specifier: 3.4.12
         version: 3.4.12
       eventsource-parser:
-        specifier: ^3.1.0
+        specifier: 3.1.0
         version: 3.1.0
       fflate:
-        specifier: ^0.8.3
+        specifier: 0.8.3
         version: 0.8.3
       highlight.js:
-        specifier: ^11.11.1
+        specifier: 11.11.1
         version: 11.11.1
       katex:
-        specifier: ^0.18.1
+        specifier: 0.18.1
         version: 0.18.1
       lowlight:
-        specifier: ^3.3.0
+        specifier: 3.3.0
         version: 3.3.0
       minisearch:
-        specifier: ^7.2.0
+        specifier: 7.2.0
         version: 7.2.0
       plist:
         specifier: 3.1.0
         version: 3.1.0
       prosemirror-state:
-        specifier: ^1.4.4
+        specifier: 1.4.4
         version: 1.4.4
       prosemirror-view:
-        specifier: ^1.42.1
+        specifier: 1.42.1
         version: 1.42.1
       qrcode:
-        specifier: ^1.5.4
+        specifier: 1.5.4
         version: 1.5.4
       react:
-        specifier: ^19.2.0
+        specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: ^19.2.0
+        specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
       yjs:
-        specifier: ^13.6.31
+        specifier: 13.6.31
         version: 13.6.31
       zod:
-        specifier: ^4.1.13
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       '@testing-library/jest-dom':
-        specifier: ^6.9.1
+        specifier: 6.9.1
         version: 6.9.1
       '@testing-library/react':
-        specifier: ^16.3.2
+        specifier: 16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@types/plist':
         specifier: 3.0.5
         version: 3.0.5
       '@types/qrcode':
-        specifier: ^1.5.6
+        specifier: 1.5.6
         version: 1.5.6
       '@types/react':
-        specifier: ^19.2.0
+        specifier: 19.2.17
         version: 19.2.17
       '@types/react-dom':
-        specifier: ^19.2.0
+        specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
-        specifier: ^5.2.0
+        specifier: 5.2.0
         version: 5.2.0(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
       fake-indexeddb:
-        specifier: ^6.2.5
+        specifier: 6.2.5
         version: 6.2.5
       jsdom:
-        specifier: ^28.0.0
+        specifier: 28.1.0
         version: 28.1.0(@noble/hashes@2.2.0)
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vite:
-        specifier: ^7.3.6
+        specifier: 7.3.6
         version: 7.3.6(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1)
       vitest:
-        specifier: ^4.1.0
+        specifier: 4.1.10
         version: 4.1.10(@types/node@26.1.1)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
   packages/domain:
     devDependencies:
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vitest:
-        specifier: ^4.1.0
+        specifier: 4.1.10
         version: 4.1.10(@types/node@26.1.1)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
   packages/storage-renderer:
@@ -221,94 +221,94 @@ importers:
         specifier: workspace:*
         version: link:../sync-contract
       dexie:
-        specifier: ^4.4.4
+        specifier: 4.4.4
         version: 4.4.4
       minisearch:
-        specifier: ^7.2.0
+        specifier: 7.2.0
         version: 7.2.0
       zod:
-        specifier: ^4.1.13
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       fake-indexeddb:
-        specifier: ^6.2.5
+        specifier: 6.2.5
         version: 6.2.5
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vitest:
-        specifier: ^4.1.0
+        specifier: 4.1.10
         version: 4.1.10(@types/node@26.1.1)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
   packages/sync-contract:
     dependencies:
       '@noble/hashes':
-        specifier: ^2.0.1
+        specifier: 2.2.0
         version: 2.2.0
       '@notebook/domain':
         specifier: workspace:*
         version: link:../domain
       '@tiptap/core':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/pm@3.28.0)
       '@tiptap/extension-image':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))
       '@tiptap/extension-list':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/extension-table':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/markdown':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)
       '@tiptap/starter-kit':
-        specifier: ^3.28.0
+        specifier: 3.28.0
         version: 3.28.0
       zod:
-        specifier: ^4.1.13
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       '@types/node':
-        specifier: ^24.10.0
+        specifier: 24.13.3
         version: 24.13.3
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vitest:
-        specifier: ^4.1.0
+        specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
   services/collaboration:
     dependencies:
       '@hocuspocus/extension-sqlite':
-        specifier: ^4.4.0
+        specifier: 4.4.0
         version: 4.4.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       '@hocuspocus/server':
-        specifier: ^4.4.0
+        specifier: 4.4.0
         version: 4.4.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       better-sqlite3:
-        specifier: ^13.0.1
+        specifier: 13.0.1
         version: 13.0.1
       jose:
-        specifier: ^6.1.3
+        specifier: 6.2.3
         version: 6.2.3
     devDependencies:
       '@types/better-sqlite3':
-        specifier: ^7.6.13
+        specifier: 7.6.13
         version: 7.6.13
       '@types/node':
-        specifier: ^24.10.0
+        specifier: 24.13.3
         version: 24.13.3
       tsx:
-        specifier: ^4.21.0
+        specifier: 4.23.1
         version: 4.23.1
       typescript:
-        specifier: ^7.0.2
+        specifier: 7.0.2
         version: 7.0.2
       vitest:
-        specifier: ^4.1.0
+        specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(happy-dom@20.11.0)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.0)(tsx@4.23.1))
 
 packages:

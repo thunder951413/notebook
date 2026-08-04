@@ -3,25 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@notebook/domain": "workspace:*",
-    "@noble/hashes": "^2.0.1",
-    "@tiptap/core": "^3.28.0",
-    "@tiptap/extension-image": "^3.28.0",
-    "@tiptap/extension-list": "^3.28.0",
-    "@tiptap/extension-table": "^3.28.0",
-    "@tiptap/markdown": "^3.28.0",
-    "@tiptap/starter-kit": "^3.28.0",
-    "zod": "^4.1.13"
+    "@noble/hashes": "2.2.0",
+    "@tiptap/core": "3.28.0",
+    "@tiptap/extension-image": "3.28.0",
+    "@tiptap/extension-list": "3.28.0",
+    "@tiptap/extension-table": "3.28.0",
+    "@tiptap/markdown": "3.28.0",
+    "@tiptap/starter-kit": "3.28.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.0"
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
   }
 }
