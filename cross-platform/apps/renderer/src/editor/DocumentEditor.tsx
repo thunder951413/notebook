@@ -177,8 +177,10 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const bodyRef = useRef<HTMLDivElement>(null)
   const restoreTimers = useRef<number[]>([])
+  const restoredViewportPage = useRef<string | undefined>(undefined)
   const restoringViewport = useRef(false)
   const userMovedViewport = useRef(false)
+  const viewportInteractionVersion = useRef(0)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
   const latestJsonSignature = useRef<string | undefined>(content ? JSON.stringify(content) : undefined)
   const lastAppliedContent = useRef(content)
@@ -464,8 +466,30 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     // after sync/revision restore has replaced the stored document. Local saves
     // already match the editor, so a difference here is an external replacement
     // that also needs to refresh the persistent Yjs document.
+    const body = bodyRef.current
+    const previousScrollTop = body?.scrollTop
+    const previousSelection = editor.state.selection
+    const interactionVersion = viewportInteractionVersion.current
     clearTimeout(saveTimer.current)
     editor.commands.setContent(content, { emitUpdate: false })
+    const maximumPosition = editor.state.doc.content.size
+    try {
+      const anchor = Math.min(previousSelection.anchor, maximumPosition)
+      const head = Math.min(previousSelection.head, maximumPosition)
+      editor.view.dispatch(editor.state.tr
+        .setSelection(TextSelection.between(editor.state.doc.resolve(anchor), editor.state.doc.resolve(head)))
+        .setMeta('addToHistory', false))
+    } catch {
+      // A structural replacement can invalidate the old selection. In that
+      // case ProseMirror's safe default is preferable to aborting the refresh.
+    }
+    if (body && previousScrollTop !== undefined) {
+      body.scrollTop = Math.min(previousScrollTop, Math.max(0, body.scrollHeight - body.clientHeight))
+      window.requestAnimationFrame(() => {
+        if (viewportInteractionVersion.current !== interactionVersion) return
+        body.scrollTop = Math.min(previousScrollTop, Math.max(0, body.scrollHeight - body.clientHeight))
+      })
+    }
     latestJson.current = editor.getJSON()
     latestJsonSignature.current = JSON.stringify(latestJson.current)
     lastAppliedContent.current = content
@@ -477,9 +501,14 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     restoreTimers.current = []
     const body = bodyRef.current
     if (!editor || !body || !viewportPosition) return
+    // A user who already moved the viewport before the stored position arrived
+    // does not want to be interrupted. Mark the page as restored only when the
+    // restore actually starts, so a late-arriving position may still retry.
+    if (userMovedViewport.current) return
+    if (restoredViewportPage.current === pageId) return
+    restoredViewportPage.current = pageId
     let cancelled = false
     restoringViewport.current = true
-    userMovedViewport.current = false
     const apply = () => {
       if (cancelled || userMovedViewport.current) return
       const maximum = Math.max(0, body.scrollHeight - body.clientHeight)
@@ -494,6 +523,9 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         apply()
         if (delay === 700) {
           restoringViewport.current = false
+          // Never report the un-restored position after the user has taken
+          // over: the caller would persist scrollTop 0 over the saved one.
+          if (cancelled || userMovedViewport.current) return
           const maximum = Math.max(1, body.scrollHeight - body.clientHeight)
           onViewportChangeRef.current?.({ scrollTop: body.scrollTop, fraction: body.scrollTop / maximum })
         }
@@ -506,7 +538,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       restoreTimers.current = []
       restoringViewport.current = false
     }
-  }, [content, editor, pageId, viewportPosition])
+  }, [editor, pageId, viewportPosition])
 
   useEffect(() => () => {
     clearTimeout(saveTimer.current)
@@ -638,10 +670,11 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     <div
       ref={bodyRef}
       className="document-editor-body"
-      onWheel={() => { userMovedViewport.current = true; restoringViewport.current = false }}
-      onPointerDown={() => { userMovedViewport.current = true; restoringViewport.current = false }}
+      onWheel={() => { viewportInteractionVersion.current += 1; userMovedViewport.current = true; restoringViewport.current = false }}
+      onPointerDown={() => { viewportInteractionVersion.current += 1; userMovedViewport.current = true; restoringViewport.current = false }}
       onKeyDownCapture={(event) => {
-        if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '].includes(event.key)) {
+        if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+          viewportInteractionVersion.current += 1
           userMovedViewport.current = true
           restoringViewport.current = false
         }
