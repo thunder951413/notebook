@@ -36,6 +36,12 @@ function expandFiles(files: ImportFile[]): ImportFile[] {
 
 export interface DecodedImport { bundle: NotebookDataBundle; assetContents: Map<string, Uint8Array> }
 
+/**
+ * Resolve a locally available resource by its repository-local id, or by its
+ * immutable content hash when another device assigned it a different id.
+ */
+export type AssetContentLoader = (assetId: string, contentHash?: string) => Promise<Uint8Array | undefined>
+
 function documentPlainText(value: unknown): string {
   if (typeof value === 'string') return value
   if (Array.isArray(value)) return value.map(documentPlainText).join(' ')
@@ -80,7 +86,7 @@ function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknow
   return { ...encrypted, encryptedFolders: folders }
 }
 
-export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string, fallbackAssetContents: Map<string, Uint8Array> = new Map()): Promise<DecodedImport> {
+export async function decodeImport(files: ImportFile[], workspaceId: string, privacySecret?: string, fallbackAssetContents: Map<string, Uint8Array> | AssetContentLoader = new Map()): Promise<DecodedImport> {
   const expanded = expandFiles(files)
   const privacyCheckFile = expanded.find((file) => /(^|\/)notes\/privacy\.json$/i.test(file.name))
   if (privacyCheckFile) await verifyPrivacyKeyCheck(JSON.parse(strFromU8(privacyCheckFile.data)) as PrivacyKeyCheck, privacySecret)
@@ -171,18 +177,28 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
   if (!library) throw new Error('迁移包中缺少 library-envelope.json')
   if (markdownNotes.length || markdownRepositoryDetected) {
     const bundle = await importMarkdownRepository({ library, notes: markdownNotes, readingPositions: positions, index, privacySecret }, workspaceId)
+    // Fallback contents can be a prebuilt map or a lazy loader. Sync passes a
+    // loader so bytes for remote-referenced objects are read from IndexedDB on
+    // demand instead of exporting the whole attachment store up front.
     const fallbackByHash = new Map<string, Uint8Array>()
-    for (const bytes of fallbackAssetContents.values()) fallbackByHash.set(sha256Hex(bytes), bytes)
-    const assetContents = new Map(bundle.assets.flatMap((asset) => {
+    if (fallbackAssetContents instanceof Map) {
+      for (const bytes of fallbackAssetContents.values()) fallbackByHash.set(sha256Hex(bytes), bytes)
+    }
+    const loadContent = async (assetId: string, contentHash?: string) => {
+      const bytes = fallbackAssetContents instanceof Map ? fallbackAssetContents.get(assetId) : await fallbackAssetContents(assetId, contentHash)
+      if (bytes) fallbackByHash.set(sha256Hex(bytes), bytes)
+      return bytes
+    }
+    const assetContents = new Map<string, Uint8Array>()
+    for (const asset of bundle.assets) {
       const normalized = asset.localPath?.replace(/^\.\//, '')
       const file = normalized ? expanded.find((item) => item.name === normalized || item.name.endsWith(`/${normalized}`)) : undefined
-      const fallback = fallbackAssetContents.get(asset.id)
-        ?? ((asset as typeof asset & { objectHash?: string }).objectHash || asset.checksum
-          ? fallbackByHash.get(((asset as typeof asset & { objectHash?: string }).objectHash ?? asset.checksum)!.toLowerCase())
-          : undefined)
-      const data = file?.data ?? fallback
-      return data ? [[asset.id, data] as const] : []
-    }))
+      if (file?.data) { assetContents.set(asset.id, file.data); continue }
+      const declared = (asset as typeof asset & { objectHash?: string }).objectHash ?? asset.checksum
+      const direct = await loadContent(asset.id, declared?.toLowerCase())
+      const fallback = direct ?? (declared ? fallbackByHash.get(declared.toLowerCase()) : undefined)
+      if (fallback) assetContents.set(asset.id, fallback)
+    }
     return verified(bundle, assetContents)
   }
   if (notes.length === 0) throw new Error('迁移包中没有可导入的笔记信封')

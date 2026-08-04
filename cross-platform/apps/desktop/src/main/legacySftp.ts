@@ -1,4 +1,5 @@
 import SftpClient from 'ssh2-sftp-client'
+import { Client } from 'ssh2'
 import { createHash, randomUUID } from 'node:crypto'
 import { posix } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
@@ -12,10 +13,18 @@ export interface LegacySshConnection {
   fingerprint?: string
 }
 
-export interface LegacySftpFile { name: string; dataBase64: string }
+export interface LegacySftpFile { name: string; data: Uint8Array }
 export interface LegacySftpPullOptions {
   knownObjectHashes?: string[]
   knownNoteSignatures?: Array<{ noteID: string; signature: string }>
+  /** Skip note bodies and objects; only repository metadata is returned. */
+  metadataOnly?: boolean
+  /** Reuse the SSH connection opened by a previous pull/push. */
+  sessionId?: string
+}
+export interface LegacySftpPushOptions {
+  knownObjectHashes?: string[]
+  sessionId?: string
 }
 export interface LegacySftpPullResult {
   files: LegacySftpFile[]
@@ -24,6 +33,7 @@ export interface LegacySftpPullResult {
   objectHashes: string[]
   reusedObjectCount: number
   reusedNoteIds: string[]
+  sessionId: string
 }
 
 export interface LegacySftpConnectionResult {
@@ -33,11 +43,22 @@ export interface LegacySftpConnectionResult {
   latencyMs: number
 }
 
+export interface LegacySftpHelperResult {
+  ok: boolean
+  /** Binary payload for export-tar; undefined for the other operations. */
+  data?: Uint8Array
+  /** Human-readable result, e.g. verify errors or gc removed count. */
+  message: string
+}
+
 const MAX_FILE_BYTES = 100 * 1024 * 1024
 const MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
+const MAX_HELPER_STDERR_BYTES = 16 * 1024 * 1024
 const LOCK_RETRIES = 30
 const LOCK_STALE_MS = 30 * 60 * 1000
 const LOCK_HEARTBEAT_MS = 60 * 1000
+const TRANSFER_CONCURRENCY = 4
+const SESSION_IDLE_MS = 60 * 1000
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const isUuid = (value: string | undefined): value is string => Boolean(value && uuidPattern.test(value))
 const COMPRESSED_REPOSITORY_VERSION = 2
@@ -52,6 +73,20 @@ const pulledNoteCache = new Map<string, { signature: string; data: Buffer }>()
 const pulledObjectCache = new Map<string, { contentHash: string; data: Buffer }>()
 const MAX_NOTE_CACHE_BYTES = 128 * 1024 * 1024
 const MAX_OBJECT_CACHE_BYTES = 64 * 1024 * 1024
+
+interface SftpSession {
+  id: string
+  client: SftpClient
+  root: string
+  fingerprint: string
+  key: string
+  /** Settings identity used to validate a renderer-provided session id. */
+  settingsKey: string
+  lastUsed: number
+  timer?: NodeJS.Timeout
+}
+const sessions = new Map<string, SftpSession>()
+let sessionCounter = 0
 
 function cacheBuffer<T extends { data: Buffer }>(cache: Map<string, T>, key: string, value: T, maximumBytes: number) {
   cache.delete(key)
@@ -183,6 +218,65 @@ async function connect(settings: LegacySshConnection) {
   return { client, root, fingerprint: presented }
 }
 
+function settingsSessionKey(settings: LegacySshConnection) {
+  return `${settings.host.trim()}:${settings.port}:${settings.username.trim()}:${settings.remotePath.trim()}`
+}
+
+function canReuseSession(session: SftpSession, settings: LegacySshConnection) {
+  const expectedFingerprint = settings.fingerprint?.trim()
+  return session.settingsKey === settingsSessionKey(settings) && (!expectedFingerprint || session.fingerprint === expectedFingerprint)
+}
+
+/**
+ * SFTP sessions keep the SSH connection alive between the pull and push phases
+ * of one sync, avoiding a second handshake per synchronization. Sessions are
+ * released explicitly by the renderer or expire after an idle period.
+ */
+async function sessionFor(settings: LegacySshConnection, sessionId?: string): Promise<SftpSession> {
+  if (sessionId) {
+    const existing = sessions.get(sessionId)
+    if (existing && canReuseSession(existing, settings)) {
+      existing.lastUsed = Date.now()
+      scheduleSessionCleanup(existing)
+      return existing
+    }
+  }
+  const connected = await connect(settings)
+  const key = `${settings.host.trim()}:${settings.port}:${settings.username.trim()}:${connected.root}`
+  const existing = [...sessions.values()].find((session) => session.key === key && canReuseSession(session, settings))
+  if (existing) {
+    await connected.client.end().catch(() => undefined)
+    existing.lastUsed = Date.now()
+    scheduleSessionCleanup(existing)
+    return existing
+  }
+  const session: SftpSession = { id: `s${++sessionCounter}`, client: connected.client, root: connected.root, fingerprint: connected.fingerprint, key, settingsKey: settingsSessionKey(settings), lastUsed: Date.now() }
+  sessions.set(session.id, session)
+  scheduleSessionCleanup(session)
+  return session
+}
+
+function scheduleSessionCleanup(session: SftpSession) {
+  if (session.timer) clearTimeout(session.timer)
+  session.timer = setTimeout(() => {
+    if (Date.now() - session.lastUsed >= SESSION_IDLE_MS) {
+      sessions.delete(session.id)
+      void session.client.end().catch(() => undefined)
+    } else {
+      scheduleSessionCleanup(session)
+    }
+  }, SESSION_IDLE_MS)
+  session.timer.unref?.()
+}
+
+export async function releaseLegacySession(sessionId: string) {
+  const session = sessions.get(sessionId)
+  if (!session) return
+  sessions.delete(sessionId)
+  if (session.timer) clearTimeout(session.timer)
+  await session.client.end().catch(() => undefined)
+}
+
 export async function testLegacyConnection(settings: LegacySshConnection): Promise<LegacySftpConnectionResult> {
   const startedAt = Date.now()
   const { client, root, fingerprint: actualFingerprint } = await connect(settings)
@@ -200,13 +294,64 @@ export async function testLegacyConnection(settings: LegacySshConnection): Promi
   }
 }
 
-async function readOptional(client: SftpClient, path: string): Promise<Buffer | undefined> {
-  if (!(await client.exists(path))) return undefined
-  const stats = await client.stat(path)
-  if (stats.size > MAX_FILE_BYTES) throw new Error(`远端文件超过 100 MB：${posix.basename(path)}`)
-  const value = await client.get(path)
-  if (!Buffer.isBuffer(value)) throw new Error(`无法读取远端文件：${path}`)
-  return value
+function isNoSuchFile(error: unknown) {
+  const code = (error as { code?: unknown }).code
+  return code === 2 || (error instanceof Error && /no such file|not found|ENOENT/i.test(error.message))
+}
+
+/**
+ * Reads a bounded remote file. Missing files return undefined instead of
+ * throwing.  When the caller has a directory-listing size it is passed in to
+ * avoid a second stat; direct callers stat before downloading so a malicious
+ * or accidentally huge optional file is never buffered in memory.
+ */
+async function readOptional(client: SftpClient, path: string, maximumBytes = MAX_FILE_BYTES, knownSize?: number): Promise<Buffer | undefined> {
+  try {
+    const size = knownSize ?? (await client.stat(path)).size
+    if (size > maximumBytes) throw new Error(`远端文件超过 ${Math.floor(maximumBytes / 1024 / 1024)} MB：${posix.basename(path)}`)
+    const value = await client.get(path)
+    if (!Buffer.isBuffer(value)) throw new Error(`无法读取远端文件：${path}`)
+    if (value.byteLength > maximumBytes) throw new Error(`远端文件超过 ${Math.floor(maximumBytes / 1024 / 1024)} MB：${posix.basename(path)}`)
+    return value
+  } catch (error) {
+    if (isNoSuchFile(error)) return undefined
+    throw error
+  }
+}
+
+async function listOptional(client: SftpClient, path: string): Promise<Map<string, { size: number }> | undefined> {
+  try {
+    const entries = await client.list(path)
+    return new Map(entries.map((entry) => [entry.name, { size: entry.size }]))
+  } catch (error) {
+    if (isNoSuchFile(error)) return undefined
+    throw error
+  }
+}
+
+function mapWithConcurrency<T>(values: T[], limit: number, worker: (value: T) => Promise<void>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let index = 0
+    let active = 0
+    let failed = false
+    const next = () => {
+      if (failed) return
+      while (active < limit && index < values.length) {
+        const current = index
+        index += 1
+        active += 1
+        void worker(values[current]!).then(() => {
+          active -= 1
+          next()
+        }, (error) => {
+          failed = true
+          reject(error)
+        })
+      }
+      if (active === 0 && index >= values.length) resolve()
+    }
+    next()
+  })
 }
 
 async function acquireLock(client: SftpClient, root: string) {
@@ -275,14 +420,22 @@ async function releaseLock(client: SftpClient, lock: { lockPath: string; ownerPa
   await client.rmdir(lock.lockPath, false).catch(() => undefined)
 }
 
-async function atomicWrite(client: SftpClient, path: string, data: Buffer) {
+/**
+ * Writes a remote file atomically via a temporary name and rename. The
+ * read-back verification is only applied to files that are not content
+ * addressed: notes and objects carry their own hashes which the next pull
+ * validates, so the extra round trip is skipped for them.
+ */
+async function atomicWrite(client: SftpClient, path: string, data: Buffer, verify = false) {
   if (data.byteLength > MAX_FILE_BYTES) throw new Error(`文件超过 100 MB：${posix.basename(path)}`)
   await client.mkdir(posix.dirname(path), true)
   const temporary = `${path}.tmp.notebook-next.${randomUUID()}`
   try {
     await client.put(data, temporary)
-    const check = await readOptional(client, temporary)
-    if (!check || sha256(check) !== sha256(data)) throw new Error(`远端临时文件校验失败：${posix.basename(path)}`)
+    if (verify) {
+      const check = await readOptional(client, temporary)
+      if (!check || sha256(check) !== sha256(data)) throw new Error(`远端临时文件校验失败：${posix.basename(path)}`)
+    }
     try { await client.posixRename(temporary, path) }
     catch { if (await client.exists(path)) await client.delete(path); await client.rename(temporary, path) }
   } catch (error) {
@@ -291,8 +444,11 @@ async function atomicWrite(client: SftpClient, path: string, data: Buffer) {
   }
 }
 
+const verifyOnWrite = (name: string) => name === 'notes/index.json' || name === 'notes/privacy.json'
+
 export async function pullLegacyRepository(settings: LegacySshConnection, options: LegacySftpPullOptions = {}): Promise<LegacySftpPullResult> {
-  const { client, root, fingerprint: actualFingerprint } = await connect(settings)
+  const session = await sessionFor(settings, options.sessionId)
+  const { client, root } = session
   try {
     await client.mkdir(root, true)
     const files = new Map<string, Buffer>()
@@ -308,12 +464,21 @@ export async function pullLegacyRepository(settings: LegacySshConnection, option
       if (totalBytes > MAX_REPOSITORY_BYTES) throw new Error('远端同步仓库超过 512 MB 单次传输上限；请清理无用附件或拆分仓库后重试')
       files.set(name, value)
     }
-    const add = async (name: string, remoteName = name, transform?: (value: Buffer) => Buffer) => {
+    // Directory listings replace the per-file exists+stat round trips. The
+    // notes listing also tells us which notes actually exist, so downloads are
+    // a single get each.
+    const rootListing = await listOptional(client, root)
+    const notesListing = await listOptional(client, posix.join(root, 'notes'))
+    // The listing avoids an extra stat for repository metadata; readOptional
+    // still verifies the received bytes in case a concurrent writer replaces a
+    // file between listing and download.
+    const readListed = async (name: string, listing: Map<string, { size: number }> | undefined, transform?: (value: Buffer) => Buffer) => {
       if (files.has(name)) return
-      const remoteValue = await readOptional(client, posix.join(root, remoteName))
-      if (!remoteValue) return
-      const value = transform ? transform(remoteValue) : remoteValue
-      addValue(name, value)
+      const listed = listing?.get(posix.basename(name))
+      if (!listed) return
+      const value = await readOptional(client, posix.join(root, name), MAX_FILE_BYTES, listed.size)
+      if (!value) return
+      addValue(name, transform ? transform(value) : value)
     }
     // Pulls are optimistic snapshots. Publishing clients write the index last;
     // reading it both before and after avoids holding the cross-device write
@@ -321,13 +486,17 @@ export async function pullLegacyRepository(settings: LegacySshConnection, option
     // from leaving Android blocked behind a stale lock.
     const remoteIndex = await readOptional(client, posix.join(root, 'notes/index.json'))
     if (remoteIndex) addValue('notes/index.json', remoteIndex)
-    await add('library.json'); await add('notes/reading_positions.json'); await add('notes/assets_manifest.json'); await add('notes/privacy.json')
+    for (const name of ['library.json', 'notes/reading_positions.json', 'notes/assets_manifest.json', 'notes/privacy.json']) {
+      await readListed(name, name.startsWith('notes/') ? notesListing : rootListing)
+    }
     const index = remoteIndex ? normalizeRepositoryIndex(remoteIndex) : undefined
     if (index) files.set('notes/index.json', index)
-    if (index) {
+    if (index && !options.metadataOnly) {
       const parsed = JSON.parse(index.toString('utf8')) as { entries?: Array<{ noteID?: string; version?: number; contentHash?: string; historyCount?: number }> }
       const compressed = usesCompressedNotes(index)
-      for (const entry of parsed.entries ?? []) if (isUuid(entry.noteID)) {
+      const entries = parsed.entries ?? []
+      const pending: Array<{ entry: NonNullable<typeof parsed.entries>[number]; name: string; cacheKey: string; signature: string }> = []
+      for (const entry of entries) if (isUuid(entry.noteID)) {
         const name = `notes/${entry.noteID}.json`
         const cacheKey = `${cacheNamespace}:${entry.noteID}`
         const signature = `${entry.version ?? 0}:${entry.contentHash ?? ''}:${entry.historyCount ?? 0}:${compressed ? 'gzip' : 'json'}`
@@ -337,22 +506,30 @@ export async function pullLegacyRepository(settings: LegacySshConnection, option
         }
         const cached = pulledNoteCache.get(cacheKey)
         if (cached?.signature === signature) addValue(name, cached.data)
-        else {
-          if (compressed) await add(name, compressedNotePath(entry.noteID), (value) => decodeCompressedNote(value, name))
-          else await add(name)
-          const data = files.get(name)
-          if (data) cacheBuffer(pulledNoteCache, cacheKey, { signature, data }, MAX_NOTE_CACHE_BYTES)
-        }
+        else pending.push({ entry, name, cacheKey, signature })
       }
+      await mapWithConcurrency(pending, TRANSFER_CONCURRENCY, async ({ entry, name, cacheKey, signature }) => {
+        const remoteName = compressed ? compressedNotePath(entry.noteID!) : name
+        const value = await readOptional(client, posix.join(root, remoteName))
+        if (!value) return
+        const decoded = compressed ? decodeCompressedNote(value, name) : value
+        addValue(name, decoded)
+        cacheBuffer(pulledNoteCache, cacheKey, { signature, data: decoded }, MAX_NOTE_CACHE_BYTES)
+      })
     }
     const manifest = files.get('notes/assets_manifest.json')
     if (manifest) {
+      // The manifest is parsed even in metadataOnly mode so callers can learn
+      // the remote object hash set without downloading a single object.
       const parsed = JSON.parse(manifest.toString('utf8')) as { entries?: Array<{ relativePath?: string; contentHash?: string }> }
-      for (const entry of parsed.entries ?? []) if (typeof entry.relativePath === 'string') {
+      const entries = parsed.entries ?? []
+      const pending: Array<{ name: string; contentHash?: string }> = []
+      for (const entry of entries) if (typeof entry.relativePath === 'string') {
         const relative = safeRelativePath(entry.relativePath)
         const name = relative.startsWith('objects/') ? relative : `attachments/${relative}`
         const contentHash = entry.contentHash?.toLowerCase()
         if (contentHash && /^[0-9a-f]{64}$/.test(contentHash)) remoteObjectHashes.add(contentHash)
+        if (options.metadataOnly) continue
         if (contentHash && knownObjectHashes.has(contentHash)) {
           reusedObjectCount += 1
           continue
@@ -360,11 +537,15 @@ export async function pullLegacyRepository(settings: LegacySshConnection, option
         const cacheKey = `${cacheNamespace}:${name}`
         const cached = entry.contentHash ? pulledObjectCache.get(cacheKey) : undefined
         if (cached && cached.contentHash === entry.contentHash) addValue(name, cached.data)
-        else {
-          await add(name)
-          const data = files.get(name)
-          if (data && entry.contentHash) cacheBuffer(pulledObjectCache, cacheKey, { contentHash: entry.contentHash, data }, MAX_OBJECT_CACHE_BYTES)
-        }
+        else pending.push({ name, contentHash: entry.contentHash })
+      }
+      if (!options.metadataOnly) {
+        await mapWithConcurrency(pending, TRANSFER_CONCURRENCY, async ({ name, contentHash }) => {
+          const value = await readOptional(client, posix.join(root, name))
+          if (!value) return
+          addValue(name, value)
+          if (contentHash) cacheBuffer(pulledObjectCache, `${cacheNamespace}:${name}`, { contentHash, data: value }, MAX_OBJECT_CACHE_BYTES)
+        })
       }
     }
     const finalIndex = await readOptional(client, posix.join(root, 'notes/index.json'))
@@ -372,24 +553,26 @@ export async function pullLegacyRepository(settings: LegacySshConnection, option
       throw new Error('远端索引在拉取期间已变化，请重新同步')
     }
     return {
-      files: [...files].map(([name, data]) => ({ name, dataBase64: data.toString('base64') })),
+      files: [...files].map(([name, data]) => ({ name, data: new Uint8Array(data) })),
       indexHash: remoteIndex ? sha256(remoteIndex) : '',
-      fingerprint: actualFingerprint,
+      fingerprint: session.fingerprint,
       objectHashes: [...remoteObjectHashes],
       reusedObjectCount,
       reusedNoteIds,
+      sessionId: session.id,
     }
   } finally {
-    await client.end().catch(() => undefined)
+    // The session stays open so the caller can push over the same connection.
   }
 }
 
-export async function pushLegacyRepository(settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string) {
-  const { client, root, fingerprint: actualFingerprint } = await connect(settings)
+export async function pushLegacyRepository(settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string, options: LegacySftpPushOptions = {}) {
+  const session = await sessionFor(settings, options.sessionId)
+  const { client, root } = session
   let lock: { lockPath: string; ownerPath: string; owner: string } | undefined
   let finishHeartbeat: (() => Promise<void>) | undefined
   try {
-    const normalized = files.map((file) => ({ name: safeRelativePath(file.name), data: Buffer.from(file.dataBase64, 'base64') }))
+    const normalized = files.map((file) => ({ name: safeRelativePath(file.name), data: Buffer.from(file.data) }))
     if (normalized.some((file) => !isAllowedRepositoryFile(file.name))) throw new Error('同步请求包含不允许的远端路径')
     if (normalized.reduce((sum, item) => sum + item.data.byteLength, 0) > MAX_REPOSITORY_BYTES) throw new Error('待上传同步仓库超过 512 MB 单次传输上限')
     await client.mkdir(root, true)
@@ -419,18 +602,394 @@ export async function pushLegacyRepository(settings: LegacySshConnection, files:
       if (file.name.endsWith('.json')) return [{ ...file, data: compactJson(file.data) }]
       return [file]
     })
-    const priority = (name: string) => name === 'library.json' ? 0 : name.startsWith('attachments/') || name.startsWith('objects/') ? 1 : name === 'notes/assets_manifest.json' ? 2 : /^notes\/[0-9a-f-]{36}\.json\.gz$/i.test(name) ? 3 : name === 'notes/privacy.json' ? 4 : name === 'notes/reading_positions.json' ? 5 : 6
-    encoded.sort((left, right) => priority(left.name) - priority(right.name) || left.name.localeCompare(right.name))
-    for (const file of encoded) {
-      if (file.name.startsWith('objects/') && await client.exists(posix.join(root, file.name))) continue
-      await atomicWrite(client, posix.join(root, file.name), file.data)
+    const knownObjects = new Set((options.knownObjectHashes ?? []).filter((value) => /^[0-9a-f]{64}$/i.test(value)).map((value) => value.toLowerCase()))
+    const upload = async (file: { name: string; data: Buffer }) => {
+      // Objects the renderer already knows about are skipped without a remote
+      // exists check; unknown names still get one as a defensive guard.
+      if (file.name.startsWith('objects/')) {
+        const hash = file.name.split('/').pop()!.toLowerCase()
+        if (!knownObjects.has(hash) && await client.exists(posix.join(root, file.name))) return
+      }
+      await atomicWrite(client, posix.join(root, file.name), file.data, verifyOnWrite(file.name))
     }
+    // Upload in dependency order while transferring each wave concurrently:
+    // objects first, then notes and metadata, and the index last so readers
+    // never observe a half-published repository.
+    const firstWave = encoded.filter((file) => file.name === 'library.json' || file.name.startsWith('attachments/') || file.name.startsWith('objects/'))
+    const secondWave = encoded.filter((file) => !firstWave.includes(file) && file.name !== 'notes/index.json')
+    await mapWithConcurrency(firstWave, TRANSFER_CONCURRENCY, upload)
+    await mapWithConcurrency(secondWave, TRANSFER_CONCURRENCY, upload)
+    const indexFile = encoded.find((file) => file.name === 'notes/index.json')
+    if (indexFile) await atomicWrite(client, posix.join(root, indexFile.name), indexFile.data, true)
     await finishHeartbeat()
     finishHeartbeat = undefined
-    return { fingerprint: actualFingerprint }
+    return { fingerprint: session.fingerprint, sessionId: session.id }
   } finally {
     if (finishHeartbeat) await finishHeartbeat().catch(() => undefined)
     if (lock) await releaseLock(client, lock)
-    await client.end().catch(() => undefined)
+  }
+}
+
+/**
+ * Repository maintenance helper. The helper is a single-file Python 3 script
+ * executed over an SSH channel (fed via base64 so no quoting issues and no
+ * files need to be uploaded); servers without python3 return a non-zero exit
+ * and callers fall back to the plain SFTP path.
+ */
+const REPOSITORY_HELPER = String.raw`import gzip, hashlib, json, os, posixpath, shutil, sys, tarfile, tempfile, time, uuid
+
+ALLOWED_ROOT_FILES = {'library.json', 'notes/index.json', 'notes/reading_positions.json', 'notes/assets_manifest.json', 'notes/privacy.json'}
+MAX_FILE_BYTES = 100 * 1024 * 1024
+MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
+
+def safe(name):
+    norm = posixpath.normpath(name.replace('\\\\', '/'))
+    if norm in ('', '.', '..') or norm.startswith('/') or norm.startswith('../'):
+        return None
+    return norm
+
+def is_note(name):
+    if not name.startswith('notes/') or not name.endswith('.json.gz'):
+        return False
+    note = name[len('notes/'):-len('.json.gz')]
+    return len(note) == 36 and note.count('-') == 4
+
+def is_object(name):
+    parts = name.split('/')
+    return len(parts) == 3 and parts[0] == 'objects' and len(parts[1]) == 2 and len(parts[2]) == 64
+
+def allowed(name):
+    return name in ALLOWED_ROOT_FILES or is_note(name) or is_object(name) or (name.startswith('attachments/') and len(name) > len('attachments/'))
+
+def die(message):
+    print(json.dumps({'ok': False, 'error': message}), file=sys.stderr)
+    sys.exit(1)
+
+def acquire_lock(root):
+    notes_dir = os.path.join(root, 'notes')
+    os.makedirs(notes_dir, exist_ok=True)
+    lock_path = os.path.join(notes_dir, '.index-write.lock')
+    owner_path = os.path.join(lock_path, 'owner')
+    owner = str(uuid.uuid4())
+    try:
+        os.mkdir(lock_path)
+    except FileExistsError:
+        die('repository is locked by another device')
+    try:
+        with open(owner_path, 'w', encoding='utf-8') as f:
+            f.write(owner + '\\n')
+        os.utime(lock_path, None)
+    except Exception:
+        shutil.rmtree(lock_path, ignore_errors=True)
+        raise
+    return lock_path, owner_path, owner
+
+def heartbeat(lock_path, owner_path, owner):
+    try:
+        with open(owner_path, 'r', encoding='utf-8') as f:
+            if f.read().strip() != owner:
+                die('repository lock ownership changed')
+        os.utime(lock_path, None)
+    except FileNotFoundError:
+        die('repository lock ownership changed')
+
+def release_lock(lock_path, owner_path, owner):
+    try:
+        with open(owner_path, 'r', encoding='utf-8') as f:
+            if f.read().strip() != owner:
+                return
+        os.remove(owner_path)
+        os.rmdir(lock_path)
+    except OSError:
+        pass
+
+def main(op, root):
+    if not os.path.isabs(root):
+        die('root must be absolute')
+    if op == 'export-tar':
+        try:
+            out = tarfile.open(fileobj=sys.stdout.buffer, mode='w|')
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for filename in filenames:
+                    if '.tmp.notebook-next.' in filename or filename.endswith('.tmp'):
+                        continue
+                    full = os.path.join(dirpath, filename)
+                    rel = posixpath.relpath(full, root)
+                    if not allowed(rel):
+                        continue
+                    out.add(full, arcname=rel, recursive=False)
+            out.close()
+        except Exception as error:
+            die('export failed: %s' % error)
+    elif op == 'import-tar':
+        lock_path = owner_path = stage = None
+        try:
+            os.makedirs(root, exist_ok=True)
+            lock_path, owner_path, owner = acquire_lock(root)
+            stage = tempfile.mkdtemp(prefix='.notebook-next-import-', dir=root)
+            total = 0
+            with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
+                for member in archive:
+                    rel = safe(member.name)
+                    if not rel or not allowed(rel):
+                        die('unsafe path: %s' % member.name)
+                    if not member.isfile():
+                        die('unsupported archive member: %s' % member.name)
+                    if member.size < 0 or member.size > MAX_FILE_BYTES:
+                        die('archive member exceeds 100 MB: %s' % member.name)
+                    total += member.size
+                    if total > MAX_REPOSITORY_BYTES:
+                        die('archive exceeds 512 MB')
+                    target = os.path.join(stage, *rel.split('/'))
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        die('cannot extract archive member: %s' % member.name)
+                    with open(target, 'wb') as out:
+                        written = 0
+                        while True:
+                            chunk = extracted.read(65536)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > MAX_FILE_BYTES:
+                                die('archive member exceeds 100 MB: %s' % member.name)
+                            out.write(chunk)
+                            heartbeat(lock_path, owner_path, owner)
+            staged = []
+            for dirpath, _dirnames, filenames in os.walk(stage):
+                for filename in filenames:
+                    full = os.path.join(dirpath, filename)
+                    rel = posixpath.relpath(full, stage)
+                    staged.append((rel, full))
+            # Publish the index last, matching normal SFTP synchronization, so
+            # readers never observe an index that references unpublished files.
+            staged.sort(key=lambda item: (item[0] == 'notes/index.json', item[0]))
+            for rel, full in staged:
+                target = os.path.join(root, *rel.split('/'))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.replace(full, target)
+                heartbeat(lock_path, owner_path, owner)
+            print(json.dumps({'ok': True}))
+        except Exception as error:
+            die('import failed: %s' % error)
+        finally:
+            if stage:
+                shutil.rmtree(stage, ignore_errors=True)
+            if lock_path:
+                release_lock(lock_path, owner_path, owner)
+    elif op == 'verify':
+        errors = []
+        objects_dir = os.path.join(root, 'objects')
+        if os.path.isdir(objects_dir):
+            for prefix in sorted(os.listdir(objects_dir)):
+                prefix_dir = os.path.join(objects_dir, prefix)
+                if not os.path.isdir(prefix_dir):
+                    continue
+                for name in sorted(os.listdir(prefix_dir)):
+                    digest = hashlib.sha256()
+                    with open(os.path.join(prefix_dir, name), 'rb') as f:
+                        while True:
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                    if digest.hexdigest() != name:
+                        errors.append('objects/%s/%s hash mismatch' % (prefix, name))
+        notes_dir = os.path.join(root, 'notes')
+        if os.path.isdir(notes_dir):
+            for name in sorted(os.listdir(notes_dir)):
+                if not name.endswith('.json.gz'):
+                    continue
+                full = os.path.join(notes_dir, name)
+                try:
+                    with gzip.open(full, 'rb') as f:
+                        value = json.load(f)
+                    if not isinstance(value, dict) or value.get('noteID') != name[:-len('.json.gz')]:
+                        errors.append('notes/%s noteID mismatch' % name)
+                except Exception as error:
+                    errors.append('notes/%s invalid: %s' % (name, error))
+        index_path = os.path.join(root, 'notes/index.json')
+        if os.path.exists(index_path):
+            try:
+                with open(index_path, 'rb') as f:
+                    json.load(f)
+            except Exception as error:
+                errors.append('notes/index.json invalid: %s' % error)
+        print(json.dumps({'ok': not errors, 'errors': errors}))
+    elif op == 'gc':
+        lock_path = owner_path = None
+        try:
+            os.makedirs(root, exist_ok=True)
+            lock_path, owner_path, owner = acquire_lock(root)
+            declared = set()
+            manifest_path = os.path.join(root, 'notes/assets_manifest.json')
+            if os.path.exists(manifest_path):
+                with open(manifest_path, 'rb') as f:
+                    manifest = json.load(f)
+                for entry in manifest.get('entries', []):
+                    rel = entry.get('relativePath', '')
+                    if rel.startswith('objects/'):
+                        declared.add(rel.split('/')[-1])
+            heartbeat(lock_path, owner_path, owner)
+            removed = 0
+            objects_dir = os.path.join(root, 'objects')
+            if os.path.isdir(objects_dir):
+                for prefix in sorted(os.listdir(objects_dir)):
+                    prefix_dir = os.path.join(objects_dir, prefix)
+                    if not os.path.isdir(prefix_dir):
+                        continue
+                    for name in sorted(os.listdir(prefix_dir)):
+                        if name not in declared:
+                            os.remove(os.path.join(prefix_dir, name))
+                            removed += 1
+                        heartbeat(lock_path, owner_path, owner)
+            print(json.dumps({'ok': True, 'removed': removed}))
+        except Exception as error:
+            die('gc failed: %s' % error)
+        finally:
+            if lock_path:
+                release_lock(lock_path, owner_path, owner)
+    else:
+        die('unknown op: %s' % op)
+
+`
+// The helper is executed as `python3 -c "..."`. The script itself, the
+// operation and the repository root travel as base64 payloads, which contain
+// no shell metacharacters inside double quotes; the caller invokes `main()`
+// explicitly after exec so the repository root reaches the script without
+// environment plumbing. stdin stays available for import-tar payloads.
+function helperCommand(op: string, root: string) {
+  const script = Buffer.from(REPOSITORY_HELPER).toString('base64')
+  return `python3 -c "import base64,sys;exec(base64.b64decode('${script}'));main(base64.b64decode('${Buffer.from(op).toString('base64')}').decode(),base64.b64decode('${Buffer.from(root).toString('base64')}').decode())"`
+}
+
+interface ExecResult { code: number; stdout: Uint8Array; stderr: string }
+
+async function connectExec(settings: LegacySshConnection) {
+  validateConnection(settings)
+  const client = new Client()
+  let presented = ''
+  const expected = settings.fingerprint?.trim() ?? ''
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        client.removeListener('ready', onReady)
+        reject(error)
+      }
+      const onReady = () => {
+        client.removeListener('error', onError)
+        resolve()
+      }
+      client.once('error', onError)
+      client.once('ready', onReady)
+      client.connect({
+        host: settings.host.trim(), port: settings.port, username: settings.username.trim(), password: settings.password,
+        readyTimeout: 15_000, keepaliveInterval: 15_000, keepaliveCountMax: 3,
+        hostVerifier: (key: Buffer) => {
+          presented = fingerprint(key)
+          return !expected || presented === expected
+        },
+      })
+    })
+  } catch (error) {
+    client.end()
+    if (expected && presented && presented !== expected) throw new Error(`SSH 主机指纹已变化|${expected}|${presented}`, { cause: error })
+    throw error
+  }
+  if (!presented) { client.end(); throw new Error('服务器没有提供可校验的 SSH 主机密钥') }
+  // ssh2 emits connection-level errors after the ready event as well. Keeping
+  // a listener prevents an unhandled EventEmitter error from crashing the main
+  // process; command streams still surface their own failure to the caller.
+  client.on('error', () => undefined)
+  return client
+}
+
+function execCommand(client: Client, command: string, input?: Uint8Array, maximumStdout = MAX_REPOSITORY_BYTES): Promise<ExecResult> {
+  return new Promise((resolve, reject) => {
+    client.exec(command, (error, stream) => {
+      if (error) { reject(error); return }
+      const chunks: Buffer[] = []
+      let stdoutBytes = 0
+      let stderr = ''
+      let stderrBytes = 0
+      let settled = false
+      const onClientError = (reason: Error) => {
+        stream.close()
+        rejectOnce(reason)
+      }
+      const cleanup = () => client.removeListener('error', onClientError)
+      const rejectOnce = (reason: unknown) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(reason)
+      }
+      const resolveOnce = (value: ExecResult) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(value)
+      }
+      client.once('error', onClientError)
+      stream.on('data', (chunk: Buffer) => {
+        if (settled) return
+        stdoutBytes += chunk.byteLength
+        if (stdoutBytes > maximumStdout) {
+          stream.close()
+          rejectOnce(new Error('服务器 helper 输出超过 512 MB 上限'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      stream.stderr.on('data', (chunk: Buffer) => {
+        if (settled) return
+        stderrBytes += chunk.byteLength
+        if (stderrBytes > MAX_HELPER_STDERR_BYTES) {
+          stream.close()
+          rejectOnce(new Error('服务器 helper 错误输出超过 16 MB 上限'))
+          return
+        }
+        stderr += chunk.toString('utf8')
+      })
+      stream.on('close', (code: number | null) => resolveOnce({ code: code ?? -1, stdout: new Uint8Array(Buffer.concat(chunks)), stderr }))
+      stream.on('error', rejectOnce)
+      if (input) stream.write(input)
+      stream.end()
+    })
+  })
+}
+
+export async function runRepositoryHelper(settings: LegacySshConnection, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<LegacySftpHelperResult> {
+  if (input && input.byteLength > MAX_REPOSITORY_BYTES) throw new Error('待导入仓库超过 512 MB 上限')
+  const client = await connectExec(settings)
+  try {
+    const cwdResult = await execCommand(client, 'pwd', undefined, 1024 * 1024)
+    const home = cwdResult.stdout.length ? new TextDecoder().decode(cwdResult.stdout).trim() : ''
+    const configured = settings.remotePath.trim()
+    const root = configured === '~' ? home : configured.startsWith('~/') ? posix.join(home, configured.slice(2)) : configured.startsWith('/') ? posix.normalize(configured) : posix.join(home, configured)
+    const result = await execCommand(client, helperCommand(operation, root), input)
+    if (operation === 'export-tar') {
+      // The tar stream is raw; a failed helper prints a JSON error to stderr.
+      if (result.code !== 0 || result.stdout.byteLength === 0) {
+        throw new Error(result.stderr.trim() || `服务器 helper 导出失败（退出码 ${result.code}）`)
+      }
+      return { ok: true, data: result.stdout, message: `${result.stdout.byteLength} 字节` }
+    }
+    let parsed: { ok?: boolean; error?: string; errors?: string[]; removed?: number }
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(result.stdout)) as typeof parsed
+    } catch {
+      throw new Error(result.stderr.trim() || `服务器 helper 返回了无法解析的结果（退出码 ${result.code}）`)
+    }
+    if (result.code !== 0 || parsed.ok === false) throw new Error((parsed.error ?? result.stderr.trim()) || '服务器 helper 执行失败')
+    if (operation === 'verify') {
+      const errors = parsed.errors ?? []
+      return { ok: true, message: errors.length ? `发现 ${errors.length} 个问题：${errors.join('；')}` : '仓库校验通过' }
+    }
+    if (operation === 'gc') return { ok: true, message: `已清理 ${parsed.removed ?? 0} 个孤儿对象` }
+    return { ok: true, message: '仓库已导入' }
+  } finally {
+    client.end()
   }
 }

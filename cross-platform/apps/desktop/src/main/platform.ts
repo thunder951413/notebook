@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
-import { pullLegacyRepository, pushLegacyRepository, testLegacyConnection, type LegacySftpFile, type LegacySftpPullOptions, type LegacySshConnection } from './legacySftp'
+import { pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection, type LegacySftpFile, type LegacySftpHelperResult, type LegacySftpPullOptions, type LegacySftpPushOptions, type LegacySshConnection } from './legacySftp'
 import { appendDiagnosticEvent, diagnosticLogPath, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
@@ -245,8 +245,16 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     assertTrustedSender(event)
     return testLegacyConnection(settings)
   })
-  ipcMain.handle('legacySftp:push', async (event, settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string) => {
+  ipcMain.handle('legacySftp:push', async (event, settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string, pushOptions?: LegacySftpPushOptions) => {
     assertTrustedSender(event)
-    return pushLegacyRepository(settings, files, expectedIndexHash)
+    return pushLegacyRepository(settings, files, expectedIndexHash, pushOptions)
+  })
+  ipcMain.handle('legacySftp:release', async (event, sessionId: string) => {
+    assertTrustedSender(event)
+    await releaseLegacySession(sessionId)
+  })
+  ipcMain.handle('legacySftp:helper', async (event, settings: LegacySshConnection, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<LegacySftpHelperResult> => {
+    assertTrustedSender(event)
+    return runRepositoryHelper(settings, operation, input)
   })
 }

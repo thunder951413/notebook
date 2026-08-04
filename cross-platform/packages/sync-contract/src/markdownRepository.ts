@@ -267,24 +267,31 @@ export async function encodeMarkdownRepository(
     if (!document) continue
     const currentMarkdown = markdownOf(document)
     const currentContentHash = sha256Hex(currentMarkdown)
+    // D1 fast path: a page whose remote signature still matches is skipped
+    // before any asset hashing or envelope encoding. Its objects already live
+    // on the server, but the manifest must keep declaring them so other
+    // devices (and server-side GC) still see them as referenced.
+    const reusableSignature = reuseNoteSignatures.get(page.id)
+    const [reusedVersionText, reusedHash, reusedHistoryText] = reusableSignature?.split(':') ?? []
+    const reusedVersion = Number(reusedVersionText)
+    const reusedHistoryCount = Number(reusedHistoryText)
+    const reusable = !page.deletedAt && page.syncStatus === 'synced' && reusedHash === currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)
     const assets: MarkdownAssetReference[] = []
     const presentations = imagePresentations(document)
     for (const asset of assetsByPage.get(page.id) ?? []) {
       const bytes = assetContents.get(asset.id)
       const declaredHash = asset.checksum?.toLowerCase()
       const objectHash = declaredHash && /^[0-9a-f]{64}$/.test(declaredHash) ? declaredHash : bytes ? sha256Hex(bytes) : undefined
-      if (bytes && objectHash) {
+      if (bytes && objectHash && !reusable) {
         const relativePath = `objects/${objectHash.slice(0, 2)}/${objectHash}`
         files.set(relativePath, bytes)
         manifests.set(objectHash, { relativePath, contentHash: objectHash, size: bytes.byteLength })
+      } else if (objectHash && reusable) {
+        manifests.set(objectHash, { relativePath: `objects/${objectHash.slice(0, 2)}/${objectHash}`, contentHash: objectHash, size: asset.byteSize ?? bytes?.byteLength ?? 0 })
       }
       assets.push({ ...asset, ...presentations.get(asset.id), ...(objectHash ? { objectHash, checksum: objectHash, localPath: `objects/${objectHash.slice(0, 2)}/${objectHash}` } : {}) })
     }
-    const reusableSignature = reuseNoteSignatures.get(page.id)
-    const [reusedVersionText, reusedHash, reusedHistoryText] = reusableSignature?.split(':') ?? []
-    const reusedVersion = Number(reusedVersionText)
-    const reusedHistoryCount = Number(reusedHistoryText)
-    if (!page.deletedAt && page.syncStatus === 'synced' && reusedHash === currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)) {
+    if (reusable) {
       pageVersions.set(page.id, reusedVersion)
       indexEntries.push({ noteID: page.id, version: reusedVersion, contentHash: currentContentHash, historyCount: reusedHistoryCount })
       continue

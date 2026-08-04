@@ -1,7 +1,8 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { build as buildPlist } from 'plist'
 import type { NotebookDataBundle } from '@notebook/domain'
+import { sha256Hex } from '@notebook/sync-contract'
 import { decodeImport, encodeExport } from './transfer'
 
 test('accepts a v3 incremental repository snapshot without downloaded note envelopes', async () => {
@@ -36,6 +37,47 @@ test('accepts a v3 incremental repository snapshot without downloaded note envel
 
   expect(decoded.bundle.pages).toEqual([])
   expect(decoded.bundle.documents).toEqual([])
+})
+
+test('loads an omitted v3 resource by content hash when its local asset id differs', async () => {
+  const noteId = '11111111-1111-4111-8111-111111111111'
+  const remoteAssetId = 'remote-asset-id'
+  const bytes = new Uint8Array([7, 8, 9])
+  const objectHash = sha256Hex(bytes)
+  const markdown = '# Resource test'
+  const contentHash = sha256Hex(markdown)
+  const loader = vi.fn(async (assetId: string, hash?: string) => assetId === remoteAssetId && hash === objectHash ? bytes : undefined)
+  const now = '2026-07-22T00:00:00.000Z'
+
+  const decoded = await decodeImport([
+    { name: 'library.json', data: strToU8(JSON.stringify({ exportedAt: 1, deviceID: 'desktop-test', folders: [], tags: [], deletedFolders: [], deletedTags: [] })) },
+    {
+      name: 'notes/index.json',
+      data: strToU8(JSON.stringify({
+        generatedAt: 1,
+        deviceID: 'desktop-test',
+        repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' },
+        entries: [{ noteID: noteId, version: 1, contentHash, historyCount: 0 }],
+        deletedEntries: [],
+      })),
+    },
+    {
+      name: `notes/${noteId}.json`,
+      data: strToU8(JSON.stringify({
+        schemaVersion: 3,
+        noteID: noteId,
+        metadata: { id: noteId, workspaceId: 'remote', kind: 'document', title: 'Resource test', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' },
+        currentContentHash: contentHash,
+        contentObjects: { [contentHash]: markdown },
+        history: [],
+        assets: [{ id: remoteAssetId, pageId: noteId, kind: 'file', filename: 'shared.bin', mimeType: 'application/octet-stream', byteSize: bytes.byteLength, checksum: objectHash, objectHash, localPath: `objects/${objectHash.slice(0, 2)}/${objectHash}`, createdAt: now }],
+        taskSteps: [], tagIDs: [], linkedPageIDs: [],
+      })),
+    },
+  ], 'workspace-test', undefined, loader)
+
+  expect(loader).toHaveBeenCalledWith(remoteAssetId, objectHash)
+  expect(decoded.assetContents.get(remoteAssetId)).toEqual(bytes)
 })
 
 test('imports the macOS document migration package as canonical Markdown without dropping assets', async () => {

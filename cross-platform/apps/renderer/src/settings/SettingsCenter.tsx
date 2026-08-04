@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearLegacySshPassword, getLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
 import type { LegacySyncMode } from '../sync/legacySshSync'
+import { runRepositoryHelper, type RepositoryHelperOperation } from '../sync/repositoryHelper'
 import { serializeNotebookSyncQrPayload } from '../sync/sshQrConfig'
 import { ACCENT_PRESETS, type AccentColor } from '../appearance/accent'
 import { recordDiagnosticEvent, type DiagnosticEntry } from '../diagnostics/diagnostics'
@@ -82,6 +83,9 @@ export function SettingsCenter({ initialPage = 'general', theme, accentColor, sy
   const [automationPort, setAutomationPort] = useState(47831)
   const [automationMessage, setAutomationMessage] = useState<string>()
   const [automationBusy, setAutomationBusy] = useState(false)
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string>()
+  const [maintenanceMessageIsError, setMaintenanceMessageIsError] = useState(false)
 
   useEffect(() => setPage(initialPage), [initialPage])
   useEffect(() => { void hasLegacySshPassword().then(setStoredSshPassword) }, [])
@@ -330,6 +334,33 @@ export function SettingsCenter({ initialPage = 'general', theme, accentColor, sy
     setSyncMessage('已清除已填写的主机指纹。下次连接会显示并记录服务器当前指纹，请先与服务器管理员核对。')
   }
 
+  const runMaintenance = async (operation: RepositoryHelperOperation, input?: Uint8Array, confirmText?: string) => {
+    if (savingSync || maintenanceBusy || syncState === 'syncing') return
+    if (confirmText && !window.confirm(confirmText)) return
+    setMaintenanceBusy(true)
+    setMaintenanceMessage(undefined)
+    setMaintenanceMessageIsError(false)
+    try {
+      const outcome = await runRepositoryHelper(operation, input)
+      if (operation === 'export-tar' && outcome.data) {
+        const url = URL.createObjectURL(new Blob([outcome.data as BlobPart], { type: 'application/x-tar' }))
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = `notebook-repository-${new Date().toISOString().slice(0, 10)}.tar`
+        anchor.click()
+        URL.revokeObjectURL(url)
+        setMaintenanceMessage('仓库 tar 备份已导出并开始下载。')
+      } else {
+        setMaintenanceMessage(outcome.message)
+      }
+    } catch (error) {
+      setMaintenanceMessage(describeSshConnectionError(error))
+      setMaintenanceMessageIsError(true)
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
   const toggleSshQrCode = async () => {
     if (sshQrDataUrl) {
       setSshQrDataUrl(undefined)
@@ -526,6 +557,16 @@ export function SettingsCenter({ initialPage = 'general', theme, accentColor, sy
                   {storedSshPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeSshPassword()}>清除已保存密码</Button>}
                   {sshSettings.fingerprint && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={resetSshFingerprint}>重新核对主机指纹</Button>}
                 </div>
+                {desktop && <div className="sync-action-panel">
+                  <div className="sync-action-heading"><strong>服务器仓库维护</strong><span>在服务器端通过 SSH 执行；需要服务器已安装 python3，否则操作会报错并建议改用普通同步。</span></div>
+                  <div className="sync-primary-actions">
+                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('verify')}>{maintenanceBusy ? '正在执行…' : '校验仓库内容'}</Button>
+                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('gc', undefined, '这会删除服务器上未被任何笔记引用的孤儿对象（不可恢复）。确定继续吗？')}>{maintenanceBusy ? '正在执行…' : '清理孤儿对象'}</Button>
+                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('export-tar')}>{maintenanceBusy ? '正在执行…' : '导出仓库 tar 备份'}</Button>
+                  </div>
+                  <label className="settings-file-action"><span>从 tar 备份恢复：会覆盖服务器上的同名仓库文件；导入期间会锁定仓库，且发布索引前先完成其余文件写入。</span><input type="file" accept=".tar,application/x-tar" aria-label="导入仓库 tar 备份" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file || savingSync || maintenanceBusy || syncState === 'syncing') return; void file.arrayBuffer().then((buffer) => void runMaintenance('import-tar', new Uint8Array(buffer), `将从 ${file.name} 恢复备份，并覆盖服务器上的同名仓库文件。此操作不可撤销，确定继续吗？`)) }} /></label>
+                  {maintenanceMessage && <div className={`sync-settings-result ${maintenanceMessageIsError ? 'error' : ''}`} role="status">{maintenanceMessage}</div>}
+                </div>}
                 {onPublishSshArchive && <label className="settings-file-action"><span>首次迁移遇到超大历史库时，可直接发布由迁移工具生成的 SSH 仓库 ZIP。</span><input type="file" accept=".zip,application/zip" aria-label="发布迁移仓库 ZIP" disabled={savingSync || syncState === 'syncing'} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file || savingSync || syncState === 'syncing') return; setSavingSync(true); setSyncMessage('正在发布迁移仓库…'); void onPublishSshArchive(file).then(() => setSyncMessage('迁移仓库已发布到 SSH 服务器。')).catch((error) => setSyncMessage(error instanceof Error ? error.message : '迁移仓库发布失败')).finally(() => setSavingSync(false)) }} /></label>}
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
               <Text size={200}>Android 中填写相同的服务器、端口、用户名、密码和远端目录即可双向同步。首次连接后请核对各端显示的 SHA256 主机指纹；同一服务器可能按客户端能力提供不同算法的主机密钥。</Text>

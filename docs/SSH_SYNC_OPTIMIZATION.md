@@ -2,12 +2,16 @@
 
 ## 状态
 
-本文档是 SSH/SFTP 同步的优化设计，尚未实施。文中行号对应实施时的当前代码；
-实施前需重新核对。
+本文档是 SSH/SFTP 同步的优化设计，§2–§5 与 §7（Phase 1–4）已按本设计实施。
+§6（v4 格式方向）仍为开放讨论项，未实施。
 
-§2–§5（Phase 1–3，纯端侧优化）为已接受的方向；§6（v4）与 §7（服务端 helper）
-为开放讨论项。其中 **§7 需要讨论**：是否引入服务端组件、部署模型与能力取舍
-尚未定论，不构成已接受的设计。
+实施时对设计的偏差（详见 §8）：
+- **C2 push 模式**保留全量 pull+merge，不做"push 元数据拉取"——push 跳过
+  merge 会让远端新建页面从远端索引中消失（数据丢失）；C1 无操作快速路径
+  已覆盖"无变化同步近乎免费"的目标。
+- **§7 helper 部署模型**由"用户手动上传脚本"改为"客户端内嵌单文件脚本，
+  经 `ssh exec` 以 base64 注入 `python3 -c` 执行"——无需上传、无版本分发
+  问题；代价是服务器必须安装 python3（缺失时操作报错，同步本身回退纯 SFTP）。
 
 ## 目标
 
@@ -208,11 +212,14 @@ renderer (legacySshSync.ts)
 | Phase 1 | A1 连接复用、A2 目录列表、A3 读回收敛、A4 并发池、E1 | `apps/desktop/src/main/legacySftp.ts` + preload 参数 | 高延迟链路同步时间 -50%~-70% |
 | Phase 2 | B1 Uint8Array、C1 空同步快速路径、C2 push 元数据拉取 | preload + `legacySshSync.ts` + 两端调用 | 无变化同步近乎免费；IPC -25% |
 | Phase 3 | C3 资产按需导出、D1 编码快速路径、E2 重试 jitter | `legacySshSync.ts` + `sync-contract` | 大仓库本地 I/O 与 CPU 显著下降 |
-| Phase 4（待讨论） | 服务端 helper 增强层（§7，开放项） | 新增 `ssh exec` 通道 + 单文件脚本 | 首次全量同步 -80% 以上；孤儿对象可清理 |
+| Phase 4（已实施） | 服务端 helper 增强层（§7） | 新增 `ssh exec` 通道 + 内嵌 python3 脚本 | 首次全量同步 tar 流式；verify/gc 仓库卫生 |
 
 每个阶段独立可发布；Phase 1 完全不触碰协议与 renderer 编排，风险最低。
-Phase 1–3 保持 repository v3 协议不变；v4 格式方向（§6）与旧客户端兼容性解耦，
-作为独立演进，不与 Phase 1–3 混做。
+Phase 1–4 保持 repository v3 协议不变；v4 格式方向（§6）与旧客户端兼容性解耦，
+作为独立演进，不与 Phase 1–4 混做。
+
+> 注：C2（push 模式元数据拉取）实施时保留全量 pull+merge，未采用"跳过
+> merge"的元数据拉取；无变化场景由 C1 快速路径覆盖。详见 §8。
 
 ## 4. 验证策略
 
@@ -306,29 +313,36 @@ v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
 - 迁移不可逆；完成后旧客户端停止同步（产品上明确提示）。
 - 现有 `SyncContractFixtures` 保留，用于验证 v3 读取路径不被破坏。
 
-## 7. 服务端 helper 盘点（可选增强层）
+## 7. 服务端 helper 盘点（已实施）
 
-> **⚠️ 本节需要讨论，尚未定论。**
-> 待讨论问题：① 是否接受"服务器上运行我们提供的脚本"这一信任与部署模型
-> （与纯 SFTP 的"零服务端假设"相比，是产品形态的转变）；② 服务器不满足
-> 部署条件（Windows、无 POSIX 环境、用户不愿上传脚本）时如何降级；
-> ③ 能力取舍（tar 全量加速 / verify+gc / pull --tail 各自是否值得引入）；
-> ④ 由谁维护与分发 helper 的版本。结论确定前，本节内容不构成已接受的设计，
-> Phase 4 不排期。
+> 本节原为开放讨论项，已按以下取舍实施（Phase 4）：
+> ① 部署模型：**无需用户上传**——helper 为客户端内嵌的零依赖 python3 单文件
+> 脚本（`legacySftp.ts` 中的 `REPOSITORY_HELPER`），经 `ssh exec` 以 base64
+> 注入 `python3 -c` 执行，脚本、操作名与仓库根路径均走 base64，无 shell 注入
+> 面；stdin 保留给 import-tar 载荷。② 降级：服务器无 python3 时退出码非零、
+> 错误信息明确，客户端仅对维护操作报错，日常同步走纯 SFTP 不受影响。
+> ③ 能力取舍：实现 `export-tar` / `import-tar` / `verify` / `gc`；`pull --tail`
+> 与 `delta` 未实施（收益与 §7.2 分析一致，不划算）。④ 版本随客户端内嵌分发，
+> 无独立维护负担。
 
 服务端 helper 是**产品决策**而非客户端问题：需要用户在服务器放置一个
 可执行脚本，客户端通过 `ssh exec` 调用。与 §6 的 v4 方向正交，可独立取舍。
 
 ### 7.1 部署模型与约束
 
-- **形态**：单文件、零第三方依赖的 POSIX 脚本（bash + coreutils，或
-  python3 标准库），用户手动上传（设置页提供一键下载/上传指引）。
-- **通道**：`ssh exec`。桌面端当前依赖 `ssh2-sftp-client`（其底层为 ssh2），
-  exec 通道需显式声明 `ssh2` 依赖并另建连接或复用会话。
-- **安全**：参数以 JSON 传 stdin 而非拼 shell（防注入）；复用现有主机指纹
-  验证；helper 本身拥有服务器任意执行权（即用户自己的凭据与服务器）。
-- **限制**：Windows 服务器（OpenSSH for Windows）无法保证 POSIX 环境；
-  helper 缺失时自动回退纯 SFTP 路径。
+- **形态**：单文件、零第三方依赖的 python3 标准库脚本，**内嵌在客户端**
+  （`apps/desktop/src/main/legacySftp.ts` 的 `REPOSITORY_HELPER`），无需用户
+  上传或下载；设置页"服务器仓库维护"面板直接调用。
+- **通道**：`ssh exec`。桌面端显式声明 `ssh2` 直接依赖（原为
+  ssh2-sftp-client 的传递依赖），helper 走独立 `connectExec` 连接（同一套
+  指纹验证），与 SFTP 会话互不影响。
+- **安全**：脚本、操作名、仓库根路径均以 base64 载荷注入 `python3 -c`，
+  不含 shell 元字符、无拼接注入面；stdin 仅承载 import-tar 二进制；
+  复用现有主机指纹验证；helper 本身拥有服务器任意执行权（即用户自己的
+  凭据与服务器）。
+- **限制**：服务器需安装 python3（常见发行版默认自带）；缺失时维护操作
+  报错并明确提示，日常同步回退纯 SFTP 路径。Windows 服务器（OpenSSH for
+  Windows）无 POSIX 环境，同样不可用。
 
 ### 7.2 能力清单与收益排序
 
@@ -342,12 +356,28 @@ v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
 结论：**内容寻址仓库 + append-only 日志让 rsync 式差分无利可图**。helper
 的价值集中在“首次全量加速”和“仓库卫生”，而非增量传输。
 
-### 7.3 风险与成本
+### 7.3 风险与成本（实施后更新）
 
-- 部署摩擦：每个服务器都要放脚本；版本升级需重新上传（helper 自校验版本号，
-  客户端检测到旧版本时提示）。
-- Windows 服务器不支持；`ssh exec` 需新增通道与依赖。
+- 部署摩擦已消除：脚本随客户端内嵌分发，无需上传；唯一前置条件是服务器
+  有 python3（缺失时维护操作给出明确错误）。
+- Windows 服务器不支持；`ssh exec` 已新增通道（`connectExec`）与 `ssh2`
+  直接依赖。
 - helper 是端侧自由软件，用户可审查；但服务器上执行任意脚本仍是信任边界
   （与使用 SSH 本身同等信任模型）。
-- 建议 Phase 4 先只做 `export/import --tar` + `verify`，`gc` 与 `pull --tail`
-  视仓库规模再定。
+- 已实现 `export/import --tar` + `verify` + `gc` 四项；`pull --tail` 未实施。
+
+## 8. 实施偏差记录
+
+- **C2（push 元数据拉取）未按原文案实施**。原方案让 push 模式跳过 pull 与
+  merge，直接推送本机内容；分析确认这会让远端新建/修改的页面从远端索引中
+  消失（远端索引被本地发布覆盖），构成数据丢失。实施保留 push 模式的全量
+  pull+merge，仅在**双向模式**下启用 C1 无操作快速路径（outbox 为空 +
+  远端状态缓存比对通过 → 直接返回 synced），达到原 C2 预期的"无变化同步
+  近乎免费"。
+- **§7 helper 部署模型**由"用户上传脚本"改为"客户端内嵌 + base64 注入
+  `python3 -c`"（见 §7.1），版本随客户端分发。
+- **D1 可复用页的 manifest**：为防服务端 GC 与远端设备误判引用，可复用页
+  仍声明其对象哈希（size 取 `asset.byteSize`），但不重新上传对象字节。
+- **C1 探针比对**除索引哈希与签名映射外，还比对
+  `reading_positions.json`、`library.json`、`notes/assets_manifest.json` 与
+  `notes/privacy.json` 的哈希；这些元数据都可能在不改索引的情况下变化。

@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { afterAll, beforeAll, expect, test } from 'vitest'
-import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, testLegacyConnection } from './legacySftp'
+import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, releaseLegacySession, testLegacyConnection } from './legacySftp'
 
 const enabled = process.env.NOTEBOOK_SFTP_E2E === '1'
 let root = ''
 let port = 0
 let fingerprint = ''
 let server: ReturnType<typeof spawn> | undefined
+
+const encode = (value: string) => new TextEncoder().encode(value)
+const bytes = (value: Uint8Array) => Buffer.from(value)
 
 test('normalizes duplicate index rows by highest version and newest deletion', () => {
   const noteId = '30000000-0000-4000-8000-000000000001'
@@ -72,15 +75,17 @@ test.runIf(enabled)('uploads atomically and pulls an Android-compatible SSH repo
   const empty = await pullLegacyRepository(settings)
   expect(empty.indexHash).toBe('')
   expect(empty.fingerprint).toBe(fingerprint)
+  expect(empty.sessionId).toBeTruthy()
   const noteId = '30000000-0000-4000-8000-000000000001'
   const files = [
-    { name: 'library.json', dataBase64: Buffer.from('{"folders":[],"tags":[]}').toString('base64') },
-    { name: `notes/${noteId}.json`, dataBase64: Buffer.from('{"noteID":"test"}').toString('base64') },
-    { name: 'notes/assets_manifest.json', dataBase64: Buffer.from('{"entries":[{"relativePath":"page/image.png"}]}').toString('base64') },
-    { name: 'attachments/page/image.png', dataBase64: Buffer.from([1, 2, 3]).toString('base64') },
-    { name: 'notes/index.json', dataBase64: Buffer.from(JSON.stringify({ entries: [{ noteID: noteId }] })).toString('base64') },
+    { name: 'library.json', data: encode('{"folders":[],"tags":[]}') },
+    { name: `notes/${noteId}.json`, data: encode('{"noteID":"test"}') },
+    { name: 'notes/assets_manifest.json', data: encode('{"entries":[{"relativePath":"page/image.png"}]}') },
+    { name: 'attachments/page/image.png', data: new Uint8Array([1, 2, 3]) },
+    { name: 'notes/index.json', data: encode(JSON.stringify({ entries: [{ noteID: noteId }] })) },
   ]
-  await pushLegacyRepository(settings, files, empty.indexHash)
+  // The push reuses the pull's SSH session instead of opening a second connection.
+  await pushLegacyRepository(settings, files, empty.indexHash, { sessionId: empty.sessionId })
   const physicalNote = await readFile(join(root, 'repository', 'notes', `${noteId}.json.gz`))
   expect(JSON.parse(gunzipSync(physicalNote).toString('utf8'))).toEqual({ noteID: 'test' })
   await expect(access(join(root, 'repository', 'notes', `${noteId}.json`))).rejects.toThrow()
@@ -88,7 +93,8 @@ test.runIf(enabled)('uploads atomically and pulls an Android-compatible SSH repo
   expect(physicalIndex.repositoryFormat).toMatchObject({ version: 2, noteEncoding: 'gzip' })
   const pulled = await pullLegacyRepository(settings)
   expect(pulled.files.map((item) => item.name).sort()).toEqual(files.map((item) => item.name).sort())
-  expect(pulled.files.find((item) => item.name === 'attachments/page/image.png')?.dataBase64).toBe(Buffer.from([1, 2, 3]).toString('base64'))
+  expect(bytes(pulled.files.find((item) => item.name === 'attachments/page/image.png')!.data)).toEqual(Buffer.from([1, 2, 3]))
+  await releaseLegacySession(pulled.sessionId)
   await expect(pullLegacyRepository({ ...settings, fingerprint: 'SHA256:wrong' })).rejects.toThrow(/指纹已变化/)
 })
 
@@ -99,11 +105,11 @@ test.runIf(enabled)('round-trips a v3 Markdown repository with content-addressed
   const objectHash = 'a'.repeat(64)
   const note = { schemaVersion: 3, noteID: noteId, currentContentHash: 'b'.repeat(64), contentObjects: { ['b'.repeat(64)]: '# Markdown' }, history: [] }
   const files = [
-    { name: 'library.json', dataBase64: Buffer.from('{"folders":[],"tags":[]}').toString('base64') },
-    { name: `notes/${noteId}.json`, dataBase64: Buffer.from(JSON.stringify(note)).toString('base64') },
-    { name: 'notes/assets_manifest.json', dataBase64: Buffer.from(JSON.stringify({ entries: [{ relativePath: `objects/aa/${objectHash}`, contentHash: objectHash }] })).toString('base64') },
-    { name: `objects/aa/${objectHash}`, dataBase64: Buffer.from([4, 5, 6]).toString('base64') },
-    { name: 'notes/index.json', dataBase64: Buffer.from(JSON.stringify({ repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' }, entries: [{ noteID: noteId }] })).toString('base64') },
+    { name: 'library.json', data: encode('{"folders":[],"tags":[]}') },
+    { name: `notes/${noteId}.json`, data: encode(JSON.stringify(note)) },
+    { name: 'notes/assets_manifest.json', data: encode(JSON.stringify({ entries: [{ relativePath: `objects/aa/${objectHash}`, contentHash: objectHash }] })) },
+    { name: `objects/aa/${objectHash}`, data: new Uint8Array([4, 5, 6]) },
+    { name: 'notes/index.json', data: encode(JSON.stringify({ repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' }, entries: [{ noteID: noteId }] })) },
   ]
   await pushLegacyRepository(settings, files, empty.indexHash)
   const physicalIndex = JSON.parse(await readFile(join(root, 'repository-v3', 'notes', 'index.json'), 'utf8'))
@@ -111,10 +117,16 @@ test.runIf(enabled)('round-trips a v3 Markdown repository with content-addressed
   expect(JSON.parse(gunzipSync(await readFile(join(root, 'repository-v3', 'notes', `${noteId}.json.gz`))).toString('utf8'))).toEqual(note)
   expect(await readFile(join(root, 'repository-v3', 'objects', 'aa', objectHash))).toEqual(Buffer.from([4, 5, 6]))
   const pulled = await pullLegacyRepository(settings)
-  expect(JSON.parse(Buffer.from(pulled.files.find((item) => item.name === `notes/${noteId}.json`)!.dataBase64, 'base64').toString('utf8'))).toEqual(note)
-  expect(pulled.files.find((item) => item.name === `objects/aa/${objectHash}`)?.dataBase64).toBe(Buffer.from([4, 5, 6]).toString('base64'))
+  expect(JSON.parse(bytes(pulled.files.find((item) => item.name === `notes/${noteId}.json`)!.data).toString('utf8'))).toEqual(note)
+  expect(bytes(pulled.files.find((item) => item.name === `objects/aa/${objectHash}`)!.data)).toEqual(Buffer.from([4, 5, 6]))
   expect(pulled.objectHashes).toContain(objectHash)
   const incremental = await pullLegacyRepository(settings, { knownObjectHashes: [objectHash] })
   expect(incremental.files.some((item) => item.name === `objects/aa/${objectHash}`)).toBe(false)
   expect(incremental.reusedObjectCount).toBe(1)
+  // metadataOnly skips note bodies and objects while still returning the index.
+  const metadata = await pullLegacyRepository(settings, { metadataOnly: true, knownObjectHashes: [objectHash] })
+  expect(metadata.files.some((item) => item.name === `notes/${noteId}.json`)).toBe(false)
+  expect(metadata.files.some((item) => item.name === `objects/aa/${objectHash}`)).toBe(false)
+  expect(metadata.files.some((item) => item.name === 'notes/index.json')).toBe(true)
+  expect(metadata.objectHashes).toContain(objectHash)
 })

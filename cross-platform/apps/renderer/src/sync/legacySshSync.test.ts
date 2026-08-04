@@ -1,7 +1,7 @@
 import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
 import { sha256Hex } from '@notebook/sync-contract'
-import { describe, expect, test, vi } from 'vitest'
-import { mergeBundles, publicationBundleWithRemoteConflicts, retryRemoteIndexChanges, semanticallyEqualRepositoryJson } from './legacySshSync'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { mergeBundles, publicationBundleWithRemoteConflicts, retryRemoteIndexChanges, semanticallyEqualRepositoryJson, synchronizeLegacySsh } from './legacySshSync'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -34,7 +34,25 @@ describe('legacy SSH conflict merge', () => {
     await expect(retryRemoteIndexChanges(operation, async (milliseconds) => { waits.push(milliseconds) }))
       .resolves.toEqual({ value: 'synced', retryCount: 2 })
     expect(operation).toHaveBeenCalledTimes(3)
-    expect(waits).toEqual([150, 300])
+    // Exponential backoff with full jitter keeps the same doubling shape.
+    expect(waits).toHaveLength(2)
+    expect(waits[0]).toBeGreaterThanOrEqual(150)
+    expect(waits[0]).toBeLessThan(300)
+    expect(waits[1]).toBeGreaterThanOrEqual(300)
+    expect(waits[1]).toBeLessThan(450)
+  })
+
+  test('retries broken-pipe and connection-reset transport errors', async () => {
+    const operation = vi.fn()
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'legacySftp:push': Error: read ECONNRESET"))
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValue('synced')
+    const waits: number[] = []
+
+    await expect(retryRemoteIndexChanges(operation, async (milliseconds) => { waits.push(milliseconds) }))
+      .resolves.toEqual({ value: 'synced', retryCount: 2 })
+    expect(operation).toHaveBeenCalledTimes(3)
+    expect(waits).toHaveLength(2)
   })
 
   test('does not retry authentication or data errors', async () => {
@@ -287,5 +305,162 @@ describe('legacy SSH conflict merge', () => {
       'link:block:b-one',
       'embed:group:g-one',
     ])
+  })
+})
+
+describe('legacy SSH sync orchestration', () => {
+  const host = 'example.com'
+  const remotePath = '~/notebook_backup'
+  const indexBytes = (entries: Array<{ noteID: string; version?: number; contentHash?: string; historyCount?: number }>) => new TextEncoder().encode(JSON.stringify({
+    repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' },
+    entries,
+  }))
+  const positionsBytes = new TextEncoder().encode(JSON.stringify({ positions: [] }))
+  const libraryBytes = new TextEncoder().encode(JSON.stringify({ exportedAt: 1_000_000, deviceID: 'test-server', folders: [], tags: [] }))
+  const remoteStateCacheKey = `notebook-ssh-remote-state-v3:${encodeURIComponent(`user@${host}:22:${remotePath}:${workspaceId}`)}`
+  const connection = { host, port: 22, username: 'user', remotePath, fingerprint: 'SHA256:test' }
+  const connectionWithPassword = { ...connection, password: 'test-password' }
+  const remoteState = (indexHash: string, options: { positions?: Uint8Array; library?: Uint8Array; manifest?: Uint8Array; privacy?: Uint8Array } = {}) => ({
+    indexHash,
+    readingPositionsHash: options.positions ? sha256Hex(options.positions) : '',
+    libraryHash: options.library ? sha256Hex(options.library) : '',
+    assetsManifestHash: options.manifest ? sha256Hex(options.manifest) : '',
+    privacyHash: options.privacy ? sha256Hex(options.privacy) : '',
+    signatures: {},
+  })
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+    window.localStorage.setItem('notebook-sync-backend-v1', 'ssh')
+    window.localStorage.setItem('notebook-sync-settings-v1', JSON.stringify({ enabled: true, baseUrl: '', workspaceId }))
+    window.localStorage.setItem('notebook-legacy-ssh-settings-v1', JSON.stringify(connection))
+  })
+
+  const stubDesktop = (legacySftp: Record<string, unknown>) => {
+    vi.stubGlobal('notebookDesktop', {
+      legacySftp: { test: vi.fn(), pull: vi.fn(), push: vi.fn(), release: vi.fn(), helper: vi.fn(), ...legacySftp },
+      secrets: { get: vi.fn(async () => 'test-password'), set: vi.fn(async () => undefined), delete: vi.fn(async () => undefined) },
+    })
+  }
+
+  const stubRepository = (overrides: Record<string, unknown> = {}) => ({
+    exportData: vi.fn(async () => bundle()),
+    exportAssetContents: vi.fn(async () => new Map<string, Uint8Array>()),
+    listOutbox: vi.fn(async () => []),
+    getAssetContent: vi.fn(async () => undefined),
+    importAssetContents: vi.fn(async () => undefined),
+    importSyncResult: vi.fn(async () => undefined),
+    ...overrides,
+  }) as unknown as Parameters<typeof synchronizeLegacySsh>[0]
+
+  test('a metadata-only probe short-circuits when nothing changed on either side', async () => {
+    const cachedState = remoteState('i1', { positions: positionsBytes, library: libraryBytes })
+    window.localStorage.setItem(remoteStateCacheKey, JSON.stringify(cachedState))
+    const pull = vi.fn(async () => ({
+      files: [{ name: 'library.json', data: libraryBytes }, { name: 'notes/index.json', data: indexBytes([]) }, { name: 'notes/reading_positions.json', data: positionsBytes }],
+      indexHash: 'i1',
+      fingerprint: 'SHA256:test',
+      objectHashes: [],
+      reusedObjectCount: 0,
+      reusedNoteIds: [],
+      sessionId: 's1',
+    }))
+    const push = vi.fn(async () => ({ fingerprint: 'SHA256:test', sessionId: 's1' }))
+    const release = vi.fn(async () => undefined)
+    stubDesktop({ pull, push, release })
+
+    const result = await synchronizeLegacySsh(stubRepository(), workspaceId)
+
+    expect(result).toMatchObject({ state: 'synced', skipped: 0, fingerprint: 'SHA256:test' })
+    expect(pull).toHaveBeenCalledOnce()
+    expect(pull).toHaveBeenCalledWith(connectionWithPassword, expect.objectContaining({ metadataOnly: true }))
+    expect(push).not.toHaveBeenCalled()
+    expect(release).toHaveBeenCalledWith('s1')
+  })
+
+  test('a changed remote state falls through to a full pull and push over the reused session', async () => {
+    const cachedState = remoteState('i1')
+    window.localStorage.setItem(remoteStateCacheKey, JSON.stringify(cachedState))
+    const pull = vi.fn(async () => ({
+      files: [
+        { name: 'library.json', data: libraryBytes },
+        { name: 'notes/index.json', data: indexBytes([]) },
+      ],
+      indexHash: 'i2',
+      fingerprint: 'SHA256:test',
+      objectHashes: [],
+      reusedObjectCount: 0,
+      reusedNoteIds: [],
+      sessionId: 's1',
+    }))
+    const push = vi.fn(async () => ({ fingerprint: 'SHA256:test', sessionId: 's2' }))
+    const release = vi.fn(async () => undefined)
+    stubDesktop({ pull, push, release })
+
+    const result = await synchronizeLegacySsh(stubRepository(), workspaceId)
+
+    expect(result).toMatchObject({ state: 'synced' })
+    // Probe (metadataOnly) then full pull on the same session.
+    expect(pull).toHaveBeenCalledTimes(2)
+    expect(pull).toHaveBeenNthCalledWith(1, connectionWithPassword, expect.objectContaining({ metadataOnly: true }))
+    expect(pull).toHaveBeenNthCalledWith(2, connectionWithPassword, expect.objectContaining({ sessionId: 's1' }))
+    expect(push).toHaveBeenCalledTimes(1)
+    expect(push).toHaveBeenCalledWith(connectionWithPassword, expect.any(Array), 'i2', expect.objectContaining({ sessionId: 's1' }))
+    expect(release).toHaveBeenCalledWith('s1')
+  })
+
+  test('a pending outbox skips the fast path and syncs normally', async () => {
+    const cachedState = remoteState('i1')
+    window.localStorage.setItem(remoteStateCacheKey, JSON.stringify(cachedState))
+    const pull = vi.fn(async (_settings: unknown, _options?: { metadataOnly?: boolean; sessionId?: string }) => ({
+      files: [{ name: 'library.json', data: libraryBytes }, { name: 'notes/index.json', data: indexBytes([]) }],
+      indexHash: 'i1',
+      fingerprint: 'SHA256:test',
+      objectHashes: [],
+      reusedObjectCount: 0,
+      reusedNoteIds: [],
+      sessionId: 's1',
+    }))
+    const push = vi.fn(async () => ({ fingerprint: 'SHA256:test', sessionId: 's2' }))
+    const release = vi.fn(async () => undefined)
+    stubDesktop({ pull, push, release })
+
+    const result = await synchronizeLegacySsh(stubRepository({
+      listOutbox: vi.fn(async () => [{ id: 'outbox-1', workspaceId, entityType: 'page', entityId: pageId, operation: 'update', payload: {}, expectedVersion: 1 }]),
+    }), workspaceId)
+
+    expect(result).toMatchObject({ state: 'synced' })
+    expect(pull).toHaveBeenCalledOnce()
+    expect(pull.mock.calls[0]![1]).not.toHaveProperty('metadataOnly')
+    expect(push).toHaveBeenCalledTimes(1)
+  })
+
+  test('a metadata-only probe falls through when the library changes without an index change', async () => {
+    const priorLibrary = new TextEncoder().encode(JSON.stringify({ exportedAt: 1, deviceID: 'test-server', folders: [], tags: [] }))
+    const changedLibrary = new TextEncoder().encode(JSON.stringify({ exportedAt: 2, deviceID: 'test-server', folders: [{ id: '40000000-0000-4000-8000-000000000001', name: 'Changed', sortOrder: 0, isSystem: false }], tags: [] }))
+    window.localStorage.setItem(remoteStateCacheKey, JSON.stringify(remoteState('i1', { positions: positionsBytes, library: priorLibrary })))
+    const pull = vi.fn(async () => ({
+      files: [
+        { name: 'library.json', data: changedLibrary },
+        { name: 'notes/index.json', data: indexBytes([]) },
+        { name: 'notes/reading_positions.json', data: positionsBytes },
+      ],
+      indexHash: 'i1',
+      fingerprint: 'SHA256:test',
+      objectHashes: [],
+      reusedObjectCount: 0,
+      reusedNoteIds: [],
+      sessionId: 's1',
+    }))
+    const release = vi.fn(async () => undefined)
+    stubDesktop({ pull, push: vi.fn(async () => ({ fingerprint: 'SHA256:test', sessionId: 's1' })), release })
+
+    await synchronizeLegacySsh(stubRepository(), workspaceId)
+
+    expect(pull).toHaveBeenCalledTimes(2)
+    expect(pull).toHaveBeenNthCalledWith(1, connectionWithPassword, expect.objectContaining({ metadataOnly: true }))
+    expect(pull).toHaveBeenNthCalledWith(2, connectionWithPassword, expect.objectContaining({ sessionId: 's1' }))
+    expect(release).toHaveBeenCalledWith('s1')
   })
 })

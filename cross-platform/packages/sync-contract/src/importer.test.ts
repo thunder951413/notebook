@@ -332,7 +332,13 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
     new Map([[pageId, `${entry.version}:${entry.contentHash}:${entry.historyCount}:gzip`]]),
   )
   expect(reused.files.has(`notes/${pageId}.json`)).toBe(false)
-  expect(reused.files.has(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)).toBe(true)
+  // D1 fast path: a reusable page's objects already live on the server, so no
+  // bytes are re-uploaded, but the manifest keeps declaring them so GC and
+  // other devices still see them as referenced.
+  const reusedObjectPath = `objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`
+  expect(reused.files.has(reusedObjectPath)).toBe(false)
+  const reusedManifest = JSON.parse(new TextDecoder().decode(reused.files.get('notes/assets_manifest.json'))) as { entries: Array<{ relativePath: string }> }
+  expect(reusedManifest.entries.map((item) => item.relativePath)).toContain(reusedObjectPath)
   expect(noteIndexSchema.parse(JSON.parse(new TextDecoder().decode(reused.files.get('notes/index.json')))).entries).toEqual(index.entries)
 })
 

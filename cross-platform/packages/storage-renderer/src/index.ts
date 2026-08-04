@@ -604,14 +604,18 @@ export class DexieNotebookRepository implements NotebookRepository {
     await this.db.assetContents.bulkPut([...contents].map(([id, data]) => ({ id, data: new Blob([data as BlobPart]) })))
   }
 
-  async exportAssetContents(pageIds: Set<string>) {
-    const assets = (await this.db.assets.toArray()).filter((asset) => pageIds.has(asset.pageId))
+  async exportAssetContentsByIds(assetIds: Set<string>) {
     const result = new Map<string, Uint8Array>()
-    for (const asset of assets) {
-      const content = await this.db.assetContents.get(asset.id)
-      if (content) result.set(asset.id, new Uint8Array(await content.data.arrayBuffer()))
+    for (const id of assetIds) {
+      const content = await this.db.assetContents.get(id)
+      if (content) result.set(id, new Uint8Array(await content.data.arrayBuffer()))
     }
     return result
+  }
+
+  async exportAssetContents(pageIds: Set<string>) {
+    const assets = (await this.db.assets.toArray()).filter((asset) => pageIds.has(asset.pageId))
+    return this.exportAssetContentsByIds(new Set(assets.map((asset) => asset.id)))
   }
 
   async exportData(workspaceId: UUID): Promise<NotebookDataBundle> {

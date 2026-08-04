@@ -65,8 +65,10 @@ export interface NotebookDesktopApi {
   }
   legacySftp: {
     test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
-    pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }> }): Promise<{ files: Array<{ name: string; dataBase64: string }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[] }>
-    push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; dataBase64: string }>, expectedIndexHash: string): Promise<{ fingerprint: string }>
+    pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { metadataOnly?: boolean; knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }>; sessionId?: string }): Promise<{ files: Array<{ name: string; data: Uint8Array }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[]; sessionId: string }>
+    push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; data: Uint8Array }>, expectedIndexHash: string, options?: { knownObjectHashes?: string[]; sessionId?: string }): Promise<{ fingerprint: string; sessionId: string }>
+    release(sessionId: string): Promise<void>
+    helper(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
   }
   events: {
     onQuickCapture(callback: () => void): () => void
@@ -137,7 +139,9 @@ const api: NotebookDesktopApi = Object.freeze({
   legacySftp: Object.freeze({
     test: (settings: Parameters<NotebookDesktopApi['legacySftp']['test']>[0]) => ipcRenderer.invoke('legacySftp:test', settings),
     pull: (settings: Parameters<NotebookDesktopApi['legacySftp']['pull']>[0], options?: Parameters<NotebookDesktopApi['legacySftp']['pull']>[1]) => ipcRenderer.invoke('legacySftp:pull', settings, options),
-    push: (settings: Parameters<NotebookDesktopApi['legacySftp']['push']>[0], files: Parameters<NotebookDesktopApi['legacySftp']['push']>[1], expectedIndexHash: string) => ipcRenderer.invoke('legacySftp:push', settings, files, expectedIndexHash),
+    push: (settings: Parameters<NotebookDesktopApi['legacySftp']['push']>[0], files: Parameters<NotebookDesktopApi['legacySftp']['push']>[1], expectedIndexHash: string, options?: Parameters<NotebookDesktopApi['legacySftp']['push']>[3]) => ipcRenderer.invoke('legacySftp:push', settings, files, expectedIndexHash, options),
+    release: (sessionId: string) => ipcRenderer.invoke('legacySftp:release', sessionId),
+    helper: (settings: Parameters<NotebookDesktopApi['legacySftp']['helper']>[0], operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array) => ipcRenderer.invoke('legacySftp:helper', settings, operation, input),
   }),
   events: Object.freeze({
     onQuickCapture: (callback: () => void) => {
