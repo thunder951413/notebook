@@ -273,7 +273,14 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
       updatedAt: now,
       deviceId: 'electron',
     }],
-    tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+    tombstones: [{
+      id: 'page:migration',
+      workspaceId,
+      entityType: 'page',
+      entityId: 'migration',
+      deletedAt: now,
+      deviceId: 'legacy-seed',
+    }], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
   const encoded = await encodeMarkdownRepository(bundle, new Map([[assetId, new Uint8Array([1, 2, 3])]]), 'electron')
   const note = JSON.parse(new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))) as MarkdownNoteEnvelope
@@ -288,6 +295,7 @@ test('stores one canonical GFM body, hash-only history, and content-addressed as
   expect(note.history[0]?.contentHash).toHaveLength(64)
   expect(note.assets[0]?.objectHash).toHaveLength(64)
   expect(note.linkedPageIDs).toEqual(['target-page'])
+  expect(index.deletedEntries).toEqual([])
   expect([...encoded.files.keys()]).toContain(`objects/${note.assets[0]?.objectHash?.slice(0, 2)}/${note.assets[0]?.objectHash}`)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
   const readingPositions = readingPositionsSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('notes/reading_positions.json'))))

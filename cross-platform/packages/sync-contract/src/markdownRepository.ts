@@ -1,5 +1,5 @@
 import type { Asset, NotebookDataBundle, PageDocument, PageRevision } from '@notebook/domain'
-import { encodeLegacyRepository } from './exporter'
+import { encodeLegacyRepository, isRepositoryUuid } from './exporter'
 import { importLegacyLibrary } from './importer'
 import type { LegacyLibraryEnvelope, LegacyReadingPositions } from './schema'
 import { markdownToTiptap, tiptapToMarkdown } from './markdown'
@@ -325,8 +325,16 @@ export async function encodeMarkdownRepository(
     if (!privacySecret) throw new Error('隐私笔记无法安全同步：缺少 SSH 加密密码')
     files.set('notes/privacy.json', encoder.encode(JSON.stringify(await createPrivacyKeyCheck(privacySecret))))
   }
-  const livePages = new Map(bundle.pages.filter((page) => !page.deletedAt).map((page) => [page.id, page]))
-  const activeTombstones = bundle.tombstones.filter((item) => item.entityType === 'page' && (!livePages.get(item.entityId) || item.deletedAt >= livePages.get(item.entityId)!.updatedAt))
+  const livePages = new Map(bundle.pages.filter((page) => isRepositoryUuid(page.id) && !page.deletedAt).map((page) => [page.id, page]))
+  // Old seed builds used readable IDs such as "migration" and "vision".
+  // They are not valid shared-repository identities. Never publish those stale
+  // tombstones: strict Android/macOS readers reject them and one old record
+  // would otherwise block the entire repository.
+  const activeTombstones = bundle.tombstones.filter((item) =>
+    item.entityType === 'page'
+    && isRepositoryUuid(item.entityId)
+    && (!livePages.get(item.entityId) || item.deletedAt >= livePages.get(item.entityId)!.updatedAt)
+  )
   files.set('notes/index.json', encoder.encode(JSON.stringify({ schemaVersion: 3, generatedAt: (Date.now() - Date.UTC(2001, 0, 1)) / 1000, deviceID: deviceId, repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' }, entries: indexEntries, deletedEntries: activeTombstones.map((item) => ({ noteID: item.entityId, deletedAt: item.deletedAt, deletedByDeviceID: item.deviceId })) })))
   return { files, pageVersions, skippedPageIds: legacy.skippedPageIds }
 }

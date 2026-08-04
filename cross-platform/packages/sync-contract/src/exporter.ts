@@ -15,7 +15,8 @@ type TiptapNode = { type?: string; attrs?: Record<string, unknown>; marks?: Tipt
 type LegacySpan = { text: string; bold?: boolean; italic?: boolean; underline?: boolean; strikethrough?: boolean; link?: string }
 type LegacyBlock = Record<string, unknown> & { id: string; type: string; text?: LegacySpan[]; asset?: Record<string, unknown> }
 
-const isUuid = (value: string | undefined): value is string => Boolean(value && uuidPattern.test(value))
+export const isRepositoryUuid = (value: string | undefined): value is string => Boolean(value && uuidPattern.test(value))
+const isUuid = isRepositoryUuid
 const toAppleSeconds = (value: string | undefined) => (Date.parse(value ?? '') - appleReferenceDateMs) / 1000
 const safeAppleSeconds = (value: string | undefined) => Number.isFinite(toAppleSeconds(value)) ? toAppleSeconds(value) : (Date.now() - appleReferenceDateMs) / 1000
 const cleanFilename = (value: string) => value.replace(/[^\p{L}\p{N}._-]+/gu, '_').slice(0, 180) || 'attachment'
