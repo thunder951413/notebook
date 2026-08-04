@@ -204,8 +204,11 @@ renderer (legacySshSync.ts)
 | Phase 1 | A1 连接复用、A2 目录列表、A3 读回收敛、A4 并发池、E1 | `apps/desktop/src/main/legacySftp.ts` + preload 参数 | 高延迟链路同步时间 -50%~-70% |
 | Phase 2 | B1 Uint8Array、C1 空同步快速路径、C2 push 元数据拉取 | preload + `legacySshSync.ts` + 两端调用 | 无变化同步近乎免费；IPC -25% |
 | Phase 3 | C3 资产按需导出、D1 编码快速路径、E2 重试 jitter | `legacySshSync.ts` + `sync-contract` | 大仓库本地 I/O 与 CPU 显著下降 |
+| Phase 4（可选） | 服务端 helper 增强层（§7） | 新增 `ssh exec` 通道 + 单文件脚本 | 首次全量同步 -80% 以上；孤儿对象可清理 |
 
 每个阶段独立可发布；Phase 1 完全不触碰协议与 renderer 编排，风险最低。
+Phase 1–3 保持 repository v3 协议不变；v4 格式方向（§6）与旧客户端兼容性解耦，
+作为独立演进，不与 Phase 1–3 混做。
 
 ## 4. 验证策略
 
@@ -224,6 +227,115 @@ renderer (legacySshSync.ts)
 
 ## 5. 不做的事
 
-- 不修改 repository v3 协议与任何远端文件格式（旧客户端必须继续兼容）。
-- 不改变合并冲突语义、隐私加密、锁契约。
-- 不引入服务端组件；纯端侧优化。
+- Phase 1–3 不修改 repository v3 协议与任何远端文件格式（旧客户端必须继续
+  兼容）；v4 是独立方向（§6），按新格式迁移，不与旧客户端兼容。
+- 不改变合并冲突语义、隐私加密、锁契约（v3 阶段）。
+- Phase 1–3 不引入服务端组件；服务端 helper 仅作为可选增强层在 §7 评估。
+
+## 6. v4 方向：不考虑旧客户端
+
+### 6.1 旧客户端约束的两个层面
+
+1. **格式兼容层**（丢弃旧客户端后可直接删除的代码）：
+   - `usesCompressedNotes` / `encodeCompressedIndex` 的 v2 分支
+     （`legacySftp.ts:43-50, 95-103, 145-150`）；
+   - `repositoryEntrySignatures` 的 v2/v3 编码探测（`legacySshSync.ts:25`）；
+   - `normalizeRepositoryIndex` 的排序规范化（`legacySftp.ts:105-135`，
+     防御无序写入，旧客户端产物）；
+   - `hasMarkdownRepository` 的 v1/v2 探测（`legacySshSync.ts:313-320`）；
+   - 锁契约本身（`legacySftp.ts:212` 注释明确其为
+     “legacy Android/macOS lock contract”：owner 文件 + 目录 mtime 陈旧判定）。
+2. **v3 格式本体**：笔记 `.json.gz` 独立文件、每笔记自包含信封
+   （per-note `contentObjects`）、`index.json` 全量重写、PBKDF2 310k 迭代。
+
+重要事实：**旧客户端约束的是文件格式，不是传输效率**。§2 的 Phase 1/2 优化
+（连接复用、往返削减、并发、IPC 二进制、快速路径）与旧客户端无关，v4 不改变
+它们的收益。
+
+### 6.2 解锁项
+
+#### 6.2.1 v4 日志模型：消灭锁与重试（最大结构性收益）
+
+现状的竞争核心：`index.json` 是共享可变文件，任何写者都要重写它，因此必须
+加锁、读两次校验、并在“索引已变化”时重试（`retryRemoteIndexChanges`）。
+
+v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
+
+- 每个设备只 append 自己的日志（SFTP 原始 handle `open('a')` 追加写；现有
+  代码已有 `(client as unknown as { sftp }).sftp` 访问先例，
+  `legacySftp.ts:250`）。**单写者无竞争 → 无锁、无索引重写、无重试**。
+- 读者按字节游标**只读日志尾部**（增量拉取），替代下载并规范化整个 index。
+- 笔记正文仍内容寻址存放于 `objects/`，日志记录只含变更元数据与哈希引用；
+  删除 = 日志中的墓碑记录。仓库不再需要全局 `index.json`。
+- 压缩：每个设备重写**自己的**日志即可（唯一写者），无跨设备竞争。
+- 合并语义不变：按实体版本 + baseline hash 冲突检测（与 v3 相同），
+  跨设备变更天然可交换。
+
+可行性：ssh2-sftp-client 的 `put` 不支持追加 flags，需走底层
+`sftp.open(path, 'a')` + `write`；读者小日志可直接 `get` 全文，大日志用
+底层 handle 按偏移 `read`。
+
+#### 6.2.2 全局内容去重
+
+- v3 中每笔记信封自带 `contentObjects`，相同正文/历史跨笔记重复存储。
+- v4 把内容对象移到仓库级（`objects/` 已存在，正文 hash 也进对象库），
+  笔记只引用 hash。模板页、重复正文、共享历史可跨笔记去重，大仓库瘦身显著。
+- 代价：笔记不再自包含，读单个笔记需要对象引用解析（本地缓存后无感）。
+
+#### 6.2.3 压缩与 KDF 自由
+
+- `noteEncoding: gzip` 是旧客户端协议约定。v4 可用 zstd/brotli（Node 生态
+  现成）或调低 gzip level（推送压缩 CPU 3–5 倍下降，体积 +1–3%）。
+- PBKDF2 310k 迭代是为与旧客户端密钥一致；v4 可换 Argon2id 或降低迭代
+  （隐私笔记加密/解密有缓存，KDF 每会话一次，收益有限，主要是自由度）。
+
+#### 6.2.4 代码面收敛
+
+删除 §6.1 格式兼容层后，同步路径预计净减 150+ 行；`legacySftp.ts`、
+`legacySshSync.ts`、`sync-contract` 的 v2 分支全部消失。
+
+### 6.3 v3 → v4 迁移
+
+- 首次运行：读 v3 仓库（现有 `pull` + `decodeImport` 路径复用），重建为
+  v4 布局（objects + 设备日志）后原子发布（先传对象，最后写首个日志，
+  类似现有原子迁移顺序）。
+- 迁移不可逆；完成后旧客户端停止同步（产品上明确提示）。
+- 现有 `SyncContractFixtures` 保留，用于验证 v3 读取路径不被破坏。
+
+## 7. 服务端 helper 盘点（可选增强层）
+
+服务端 helper 是**产品决策**而非客户端问题：需要用户在服务器放置一个
+可执行脚本，客户端通过 `ssh exec` 调用。与 §6 的 v4 方向正交，可独立取舍。
+
+### 7.1 部署模型与约束
+
+- **形态**：单文件、零第三方依赖的 POSIX 脚本（bash + coreutils，或
+  python3 标准库），用户手动上传（设置页提供一键下载/上传指引）。
+- **通道**：`ssh exec`。桌面端当前依赖 `ssh2-sftp-client`（其底层为 ssh2），
+  exec 通道需显式声明 `ssh2` 依赖并另建连接或复用会话。
+- **安全**：参数以 JSON 传 stdin 而非拼 shell（防注入）；复用现有主机指纹
+  验证；helper 本身拥有服务器任意执行权（即用户自己的凭据与服务器）。
+- **限制**：Windows 服务器（OpenSSH for Windows）无法保证 POSIX 环境；
+  helper 缺失时自动回退纯 SFTP 路径。
+
+### 7.2 能力清单与收益排序
+
+| 能力 | 做什么 | 收益 | 优先级 |
+|---|---|---|---|
+| `export --tar` / `import --tar` | 首次全量同步一次流式下载/上传（tar 打包） | 首次同步从 N 次往返 → 1 次流；大仓库 -80% 以上时间 | 高 |
+| `verify` / `gc` | 校验 objects 哈希与日志完整性；清理孤儿对象 | 孤儿对象清理是纯 SFTP 模型唯一做不到的卫生能力 | 高 |
+| `pull --tail` | 聚合返回所有设备日志尾部，替代客户端逐个读 | 每同步省若干往返；收益随设备数增长 | 中 |
+| `delta`（rsync 式） | 只传变化字节块 | **对当前仓库收益有限**：正文与附件均为内容寻址（改一次一个新对象），无就地修改文件；日志是 append-only，本身即增量。除非未来引入就地修改文件，否则不建议做 | 低 |
+
+结论：**内容寻址仓库 + append-only 日志让 rsync 式差分无利可图**。helper
+的价值集中在“首次全量加速”和“仓库卫生”，而非增量传输。
+
+### 7.3 风险与成本
+
+- 部署摩擦：每个服务器都要放脚本；版本升级需重新上传（helper 自校验版本号，
+  客户端检测到旧版本时提示）。
+- Windows 服务器不支持；`ssh exec` 需新增通道与依赖。
+- helper 是端侧自由软件，用户可审查；但服务器上执行任意脚本仍是信任边界
+  （与使用 SSH 本身同等信任模型）。
+- 建议 Phase 4 先只做 `export/import --tar` + `verify`，`gc` 与 `pull --tail`
+  视仓库规模再定。
