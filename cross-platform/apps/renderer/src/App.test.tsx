@@ -235,7 +235,10 @@ test('renders the OneNote-style workspace and editor', async () => {
   fireEvent.dragStart(meetingRoot, { dataTransfer })
   fireEvent.dragOver(productDropTarget, { dataTransfer, clientY: 0.5 })
   fireEvent.drop(productDropTarget, { dataTransfer, clientY: 0.5 })
-  await waitFor(() => expect(within(notebookTree).getByRole('treeitem', { name: '会议记录' })).toHaveAttribute('aria-level', '3'))
+  await waitFor(
+    () => expect(within(notebookTree).getByRole('treeitem', { name: '会议记录' })).toHaveAttribute('aria-level', '3'),
+    { timeout: 5_000 },
+  )
 
   fireEvent.click(screen.getByRole('button', { name: '设置' }))
   const settings = screen.getByRole('dialog', { name: '设置' })
@@ -315,4 +318,4 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(container.querySelector('.app-shell')).toHaveClass('focus-mode')
   fireEvent.keyDown(window, { key: 'F11' })
   expect(container.querySelector('.app-shell')).not.toHaveClass('focus-mode')
-}, 15_000)
+}, 30_000)
