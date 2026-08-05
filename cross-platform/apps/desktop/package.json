@@ -37,6 +37,7 @@
   "build": {
     "appId": "app.notebook.next",
     "productName": "Notebook Next",
+    "executableName": "notebook-next",
     "npmRebuild": false,
     "afterSign": "scripts/notarize.mjs",
     "directories": {
