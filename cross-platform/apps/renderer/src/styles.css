@@ -469,6 +469,7 @@ html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixe
 .action-menu-popover { position: fixed; z-index: 2147483000; isolation: isolate; display: flex; flex-direction: column; min-width: 210px; max-width: min(320px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 5px; border: 1px solid var(--surface-border); border-radius: 10px; color: var(--text-primary); background: var(--surface-raised); box-shadow: var(--shadow-overlay); }
 .action-menu-popover > button { min-height: 34px; padding: 7px 10px; border: 0; border-radius: var(--radius-control); color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
 .action-menu-popover > button:hover, .action-menu-popover > button:focus-visible { outline: none; background: var(--surface-hover); }
+.action-menu-popover > button.selected { color: var(--accent); font-weight: 600; }
 .action-menu-popover > button:disabled { color: #aaa2ad; cursor: not-allowed; }
 .action-menu-divider { height: 1px; margin: 4px 6px; background: #e6e0e9; }
 .theme-dark .action-menu-popover { color: var(--text-primary); border-color: var(--surface-border); background: var(--surface-raised); }

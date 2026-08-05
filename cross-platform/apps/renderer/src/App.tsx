@@ -39,6 +39,7 @@ import { useReminders } from './tasks/useReminders'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from './editor/extensions'
 import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
+import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
 import { publishPreparedLegacyArchive } from './sync/legacySshSync'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
@@ -100,12 +101,13 @@ const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面'
 
 export interface AppProps {
   theme?: 'light' | 'dark'
+  themePreference?: ThemePreference
   accentColor?: AccentColor
   onAccentColorChange?: (color: AccentColor) => void
-  onToggleTheme?: () => void
+  onThemePreferenceChange?: (preference: ThemePreference) => void
 }
 
-export function App({ theme = 'light', accentColor = 'purple', onAccentColorChange, onToggleTheme }: AppProps) {
+export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
   const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
@@ -839,7 +841,11 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
               </ActionMenu>
               {activeArea === 'notes' && !sectionIsEmpty && <Button appearance="subtle" icon={<Delete20Regular />} aria-label="移到回收站" title="移到回收站" onClick={() => { void trashPage(currentPage.id) }} />}
               <Button appearance="subtle" icon={<FullScreenMaximize20Regular />} aria-label="进入聚焦模式" title="聚焦页面（F11）" onClick={() => setFocusMode(true)} />
-              <Button appearance="subtle" icon={theme === 'dark' ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} aria-label={theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'} title={theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'} onClick={onToggleTheme} />
+              <ActionMenu label="颜色主题" trigger={<Button appearance="subtle" icon={theme === 'dark' ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} aria-label="颜色主题" title="颜色主题" />}>
+                <button className={themePreference === 'light' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('light')}>浅色</button>
+                <button className={themePreference === 'dark' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('dark')}>深色</button>
+                <button className={themePreference === 'system' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('system')}>跟随系统</button>
+              </ActionMenu>
             </div>
           </div>
           <section className="document-surface">
@@ -901,6 +907,7 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
       {settingsOpen && <Suspense fallback={null}><SettingsCenter
         initialPage={settingsPage}
         theme={theme}
+        themePreference={themePreference}
         accentColor={accentColor}
         syncState={syncState}
         syncError={syncError}
@@ -919,7 +926,7 @@ export function App({ theme = 'light', accentColor = 'purple', onAccentColorChan
         privacyConfigured={privacyConfigured}
         privacyUnlocked={privacyUnlocked}
         onClose={() => setSettingsOpen(false)}
-        onToggleTheme={() => onToggleTheme?.()}
+        onThemePreferenceChange={(preference) => onThemePreferenceChange?.(preference)}
         onAccentColorChange={(color) => onAccentColorChange?.(color)}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}
         onPublishSshArchive={async (file) => { await publishPreparedLegacyArchive(file) }}

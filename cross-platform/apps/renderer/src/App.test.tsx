@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
+import { vi } from 'vitest'
 import { App } from './App'
 
 test('renders the OneNote-style workspace and editor', async () => {
@@ -21,7 +22,7 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(container.querySelector('.titlebar')).not.toBeInTheDocument()
   const editorActions = container.querySelector('.editor-actions') as HTMLElement
   expect(within(editorActions).queryByRole('button', { name: /AI 助手/ })).not.toBeInTheDocument()
-  expect(within(editorActions).getByRole('button', { name: '切换为深色主题' })).toBeInTheDocument()
+  expect(within(editorActions).getByRole('button', { name: '颜色主题' })).toBeInTheDocument()
   const rightTools = screen.getByRole('navigation', { name: '页面辅助工具' })
   expect(within(rightTools).getByRole('button', { name: '隐藏右侧面板' })).toBeInTheDocument()
   expect(within(rightTools).getByRole('button', { name: '大纲' })).toBeInTheDocument()
@@ -319,3 +320,23 @@ test('renders the OneNote-style workspace and editor', async () => {
   fireEvent.keyDown(window, { key: 'F11' })
   expect(container.querySelector('.app-shell')).not.toHaveClass('focus-mode')
 }, 30_000)
+
+test('the theme icon opens a light/dark/system menu and reports the choice', () => {
+  Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: false, media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }) })
+  const onThemePreferenceChange = vi.fn()
+  const { container } = render(<FluentProvider theme={webLightTheme}><App themePreference="system" onThemePreferenceChange={onThemePreferenceChange} /></FluentProvider>)
+  const editorActions = container.querySelector('.editor-actions') as HTMLElement
+  fireEvent.click(within(editorActions).getByRole('button', { name: '颜色主题' }))
+  const menu = screen.getByRole('dialog', { name: '颜色主题' })
+  const light = within(menu).getByRole('button', { name: '浅色' })
+  const dark = within(menu).getByRole('button', { name: '深色' })
+  const system = within(menu).getByRole('button', { name: '跟随系统' })
+  // Following the system is the active preference by default.
+  expect(light).not.toHaveClass('selected')
+  expect(dark).not.toHaveClass('selected')
+  expect(system).toHaveClass('selected')
+  fireEvent.click(dark)
+  expect(onThemePreferenceChange).toHaveBeenCalledWith('dark')
+  fireEvent.click(light)
+  expect(onThemePreferenceChange).toHaveBeenCalledWith('light')
+})

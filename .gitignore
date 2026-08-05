@@ -37,3 +37,4 @@ output/
 # Android is maintained as a separate repository.
 notebook_android/
 recovery/
+.zcode/
