@@ -12,8 +12,8 @@
     "build": "electron-vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "package": "pnpm build:native && pnpm build && electron-builder --dir",
-    "dist": "pnpm build:native && pnpm build && electron-builder"
+    "package": "pnpm build:native && pnpm build && electron-builder --dir --publish never",
+    "dist": "pnpm build:native && pnpm build && electron-builder --publish never"
   },
   "dependencies": {
     "electron-updater": "6.8.9",
@@ -37,6 +37,7 @@
   "build": {
     "appId": "app.notebook.next",
     "productName": "Notebook Next",
+    "npmRebuild": false,
     "afterSign": "scripts/notarize.mjs",
     "directories": {
       "output": "release"
