@@ -47,11 +47,15 @@ function tar(entries: Array<{ name: string; data: Uint8Array }>) {
 function tarNames(archive: Uint8Array) {
   const data = Buffer.from(archive)
   const names: string[] = []
+  const beforeNull = (value: string) => {
+    const end = value.indexOf('\0')
+    return end < 0 ? value : value.slice(0, end)
+  }
   for (let offset = 0; offset + 512 <= data.byteLength;) {
     const header = data.subarray(offset, offset + 512)
     if (header.every((byte) => byte === 0)) break
-    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '')
-    const sizeText = header.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim()
+    const name = beforeNull(header.subarray(0, 100).toString('utf8'))
+    const sizeText = beforeNull(header.subarray(124, 136).toString('ascii')).trim()
     const size = Number.parseInt(sizeText || '0', 8)
     names.push(name)
     offset += 512 + Math.ceil(size / 512) * 512

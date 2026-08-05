@@ -37,8 +37,19 @@ jobs:
           python -m pip install -e '.[test]'
           pytest -q
 
-  desktop-package:
+  prepare-release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "Notebook Next $GITHUB_REF_NAME"
+
+  desktop-package:
+    needs: [quality, prepare-release]
+    if: ${{ always() && needs.quality.result == 'success' && (!startsWith(github.ref, 'refs/tags/v') || needs.prepare-release.result == 'success') }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,40 +65,29 @@ jobs:
       - name: Install dependencies
         working-directory: cross-platform
         run: pnpm install --frozen-lockfile
-      - name: Require signing credentials for tagged releases
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_LINK || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_KEY_PASSWORD || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: node -e "if (process.env.RUNNER_OS === 'macOS' && (!process.env.CSC_LINK || !process.env.CSC_KEY_PASSWORD || !process.env.APPLE_ID || !process.env.APPLE_APP_SPECIFIC_PASSWORD || !process.env.APPLE_TEAM_ID)) throw new Error('Tagged macOS releases require signing and notarization secrets'); if (process.env.RUNNER_OS === 'Windows' && (!process.env.CSC_LINK || !process.env.CSC_KEY_PASSWORD)) throw new Error('Tagged Windows releases require Authenticode secrets')"
       - name: Package desktop application
         working-directory: cross-platform
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ startsWith(github.ref, 'refs/tags/v') && ((matrix.os == 'macos-latest' && secrets.MACOS_CSC_LINK != '') || (matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK != '')) && 'true' || 'false' }}
           CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_LINK || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_LINK || '' }}
           CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.MACOS_CSC_KEY_PASSWORD || matrix.os == 'windows-latest' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: pnpm --filter @notebook/desktop dist
-      - uses: actions/upload-artifact@v5
-        with:
-          name: notebook-next-${{ matrix.os }}
-          path: cross-platform/apps/desktop/release/
-          if-no-files-found: error
-
-  draft-release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: desktop-package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v6
-        with:
-          path: artifacts
-      - name: Create draft GitHub release
+      - name: Upload files directly to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        working-directory: cross-platform/apps/desktop
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/**/* --draft --generate-notes --title "Notebook Next $GITHUB_REF_NAME"
+        run: |
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find release -maxdepth 1 -type f ! -name 'builder-*' -print0)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release files were produced" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
