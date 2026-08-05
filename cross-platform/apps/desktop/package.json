@@ -3,6 +3,7 @@
   "version": "2.0.2",
   "description": "AI-native, offline-first cross-platform notebook",
   "author": "Notebook contributors",
+  "homepage": "https://github.com/thunder951413/notebook",
   "private": true,
   "type": "module",
   "main": "dist/main/index.js",
