@@ -229,6 +229,8 @@ html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixe
 .area-heading > span { font-weight: 650; }
 .area-heading small, .area-toolbar-label { color: #7c7580; font-size: 12px; }
 .editor-toolbar {
+  position: relative;
+  z-index: 10;
   display: grid;
   min-height: 58px;
   grid-template-columns: minmax(120px,1fr) auto auto;
@@ -261,13 +263,15 @@ html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixe
 .attachment-error { max-width: 240px; color: #b42318; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .version-history { position: relative; }
 .version-popover { position: absolute; z-index: 12; top: 34px; right: 0; width: min(680px, 70vw); max-height: 440px; overflow: hidden; padding: 8px; border: 1px solid #ded6e3; border-radius: 10px; background: white; box-shadow: 0 12px 36px rgba(30,20,35,.18); }
+.version-popover:has(.version-browser) { height: min(440px, calc(100dvh - 96px)); display: grid; grid-template-rows: auto minmax(0,1fr); }
 .version-popover > div:first-child { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 7px; }
-.version-popover > div:first-child > span, .version-preview > header > div:first-child { display: grid; gap: 2px; }
-.version-browser { display: grid; grid-template-columns: 220px minmax(280px, 1fr); min-height: 300px; border-top: 1px solid #ece7ef; }
-.version-list { overflow-y: auto; padding: 6px 6px 6px 0; }
+.version-popover > div:first-child > span:first-child, .version-preview > header > div:first-child { display: grid; gap: 2px; }
+.version-popover > div:first-child > span:last-child { display: flex; align-items: center; gap: 4px; }
+.version-browser { min-height: 0; display: grid; grid-template-columns: 220px minmax(280px, 1fr); border-top: 1px solid #ece7ef; }
+.version-list { min-height: 0; overflow-y: auto; padding: 6px 6px 6px 0; }
 .version-list button { width: 100%; display: flex; flex-direction: column; gap: 2px; padding: 8px; border: 0; border-radius: 7px; text-align: left; background: transparent; cursor: pointer; }
 .version-list button:hover, .version-list button.selected { background: #f0f1f2; }
-.version-preview { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; padding: 10px; border-left: 1px solid #ece7ef; }
+.version-preview { min-width: 0; min-height: 0; display: flex; overflow: hidden; flex-direction: column; align-items: flex-end; gap: 8px; padding: 10px; border-left: 1px solid #ece7ef; }
 .version-preview > header { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .version-preview > header > div:last-child { display: flex; gap: 4px; }
 .version-preview > header small { color: #7d7580; font-size: 10px; }
