@@ -64,6 +64,14 @@ The Electron synchronizer never writes a pulled merge into IndexedDB before remo
 
 The verified pre-migration archive must be retained until Electron-to-Android round-trip, history restore, mixed image rendering, and repository-size checks all pass. Obsolete v1 note files and attachment paths may only be removed afterward.
 
+## Server maintenance helper
+
+The Electron-only server helper is an optional, manual maintenance tool. It does not participate in daily synchronization or automatically accelerate a first sync; ordinary SFTP remains the normal path and fallback. It runs over SSH only on POSIX servers with `python3` available.
+
+`export-tar` acquires the shared repository lock, keeps it alive with heartbeats, verifies repository integrity, then emits a consistent tar snapshot. `import-tar` first unpacks into a stage and validates archive paths and limits, object and note hashes, cross-file references, and overall repository integrity. Only a valid stage is published while holding the lock, with overwritten files retained in the private recovery area and `notes/index.json` committed last; a rejected import leaves the existing repository unchanged. `verify` reports the concrete broken object, note, index, manifest, or reference rather than a generic failure.
+
+`pull --tail` and `delta` are intentionally not implemented.
+
 ## Resource collection
 
-An object is live while referenced by any current note, any retained history entry, or a migration backup. Ordinary sync intentionally never deletes content-addressed objects. A future maintenance command may perform grace-period collection after producing a recovery manifest; clients must not infer that an unreferenced object is immediately disposable.
+An object is live while referenced by any current note, any retained history entry, or an asset manifest. Ordinary sync intentionally never deletes content-addressed objects. The manual helper's `gc` scans all of those references and only moves an unreferenced object older than its grace period into a private quarantine/recovery area, together with a recovery manifest. If an encrypted note prevents the helper from proving the complete historical object graph, collection fails closed without moving anything. A later `gc` run purges a quarantine batch only after a longer retention period, so collection is recoverable during that window; clients must not infer that an unreferenced object is immediately disposable.

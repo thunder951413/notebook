@@ -11,7 +11,8 @@
   已覆盖"无变化同步近乎免费"的目标。
 - **§7 helper 部署模型**由"用户手动上传脚本"改为"客户端内嵌单文件脚本，
   经 `ssh exec` 以 base64 注入 `python3 -c` 执行"——无需上传、无版本分发
-  问题；代价是服务器必须安装 python3（缺失时操作报错，同步本身回退纯 SFTP）。
+  问题；前提是服务器具备 POSIX 环境和 python3（缺失时操作报错，同步本身回退
+  纯 SFTP）。
 
 ## 目标
 
@@ -212,7 +213,7 @@ renderer (legacySshSync.ts)
 | Phase 1 | A1 连接复用、A2 目录列表、A3 读回收敛、A4 并发池、E1 | `apps/desktop/src/main/legacySftp.ts` + preload 参数 | 高延迟链路同步时间 -50%~-70% |
 | Phase 2 | B1 Uint8Array、C1 空同步快速路径、C2 push 元数据拉取 | preload + `legacySshSync.ts` + 两端调用 | 无变化同步近乎免费；IPC -25% |
 | Phase 3 | C3 资产按需导出、D1 编码快速路径、E2 重试 jitter | `legacySshSync.ts` + `sync-contract` | 大仓库本地 I/O 与 CPU 显著下降 |
-| Phase 4（已实施） | 服务端 helper 增强层（§7） | 新增 `ssh exec` 通道 + 内嵌 python3 脚本 | 首次全量同步 tar 流式；verify/gc 仓库卫生 |
+| Phase 4（已实施） | 服务端 helper 增强层（§7） | 新增 `ssh exec` 通道 + 内嵌 python3 脚本 | 手动、可验证的 tar 备份恢复；verify/gc 仓库卫生 |
 
 每个阶段独立可发布；Phase 1 完全不触碰协议与 renderer 编排，风险最低。
 Phase 1–4 保持 repository v3 协议不变；v4 格式方向（§6）与旧客户端兼容性解耦，
@@ -315,18 +316,15 @@ v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
 
 ## 7. 服务端 helper 盘点（已实施）
 
-> 本节原为开放讨论项，已按以下取舍实施（Phase 4）：
-> ① 部署模型：**无需用户上传**——helper 为客户端内嵌的零依赖 python3 单文件
-> 脚本（`legacySftp.ts` 中的 `REPOSITORY_HELPER`），经 `ssh exec` 以 base64
-> 注入 `python3 -c` 执行，脚本、操作名与仓库根路径均走 base64，无 shell 注入
-> 面；stdin 保留给 import-tar 载荷。② 降级：服务器无 python3 时退出码非零、
-> 错误信息明确，客户端仅对维护操作报错，日常同步走纯 SFTP 不受影响。
-> ③ 能力取舍：实现 `export-tar` / `import-tar` / `verify` / `gc`；`pull --tail`
-> 与 `delta` 未实施（收益与 §7.2 分析一致，不划算）。④ 版本随客户端内嵌分发，
-> 无独立维护负担。
+> helper 是 Electron 的可选、手动维护能力，不参与日常同步，也不会自动加速首次
+> 同步；普通 SFTP 始终是默认路径与回退。它内嵌为零依赖 python3 单文件脚本
+> （`legacySftp.ts` 的 `REPOSITORY_HELPER`），经 `ssh exec` 以 base64 注入
+> `python3 -c` 执行。脚本、操作名与仓库根路径均走 base64，无 shell 注入面；
+> stdin 仅承载 `import-tar` 载荷。服务器必须具备 POSIX 环境与 python3；不满足时
+> 只有维护操作报错，普通同步不受影响。已实现 `export-tar` / `import-tar` /
+> `verify` / `gc`；`pull --tail` 与 `delta` 不实施。
 
-服务端 helper 是**产品决策**而非客户端问题：需要用户在服务器放置一个
-可执行脚本，客户端通过 `ssh exec` 调用。与 §6 的 v4 方向正交，可独立取舍。
+helper 与 §6 的 v4 方向正交，可独立取舍，且版本随客户端内嵌分发，无需用户上传。
 
 ### 7.1 部署模型与约束
 
@@ -340,31 +338,41 @@ v4 改为**每设备 append-only 日志**（`journal/<deviceID>.jsonl`）：
   不含 shell 元字符、无拼接注入面；stdin 仅承载 import-tar 二进制；
   复用现有主机指纹验证；helper 本身拥有服务器任意执行权（即用户自己的
   凭据与服务器）。
-- **限制**：服务器需安装 python3（常见发行版默认自带）；缺失时维护操作
-  报错并明确提示，日常同步回退纯 SFTP 路径。Windows 服务器（OpenSSH for
-  Windows）无 POSIX 环境，同样不可用。
+- **限制**：服务器需具备 POSIX 环境和 python3；缺失时维护操作报错并明确提示，
+  日常同步仍使用纯 SFTP。Windows 服务器（OpenSSH for Windows）无 POSIX 环境，
+  helper 不可用。
 
 ### 7.2 能力清单与收益排序
 
 | 能力 | 做什么 | 收益 | 优先级 |
 |---|---|---|---|
-| `export --tar` / `import --tar` | 首次全量同步一次流式下载/上传（tar 打包） | 首次同步从 N 次往返 → 1 次流；大仓库 -80% 以上时间 | 高 |
-| `verify` / `gc` | 校验 objects 哈希与日志完整性；清理孤儿对象 | 孤儿对象清理是纯 SFTP 模型唯一做不到的卫生能力 | 高 |
+| `export-tar` | 在共享锁与心跳保护下先校验，再导出一致的 tar 快照 | 手动备份可避免与发布并发时混入不同版本 | 高 |
+| `import-tar` | 在暂存区校验路径、限制、哈希、跨文件引用和仓库完整性；持锁后保留覆盖前副本并最后发布索引 | 无效备份不改变当前仓库，覆盖可回退，恢复过程可验证 | 高 |
+| `verify` | 输出具体的 object、note、index、manifest 或跨文件引用错误 | 让仓库损坏可定位，而非只返回泛化失败 | 高 |
+| `gc` | 扫描当前笔记、历史和附件清单；超宽限期孤儿移至带恢复清单的私有隔离区 | 可恢复的仓库卫生；无法证明加密笔记完整引用图时安全拒绝；隔离批次超过更长保留期后由后续 `gc` 清除 | 高 |
 | `pull --tail` | 聚合返回所有设备日志尾部，替代客户端逐个读 | 每同步省若干往返；收益随设备数增长 | 中 |
 | `delta`（rsync 式） | 只传变化字节块 | **对当前仓库收益有限**：正文与附件均为内容寻址（改一次一个新对象），无就地修改文件；日志是 append-only，本身即增量。除非未来引入就地修改文件，否则不建议做 | 低 |
 
 结论：**内容寻址仓库 + append-only 日志让 rsync 式差分无利可图**。helper
-的价值集中在“首次全量加速”和“仓库卫生”，而非增量传输。
+的价值集中在手动、可验证的备份恢复与仓库卫生，而非自动同步或增量传输。
 
 ### 7.3 风险与成本（实施后更新）
 
-- 部署摩擦已消除：脚本随客户端内嵌分发，无需上传；唯一前置条件是服务器
-  有 python3（缺失时维护操作给出明确错误）。
+- 部署摩擦已消除：脚本随客户端内嵌分发，无需上传；前置条件是服务器具备
+  POSIX 环境与 python3（缺失时维护操作给出明确错误）。
 - Windows 服务器不支持；`ssh exec` 已新增通道（`connectExec`）与 `ssh2`
   直接依赖。
 - helper 是端侧自由软件，用户可审查；但服务器上执行任意脚本仍是信任边界
   （与使用 SSH 本身同等信任模型）。
-- 已实现 `export/import --tar` + `verify` + `gc` 四项；`pull --tail` 未实施。
+- `export-tar` 在共享锁、心跳和完整性校验后生成一致快照；`import-tar` 必须先在
+  暂存区通过路径、限额、哈希、引用与仓库完整性校验，并在锁内保留覆盖前副本、
+  最后发布索引。失败导入不会修改当前仓库。
+- `verify` 返回具体的跨文件、对象、note、index 与 manifest 错误。`gc` 不会立即
+  删除对象：它只将超过宽限期且未被当前笔记、历史或 manifest 引用的对象移入私有
+  隔离/恢复区，并写入恢复清单；无法证明加密笔记的完整历史对象引用图时会安全拒绝，
+  隔离批次超过更长保留期后只由后续 `gc` 清除。
+- 已实现 `export-tar`、`import-tar`、`verify`、`gc` 四项；`pull --tail` 与 `delta`
+  未实施。
 
 ## 8. 实施偏差记录
 

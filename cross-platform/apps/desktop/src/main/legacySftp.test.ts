@@ -1,11 +1,12 @@
 import { createServer } from 'node:net'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
-import { gunzipSync } from 'node:zlib'
+import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, expect, test } from 'vitest'
-import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, releaseLegacySession, testLegacyConnection } from './legacySftp'
+import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection } from './legacySftp'
 
 const enabled = process.env.NOTEBOOK_SFTP_E2E === '1'
 let root = ''
@@ -15,6 +16,67 @@ let server: ReturnType<typeof spawn> | undefined
 
 const encode = (value: string) => new TextEncoder().encode(value)
 const bytes = (value: Uint8Array) => Buffer.from(value)
+const digest = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex')
+
+function tar(entries: Array<{ name: string; data: Uint8Array }>) {
+  const chunks: Buffer[] = []
+  for (const entry of entries) {
+    const data = Buffer.from(entry.data)
+    const header = Buffer.alloc(512)
+    const writeOctal = (offset: number, length: number, value: number) => header.write(`${value.toString(8).padStart(length - 1, '0')}\0`, offset, length, 'ascii')
+    header.write(entry.name, 0, 100, 'utf8')
+    writeOctal(100, 8, 0o644)
+    writeOctal(108, 8, 0)
+    writeOctal(116, 8, 0)
+    writeOctal(124, 12, data.byteLength)
+    writeOctal(136, 12, Math.floor(Date.now() / 1000))
+    header.fill(0x20, 148, 156)
+    header[156] = '0'.charCodeAt(0)
+    header.write('ustar\0', 257, 6, 'ascii')
+    header.write('00', 263, 2, 'ascii')
+    const checksum = header.reduce((total, byte) => total + byte, 0)
+    header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
+    chunks.push(header, data)
+    const padding = (512 - data.byteLength % 512) % 512
+    if (padding) chunks.push(Buffer.alloc(padding))
+  }
+  chunks.push(Buffer.alloc(1024))
+  return Buffer.concat(chunks)
+}
+
+function tarNames(archive: Uint8Array) {
+  const data = Buffer.from(archive)
+  const names: string[] = []
+  for (let offset = 0; offset + 512 <= data.byteLength;) {
+    const header = data.subarray(offset, offset + 512)
+    if (header.every((byte) => byte === 0)) break
+    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '')
+    const sizeText = header.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim()
+    const size = Number.parseInt(sizeText || '0', 8)
+    names.push(name)
+    offset += 512 + Math.ceil(size / 512) * 512
+  }
+  return names
+}
+
+const helperSettings = (remotePath: string) => ({ host: '127.0.0.1', port, username: 'notebook', password: 'test-password', remotePath, fingerprint })
+
+async function writeHelperRepository(remotePath: string) {
+  const repository = join(root, remotePath)
+  const noteId = '30000000-0000-4000-8000-000000000004'
+  const body = '# Repository helper\n'
+  const contentHash = digest(body)
+  const object = Buffer.from('referenced object')
+  const objectHash = digest(object)
+  await mkdir(join(repository, 'notes'), { recursive: true })
+  await mkdir(join(repository, 'objects', objectHash.slice(0, 2)), { recursive: true })
+  await writeFile(join(repository, 'library.json'), '{"folders":[],"tags":[]}')
+  await writeFile(join(repository, 'notes', `${noteId}.json.gz`), gzipSync(JSON.stringify({ schemaVersion: 3, noteID: noteId, metadata: { id: noteId }, currentContentHash: contentHash, contentObjects: { [contentHash]: body }, history: [], assets: [] })))
+  await writeFile(join(repository, 'notes', 'assets_manifest.json'), JSON.stringify({ entries: [{ relativePath: `objects/${objectHash.slice(0, 2)}/${objectHash}`, contentHash: objectHash, size: object.byteLength }] }))
+  await writeFile(join(repository, 'objects', objectHash.slice(0, 2), objectHash), object)
+  await writeFile(join(repository, 'notes', 'index.json'), JSON.stringify({ repositoryFormat: { version: 3, noteEncoding: 'gzip', contentFormat: 'markdown-gfm', assetAddressing: 'sha256' }, entries: [{ noteID: noteId, version: 1, contentHash }] }))
+  return { repository, noteId, object, objectHash }
+}
 
 test('normalizes duplicate index rows by highest version and newest deletion', () => {
   const noteId = '30000000-0000-4000-8000-000000000001'
@@ -129,4 +191,126 @@ test.runIf(enabled)('round-trips a v3 Markdown repository with content-addressed
   expect(metadata.files.some((item) => item.name === `objects/aa/${objectHash}`)).toBe(false)
   expect(metadata.files.some((item) => item.name === 'notes/index.json')).toBe(true)
   expect(metadata.objectHashes).toContain(objectHash)
+})
+
+test.runIf(enabled)('runs repository helper verification and exports a valid tar archive over SSH exec', async () => {
+  const remotePath = 'repository-helper-export'
+  const source = await writeHelperRepository(remotePath)
+  const verification = await runRepositoryHelper(helperSettings(remotePath), 'verify')
+  expect(verification.ok).toBe(true)
+  expect(verification.message).toMatch(/校验通过/)
+
+  const exported = await runRepositoryHelper(helperSettings(remotePath), 'export-tar')
+  expect(exported.ok).toBe(true)
+  expect(exported.data).toBeTruthy()
+  expect(tarNames(exported.data!)).toEqual(expect.arrayContaining([
+    'library.json',
+    'notes/index.json',
+    `notes/${source.noteId}.json.gz`,
+    `objects/${source.objectHash.slice(0, 2)}/${source.objectHash}`,
+  ]))
+  const destination = 'repository-helper-export-imported'
+  await expect(runRepositoryHelper(helperSettings(destination), 'import-tar', exported.data)).resolves.toMatchObject({ ok: true })
+  await expect(readFile(join(root, destination, 'notes', 'index.json'), 'utf8')).resolves.toContain(source.noteId)
+  const repeated = await runRepositoryHelper(helperSettings(destination), 'import-tar', exported.data)
+  expect(repeated.message).toMatch(/覆盖前文件保存在/)
+  await expect(access(join(root, destination, '.notebook-next-recovery'))).resolves.toBeUndefined()
+})
+
+test.runIf(enabled)('verifies a compressed legacy repository with attachment-relative manifest paths', async () => {
+  const remotePath = 'repository-helper-legacy'
+  const repository = join(root, remotePath)
+  const noteId = '30000000-0000-4000-8000-000000000005'
+  const attachment = Buffer.from('legacy attachment')
+  const attachmentHash = digest(attachment)
+  const relativePath = `${noteId}/legacy.bin`
+  await mkdir(join(repository, 'notes'), { recursive: true })
+  await mkdir(join(repository, 'attachments', noteId), { recursive: true })
+  await writeFile(join(repository, 'library.json'), '{"folders":[],"tags":[]}')
+  await writeFile(join(repository, 'notes', `${noteId}.json.gz`), gzipSync(JSON.stringify({ noteID: noteId, currentSnapshot: {} })))
+  await writeFile(join(repository, 'attachments', relativePath), attachment)
+  await writeFile(join(repository, 'notes', 'assets_manifest.json'), JSON.stringify({ entries: [{ relativePath, contentHash: attachmentHash, size: attachment.byteLength }] }))
+  await writeFile(join(repository, 'notes', 'index.json'), JSON.stringify({ repositoryFormat: { version: 2, noteEncoding: 'gzip' }, entries: [{ noteID: noteId, version: 1, contentHash: digest('{}'), historyCount: 0 }] }))
+  await expect(runRepositoryHelper(helperSettings(remotePath), 'verify')).resolves.toMatchObject({ ok: true, message: expect.stringMatching(/校验通过/) })
+})
+
+test.runIf(enabled)('reports detailed corruption from repository helper verification', async () => {
+  const remotePath = 'repository-helper-corrupt'
+  const source = await writeHelperRepository(remotePath)
+  await writeFile(join(source.repository, 'objects', source.objectHash.slice(0, 2), source.objectHash), 'corrupted object')
+  const detail = await runRepositoryHelper(helperSettings(remotePath), 'verify').then(
+    (result) => result.message,
+    (error: Error) => error.message,
+  )
+  expect(detail).toMatch(new RegExp(`objects/${source.objectHash.slice(0, 2)}/${source.objectHash} hash mismatch`))
+})
+
+test.runIf(enabled)('rejects an invalid helper import without publishing its index', async () => {
+  const remotePath = 'repository-helper-invalid-import'
+  const repository = join(root, remotePath)
+  const originalIndex = '{"entries":[{"noteID":"existing"}]}'
+  await mkdir(join(repository, 'notes'), { recursive: true })
+  await writeFile(join(repository, 'notes', 'index.json'), originalIndex)
+  const claimedHash = 'a'.repeat(64)
+  const invalid = tar([
+    { name: 'notes/index.json', data: encode('{"entries":[]}') },
+    { name: `objects/aa/${claimedHash}`, data: encode('not the claimed object') },
+  ])
+  await expect(runRepositoryHelper(helperSettings(remotePath), 'import-tar', invalid)).rejects.toThrow()
+  await expect(readFile(join(repository, 'notes', 'index.json'), 'utf8')).resolves.toBe(originalIndex)
+})
+
+test.runIf(enabled)('quarantines old unreferenced objects while preserving referenced objects', async () => {
+  const remotePath = 'repository-helper-gc'
+  const source = await writeHelperRepository(remotePath)
+  const orphan = Buffer.from('old unreferenced object')
+  const orphanHash = digest(orphan)
+  const orphanPath = join(source.repository, 'objects', orphanHash.slice(0, 2), orphanHash)
+  await mkdir(join(source.repository, 'objects', orphanHash.slice(0, 2)), { recursive: true })
+  await writeFile(orphanPath, orphan)
+  const historyObject = Buffer.from('history-only object')
+  const historyObjectHash = digest(historyObject)
+  const historyObjectPath = join(source.repository, 'objects', historyObjectHash.slice(0, 2), historyObjectHash)
+  await mkdir(join(source.repository, 'objects', historyObjectHash.slice(0, 2)), { recursive: true })
+  await writeFile(historyObjectPath, historyObject)
+  const notePath = join(source.repository, 'notes', `${source.noteId}.json.gz`)
+  const envelope = JSON.parse(gunzipSync(await readFile(notePath)).toString('utf8'))
+  const historyAssetId = 'history-only-asset'
+  const historyMarkdown = `![history](notebook-asset:${historyAssetId})`
+  const historyHash = digest(historyMarkdown)
+  envelope.contentObjects[historyHash] = historyMarkdown
+  envelope.history = [{ contentHash: historyHash }]
+  envelope.assets.push({ id: historyAssetId, objectHash: historyObjectHash, checksum: historyObjectHash, localPath: `objects/${historyObjectHash.slice(0, 2)}/${historyObjectHash}` })
+  await writeFile(notePath, gzipSync(JSON.stringify(envelope)))
+  const indexPath = join(source.repository, 'notes', 'index.json')
+  const index = JSON.parse(await readFile(indexPath, 'utf8'))
+  index.entries[0].historyCount = 1
+  await writeFile(indexPath, JSON.stringify(index))
+  const old = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+  await utimes(orphanPath, old, old)
+  await utimes(historyObjectPath, old, old)
+
+  const outcome = await runRepositoryHelper(helperSettings(remotePath), 'gc')
+  expect(outcome.ok).toBe(true)
+  expect(outcome.message).toMatch(/隔离|quarantin/i)
+  await expect(access(orphanPath)).rejects.toThrow()
+  await expect(readFile(join(source.repository, 'objects', source.objectHash.slice(0, 2), source.objectHash))).resolves.toEqual(source.object)
+  await expect(readFile(historyObjectPath)).resolves.toEqual(historyObject)
+})
+
+test.runIf(enabled)('fails closed when encrypted notes hide the historical object graph from gc', async () => {
+  const remotePath = 'repository-helper-private-gc'
+  const source = await writeHelperRepository(remotePath)
+  const privateEnvelope = {
+    schemaVersion: 3,
+    noteID: source.noteId,
+    metadata: { id: source.noteId },
+    currentContentHash: digest('private'),
+    contentObjects: {},
+    history: [], assets: [], taskSteps: [], tagIDs: [], linkedPageIDs: [],
+    privacyEncryption: { version: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: 310000, salt: 'salt', iv: 'iv', ciphertext: 'ciphertext' },
+  }
+  await writeFile(join(source.repository, 'notes', `${source.noteId}.json.gz`), gzipSync(JSON.stringify(privateEnvelope)))
+  await expect(runRepositoryHelper(helperSettings(remotePath), 'gc')).rejects.toThrow(/encrypted|加密/i)
+  await expect(readFile(join(source.repository, 'objects', source.objectHash.slice(0, 2), source.objectHash))).resolves.toEqual(source.object)
 })
