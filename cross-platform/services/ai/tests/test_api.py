@@ -1,10 +1,13 @@
 from collections.abc import AsyncIterator
 
+import pydantic
+import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
 
-from notebook_ai.main import create_app
 from notebook_ai.legacy_sftp import PullResponse as LegacyPullResponse
+from notebook_ai.legacy_sftp import SshConnection
+from notebook_ai.main import create_app
 from notebook_ai.models import ChatRequest
 from notebook_ai.settings import Settings
 
@@ -72,6 +75,27 @@ def test_local_sftp_bridge_does_not_leak_backend_errors(monkeypatch, tmp_path) -
         assert "SSH/SFTP" in response.json()["detail"]
         assert "supersecret" not in response.text
         assert "/private/server/path" not in response.text
+
+
+def test_local_sftp_bridge_accepts_private_key_auth(monkeypatch, tmp_path) -> None:
+    """Private-key-only auth (no password) should be accepted by the model and bridge."""
+    monkeypatch.setattr("notebook_ai.main.pull_repository", lambda _: LegacyPullResponse(files=[], indexHash="", fingerprint="SHA256:test"))
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'bridge-key.db'}", enable_local_sftp_bridge=True, api_token="secret")
+    payload = {"settings": {"host": "server", "port": 22, "username": "user", "privateKeyPath": "/home/user/.ssh/id_ed25519", "remotePath": "~/notebook_backup"}}
+    with TestClient(create_app(settings, FakeGateway()), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+        response = client.post("/v1/local-sftp/pull", headers={"Authorization": "Bearer secret"}, json=payload)
+        assert response.status_code == 200
+        assert response.json()["fingerprint"] == "SHA256:test"
+
+
+def test_ssh_connection_rejects_missing_password_and_private_key(tmp_path) -> None:
+    """SshConnection must require at least one of password or privateKeyPath."""
+    with pytest.raises(pydantic.ValidationError):
+        SshConnection(host="server", port=22, username="user", remotePath="~/notebook_backup")
+    # password-only should still work
+    SshConnection(host="server", port=22, username="user", password="secret", remotePath="~/notebook_backup")
+    # key-only should also work
+    SshConnection(host="server", port=22, username="user", privateKeyPath="/home/user/.ssh/id_ed25519", remotePath="~/notebook_backup")
 
 
 def test_ai_and_embedding_models_are_allowlisted(tmp_path) -> None:

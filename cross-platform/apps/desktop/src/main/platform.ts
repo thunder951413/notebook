@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
 import { pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection, type LegacySftpFile, type LegacySftpHelperResult, type LegacySftpPullOptions, type LegacySftpPushOptions, type LegacySshConnection } from './legacySftp'
+import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, type WebdavConnection, type WebdavJournalEntry } from './webdav'
 import { appendDiagnosticEvent, diagnosticLogPath, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
@@ -256,5 +257,23 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
   ipcMain.handle('legacySftp:helper', async (event, settings: LegacySshConnection, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<LegacySftpHelperResult> => {
     assertTrustedSender(event)
     return runRepositoryHelper(settings, operation, input)
+  })
+
+  ipcMain.handle('webdav:test', async (event, settings: WebdavConnection) => {
+    assertTrustedSender(event)
+    return testWebdavConnection(settings)
+  })
+  ipcMain.handle('webdav:pull', async (event, settings: WebdavConnection, knownSeqs: Record<string, number>) => {
+    assertTrustedSender(event)
+    return pullWebdavJournals(settings, knownSeqs)
+  })
+  ipcMain.handle('webdav:object:get', async (event, settings: WebdavConnection, hash: string) => {
+    assertTrustedSender(event)
+    return getWebdavObject(settings, hash)
+  })
+  ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>) => {
+    assertTrustedSender(event)
+    for (const object of objects) await putWebdavObject(settings, object.hash, object.data)
+    return appendWebdavJournal(settings, deviceId, entries)
   })
 }

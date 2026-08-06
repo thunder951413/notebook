@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/react-components'
-import QRCode from 'qrcode'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
-import { clearLegacySshPassword, getLegacySshPassword, hasLegacySshPassword, loadLegacySshSettings, saveLegacySshSettings, type LegacySshSettings } from '../sync/legacySshSettings'
+import { clearWebdavAppPassword, clearWebdavSyncPassword, getWebdavAppPassword, getWebdavSyncPassword, hasWebdavAppPassword, loadWebdavSettings, saveWebdavSettings, type WebdavSettings } from '../sync/webdavSettings'
+import { testWebdavConnection } from '../sync/webdavSync'
 import type { LegacySyncMode } from '../sync/legacySshSync'
-import { runRepositoryHelper, type RepositoryHelperOperation } from '../sync/repositoryHelper'
-import { serializeNotebookSyncQrPayload } from '../sync/sshQrConfig'
 import { ACCENT_PRESETS, type AccentColor } from '../appearance/accent'
 import type { ThemePreference } from '../appearance/theme'
 import { recordDiagnosticEvent, type DiagnosticEntry } from '../diagnostics/diagnostics'
@@ -50,7 +48,7 @@ interface SettingsCenterProps {
   onResetHistory: () => Promise<{ pageCount: number; removedRevisionCount: number }>
   onChooseDataRoot?: () => void
   onPrivacyAction: () => void
-  onPublishSshArchive?: (file: File) => Promise<void>
+  onMigrateFromSsh: () => Promise<{ published: number }>
   onApplyAutomationProposal: (proposalId: string) => Promise<void>
   onRejectAutomationProposal: (proposalId: string) => Promise<void>
 }
@@ -63,18 +61,20 @@ const syncLabels: Record<SyncState, string> = {
   error: '同步失败',
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onPublishSshArchive, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
   const [page, setPage] = useState<SettingsPage>(initialPage)
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => loadSyncSettings())
-  const [sshSettings, setSshSettings] = useState<LegacySshSettings>(() => loadLegacySshSettings())
-  const [sshPassword, setSshPassword] = useState('')
-  const [storedSshPassword, setStoredSshPassword] = useState(false)
+  const [webdavSettings, setWebdavSettings] = useState<WebdavSettings>(() => loadWebdavSettings())
+  const [webdavAppPassword, setWebdavAppPassword] = useState('')
+  const [webdavSyncPassword, setWebdavSyncPassword] = useState('')
+  const [storedWebdavAppPassword, setStoredWebdavAppPassword] = useState(false)
+  const [storedWebdavSyncPassword, setStoredWebdavSyncPassword] = useState(false)
   const [savingSync, setSavingSync] = useState(false)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [checkingServer, setCheckingServer] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string>()
   const [syncMessageIsError, setSyncMessageIsError] = useState(false)
-  const [sshQrDataUrl, setSshQrDataUrl] = useState<string>()
+  const [migrating, setMigrating] = useState(false)
   const [updateState, setUpdateState] = useState<DesktopUpdateState>()
   const [updateActionError, setUpdateActionError] = useState<string>()
   const [githubReleaseToken, setGithubReleaseToken] = useState('')
@@ -85,13 +85,10 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   const [automationPort, setAutomationPort] = useState(47831)
   const [automationMessage, setAutomationMessage] = useState<string>()
   const [automationBusy, setAutomationBusy] = useState(false)
-  const [maintenanceBusy, setMaintenanceBusy] = useState(false)
-  const [maintenanceMessage, setMaintenanceMessage] = useState<string>()
-  const [maintenanceMessageIsError, setMaintenanceMessageIsError] = useState(false)
 
   useEffect(() => setPage(initialPage), [initialPage])
-  useEffect(() => { void hasLegacySshPassword().then(setStoredSshPassword) }, [])
-  useEffect(() => setSshQrDataUrl(undefined), [sshPassword, sshSettings])
+  useEffect(() => { void hasWebdavAppPassword().then(setStoredWebdavAppPassword) }, [])
+  useEffect(() => { void getWebdavSyncPassword().then((value) => setStoredWebdavSyncPassword(Boolean(value))) }, [])
   useEffect(() => {
     const updates = window.notebookDesktop?.updates
     if (!updates) return
@@ -234,20 +231,21 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     setUpdateState(await window.notebookDesktop.updates.check())
   }
 
-  const saveAndSync = async (mode: LegacySyncMode = 'bidirectional') => {
+  const saveAndSync = async () => {
     if (savingSync || syncState === 'syncing') return
     setSavingSync(true)
     setSyncMessage(undefined)
     setSyncMessageIsError(false)
     try {
-      const savedSsh = await saveLegacySshSettings(sshSettings, sshPassword || undefined)
-      setSshSettings(savedSsh)
-      if (sshPassword) { setStoredSshPassword(true); setSshPassword('') }
+      const savedWebdav = await saveWebdavSettings(webdavSettings, webdavAppPassword || undefined, webdavSyncPassword || undefined)
+      setWebdavSettings(savedWebdav)
+      if (webdavAppPassword) { setStoredWebdavAppPassword(true); setWebdavAppPassword('') }
+      if (webdavSyncPassword) setStoredWebdavSyncPassword(true)
       const saved = await saveSyncSettings(syncSettings)
       setSyncSettings(saved)
-      const succeeded = await onSyncNow(mode)
+      const succeeded = await onSyncNow('bidirectional')
       setSyncMessage(succeeded
-        ? mode === 'pull' ? '设置已保存，远端内容已拉取并安全合并到本机。' : mode === 'push' ? '设置已保存，本机变化已在校验远端后安全推送。' : '设置已保存，双向同步已完成。'
+        ? '设置已保存，双向同步已完成。'
         : !navigator.onLine
           ? `设置已保存；当前离线${saved.enabled ? '，将在联网后自动同步' : ''}。`
           : undefined)
@@ -286,7 +284,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     }
   }
 
-  const testServer = async () => {
+  const testWebdavServer = async () => {
     if (savingSync || checkingServer || syncState === 'syncing') return
     setCheckingServer(true)
     setSyncMessage(undefined)
@@ -294,23 +292,20 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     const startedAt = performance.now()
     recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'server-check', status: 'started' })
     try {
-      const saved = await saveLegacySshSettings(sshSettings, sshPassword || undefined)
-      const password = sshPassword || await getLegacySshPassword()
-      if (!password) throw new Error('请填写 SSH 密码后再检测连接')
-      const sftp = window.notebookDesktop?.legacySftp
-      if (!sftp) throw new Error('服务器连接检测仅在 Electron 桌面版中可用')
-      const result = await sftp.test({ ...saved, password })
-      const trusted = saved.fingerprint
-        ? saved
-        : await saveLegacySshSettings({ ...saved, fingerprint: result.fingerprint })
-      setSshSettings(trusted)
-      if (sshPassword) {
-        setStoredSshPassword(true)
-        setSshPassword('')
+      const saved = await saveWebdavSettings(webdavSettings, webdavAppPassword || undefined, webdavSyncPassword || undefined)
+      const appPassword = webdavAppPassword || await getWebdavAppPassword()
+      if (!appPassword) throw new Error('请填写 WebDAV 应用密码后再检测连接')
+      const syncPassword = webdavSyncPassword || await getWebdavSyncPassword() || undefined
+      const result = await testWebdavConnection(saved, appPassword, syncPassword)
+      if (!result.ok) throw new Error(result.message || '无法连接 WebDAV 服务器')
+      setWebdavSettings(saved)
+      if (webdavAppPassword) {
+        setStoredWebdavAppPassword(true)
+        setWebdavAppPassword('')
       }
       setSyncMessage(result.remotePathExists
-        ? `服务器连接正常（${result.latencyMs} ms），远端目录可访问；主机指纹 ${result.fingerprint}。`
-        : `服务器连接正常（${result.latencyMs} ms）；远端目录尚不存在，首次同步时会自动创建。主机指纹 ${result.fingerprint}。`)
+        ? `服务器连接正常（${result.latencyMs} ms），远端目录可访问。`
+        : `服务器连接正常（${result.latencyMs} ms）；远端目录尚不存在，首次同步时会自动创建。`)
       recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'server-check', status: 'success', message: result.remotePathExists ? '远端目录可访问' : '远端目录尚未创建', durationMs: performance.now() - startedAt })
     } catch (error) {
       const message = describeSshConnectionError(error)
@@ -322,61 +317,42 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     }
   }
 
-  const removeSshPassword = async () => {
-    await clearLegacySshPassword()
-    setSshPassword('')
-    setStoredSshPassword(false)
+  const removeWebdavAppPassword = async () => {
+    await clearWebdavAppPassword()
+    setWebdavAppPassword('')
+    setStoredWebdavAppPassword(false)
     setSyncMessageIsError(false)
-    setSyncMessage('SSH 密码已从当前设备删除。')
+    setSyncMessage('WebDAV 应用密码已从当前设备删除。')
   }
 
-  const resetSshFingerprint = () => {
-    setSshSettings((current) => ({ ...current, fingerprint: '' }))
+  const removeWebdavSyncPassword = async () => {
+    await clearWebdavSyncPassword()
+    setWebdavSyncPassword('')
+    setStoredWebdavSyncPassword(false)
     setSyncMessageIsError(false)
-    setSyncMessage('已清除已填写的主机指纹。下次连接会显示并记录服务器当前指纹，请先与服务器管理员核对。')
+    setSyncMessage('同步密码已从当前设备删除。')
   }
 
-  const runMaintenance = async (operation: RepositoryHelperOperation, input?: Uint8Array, confirmText?: string) => {
-    if (savingSync || maintenanceBusy || syncState === 'syncing') return
-    if (confirmText && !window.confirm(confirmText)) return
-    setMaintenanceBusy(true)
-    setMaintenanceMessage(undefined)
-    setMaintenanceMessageIsError(false)
-    try {
-      const outcome = await runRepositoryHelper(operation, input)
-      if (operation === 'export-tar' && outcome.data) {
-        const url = URL.createObjectURL(new Blob([outcome.data as BlobPart], { type: 'application/x-tar' }))
-        const anchor = document.createElement('a')
-        anchor.href = url
-        anchor.download = `notebook-repository-${new Date().toISOString().slice(0, 10)}.tar`
-        anchor.click()
-        URL.revokeObjectURL(url)
-        setMaintenanceMessage('仓库 tar 备份已导出并开始下载。')
-      } else {
-        setMaintenanceMessage(outcome.message)
-      }
-    } catch (error) {
-      setMaintenanceMessage(describeSshConnectionError(error))
-      setMaintenanceMessageIsError(true)
-    } finally {
-      setMaintenanceBusy(false)
-    }
-  }
-
-  const toggleSshQrCode = async () => {
-    if (sshQrDataUrl) {
-      setSshQrDataUrl(undefined)
-      return
-    }
+  const migrateFromSsh = async () => {
+    if (migrating || savingSync || syncState === 'syncing') return
+    if (!window.confirm('将先从 SSH 服务器同步最新数据，再把全部笔记发布到坚果云 WebDAV。迁移后 SSH 同步将不再使用（可在设置中重新启用）。确定继续吗？')) return
+    setMigrating(true)
     setSyncMessage(undefined)
     setSyncMessageIsError(false)
     try {
-      const password = sshPassword || await getLegacySshPassword() || ''
-      const payload = serializeNotebookSyncQrPayload(sshSettings, password)
-      setSshQrDataUrl(await QRCode.toDataURL(payload, { width: 320, margin: 2, errorCorrectionLevel: 'M' }))
+      const savedWebdav = await saveWebdavSettings(webdavSettings, webdavAppPassword || undefined, webdavSyncPassword || undefined)
+      setWebdavSettings(savedWebdav)
+      if (webdavAppPassword) { setStoredWebdavAppPassword(true); setWebdavAppPassword('') }
+      if (webdavSyncPassword) setStoredWebdavSyncPassword(true)
+      await saveSyncSettings({ ...syncSettings, enabled: true })
+      setSyncSettings((current) => ({ ...current, enabled: true }))
+      const result = await onMigrateFromSsh()
+      setSyncMessage(`迁移完成：已发布 ${result.published} 条变更到坚果云。`)
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : '无法生成 Android 配置二维码')
+      setSyncMessage(error instanceof Error ? error.message : '迁移失败')
       setSyncMessageIsError(true)
+    } finally {
+      setMigrating(false)
     }
   }
 
@@ -524,54 +500,36 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>}
           </>}
           {page === 'services' && <>
-            <SettingsSection title="SSH/SFTP 同步" description="网页、Electron 桌面版和 Android 共用同一套 SSH JSON 仓库。">
+            <SettingsSection title="WebDAV 同步" description="笔记以 v4 日志格式同步到坚果云 WebDAV，Electron、Android 与浏览器共用同一远端仓库。">
               <div className="sync-settings-form">
                 <Switch aria-label="启用自动同步" checked={syncSettings.enabled} disabled={savingAutoSync} onChange={(_, data) => void toggleAutoSync(data.checked)} label={savingAutoSync ? '正在保存自动同步设置…' : '启用自动同步（关闭后仍可手动同步）'} />
-                {!desktop && <div className="sync-settings-result">浏览器通过 127.0.0.1:8787 的本机 Python SSH 助手连接；使用 ./ctl start 会同时启动它。密码仅保存在当前标签会话。</div>}
+                {!desktop && <div className="sync-settings-result">浏览器通过 127.0.0.1:8787 的本机 Python 助手连接 WebDAV 同步；应用密码仅保存在当前标签会话。</div>}
+                  <label><span>WebDAV 服务器地址</span><Input value={webdavSettings.baseUrl} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, baseUrl: data.value }))} placeholder="https://dav.jianguoyun.com/dav/" aria-label="WebDAV 服务器地址" /></label>
                   <div className="sync-ssh-grid">
-                    <label><span>SSH 服务器</span><Input value={sshSettings.host} onChange={(_, data) => setSshSettings((current) => ({ ...current, host: data.value }))} placeholder="服务器 IP" aria-label="SSH 服务器" /></label>
-                    <label><span>端口</span><Input type="number" value={String(sshSettings.port)} onChange={(_, data) => setSshSettings((current) => ({ ...current, port: Number(data.value) || 22 }))} aria-label="SSH 端口" /></label>
+                    <label><span>用户名</span><Input value={webdavSettings.username} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, username: data.value }))} placeholder="坚果云账号" aria-label="WebDAV 用户名" /></label>
+                    <label><span>应用密码</span><Input type="password" value={webdavAppPassword} onChange={(_, data) => setWebdavAppPassword(data.value)} placeholder={storedWebdavAppPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '坚果云安全选项生成的应用密码'} aria-label="WebDAV 应用密码" /></label>
                   </div>
-                  <label><span>用户名</span><Input value={sshSettings.username} onChange={(_, data) => setSshSettings((current) => ({ ...current, username: data.value }))} aria-label="SSH 用户名" /></label>
-                  <label><span>密码</span><Input type="password" value={sshPassword} onChange={(_, data) => setSshPassword(data.value)} placeholder={storedSshPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '请输入 SSH 密码'} aria-label="SSH 密码" /></label>
-                  <label><span>远端同步目录</span><Input value={sshSettings.remotePath} onChange={(_, data) => setSshSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="~/notebook_backup" aria-label="远端同步目录" /></label>
-                  <label><span>服务器主机指纹</span><Input readOnly value={sshSettings.fingerprint} placeholder="首次成功连接后自动记录 SHA256 指纹" aria-label="SSH 主机指纹" /></label>
-                <div className="ssh-qr-actions">
-                  {sshQrDataUrl && <div className="ssh-qr-card" role="region" aria-label="Android SSH 配置二维码">
-                    <img src={sshQrDataUrl} alt="供 Android Notebook 扫描的 SSH 配置二维码" />
-                    <div><strong>在 Android“设置与同步”中扫描</strong><p>二维码包含服务器、用户名、密码、目录和主机指纹。仅在可信环境展示，扫描完成后立即隐藏。</p></div>
-                  </div>}
-                </div>
+                  <label><span>远端同步目录</span><Input value={webdavSettings.remotePath} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="notebook_backup" aria-label="远端同步目录" /></label>
+                  <label><span>同步密码（可选）</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '仅用于隐私笔记加密，与 WebDAV 认证无关'} aria-label="同步密码" /></label>
                 <div className="sync-action-panel">
                   <div className="sync-action-heading"><strong>连接与同步</strong><span>先检测连接；日常使用双向同步。</span></div>
                   <div className="sync-primary-actions">
-                    <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void testServer()}>{checkingServer ? '正在检测…' : '检测服务器连接'}</Button>
-                    <Button appearance="primary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync('bidirectional')}>{savingSync || syncState === 'syncing' ? '正在同步…' : '立即双向同步'}</Button>
-                  </div>
-                  <div className="sync-mode-actions" aria-label="SSH 单向同步方式">
-                    <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync('pull')}>仅拉取并合并</Button>
-                    <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync('push')}>仅推送本机变化</Button>
+                    <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void testWebdavServer()}>{checkingServer ? '正在检测…' : '检测服务器连接'}</Button>
+                    <Button appearance="primary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync()}>{savingSync || syncState === 'syncing' ? '正在同步…' : '立即同步'}</Button>
                   </div>
                 </div>
-                <p className="settings-note">“推送”会先读取并校验远端索引，发现其他设备的新内容时先安全合并，避免覆盖 Android 的修改；“拉取”只更新本机，不发布本机待同步内容；日常使用建议选择“双向同步”。</p>
                 <div className="sync-utility-actions">
-                  <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void toggleSshQrCode()}>{sshQrDataUrl ? '隐藏 Android 配置二维码' : 'Android 配置二维码'}</Button>
-                  {storedSshPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeSshPassword()}>清除已保存密码</Button>}
-                  {sshSettings.fingerprint && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={resetSshFingerprint}>重新核对主机指纹</Button>}
+                  {storedWebdavSyncPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavSyncPassword()}>清除已保存同步密码</Button>}
+                  {storedWebdavAppPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavAppPassword()}>清除已保存应用密码</Button>}
                 </div>
-                {desktop && <div className="sync-action-panel">
-                  <div className="sync-action-heading"><strong>服务器仓库维护</strong><span>仅供桌面版手动维护，不参与日常同步或首次同步加速；服务器需具备 POSIX 环境和 python3。不可用时仍可使用普通 SFTP 同步。</span></div>
+                <div className="sync-action-panel">
+                  <div className="sync-action-heading"><strong>从 SSH 迁移</strong><span>把原 SSH 服务器上的笔记一次性发布到坚果云 WebDAV。</span></div>
                   <div className="sync-primary-actions">
-                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('verify')}>{maintenanceBusy ? '正在执行…' : '校验仓库内容'}</Button>
-                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('gc', undefined, '这会将超过宽限期、且未被当前笔记、历史或附件清单引用的对象移入服务器私有隔离区，并生成恢复清单；隔离区超过更长保留期后，会在后续清理时永久清除。若存在无法检查完整历史引用的加密笔记，清理会安全拒绝。确定继续吗？')}>{maintenanceBusy ? '正在执行…' : '清理孤儿对象'}</Button>
-                    <Button appearance="subtle" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onClick={() => void runMaintenance('export-tar')}>{maintenanceBusy ? '正在执行…' : '导出仓库 tar 备份'}</Button>
+                    <Button appearance="subtle" disabled={migrating || savingSync || checkingServer || syncState === 'syncing'} onClick={() => void migrateFromSsh()}>{migrating ? '正在迁移…' : '迁移 SSH 数据到坚果云'}</Button>
                   </div>
-                  <label className="settings-file-action"><span>从 tar 备份恢复：先在暂存区校验路径、大小、哈希及跨文件引用，通过后才锁定仓库并最后发布索引；覆盖前文件会保存在服务器私有恢复目录，校验失败不会改动当前仓库。</span><input type="file" accept=".tar,application/x-tar" aria-label="导入仓库 tar 备份" disabled={savingSync || maintenanceBusy || syncState === 'syncing'} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file || savingSync || maintenanceBusy || syncState === 'syncing') return; void file.arrayBuffer().then((buffer) => void runMaintenance('import-tar', new Uint8Array(buffer), `将从 ${file.name} 恢复备份。系统会先在暂存区完成完整性校验；通过后才替换同名仓库文件、保留覆盖前副本并最后发布索引。确定继续吗？`)) }} /></label>
-                  {maintenanceMessage && <div className={`sync-settings-result ${maintenanceMessageIsError ? 'error' : ''}`} role="status">{maintenanceMessage}</div>}
-                </div>}
-                {onPublishSshArchive && <label className="settings-file-action"><span>首次迁移遇到超大历史库时，可直接发布由迁移工具生成的 SSH 仓库 ZIP。</span><input type="file" accept=".zip,application/zip" aria-label="发布迁移仓库 ZIP" disabled={savingSync || syncState === 'syncing'} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file || savingSync || syncState === 'syncing') return; setSavingSync(true); setSyncMessage('正在发布迁移仓库…'); void onPublishSshArchive(file).then(() => setSyncMessage('迁移仓库已发布到 SSH 服务器。')).catch((error) => setSyncMessage(error instanceof Error ? error.message : '迁移仓库发布失败')).finally(() => setSavingSync(false)) }} /></label>}
+                </div>
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
-              <Text size={200}>Android 中填写相同的服务器、端口、用户名、密码和远端目录即可双向同步。首次连接后请核对各端显示的 SHA256 主机指纹；同一服务器可能按客户端能力提供不同算法的主机密钥。</Text>
+              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。笔记以 v4 日志格式存储在远端 <code>journal/</code> 与 <code>objects/</code> 目录，支持多设备双向同步；各端填写相同的服务器、用户名、应用密码和远端目录即可。</Text>
               </div>
             </SettingsSection>
             <SettingsSection title="其他服务" description="AI 与实时协作可以独立部署；未配置时不影响本地笔记和数据同步。">
@@ -579,8 +537,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>
             <SettingsSection title="安全" description="敏感信息不会写入笔记内容。">
               <SettingsRow title="隐私笔记本" description={!privacyAvailable ? '尚未导入隐私笔记本' : privacyUnlocked ? '当前已解锁；关闭应用后会重新锁定' : privacyConfigured ? '当前已锁定' : '需要为此设备设置新的隐私密码'}><Button disabled={!privacyAvailable} onClick={onPrivacyAction}>{privacyUnlocked ? '立即锁定' : privacyConfigured ? '解锁' : '设置密码'}</Button></SettingsRow>
-              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。通过 SSH 同步时，隐私笔记的标题、正文、历史和笔记内元数据会使用由 SSH 密码派生的 AES-256-GCM 密钥加密；附件二进制仍依赖 SSH 账户和服务器磁盘保护。</p>
-              <p className="settings-note">Electron 桌面版使用操作系统凭据保存 SSH 密码；普通浏览器只在当前标签会话保存密码，不写入 localStorage 或 IndexedDB。</p>
+              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。通过 WebDAV 同步时，隐私笔记的标题、正文、历史和笔记内元数据会使用同步密码派生的 AES-256-GCM 密钥加密；附件二进制仍依赖 WebDAV 账号和服务器磁盘保护。</p>
+              <p className="settings-note">Electron 桌面版使用操作系统凭据保存 WebDAV 应用密码与同步密码；普通浏览器只在当前标签会话保存，不写入 localStorage 或 IndexedDB。</p>
               <p className="settings-note">加密备份使用 AES-GCM；备份口令只在当前设备处理，无法由服务端找回。</p>
             </SettingsSection>
           </>}
@@ -666,10 +624,13 @@ function formatBytes(value?: number) {
 
 function describeSshConnectionError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || '')
+  if (/无法读取 SSH 私钥文件/.test(message)) return message
+  if (/ENOENT|EACCES|EISDIR|ENOTDIR/i.test(message)) return '无法读取 SSH 私钥文件，请检查私钥文件路径和权限。'
   if (/ENOTFOUND|getaddrinfo/i.test(message)) return '找不到 SSH 服务器，请检查服务器地址或 DNS。'
   if (/ECONNREFUSED/i.test(message)) return 'SSH 服务器拒绝连接，请检查端口以及 SSH 服务是否已启动。'
   if (/ETIMEDOUT|Timed out|timeout/i.test(message)) return '连接 SSH 服务器超时，请检查网络、防火墙和端口。'
-  if (/authentication|auth methods|permission denied/i.test(message)) return 'SSH 身份验证失败，请检查用户名和密码。'
+  if (/authentication|auth methods|permission denied/i.test(message)) return 'SSH 身份验证失败，请检查用户名、私钥文件路径与口令（或密码）。'
+  if (/私钥|key.*parse|unable to parse|bad passphrase|encrypted key/i.test(message)) return '无法解析 SSH 私钥或私钥口令不正确，请检查私钥文件内容和口令。'
   return message || '服务器连接失败'
 }
 

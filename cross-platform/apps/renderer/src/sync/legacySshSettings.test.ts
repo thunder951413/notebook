@@ -14,8 +14,8 @@ describe('legacy SSH settings', () => {
   })
 
   test('normalizes the connection and keeps browser passwords out of persistent storage', async () => {
-    const saved = await saveLegacySshSettings({ host: ' 10.0.0.2 ', port: 22, username: ' user ', remotePath: ' ~/notebook_backup ', fingerprint: ' SHA256:test ' }, 'secret')
-    expect(saved).toEqual({ host: '10.0.0.2', port: 22, username: 'user', remotePath: '~/notebook_backup', fingerprint: 'SHA256:test' })
+    const saved = await saveLegacySshSettings({ host: ' 10.0.0.2 ', port: 22, username: ' user ', remotePath: ' ~/notebook_backup ', fingerprint: ' SHA256:test ', privateKeyPath: ' ~/.ssh/id_ed25519 ' }, 'secret')
+    expect(saved).toEqual({ host: '10.0.0.2', port: 22, username: 'user', remotePath: '~/notebook_backup', fingerprint: 'SHA256:test', privateKeyPath: '~/.ssh/id_ed25519' })
     expect(loadLegacySshSettings()).toEqual(saved)
     expect(await getLegacySshPassword()).toBe('secret')
     expect(JSON.stringify([...Array(window.localStorage.length)].map((_, index) => window.localStorage.getItem(window.localStorage.key(index)!)))).not.toContain('secret')
@@ -24,9 +24,9 @@ describe('legacy SSH settings', () => {
   })
 
   test('persists the explicit backend choice and validates required fields', async () => {
-    expect(loadSyncBackend()).toBe('ssh')
+    expect(loadSyncBackend()).toBe('webdav')
     saveSyncBackend('api')
     expect(loadSyncBackend()).toBe('api')
-    await expect(saveLegacySshSettings({ host: '', port: 22, username: 'user', remotePath: '~/notes', fingerprint: '' })).rejects.toThrow(/服务器/)
+    await expect(saveLegacySshSettings({ host: '', port: 22, username: 'user', remotePath: '~/notes', fingerprint: '', privateKeyPath: '' })).rejects.toThrow(/服务器/)
   })
 })

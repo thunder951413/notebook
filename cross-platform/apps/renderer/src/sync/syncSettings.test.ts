@@ -39,4 +39,15 @@ describe('runtime sync settings', () => {
     await expect(saveSyncSettings({ enabled: true, baseUrl: '' })).rejects.toThrow(/服务地址/)
     await expect(saveSyncSettings({ enabled: false, baseUrl: '' })).resolves.toMatchObject({ enabled: false })
   })
+
+  test('defaults auto-sync to enabled for the webdav backend and off for api', () => {
+    saveSyncBackend('webdav')
+    expect(loadSyncSettings().enabled).toBe(true)
+    saveSyncBackend('api')
+    expect(loadSyncSettings().enabled).toBe(false)
+    // An explicit choice always wins over the default.
+    void saveSyncSettings({ enabled: false, baseUrl: '' })
+    saveSyncBackend('webdav')
+    expect(loadSyncSettings().enabled).toBe(false)
+  })
 })

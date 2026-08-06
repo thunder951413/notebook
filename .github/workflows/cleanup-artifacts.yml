@@ -1,0 +1,30 @@
+name: Cleanup workflow artifacts
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete all workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # List every non-expired artifact (paginated), then delete them one
+          # by one. Releases upload their binaries straight to the release
+          # page, so workflow artifacts are only ever temporary build output;
+          # clearing them keeps the Actions storage quota from filling up.
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts" --jq '.artifacts[] | select(.expired == false) | .id')
+          count=0
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null || echo "Failed to delete artifact $id"
+            count=$((count + 1))
+          done
+          echo "Deleted $count workflow artifact(s)"

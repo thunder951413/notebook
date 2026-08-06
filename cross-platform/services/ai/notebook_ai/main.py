@@ -18,9 +18,11 @@ from .settings import Settings
 from .sync import PullResponse, PushRequest, PushResponse, SyncStore, workspace_authorizer
 from .retrieval import IndexRequest, RetrievalStore, SemanticHit, SemanticSearchRequest
 from .legacy_sftp import PullRequest as LegacyPullRequest, PullResponse as LegacyPullResponse, PushRequest as LegacyPushRequest, PushResponse as LegacyPushResponse, RepositoryFile as LegacyRepositoryFile, SshConnection, pull_repository, push_repository, repository_index_hash
+from .legacy_webdav import WebdavObjectRequest, WebdavObjectResponse, WebdavPullRequest, WebdavPullResult, WebdavPushRequest, WebdavPushResult, WebdavTestRequest, WebdavTestResult, get_object, pull_journals, push_repository as push_webdav_repository, test_connection
 
 AI_PROVIDER_MESSAGE = "AI provider unavailable. Configure a provider API key on the Notebook AI service."
 SFTP_BRIDGE_MESSAGE = "SSH/SFTP 操作失败。请检查服务器地址、凭证、主机指纹和远端目录；详细原因已写入服务日志。"
+WEBDAV_BRIDGE_MESSAGE = "WebDAV 同步操作失败。请检查服务器地址、用户名、应用密码和远端目录；详细原因已写入服务日志。"
 MAX_ASSET_BYTES = 100 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
@@ -63,9 +65,9 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
         if not config.enable_local_sftp_bridge or host not in {"127.0.0.1", "localhost", "::1"} or not client_is_loopback:
             raise HTTPException(status_code=404, detail="Local SFTP bridge is disabled")
 
-    def bridge_failure(error: Exception) -> HTTPException:
-        logger.exception("Local SSH/SFTP bridge request failed")
-        return HTTPException(status_code=502, detail=SFTP_BRIDGE_MESSAGE)
+    def bridge_failure(error: Exception, message: str = SFTP_BRIDGE_MESSAGE) -> HTTPException:
+        logger.exception("Local sync bridge request failed")
+        return HTTPException(status_code=502, detail=message)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -136,6 +138,35 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
             return await asyncio.to_thread(push_repository, prepared)
         except Exception as error:
             raise bridge_failure(error) from error
+
+    @app.post("/v1/local-webdav/test", response_model=WebdavTestResult, dependencies=[Depends(authorize)])
+    async def legacy_webdav_test(payload: WebdavTestRequest, request: Request) -> WebdavTestResult:
+        authorize_local_bridge(request)
+        return await asyncio.to_thread(test_connection, payload.settings)
+
+    @app.post("/v1/local-webdav/pull", response_model=WebdavPullResult, dependencies=[Depends(authorize)])
+    async def legacy_webdav_pull(payload: WebdavPullRequest, request: Request) -> WebdavPullResult:
+        authorize_local_bridge(request)
+        try:
+            return await asyncio.to_thread(pull_journals, payload)
+        except Exception as error:
+            raise bridge_failure(error, WEBDAV_BRIDGE_MESSAGE) from error
+
+    @app.post("/v1/local-webdav/object", response_model=WebdavObjectResponse, dependencies=[Depends(authorize)])
+    async def legacy_webdav_object(payload: WebdavObjectRequest, request: Request) -> WebdavObjectResponse:
+        authorize_local_bridge(request)
+        try:
+            return await asyncio.to_thread(get_object, payload)
+        except Exception as error:
+            raise bridge_failure(error, WEBDAV_BRIDGE_MESSAGE) from error
+
+    @app.post("/v1/local-webdav/push", response_model=WebdavPushResult, dependencies=[Depends(authorize)])
+    async def legacy_webdav_push(payload: WebdavPushRequest, request: Request) -> WebdavPushResult:
+        authorize_local_bridge(request)
+        try:
+            return await asyncio.to_thread(push_webdav_repository, payload)
+        except Exception as error:
+            raise bridge_failure(error, WEBDAV_BRIDGE_MESSAGE) from error
 
     @app.post("/v1/chat/stream", dependencies=[Depends(authorize)])
     async def chat(request: ChatRequest) -> StreamingResponse:

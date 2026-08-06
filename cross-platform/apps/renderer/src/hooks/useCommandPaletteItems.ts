@@ -28,7 +28,7 @@ export interface CommandPaletteOptions {
   selectArea: (area: 'notes' | 'tasks' | 'trash') => void
   openRecentPage: (pageId: string) => void
   toggleNavigation: () => void
-  syncNow: (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode }) => Promise<boolean>
+  syncNow: (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode; scope?: { pageId: string } }) => Promise<boolean>
   chooseImport: () => void
   runExport: () => Promise<void>
   trashPage: (pageId: string, alwaysConfirm?: boolean) => Promise<void>

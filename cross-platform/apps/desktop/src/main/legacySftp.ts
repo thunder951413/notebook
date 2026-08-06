@@ -1,16 +1,23 @@
 import SftpClient from 'ssh2-sftp-client'
 import { Client } from 'ssh2'
 import { createHash, randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { posix } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 export interface LegacySshConnection {
   host: string
   port: number
   username: string
-  password: string
   remotePath: string
   fingerprint?: string
+  /** SSH 登录密码（与 privateKeyPath 二选一；服务器仅允许公钥认证时留空）。 */
+  password?: string
+  /** SSH 私钥文件路径（如 ~/.ssh/id_ed25519）。提供时优先使用公钥认证。 */
+  privateKeyPath?: string
+  /** SSH 私钥口令（加密私钥时必填，无口令私钥留空）。 */
+  privateKeyPassphrase?: string
 }
 
 export interface LegacySftpFile { name: string; data: Uint8Array }
@@ -112,8 +119,38 @@ function validateConnection(value: LegacySshConnection) {
   if (!value.host.trim() || /[\s/]/.test(value.host)) throw new Error('SSH 服务器地址不正确')
   if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error('SSH 端口必须在 1–65535 之间')
   if (!value.username.trim() || /[\r\n]/.test(value.username)) throw new Error('SSH 用户名不正确')
-  if (!value.password) throw new Error('请填写 SSH 密码')
   if (!value.remotePath.trim() || value.remotePath.includes('\0')) throw new Error('请填写远端同步目录')
+  const hasPassword = Boolean(value.password)
+  const hasPrivateKey = Boolean(value.privateKeyPath?.trim())
+  if (!hasPassword && !hasPrivateKey) throw new Error('请配置 SSH 私钥文件路径或登录密码')
+}
+
+/** Resolve a `~/`-prefixed path to an absolute filesystem path. */
+function resolvePrivateKeyPath(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('~/')) return posix.join(homedir(), trimmed.slice(2))
+  if (trimmed === '~') return homedir()
+  return trimmed
+}
+
+/**
+ * Build ssh2/ssh2-sftp-client connect credentials from a LegacySshConnection.
+ * Private key auth takes precedence when provided; password is only sent when
+ * no key is configured (the server may have disabled password auth entirely).
+ */
+async function buildSshCredentials(settings: LegacySshConnection) {
+  const keyPath = settings.privateKeyPath?.trim()
+  if (keyPath) {
+    let privateKey: Buffer
+    try {
+      privateKey = await readFile(resolvePrivateKeyPath(keyPath))
+    } catch (error) {
+      throw new Error(`无法读取 SSH 私钥文件：${resolvePrivateKeyPath(keyPath)}（请检查路径和权限）`, { cause: error })
+    }
+    const passphrase = settings.privateKeyPassphrase?.trim() || undefined
+    return { privateKey, passphrase, password: undefined as string | undefined }
+  }
+  return { privateKey: undefined, passphrase: undefined, password: settings.password }
 }
 
 function safeRelativePath(value: string) {
@@ -197,12 +234,14 @@ function decodeCompressedNote(value: Buffer, name: string) {
 
 async function connect(settings: LegacySshConnection) {
   validateConnection(settings)
+  const credentials = await buildSshCredentials(settings)
   const client = new SftpClient('Notebook legacy sync')
   let presented = ''
   const expected = settings.fingerprint?.trim() ?? ''
   try {
     await client.connect({
-      host: settings.host.trim(), port: settings.port, username: settings.username.trim(), password: settings.password,
+      host: settings.host.trim(), port: settings.port, username: settings.username.trim(),
+      password: credentials.password, privateKey: credentials.privateKey, passphrase: credentials.passphrase,
       readyTimeout: 15_000, keepaliveInterval: 15_000, keepaliveCountMax: 3,
       hostVerifier: (key: Buffer | string) => {
         presented = fingerprint(Buffer.isBuffer(key) ? key : Buffer.from(key))
@@ -222,7 +261,7 @@ async function connect(settings: LegacySshConnection) {
 }
 
 function settingsSessionKey(settings: LegacySshConnection) {
-  return `${settings.host.trim()}:${settings.port}:${settings.username.trim()}:${settings.remotePath.trim()}`
+  return `${settings.host.trim()}:${settings.port}:${settings.username.trim()}:${settings.remotePath.trim()}:${settings.privateKeyPath?.trim() ?? ''}`
 }
 
 function canReuseSession(session: SftpSession, settings: LegacySshConnection) {
@@ -1317,6 +1356,7 @@ interface ExecResult { code: number; stdout: Uint8Array; stderr: string }
 
 async function connectExec(settings: LegacySshConnection) {
   validateConnection(settings)
+  const credentials = await buildSshCredentials(settings)
   const client = new Client()
   let presented = ''
   const expected = settings.fingerprint?.trim() ?? ''
@@ -1333,7 +1373,8 @@ async function connectExec(settings: LegacySshConnection) {
       client.once('error', onError)
       client.once('ready', onReady)
       client.connect({
-        host: settings.host.trim(), port: settings.port, username: settings.username.trim(), password: settings.password,
+        host: settings.host.trim(), port: settings.port, username: settings.username.trim(),
+        password: credentials.password, privateKey: credentials.privateKey, passphrase: credentials.passphrase,
         readyTimeout: 15_000, keepaliveInterval: 15_000, keepaliveCountMax: 3,
         hostVerifier: (key: Buffer) => {
           presented = fingerprint(key)

@@ -81,11 +81,17 @@ declare global {
         deleteKey(provider: 'openai' | 'deepseek' | 'custom', baseUrl: string): Promise<void>
       }
       legacySftp: {
-        test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
-        pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { metadataOnly?: boolean; knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }>; sessionId?: string }): Promise<{ files: Array<{ name: string; data: Uint8Array }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[]; sessionId: string }>
-        push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; data: Uint8Array }>, expectedIndexHash: string, options?: { knownObjectHashes?: string[]; sessionId?: string }): Promise<{ fingerprint: string; sessionId: string }>
+        test(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
+        pull(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, options?: { metadataOnly?: boolean; knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }>; sessionId?: string }): Promise<{ files: Array<{ name: string; data: Uint8Array }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[]; sessionId: string }>
+        push(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, files: Array<{ name: string; data: Uint8Array }>, expectedIndexHash: string, options?: { knownObjectHashes?: string[]; sessionId?: string }): Promise<{ fingerprint: string; sessionId: string }>
         release(sessionId: string): Promise<void>
-        helper(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
+        helper(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
+      }
+      webdav: {
+        test(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
+        pull(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, knownSeqs: Record<string, number>): Promise<{ entries: Array<{ seq: number; ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown>; deviceId: string }>; fingerprint: string }>
+        objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string): Promise<Uint8Array>
+        push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>): Promise<{ firstSeq: number; count: number }>
       }
       events: {
         onQuickCapture(callback: () => void): () => void

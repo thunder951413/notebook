@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 
 import paramiko
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_REPOSITORY_BYTES = 512 * 1024 * 1024
@@ -30,9 +30,11 @@ class SshConnection(BaseModel):
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
     username: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=4096, repr=False)
+    password: str = Field(default="", max_length=4096, repr=False)
     remotePath: str = Field(min_length=1, max_length=2048)
     fingerprint: str = Field(default="", max_length=256)
+    privateKeyPath: str = Field(default="", max_length=4096, repr=False)
+    privateKeyPassphrase: str = Field(default="", max_length=4096, repr=False)
 
     @field_validator("host")
     @classmethod
@@ -40,6 +42,12 @@ class SshConnection(BaseModel):
         if any(character.isspace() or character == "/" for character in value):
             raise ValueError("SSH host is invalid")
         return value.strip()
+
+    @model_validator(mode="after")
+    def require_password_or_private_key(self) -> "SshConnection":
+        if not self.password and not self.privateKeyPath:
+            raise ValueError("请配置 SSH 私钥文件路径或登录密码")
+        return self
 
 
 class RepositoryFile(BaseModel):
@@ -198,8 +206,17 @@ def _connect(settings: SshConnection) -> _Session:
     policy = _PinnedHostPolicy(settings.fingerprint.strip())
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(policy)
+    # Private key auth takes precedence when configured; password is only sent
+    # when no key is provided (the server may have disabled password auth).
+    key_filename = settings.privateKeyPath.strip() or None
+    if key_filename:
+        password = None
+        passphrase = settings.privateKeyPassphrase.strip() or None
+    else:
+        password = settings.password or None
+        passphrase = None
     try:
-        ssh.connect(settings.host, port=settings.port, username=settings.username, password=settings.password, timeout=15, banner_timeout=15, auth_timeout=15, look_for_keys=False, allow_agent=False)
+        ssh.connect(settings.host, port=settings.port, username=settings.username, password=password, key_filename=key_filename, passphrase=passphrase, timeout=15, banner_timeout=15, auth_timeout=15, look_for_keys=False, allow_agent=False)
         sftp = ssh.open_sftp()
     except Exception:
         ssh.close()

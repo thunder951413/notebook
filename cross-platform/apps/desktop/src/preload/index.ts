@@ -64,11 +64,17 @@ export interface NotebookDesktopApi {
     deleteKey(provider: DesktopAIChatRequest['provider'], baseUrl: string): Promise<void>
   }
   legacySftp: {
-    test(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
-    pull(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, options?: { metadataOnly?: boolean; knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }>; sessionId?: string }): Promise<{ files: Array<{ name: string; data: Uint8Array }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[]; sessionId: string }>
-    push(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, files: Array<{ name: string; data: Uint8Array }>, expectedIndexHash: string, options?: { knownObjectHashes?: string[]; sessionId?: string }): Promise<{ fingerprint: string; sessionId: string }>
+    test(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }): Promise<{ fingerprint: string; remotePath: string; remotePathExists: boolean; latencyMs: number }>
+    pull(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, options?: { metadataOnly?: boolean; knownObjectHashes?: string[]; knownNoteSignatures?: Array<{ noteID: string; signature: string }>; sessionId?: string }): Promise<{ files: Array<{ name: string; data: Uint8Array }>; indexHash: string; fingerprint: string; objectHashes: string[]; reusedObjectCount: number; reusedNoteIds: string[]; sessionId: string }>
+    push(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, files: Array<{ name: string; data: Uint8Array }>, expectedIndexHash: string, options?: { knownObjectHashes?: string[]; sessionId?: string }): Promise<{ fingerprint: string; sessionId: string }>
     release(sessionId: string): Promise<void>
-    helper(settings: { host: string; port: number; username: string; password: string; remotePath: string; fingerprint?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
+    helper(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
+  }
+  webdav: {
+    test(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
+    pull(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, knownSeqs: Record<string, number>): Promise<{ entries: Array<{ seq: number; ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown>; deviceId: string }>; fingerprint: string }>
+    objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string): Promise<Uint8Array>
+    push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>): Promise<{ firstSeq: number; count: number }>
   }
   events: {
     onQuickCapture(callback: () => void): () => void
@@ -142,6 +148,12 @@ const api: NotebookDesktopApi = Object.freeze({
     push: (settings: Parameters<NotebookDesktopApi['legacySftp']['push']>[0], files: Parameters<NotebookDesktopApi['legacySftp']['push']>[1], expectedIndexHash: string, options?: Parameters<NotebookDesktopApi['legacySftp']['push']>[3]) => ipcRenderer.invoke('legacySftp:push', settings, files, expectedIndexHash, options),
     release: (sessionId: string) => ipcRenderer.invoke('legacySftp:release', sessionId),
     helper: (settings: Parameters<NotebookDesktopApi['legacySftp']['helper']>[0], operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array) => ipcRenderer.invoke('legacySftp:helper', settings, operation, input),
+  }),
+  webdav: Object.freeze({
+    test: (settings: Parameters<NotebookDesktopApi['webdav']['test']>[0]) => ipcRenderer.invoke('webdav:test', settings),
+    pull: (settings: Parameters<NotebookDesktopApi['webdav']['pull']>[0], knownSeqs: Record<string, number>) => ipcRenderer.invoke('webdav:pull', settings, knownSeqs),
+    objectGet: (settings: Parameters<NotebookDesktopApi['webdav']['objectGet']>[0], hash: string) => ipcRenderer.invoke('webdav:object:get', settings, hash),
+    push: (settings: Parameters<NotebookDesktopApi['webdav']['push']>[0], deviceId: string, entries: Parameters<NotebookDesktopApi['webdav']['push']>[2], objects: Parameters<NotebookDesktopApi['webdav']['push']>[3]) => ipcRenderer.invoke('webdav:push', settings, deviceId, entries, objects),
   }),
   events: Object.freeze({
     onQuickCapture: (callback: () => void) => {

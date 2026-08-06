@@ -16,7 +16,10 @@ export function loadSyncSettings(): SyncSettings {
     const saved = JSON.parse(window.localStorage?.getItem(SETTINGS_KEY) ?? '{}') as Partial<SyncSettings>
     const baseUrl = typeof saved.baseUrl === 'string' ? saved.baseUrl : environmentUrl
     return {
-      enabled: typeof saved.enabled === 'boolean' ? saved.enabled : Boolean(baseUrl),
+      // WebDAV (坚果云) users get auto-sync on by default: the backend is
+      // configured with their WebDAV settings, not syncSettings, so an
+      // unset switch must not silently disable syncing for them.
+      enabled: typeof saved.enabled === 'boolean' ? saved.enabled : loadSyncBackend() === 'webdav' ? true : Boolean(baseUrl),
       baseUrl,
       workspaceId: DEFAULT_WORKSPACE_ID,
     }

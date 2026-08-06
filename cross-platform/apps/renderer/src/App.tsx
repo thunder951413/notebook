@@ -33,7 +33,7 @@ import {
   WeatherSunny20Regular,
 } from '@fluentui/react-icons'
 import type { PageSummary } from './model'
-import { useWorkspaceData, WORKSPACE_ID } from './data/useWorkspaceData'
+import { useWorkspaceData, WORKSPACE_ID, automationRepository } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from './editor/extensions'
@@ -41,7 +41,7 @@ import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
-import { publishPreparedLegacyArchive } from './sync/legacySshSync'
+import { migrateSshToWebdav } from './sync/webdavSync'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
 import { configureReferenceRuntime } from './editor/referenceRuntime'
@@ -108,7 +108,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, focusSync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -257,7 +257,14 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     globalThis.localStorage?.setItem(EXPANDED_PAGES_KEY, JSON.stringify([...expandedPageIds]))
   }, [expandedPageIds])
 
-  useEffect(() => { if (hasCurrentPage) void loadDocument(currentPage.id) }, [currentPage.id, hasCurrentPage, loadDocument])
+  // Opening a note loads it and syncs that note: remote edits are pulled
+  // first (journals are append-only, so the pull stays full-increment) and
+  // this note's pending local changes are pushed immediately.
+  useEffect(() => {
+    if (!hasCurrentPage) return
+    void loadDocument(currentPage.id)
+    void focusSync(currentPage.id)
+  }, [currentPage.id, hasCurrentPage, loadDocument, focusSync])
   useEffect(() => () => clearTimeout(documentPrefetchTimer.current), [])
   useEffect(() => {
     clearTimeout(readingPositionTimer.current)
@@ -832,7 +839,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               />}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
-                  <span>{syncState === 'offline' ? '尚未启用或配置 SSH 同步，当前修改只保存在本机。' : syncState === 'syncing' ? '正在与 SSH 服务器交换最新数据。' : syncState === 'synced' ? '本机与远端服务器已完成最近一次同步。' : syncState === 'conflict' ? '检测到多设备同时修改，请打开相关笔记的版本历史处理。' : '最近一次同步没有完成。'}</span>
+                  <span>{syncState === 'offline' ? '尚未配置坚果云 WebDAV 同步，当前修改只保存在本机。' : syncState === 'syncing' ? '正在与坚果云交换最新数据。' : syncState === 'synced' ? '本机与坚果云已完成最近一次同步。' : syncState === 'conflict' ? '检测到多设备同时修改，请打开相关笔记的版本历史处理。' : '最近一次同步没有完成。'}</span>
                   {(syncState === 'error' || syncState === 'conflict') && <code>{syncError ?? (syncState === 'conflict' ? accessiblePages.filter((page) => page.syncStatus === 'conflict').map((page) => page.title).join('、') || '存在尚未处理的同步冲突。' : '没有提供更详细的错误信息。')}</code>}
                 </div>
                 <ActionMenuDivider />
@@ -929,7 +936,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onThemePreferenceChange={(preference) => onThemePreferenceChange?.(preference)}
         onAccentColorChange={(color) => onAccentColorChange?.(color)}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}
-        onPublishSshArchive={async (file) => { await publishPreparedLegacyArchive(file) }}
+        onMigrateFromSsh={async () => migrateSshToWebdav(automationRepository, WORKSPACE_ID)}
         onImport={() => chooseImport(transferContext)}
         onExportPage={(format) => { void saveCurrentDocument(transferContext, format) }}
         onPrint={() => { setSettingsOpen(false); window.setTimeout(() => window.print(), 0) }}

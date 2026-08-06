@@ -318,8 +318,8 @@ describe('legacy SSH sync orchestration', () => {
   const positionsBytes = new TextEncoder().encode(JSON.stringify({ positions: [] }))
   const libraryBytes = new TextEncoder().encode(JSON.stringify({ exportedAt: 1_000_000, deviceID: 'test-server', folders: [], tags: [] }))
   const remoteStateCacheKey = `notebook-ssh-remote-state-v3:${encodeURIComponent(`user@${host}:22:${remotePath}:${workspaceId}`)}`
-  const connection = { host, port: 22, username: 'user', remotePath, fingerprint: 'SHA256:test' }
-  const connectionWithPassword = { ...connection, password: 'test-password' }
+  const connection = { host, port: 22, username: 'user', remotePath, fingerprint: 'SHA256:test', privateKeyPath: '' }
+  const connectionWithPassword = { ...connection, password: 'test-password', privateKeyPassphrase: undefined }
   const remoteState = (indexHash: string, options: { positions?: Uint8Array; library?: Uint8Array; manifest?: Uint8Array; privacy?: Uint8Array } = {}) => ({
     indexHash,
     readingPositionsHash: options.positions ? sha256Hex(options.positions) : '',
@@ -340,7 +340,7 @@ describe('legacy SSH sync orchestration', () => {
   const stubDesktop = (legacySftp: Record<string, unknown>) => {
     vi.stubGlobal('notebookDesktop', {
       legacySftp: { test: vi.fn(), pull: vi.fn(), push: vi.fn(), release: vi.fn(), helper: vi.fn(), ...legacySftp },
-      secrets: { get: vi.fn(async () => 'test-password'), set: vi.fn(async () => undefined), delete: vi.fn(async () => undefined) },
+      secrets: { get: vi.fn(async (key: string) => key === 'legacy-ssh-key-passphrase' ? undefined : 'test-password'), set: vi.fn(async () => undefined), delete: vi.fn(async () => undefined) },
     })
   }
 

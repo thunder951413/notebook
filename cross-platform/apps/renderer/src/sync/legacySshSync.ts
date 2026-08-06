@@ -2,7 +2,7 @@ import type { NotebookDataBundle, Page, PageDocument, PageRevision } from '@note
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { encodeMarkdownRepository, sha256Hex } from '@notebook/sync-contract'
 import { decodeImport, type ImportFile } from '../data/transfer'
-import { getLegacySshPassword, legacyDeviceId, loadLegacySshSettings, saveLegacySshSettings } from './legacySshSettings'
+import { getLegacySshPassphrase, getLegacySshPassword, legacyDeviceId, loadLegacySshSettings, saveLegacySshSettings } from './legacySshSettings'
 import { loadSyncSettings } from './syncSettings'
 import { unzipSync } from 'fflate'
 
@@ -341,10 +341,11 @@ async function synchronizeLegacySshAttempt(repository: DexieNotebookRepository, 
   if (!force && !loadSyncSettings().enabled) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
   const settings = loadLegacySshSettings()
   if (!settings.host || !settings.username || !settings.remotePath) return { state: 'offline' as const, skipped: 0, fingerprint: '' }
-  const password = await getLegacySshPassword()
-  if (!password) throw new Error('请在设置中填写并保存 SSH 密码')
   if (!window.notebookDesktop) throw new Error('SSH/SFTP 同步仅在 Notebook Next Electron 桌面版中提供')
-  const connection = { ...settings, password }
+  const password = await getLegacySshPassword()
+  const passphrase = settings.privateKeyPath ? await getLegacySshPassphrase() : undefined
+  if (!password && !settings.privateKeyPath) throw new Error('请在设置中配置 SSH 私钥文件路径或登录密码')
+  const connection = { ...settings, password, privateKeyPassphrase: passphrase }
   const localBundle = await repository.exportData(workspaceId)
   const localAssets = new Map(localBundle.assets.map((asset) => [asset.id, asset]))
   const localDocumentsByPage = new Map(localBundle.documents.map((document) => [document.pageId, document]))
@@ -462,7 +463,7 @@ async function synchronizeLegacySshAttempt(repository: DexieNotebookRepository, 
         && semanticallyEqualRepositoryJson(name, remoteFileMap.get(name), data)) return []
       return [{ name, data }]
     })
-    if (files.length > 0) await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash, { knownObjectHashes: [...remoteObjectHashes], sessionId: pulled.sessionId })
+    if (files.length > 0) await window.notebookDesktop.legacySftp.push({ ...trustedSettings, password, privateKeyPassphrase: passphrase }, files, pulled.indexHash, { knownObjectHashes: [...remoteObjectHashes], sessionId: pulled.sessionId })
     const documents = new Map(merged.bundle.documents.map((document) => [document.pageId, document]))
     const syncedBundle: NotebookDataBundle = { ...merged.bundle, pages: merged.bundle.pages.map((page) => !conflictIds.has(page.id) && encoded.pageVersions.has(page.id) ? { ...page, legacyVersion: encoded.pageVersions.get(page.id), syncStatus: 'synced', legacyMetadata: { ...page.legacyMetadata, ...(documents.get(page.id) ? { syncBaselineHash: sha256Hex(documentSignature(documents.get(page.id)!)) } : {}), ...(nextSignatures.get(page.id) ? { remoteIndexSignature: nextSignatures.get(page.id) } : {}) } } : page) }
     await repository.importAssetContents(merged.contents)
@@ -483,10 +484,12 @@ export async function synchronizeLegacySsh(repository: DexieNotebookRepository, 
 
 export async function publishPreparedLegacyArchive(file: File) {
   const settings = loadLegacySshSettings()
-  const password = await getLegacySshPassword()
-  if (!settings.host || !settings.username || !settings.remotePath || !password) throw new Error('请先完整填写并保存 SSH 设置和密码')
+  if (!settings.host || !settings.username || !settings.remotePath) throw new Error('请先完整填写并保存 SSH 设置')
   if (!window.notebookDesktop) throw new Error('迁移仓库发布仅在 Notebook Next Electron 桌面版中提供')
-  const connection = { ...settings, password }
+  const password = await getLegacySshPassword()
+  const passphrase = settings.privateKeyPath ? await getLegacySshPassphrase() : undefined
+  if (!password && !settings.privateKeyPath) throw new Error('请先配置 SSH 私钥文件路径或登录密码')
+  const connection = { ...settings, password, privateKeyPassphrase: passphrase }
   const pulled = await window.notebookDesktop.legacySftp.pull(connection)
   try {
     const trustedSettings = !settings.fingerprint && pulled.fingerprint ? await saveLegacySshSettings({ ...settings, fingerprint: pulled.fingerprint }) : settings
@@ -496,7 +499,7 @@ export async function publishPreparedLegacyArchive(file: File) {
       data,
     }))
     if (!files.some((item) => item.name === 'notes/index.json')) throw new Error('迁移仓库 ZIP 缺少 notes/index.json')
-    return window.notebookDesktop.legacySftp.push({ ...trustedSettings, password }, files, pulled.indexHash, { sessionId: pulled.sessionId })
+    return window.notebookDesktop.legacySftp.push({ ...trustedSettings, password, privateKeyPassphrase: passphrase }, files, pulled.indexHash, { sessionId: pulled.sessionId })
   } finally {
     await window.notebookDesktop.legacySftp.release(pulled.sessionId)
   }

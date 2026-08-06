@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs
 import { gunzipSync, gzipSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { normalizeRepositoryIndex, pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection } from './legacySftp'
@@ -13,6 +13,11 @@ let root = ''
 let port = 0
 let fingerprint = ''
 let server: ReturnType<typeof spawn> | undefined
+let keyPort = 0
+let keyFingerprint = ''
+let keyServer: ReturnType<typeof spawn> | undefined
+let privateKeyPath = ''
+let publicKeyPath = ''
 
 const encode = (value: string) => new TextEncoder().encode(value)
 const bytes = (value: Uint8Array) => Buffer.from(value)
@@ -115,21 +120,34 @@ async function availablePort() {
 beforeAll(async () => {
   if (!enabled) return
   root = await mkdtemp(join(tmpdir(), 'notebook-sftp-e2e-'))
-  port = await availablePort()
   const script = resolve(import.meta.dirname, '../../../../../notebook_android/scripts/test_sftp_server.py')
-  server = spawn(process.env.NOTEBOOK_SFTP_PYTHON ?? 'python3', [script, '--root', root, '--port', String(port)], { stdio: ['ignore', 'pipe', 'pipe'] })
-  fingerprint = await new Promise<string>((resolveFingerprint, reject) => {
+  const waitForFingerprint = (child: ReturnType<typeof spawn>) => new Promise<string>((resolveFingerprint, reject) => {
     let errors = ''
-    const timeout = setTimeout(() => reject(new Error('SFTP test server did not start')), 10_000)
-    server?.stdout?.once('data', (value) => { clearTimeout(timeout); resolveFingerprint(String(value).trim()) })
-    server?.stderr?.on('data', (value) => { errors += String(value) })
-    server?.once('exit', (code) => { if (!fingerprint) { clearTimeout(timeout); reject(new Error(`SFTP test server exited (${code}): ${errors}`)) } })
-    server?.once('error', reject)
+    const timeout = setTimeout(() => reject(new Error(`SFTP test server did not start: ${errors || 'no stderr'}`)), 10_000)
+    child.stdout?.once('data', (value) => { clearTimeout(timeout); resolveFingerprint(String(value).trim()) })
+    child.stderr?.on('data', (value) => { errors += String(value) })
+    child.once('exit', (code) => { if (!fingerprint) { clearTimeout(timeout); reject(new Error(`SFTP test server exited (${code}): ${errors}`)) } })
+    child.once('error', reject)
   })
+  // Password-auth server on a fixed port (existing tests).
+  port = await availablePort()
+  server = spawn(process.env.NOTEBOOK_SFTP_PYTHON ?? 'python3', [script, '--root', root, '--port', String(port)], { stdio: ['ignore', 'pipe', 'pipe'] })
+  fingerprint = await waitForFingerprint(server)
+  // Public-key-only server: generate an ephemeral key pair and restart on a
+  // fresh port with --authorized-keys pointing at the public half.
+  privateKeyPath = join(root, 'id_ed25519')
+  publicKeyPath = `${privateKeyPath}.pub`
+  await new Promise<void>((resolveKey, rejectKey) => {
+    execFile('ssh-keygen', ['-t', 'ed25519', '-f', privateKeyPath, '-N', '', '-q'], (error) => (error ? rejectKey(error) : resolveKey()))
+  })
+  keyPort = await availablePort()
+  keyServer = spawn(process.env.NOTEBOOK_SFTP_PYTHON ?? 'python3', [script, '--root', root, '--port', String(keyPort), '--authorized-keys', publicKeyPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+  keyFingerprint = await waitForFingerprint(keyServer)
 }, 20_000)
 
 afterAll(async () => {
   server?.kill('SIGTERM')
+  keyServer?.kill('SIGTERM')
   if (root) await rm(root, { recursive: true, force: true })
 })
 
@@ -317,4 +335,28 @@ test.runIf(enabled)('fails closed when encrypted notes hide the historical objec
   await writeFile(join(source.repository, 'notes', `${source.noteId}.json.gz`), gzipSync(JSON.stringify(privateEnvelope)))
   await expect(runRepositoryHelper(helperSettings(remotePath), 'gc')).rejects.toThrow(/encrypted|加密/i)
   await expect(readFile(join(source.repository, 'objects', source.objectHash.slice(0, 2), source.objectHash))).resolves.toEqual(source.object)
+})
+
+test.runIf(enabled)('authenticates with a private key when no password is configured', async () => {
+  const settings = { host: '127.0.0.1', port: keyPort, username: 'notebook', remotePath: 'repository-key', fingerprint: keyFingerprint, privateKeyPath, privateKeyPassphrase: '' }
+  const connection = await testLegacyConnection(settings)
+  expect(connection).toMatchObject({ fingerprint: keyFingerprint, remotePathExists: false })
+  const empty = await pullLegacyRepository(settings)
+  expect(empty.indexHash).toBe('')
+  const noteId = '30000000-0000-4000-8000-000000000002'
+  const files = [
+    { name: 'library.json', data: encode('{"folders":[],"tags":[]}') },
+    { name: `notes/${noteId}.json`, data: encode('{"noteID":"key-auth"}') },
+    { name: 'notes/assets_manifest.json', data: encode('{"entries":[]}') },
+    { name: 'notes/index.json', data: encode(JSON.stringify({ entries: [{ noteID: noteId }] })) },
+  ]
+  await pushLegacyRepository(settings, files, empty.indexHash, { sessionId: empty.sessionId })
+  const pulled = await pullLegacyRepository(settings)
+  expect(pulled.files.map((item) => item.name).sort()).toEqual(files.map((item) => item.name).sort())
+  await releaseLegacySession(pulled.sessionId)
+})
+
+test.runIf(enabled)('rejects an unreadable private key path with a clear error', async () => {
+  const settings = { host: '127.0.0.1', port: keyPort, username: 'notebook', remotePath: 'repository-key-missing', fingerprint: keyFingerprint, privateKeyPath: join(root, 'missing-key'), privateKeyPassphrase: '' }
+  await expect(testLegacyConnection(settings)).rejects.toThrow(/无法读取 SSH 私钥文件/)
 })
