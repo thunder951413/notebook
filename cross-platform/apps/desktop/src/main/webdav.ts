@@ -1,4 +1,5 @@
 import { createClient, type WebDAVClient, type WebDAVClientOptions } from 'webdav'
+import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
 
 /**
@@ -49,8 +50,32 @@ export interface WebdavTestResult {
   message: string
 }
 
-const MAX_LOG_BYTES = 4 * 1024 * 1024
+// Compact early to keep normal traffic small, but do not make 4 MB a hard
+// outage: revision entities have unique ids and may legitimately survive
+// state compaction until the segmented v5 protocol is deployed.
+const MAX_LOG_BYTES = 100 * 1024 * 1024
 const MAX_OBJECT_BYTES = 100 * 1024 * 1024
+const MAX_ENTRIES = 100_000
+const MAX_HEAD_BYTES = 64 * 1024
+const MAX_REVISION_ENTRIES = 256
+const MAX_REVISION_BYTES = 2 * 1024 * 1024
+const DEVICE_ID_PATTERN = /^[0-9a-f-]{36}$/i
+
+const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8')
+const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
+const isNonNegativeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+const objectPresenceCache = new Set<string>()
+
+interface WebdavJournalHead {
+  version: 1
+  deviceId: string
+  lastSeq: number
+  journalBytes: number
+  journalSha256: string
+  updatedAt: string
+  stateEntries: number
+  historyEntries: number
+}
 
 function safeRemotePath(value: string): string {
   const normalized = posix.normalize(value.trim().replaceAll('\\', '/')).replace(/^\.\//, '')
@@ -74,7 +99,9 @@ function clientFor(settings: WebdavConnection): WebDAVClient {
 }
 
 const journalPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.jsonl`
+const journalHeadPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.head.json`
 const objectPath = (root: string, hash: string) => `${root}/objects/${hash.slice(0, 2)}/${hash}`
+const objectCacheKey = (settings: WebdavConnection, root: string, hash: string) => `${settings.baseUrl.trim()}|${settings.username.trim()}|${root}|${hash}`
 
 async function ensureDirectory(client: WebDAVClient, path: string) {
   // 坚果云 rejects nested MKCOL with 409 when the parent is missing, so every
@@ -104,6 +131,69 @@ function parseJournal(text: string): WebdavJournalEntry[] {
   return entries
 }
 
+/**
+ * Keep only the latest record per entity, preserving original seq values.
+ * Seq numbers stay monotonic, so other devices' per-device read cursors
+ * remain valid after the file shrinks.
+ */
+function compactJournal(entries: WebdavJournalEntry[]): { entries: WebdavJournalEntry[]; stateEntries: number; historyEntries: number } {
+  const state = new Map<string, WebdavJournalEntry>()
+  const revisions = new Map<string, WebdavJournalEntry>()
+  for (const entry of entries) {
+    const target = entry.type === 'revision' ? revisions : state
+    const key = `${entry.type}:${entry.id}`
+    const previous = target.get(key)
+    if (!previous || entry.seq > previous.seq) target.set(key, entry)
+  }
+  const newestRevisions = [...revisions.values()].sort((left, right) => right.seq - left.seq)
+  const history: WebdavJournalEntry[] = []
+  let historyBytes = 0
+  for (const entry of newestRevisions) {
+    if (history.length >= MAX_REVISION_ENTRIES) break
+    const serializedBytes = utf8Bytes(JSON.stringify(entry)) + 1
+    if (history.length > 0 && historyBytes + serializedBytes > MAX_REVISION_BYTES) break
+    history.push(entry)
+    historyBytes += serializedBytes
+  }
+  return {
+    entries: [...state.values(), ...history].sort((left, right) => left.seq - right.seq),
+    stateEntries: state.size,
+    historyEntries: history.length,
+  }
+}
+
+function buildHead(deviceId: string, body: string, entries: WebdavJournalEntry[], stateEntries: number, historyEntries: number): WebdavJournalHead {
+  return {
+    version: 1,
+    deviceId,
+    lastSeq: entries.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0),
+    journalBytes: utf8Bytes(body),
+    journalSha256: sha256(body),
+    updatedAt: new Date().toISOString(),
+    stateEntries,
+    historyEntries,
+  }
+}
+
+function parseHead(text: string, deviceId: string): WebdavJournalHead {
+  if (utf8Bytes(text) > MAX_HEAD_BYTES) throw new Error(`远端日志 ${deviceId}.head.json 超过 64 KiB 上限`)
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(`远端日志 ${deviceId}.head.json 格式不正确`)
+  }
+  const head = value as Partial<WebdavJournalHead>
+  if (
+    head.version !== 1 || head.deviceId !== deviceId || !isNonNegativeInteger(head.lastSeq) ||
+    !isNonNegativeInteger(head.journalBytes) || head.journalBytes > MAX_LOG_BYTES ||
+    typeof head.journalSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(head.journalSha256) ||
+    typeof head.updatedAt !== 'string' || !isNonNegativeInteger(head.stateEntries) ||
+    !isNonNegativeInteger(head.historyEntries)
+  ) throw new Error(`远端日志 ${deviceId}.head.json 内容不正确`)
+  return head as WebdavJournalHead
+}
+
 export async function testWebdavConnection(settings: WebdavConnection): Promise<WebdavTestResult> {
   const startedAt = Date.now()
   try {
@@ -128,14 +218,42 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
   const root = safeRemotePath(settings.remotePath)
   await ensureDirectory(client, `${root}/journal`)
   let deviceIds: string[] = []
+  const devicesWithHeads = new Set<string>()
   try {
     const contents = await client.getDirectoryContents(`${root}/journal`)
-    deviceIds = (Array.isArray(contents) ? contents : []).map((item) => item.basename).filter((name) => name.endsWith('.jsonl')).map((name) => name.slice(0, -'.jsonl'.length))
-  } catch {
-    // journal/ does not exist yet: an empty repository.
+    const names = (Array.isArray(contents) ? contents : []).map((item) => item.basename)
+    deviceIds = names
+      .filter((name) => name.endsWith('.jsonl'))
+      .map((name) => name.slice(0, -'.jsonl'.length))
+      .filter((deviceId) => DEVICE_ID_PATTERN.test(deviceId))
+    for (const name of names) {
+      if (!name.endsWith('.head.json')) continue
+      const deviceId = name.slice(0, -'.head.json'.length)
+      if (DEVICE_ID_PATTERN.test(deviceId)) devicesWithHeads.add(deviceId)
+    }
+  } catch (error) {
+    // A missing journal directory means an empty repository. Authentication
+    // and server failures must remain visible to the caller.
+    const status = (error as { status?: number })?.status
+    if (status !== 404) throw error
   }
   const entries: Array<WebdavJournalEntry & { deviceId: string }> = []
   for (const deviceId of deviceIds) {
+    const known = knownSeqs[deviceId] ?? 0
+    let head: WebdavJournalHead | undefined
+    if (devicesWithHeads.has(deviceId)) {
+      try {
+        const data = await client.getFileContents(journalHeadPath(root, deviceId), { format: 'text' })
+        const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
+        head = parseHead(text, deviceId)
+      } catch (error) {
+        const status = (error as { status?: number })?.status
+        if (status !== 404) throw error
+      }
+      // The marker is the commit point: once its sequence is known, never
+      // fetch the corresponding large journal merely to confirm that fact.
+      if (head && known >= head.lastSeq) continue
+    }
     let text = ''
     try {
       const data = await client.getFileContents(journalPath(root, deviceId), { format: 'text' })
@@ -145,10 +263,22 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
       if (status === 404) continue
       throw error
     }
-    if (text.length > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 4 MB 上限`)
-    const known = knownSeqs[deviceId] ?? 0
-    for (const entry of parseJournal(text)) {
-      if (entry.seq <= known) continue
+    // Long-lived devices may already exceed the legacy 4 MB failure limit;
+    // 100 MB is only a recovery/abuse guard until v5 segments the log.
+    if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
+    const journal = parseJournal(text)
+    if (head && (utf8Bytes(text) !== head.journalBytes || sha256(text) !== head.journalSha256)) {
+      // Old v4 writers do not update .head.json. Their uncommitted tail is
+      // deliberately invisible until Electron publishes a new marker; a
+      // mismatch without a newer tail is corruption, not a valid transition.
+      const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
+      const bytes = Buffer.from(text, 'utf8')
+      const committedPrefixMatches = bytes.byteLength >= head.journalBytes
+        && sha256(bytes.subarray(0, head.journalBytes)) === head.journalSha256
+      if (journalLastSeq <= head.lastSeq || !committedPrefixMatches) throw new Error(`远端日志 ${deviceId}.jsonl 与提交标记不一致`)
+    }
+    for (const entry of journal) {
+      if (entry.seq <= known || (head && entry.seq > head.lastSeq)) continue
       entries.push({ ...entry, deviceId })
     }
   }
@@ -163,6 +293,7 @@ export async function getWebdavObject(settings: WebdavConnection, hash: string):
   const data = await client.getFileContents(objectPath(root, hash), { format: 'binary' })
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(Buffer.from(data as ArrayBuffer))
   if (bytes.byteLength > MAX_OBJECT_BYTES) throw new Error('远端对象超过 100 MB 上限')
+  if (sha256(Buffer.from(bytes)) !== hash) throw new Error(`远端对象 ${hash} 的 SHA-256 校验失败`)
   return bytes
 }
 
@@ -172,8 +303,15 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
   const target = objectPath(root, hash)
+  const cacheKey = objectCacheKey(settings, root, hash)
+  if (objectPresenceCache.has(cacheKey)) return
+  if (await client.exists(target)) {
+    objectPresenceCache.add(cacheKey)
+    return
+  }
   await ensureDirectory(client, `${root}/objects/${hash.slice(0, 2)}`)
   await client.putFileContents(target, Buffer.from(data), { overwrite: true })
+  objectPresenceCache.add(cacheKey)
 }
 
 /**
@@ -183,7 +321,7 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
  * writes a given journal file.
  */
 export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>): Promise<{ firstSeq: number; count: number }> {
-  if (!/^[0-9a-f-]{36}$/i.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
+  if (!DEVICE_ID_PATTERN.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
   const path = journalPath(root, deviceId)
@@ -192,16 +330,23 @@ export async function appendWebdavJournal(settings: WebdavConnection, deviceId: 
   try {
     const data = await client.getFileContents(path, { format: 'text' })
     const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
+    if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
     existing = text ? parseJournal(text) : []
   } catch (error) {
     const status = (error as { status?: number })?.status
     if (status !== 404) throw error
   }
-  if (existing.length + entries.length > 100_000) throw new Error('设备日志条目数超过 10 万，请先压缩日志')
-  const firstSeq = existing.length ? existing[existing.length - 1]!.seq + 1 : 1
-  const lines = entries.map((entry, index) => JSON.stringify({ ...entry, seq: firstSeq + index }))
-  const body = [...existing.map((entry) => JSON.stringify(entry)), ...lines].join('\n') + '\n'
-  if (body.length > MAX_LOG_BYTES) throw new Error('设备日志超过 4 MB 上限')
+  const firstSeq = (existing.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)) + 1
+  const journalEntries = [...existing, ...entries.map((entry, index) => ({ ...entry, seq: firstSeq + index }))]
+  // v4 journals remain readable by old clients. Electron always writes their
+  // compact current-state/history-ring projection to make normal sync cheap.
+  const compacted = compactJournal(journalEntries)
+  if (compacted.entries.length > MAX_ENTRIES) throw new Error('设备日志条目数超过 10 万，请先压缩日志')
+  const body = compacted.entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
+  if (utf8Bytes(body) > MAX_LOG_BYTES) throw new Error('设备日志压缩后超过 100 MB 上限')
   await client.putFileContents(path, body, { overwrite: true })
+  // Commit only after the journal bytes are durable. A failed marker PUT keeps
+  // readers on the previous committed view rather than exposing this write.
+  await client.putFileContents(journalHeadPath(root, deviceId), JSON.stringify(buildHead(deviceId, body, compacted.entries, compacted.stateEntries, compacted.historyEntries)), { overwrite: true })
   return { firstSeq, count: entries.length }
 }

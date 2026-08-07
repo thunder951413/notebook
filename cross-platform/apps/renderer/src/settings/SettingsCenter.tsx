@@ -529,7 +529,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                     <label><span>应用密码</span><Input type="password" value={webdavAppPassword} onChange={(_, data) => setWebdavAppPassword(data.value)} placeholder={storedWebdavAppPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '坚果云安全选项生成的应用密码'} aria-label="WebDAV 应用密码" /></label>
                   </div>
                   <label><span>远端同步目录</span><Input value={webdavSettings.remotePath} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="notebook_backup" aria-label="远端同步目录" /></label>
-                  <label><span>同步密码（可选）</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '仅用于隐私笔记加密，与 WebDAV 认证无关'} aria-label="同步密码" /></label>
+                  <label><span>同步密码（预留）</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '供后续跨端隐私加密协议使用；当前隐私笔记不上传'} aria-label="同步密码" /></label>
                 <div className="sync-action-panel">
                   <div className="sync-action-heading"><strong>连接与同步</strong><span>先检测连接；日常使用双向同步。</span></div>
                   <div className="sync-primary-actions">
@@ -549,7 +549,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   </div>
                 </div>
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
-              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。笔记以 v4 日志格式存储在远端 <code>journal/</code> 与 <code>objects/</code> 目录，支持多设备双向同步；各端填写相同的服务器、用户名、应用密码和远端目录即可。</Text>
+              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。正文和一般变更会在停止修改 30 秒后合并同步；窗口失焦、重新聚焦和退出时立即同步。阅读位置只在失焦或退出时发布，页面切换不会联网。</Text>
               </div>
             </SettingsSection>
             <SettingsSection title="其他服务" description="AI 与实时协作可以独立部署；未配置时不影响本地笔记和数据同步。">
@@ -557,7 +557,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>
             <SettingsSection title="安全" description="敏感信息不会写入笔记内容。">
               <SettingsRow title="隐私笔记本" description={!privacyAvailable ? '尚未导入隐私笔记本' : privacyUnlocked ? '当前已解锁；关闭应用后会重新锁定' : privacyConfigured ? '当前已锁定' : '需要为此设备设置新的隐私密码'}><Button disabled={!privacyAvailable} onClick={onPrivacyAction}>{privacyUnlocked ? '立即锁定' : privacyConfigured ? '解锁' : '设置密码'}</Button></SettingsRow>
-              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。通过 WebDAV 同步时，隐私笔记的标题、正文、历史和笔记内元数据会使用同步密码派生的 AES-256-GCM 密钥加密；附件二进制仍依赖 WebDAV 账号和服务器磁盘保护。</p>
+              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。当前 WebDAV v4 会把隐私笔记本及其页面、正文、历史、附件和内部关系严格保留在本机，不会明文上传；跨设备隐私同步将在统一的加密协议完成后启用。</p>
               <p className="settings-note">Electron 桌面版使用操作系统凭据保存 WebDAV 应用密码与同步密码；普通浏览器只在当前标签会话保存，不写入 localStorage 或 IndexedDB。</p>
               <p className="settings-note">加密备份使用 AES-GCM；备份口令只在当前设备处理，无法由服务端找回。</p>
             </SettingsSection>

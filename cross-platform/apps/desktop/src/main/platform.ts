@@ -55,7 +55,10 @@ async function atomicWriteFile(target: string, data: string | Uint8Array, mode?:
   }
 }
 
-export function flushRenderer(contents: WebContents, timeoutMs = 5_000): Promise<void> {
+// Renderer shutdown includes durable drafts/reading positions plus a bounded
+// best-effort sync, so leave enough room for that handshake without waiting
+// indefinitely on a broken renderer or network.
+export function flushRenderer(contents: WebContents, timeoutMs = 8_000): Promise<void> {
   if (contents.isDestroyed()) return Promise.resolve()
   const requestId = randomUUID()
   return new Promise((resolve, reject) => {

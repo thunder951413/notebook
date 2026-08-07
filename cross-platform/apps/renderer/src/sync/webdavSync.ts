@@ -19,6 +19,7 @@ import { getWebdavAppPassword, getWebdavSyncPassword, loadWebdavKnownSeqs, loadW
  */
 
 const OBJECT_MARKER = '$object'
+const PAYLOAD_OBJECT_MARKER = '$payloadObject'
 const EXTERNALIZE_BYTES = 2048
 const BRIDGE_BASE = 'http://127.0.0.1:8787'
 
@@ -142,15 +143,22 @@ async function materializeDocument(payload: Record<string, unknown>, transport: 
   return { ...payload, tiptapJson: JSON.parse(new TextDecoder().decode(bytes)) }
 }
 
-/** Externalize large document bodies into objects/, replacing them with a hash marker. */
+async function materializePayload(payload: Record<string, unknown>, transport: WebdavTransport, connection: WebdavConnection): Promise<Record<string, unknown>> {
+  const marker = payload[PAYLOAD_OBJECT_MARKER]
+  if (typeof marker !== 'string') return payload
+  const decoded = JSON.parse(new TextDecoder().decode(await transport.objectGet(connection, marker))) as unknown
+  if (!decoded || Array.isArray(decoded) || typeof decoded !== 'object') throw new Error(`远端对象 ${marker} 不是有效的实体内容`)
+  return decoded as Record<string, unknown>
+}
+
+/** Externalize the complete durable document (including canonical Markdown). */
 function externalizeDocument(payload: Record<string, unknown>, objects: Array<{ hash: string; data: Uint8Array }>): { payload: Record<string, unknown>; hash?: string } {
-  const tiptap = payload.tiptapJson
-  if (!tiptap || typeof tiptap !== 'object') return { payload }
-  const json = JSON.stringify(tiptap)
-  if (json.length <= EXTERNALIZE_BYTES) return { payload }
+  const json = JSON.stringify(payload)
+  const data = encoder.encode(json)
+  if (data.byteLength <= EXTERNALIZE_BYTES) return { payload }
   const hash = sha256Hex(json)
-  objects.push({ hash, data: encoder.encode(json) })
-  return { payload: { ...payload, tiptapJson: { [OBJECT_MARKER]: hash } }, hash }
+  objects.push({ hash, data })
+  return { payload: { [PAYLOAD_OBJECT_MARKER]: hash }, hash }
 }
 
 export async function testWebdavConnection(settings: WebdavSettings, appPassword: string, syncPassword?: string) {
@@ -178,7 +186,7 @@ async function pullWebdavOnce(
   const downloadedAssets = new Map<string, Uint8Array>()
   for (let index = 0; index < pulled.entries.length; index += 1) {
     const entry = pulled.entries[index] as WebdavPullEntry
-    let payload = entry.payload
+    let payload = await materializePayload(entry.payload, transport, connection)
     if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection)
     if (entry.type === 'asset' && entry.op === 'upsert') {
       const hash = entry.hash ?? (entry.payload.objectHash as string | undefined)
@@ -191,7 +199,14 @@ async function pullWebdavOnce(
   const conflictKeys = new Set<string>()
   for (const conflict of applied.conflicts) conflictKeys.add(`${conflict.entityType}:${conflict.entityId}`)
   const nextSeqs = { ...knownSeqs }
-  for (const entry of pulled.entries) nextSeqs[entry.deviceId] = Math.max(nextSeqs[entry.deviceId] ?? 0, entry.seq)
+  // applyRemoteChanges stops immediately before the first conflicting change.
+  // Only advance WebDAV's per-device cursors across the prefix it actually
+  // committed; otherwise the conflicting entry and every later entry would be
+  // filtered out forever on the next pull.
+  const appliedCount = Math.max(0, Math.min(pulled.entries.length, applied.cursor - previousCursor))
+  for (const entry of pulled.entries.slice(0, appliedCount)) {
+    nextSeqs[entry.deviceId] = Math.max(nextSeqs[entry.deviceId] ?? 0, entry.seq)
+  }
   saveWebdavKnownSeqs(settings, nextSeqs)
   return { conflicts: applied.conflicts.length, conflictKeys }
 }
@@ -211,6 +226,10 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
   const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
   const transport = webdavTransport()
   const deviceId = legacyDeviceId()
+  // syncOutbox is maintained in the same transaction as every local edit. It
+  // is the smallest reliable database change marker: no full-library hash or
+  // table scan is required before deciding whether there is anything to push.
+  const hadLocalChanges = await repository.hasPendingSyncChanges(workspaceId)
 
   // ---- Pull: adopt everything other devices published (journals are
   // append-only and shared, so pulls are always full increments — even a
@@ -221,11 +240,21 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
   conflicts += firstPull.conflicts
   conflictKeys = firstPull.conflictKeys
 
+  // A remote pull may overlap a local edit, so re-check the transactional
+  // marker once before taking the zero-upload fast path.
+  if (!hadLocalChanges && !await repository.hasPendingSyncChanges(workspaceId)) {
+    return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts }
+  }
+
   // ---- Push: append pending local changes to this device's journal. Entries
   // that conflicted during the pull stay queued for the user to resolve; a
   // scoped sync (opening a note) pushes only that note's entities.
   const outgoing = await repository.listOutbox(workspaceId)
+  const privacy = await Promise.all(outgoing.map((item) => repository.isPrivateSyncItem(item)))
+  const localOnly = outgoing.filter((_, index) => privacy[index])
+  await repository.acknowledgeLocalOnlySync(localOnly)
   const pending = outgoing.filter((item) => {
+    if (localOnly.includes(item)) return false
     if (conflictKeys.has(`${item.entityType}:${item.entityId}`)) return false
     if (!scope) return true
     return outboxPageId(item) === scope.pageId
@@ -285,36 +314,43 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
 function bundleToEntries(bundle: NotebookDataBundle, deviceId: string): Array<{ type: string; id: string; ver: number; payload: Record<string, unknown> }> {
   const entries: Array<{ type: string; id: string; ver: number; payload: Record<string, unknown> }> = []
   const push = (type: string, id: string, payload: Record<string, unknown>) => entries.push({ type, id, ver: 0, payload })
-  for (const notebook of bundle.notebooks) push('notebook', notebook.id, {
+  const privateNotebookIds = new Set(bundle.notebooks.filter((notebook) => notebook.locked).map((notebook) => notebook.id))
+  const privateSectionIds = new Set(bundle.sections.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id))
+  const privatePageIds = new Set(bundle.pages.filter((page) => page.locked || Boolean(page.sectionId && privateSectionIds.has(page.sectionId))).map((page) => page.id))
+  for (const notebook of bundle.notebooks.filter((item) => !privateNotebookIds.has(item.id))) push('notebook', notebook.id, {
     id: notebook.id, workspaceId: notebook.workspaceId, name: notebook.name, sortOrder: notebook.sortOrder, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt,
   })
-  for (const section of bundle.sections) push('section', section.id, {
+  for (const section of bundle.sections.filter((item) => !privateSectionIds.has(item.id))) push('section', section.id, {
     id: section.id, notebookId: section.notebookId, name: section.name, sortOrder: section.sortOrder, createdAt: section.createdAt, updatedAt: section.updatedAt,
   })
-  for (const page of bundle.pages) push('page', page.id, {
+  for (const page of bundle.pages.filter((item) => !privatePageIds.has(item.id))) push('page', page.id, {
     id: page.id, workspaceId: page.workspaceId, kind: page.kind === 'task' ? 'task' : 'document', title: page.title, preview: page.preview,
     favorite: page.favorite, createdAt: page.createdAt, updatedAt: page.updatedAt, syncStatus: 'synced',
   })
-  for (const document of bundle.documents) push('document', document.pageId, {
+  for (const document of bundle.documents.filter((item) => !privatePageIds.has(item.pageId))) push('document', document.pageId, {
     pageId: document.pageId, schemaVersion: document.schemaVersion, tiptapJson: document.tiptapJson ?? { type: 'doc', content: [] }, updatedAt: document.updatedAt,
   })
   for (const tag of bundle.tags) push('tag', tag.id, {
     id: tag.id, workspaceId: tag.workspaceId, name: tag.name, color: tag.color, createdAt: tag.createdAt, updatedAt: tag.updatedAt,
   })
-  for (const pageTag of bundle.pageTags) push('page_tag', `${pageTag.pageId}:${pageTag.tagId}`, { pageId: pageTag.pageId, tagId: pageTag.tagId })
-  for (const step of bundle.taskSteps) push('task_step', step.id, {
+  for (const pageTag of bundle.pageTags.filter((item) => !privatePageIds.has(item.pageId))) push('page_tag', `${pageTag.pageId}:${pageTag.tagId}`, { pageId: pageTag.pageId, tagId: pageTag.tagId })
+  for (const step of bundle.taskSteps.filter((item) => !privatePageIds.has(item.pageId))) push('task_step', step.id, {
     id: step.id, pageId: step.pageId, text: step.text, checked: step.checked, sortOrder: step.sortOrder, createdAt: step.createdAt,
   })
-  for (const asset of bundle.assets) push('asset', asset.id, {
+  for (const asset of bundle.assets.filter((item) => !privatePageIds.has(item.pageId))) push('asset', asset.id, {
     id: asset.id, pageId: asset.pageId, kind: asset.kind, filename: asset.filename, mimeType: asset.mimeType,
     createdAt: asset.createdAt, byteSize: asset.byteSize, objectHash: asset.checksum,
   })
-  for (const link of bundle.pageLinks) push('page_link', link.id, {
+  for (const link of bundle.pageLinks.filter((item) => !privatePageIds.has(item.sourcePageId) && !privatePageIds.has(item.targetPageId))) push('page_link', link.id, {
     id: link.id, workspaceId: link.workspaceId, sourcePageId: link.sourcePageId, targetPageId: link.targetPageId, kind: link.kind, createdAt: link.createdAt,
   })
-  for (const position of bundle.readingPositions) push('reading_position', position.id, {
+  for (const position of bundle.readingPositions.filter((item) => !privatePageIds.has(item.pageId))) push('reading_position', position.id, {
     id: position.id, pageId: position.pageId, anchorUtf16Offset: position.anchorUtf16Offset, viewportOffsetFraction: position.viewportOffsetFraction,
     updatedAt: position.updatedAt, deviceId: position.deviceId || deviceId,
+  })
+  for (const revision of bundle.revisions.filter((item) => !privatePageIds.has(item.pageId))) push('revision', revision.id, {
+    ...revision,
+    document: { ...revision.document, yjsState: undefined },
   })
   return entries
 }

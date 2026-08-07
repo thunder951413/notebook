@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { afterEach, expect, test, vi } from 'vitest'
 import type { Page, PageDocument } from '@notebook/domain'
-import { DexieNotebookRepository, NotebookRendererDatabase } from './index'
+import { DexieNotebookRepository, MAX_AUTOSAVE_REVISIONS_PER_PAGE, NotebookRendererDatabase } from './index'
 
 const opened: NotebookRendererDatabase[] = []
 const makeRepository = () => {
@@ -134,6 +134,75 @@ test('coalesces repeated pending changes for the same entity', async () => {
   expect(outgoing).toHaveLength(1)
   expect(outgoing[0]?.payload.title).toBe('Latest')
   expect(outgoing[0]?.expectedVersion).toBe(0)
+  expect(await repository.hasPendingSyncChanges('workspace-a')).toBe(true)
+  await repository.acknowledgeSync('workspace-a', outgoing.map((item) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: 1 })))
+  expect(await repository.hasPendingSyncChanges('workspace-a')).toBe(false)
+})
+
+test('publishes only the newest pending autosave per page while retaining local history', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-autosave-coalesce', 'Draft'), syncStatus: 'pending' as const }
+  const document = (markdown: string, updatedAt: string): PageDocument => ({
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown,
+    tiptapJson: { type: 'doc', content: [] },
+    updatedAt,
+  })
+  await repository.savePage(value, document('one', '2026-01-02T00:00:00.000Z'))
+  await repository.savePage({ ...value, updatedAt: '2026-01-02T00:00:01.000Z' }, document('two', '2026-01-02T00:00:01.000Z'))
+  await repository.savePage({ ...value, updatedAt: '2026-01-02T00:00:02.000Z' }, document('three', '2026-01-02T00:00:02.000Z'))
+
+  const localRevisions = await repository.listRevisions(value.id)
+  expect(localRevisions.filter((revision) => revision.reason === 'autosave')).toHaveLength(2)
+  const pendingAutosaves = (await repository.listOutbox(value.workspaceId, 100))
+    .filter((item) => item.entityType === 'revision' && item.payload.reason === 'autosave')
+  expect(pendingAutosaves).toHaveLength(1)
+  expect((pendingAutosaves[0]!.payload.document as PageDocument).markdown).toBe('two')
+
+  await repository.createManualRevision(value.id)
+  const pendingRevisions = (await repository.listOutbox(value.workspaceId, 100))
+    .filter((item) => item.entityType === 'revision')
+  expect(pendingRevisions.map((item) => item.payload.reason).sort()).toEqual(['autosave', 'manual'])
+})
+
+test('keeps revision history as a bounded per-page ring while preserving current content', async () => {
+  const repository = makeRepository()
+  const value = page('page-history-ring', 'Current')
+  const current: PageDocument = {
+    pageId: value.id,
+    schemaVersion: 3,
+    markdown: 'current body',
+    tiptapJson: { type: 'doc' },
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  }
+  await repository.savePage(value, current)
+  const changes = Array.from({ length: MAX_AUTOSAVE_REVISIONS_PER_PAGE + 5 }, (_, index) => {
+    const createdAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString()
+    const id = `revision-${String(index).padStart(3, '0')}`
+    return {
+      cursor: index + 1,
+      entityType: 'revision',
+      entityId: id,
+      version: 0,
+      operation: 'upsert',
+      payload: {
+        id,
+        pageId: value.id,
+        document: { ...current, markdown: `history ${index}`, updatedAt: createdAt },
+        createdAt,
+        reason: 'autosave',
+      },
+    }
+  })
+
+  await repository.applyRemoteChanges('workspace-a', changes, changes.length)
+
+  const revisions = await repository.listRevisions(value.id)
+  expect(revisions).toHaveLength(MAX_AUTOSAVE_REVISIONS_PER_PAGE)
+  expect(revisions.map((revision) => revision.id)).not.toContain('revision-000')
+  expect(revisions.map((revision) => revision.id)).toContain(`revision-${String(MAX_AUTOSAVE_REVISIONS_PER_PAGE + 4).padStart(3, '0')}`)
+  expect(await repository.getPageDocument(value.id)).toEqual(current)
 })
 
 test('queues page bodies and applies remote body updates and deletes', async () => {
@@ -481,7 +550,7 @@ test('imports and exports a versioned workspace bundle without losing metadata',
   expect(exported.tombstones[0]?.entityId).toBe('deleted')
 })
 
-test('never trims imported legacy history while bounding new autosave revisions', async () => {
+test('keeps imported history while bounding new autosave revisions', async () => {
   const repository = makeRepository()
   const value = { ...page('page-history', 'History'), syncStatus: 'pending' as const }
   const importedDocument: PageDocument = { pageId: value.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'text', text: 'imported' }] }, updatedAt: value.updatedAt }
@@ -497,7 +566,7 @@ test('never trims imported legacy history while bounding new autosave revisions'
   }
   const revisions = await repository.listRevisions(value.id)
   expect(revisions.filter((item) => item.reason === 'import').map((item) => item.id).sort()).toEqual(['imported-0', 'imported-1'])
-  expect(revisions.filter((item) => item.reason === 'autosave')).toHaveLength(100)
+  expect(revisions.filter((item) => item.reason === 'autosave')).toHaveLength(MAX_AUTOSAVE_REVISIONS_PER_PAGE)
 })
 
 test('lazily rebuilds a Markdown revision editor cache only when restoring it', async () => {
@@ -846,4 +915,23 @@ test('ranks an exact Chinese phrase ahead of weak bigram matches', async () => {
   await repository.savePage(page('weak-a', '提示与工具'))
   await repository.savePage(page('weak-b', '小说写作'))
   expect((await repository.searchWorkspace('workspace-a', '小说提示词'))[0]?.id).toBe('exact')
+})
+
+test('classifies private notebook entities and related page records as local-only sync', async () => {
+  const repository = makeRepository()
+  const notebook = { id: 'private-notebook', workspaceId: 'workspace-a', name: 'Private', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', locked: true }
+  const section = { id: 'private-section', notebookId: notebook.id, name: 'Private section', sortOrder: 0, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt }
+  const privatePage = { ...page('private-page', 'Private page', section.id), locked: true, syncStatus: 'pending' as const }
+  await repository.saveNotebook(notebook)
+  await repository.saveSection(section)
+  await repository.savePage(privatePage, { pageId: privatePage.id, schemaVersion: 3, markdown: 'secret', tiptapJson: { type: 'doc', content: [] }, updatedAt: privatePage.updatedAt })
+  await repository.saveTaskSteps(privatePage.id, [{ id: 'private-step', pageId: privatePage.id, text: 'secret task', checked: false, sortOrder: 0, createdAt: privatePage.createdAt }])
+
+  const outgoing = await repository.listOutbox('workspace-a')
+  expect(outgoing.length).toBeGreaterThanOrEqual(5)
+  await expect(Promise.all(outgoing.map((item) => repository.isPrivateSyncItem(item)))).resolves.toEqual(outgoing.map(() => true))
+
+  await repository.acknowledgeLocalOnlySync(outgoing)
+  expect(await repository.listOutbox('workspace-a')).toEqual([])
+  expect((await repository.getPage(privatePage.id))?.syncStatus).toBe('synced')
 })

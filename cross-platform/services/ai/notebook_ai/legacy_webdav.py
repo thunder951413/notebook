@@ -12,6 +12,7 @@ read-modify-write append below is race-free across devices.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import posixpath
 import re
@@ -21,9 +22,12 @@ import xml.etree.ElementTree as ET
 import requests
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-MAX_LOG_BYTES = 4 * 1024 * 1024
+MAX_LOG_BYTES = 100 * 1024 * 1024
 MAX_OBJECT_BYTES = 100 * 1024 * 1024
 MAX_ENTRIES = 100_000
+MAX_HEAD_BYTES = 64 * 1024
+MAX_REVISION_ENTRIES = 256
+MAX_REVISION_BYTES = 2 * 1024 * 1024
 DEVICE_ID_PATTERN = re.compile(r"^[0-9a-f-]{36}$", re.I)
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.I)
 PROPFIND_BODY = b'<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:allprop/></d:propfind>'
@@ -79,6 +83,31 @@ class JournalPushEntry(BaseModel):
     ver: int = Field(ge=0)
     hash: str | None = None
     payload: dict[str, object]
+
+
+class WebdavJournalHead(BaseModel):
+    version: int = Field(ge=1, le=1)
+    deviceId: str
+    lastSeq: int = Field(ge=0)
+    journalBytes: int = Field(ge=0, le=MAX_LOG_BYTES)
+    journalSha256: str
+    updatedAt: str
+    stateEntries: int = Field(ge=0)
+    historyEntries: int = Field(ge=0)
+
+    @field_validator("deviceId")
+    @classmethod
+    def device_id_is_uuid(cls, value: str) -> str:
+        if not DEVICE_ID_PATTERN.match(value):
+            raise ValueError("远端日志索引设备 ID 不正确")
+        return value
+
+    @field_validator("journalSha256")
+    @classmethod
+    def journal_hash_is_sha256(cls, value: str) -> str:
+        if not HASH_PATTERN.match(value):
+            raise ValueError("远端日志索引校验值不正确")
+        return value.lower()
 
 
 class JournalPullEntry(WebdavJournalEntry):
@@ -201,6 +230,45 @@ def _exists(session: requests.Session, settings: WebdavConnection, path: str) ->
     return bool(_parse_hrefs(response.text))
 
 
+def _journal_head_path(root: str, device_id: str) -> str:
+    return f"{root}/journal/{device_id}.head.json"
+
+
+def _parse_head(data: bytes, device_id: str) -> WebdavJournalHead:
+    if len(data) > MAX_HEAD_BYTES:
+        raise RuntimeError(f"远端日志 {device_id}.head.json 超过 64 KiB 上限")
+    try:
+        head = WebdavJournalHead.model_validate_json(data)
+    except Exception as error:
+        raise RuntimeError(f"远端日志 {device_id}.head.json 内容不正确") from error
+    if head.deviceId != device_id:
+        raise RuntimeError(f"远端日志 {device_id}.head.json 设备 ID 不匹配")
+    return head
+
+
+def _compact_journal(entries: list[WebdavJournalEntry]) -> tuple[list[WebdavJournalEntry], int, int]:
+    state: dict[tuple[str, str], WebdavJournalEntry] = {}
+    revisions: dict[tuple[str, str], WebdavJournalEntry] = {}
+    for entry in entries:
+        target = revisions if entry.type == "revision" else state
+        key = (entry.type, entry.id)
+        previous = target.get(key)
+        if previous is None or entry.seq > previous.seq:
+            target[key] = entry
+    history: list[WebdavJournalEntry] = []
+    history_bytes = 0
+    for entry in sorted(revisions.values(), key=lambda item: item.seq, reverse=True):
+        if len(history) >= MAX_REVISION_ENTRIES:
+            break
+        size = len(json.dumps(entry.model_dump(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
+        if history and history_bytes + size > MAX_REVISION_BYTES:
+            break
+        history.append(entry)
+        history_bytes += size
+    compacted = sorted([*state.values(), *history], key=lambda item: item.seq)
+    return compacted, len(state), len(history)
+
+
 def test_connection(settings: WebdavConnection) -> WebdavTestResult:
     started = time.monotonic()
     try:
@@ -229,29 +297,57 @@ def pull_journals(request: WebdavPullRequest) -> WebdavPullResult:
     root = _safe_remote_path(settings.remotePath)
     _ensure_directory(session, settings, f"{root}/journal")
     device_ids: list[str] = []
+    devices_with_heads: set[str] = set()
     response = session.request(
         "PROPFIND", _url(settings, f"{root}/journal"), data=PROPFIND_BODY, headers={"Depth": "1"}, timeout=(15, 60),
     )
     if response.status_code == 207:
         names = [posixpath.basename(href) for href in _parse_hrefs(response.text)]
         device_ids = [name[:-len(".jsonl")] for name in names if name.endswith(".jsonl") and DEVICE_ID_PATTERN.match(name[:-len(".jsonl")])]
+        devices_with_heads = {
+            name[:-len(".head.json")] for name in names
+            if name.endswith(".head.json") and DEVICE_ID_PATTERN.match(name[:-len(".head.json")])
+        }
+    elif response.status_code != 404:
+        _fail(response, f"列出远端日志目录 {root}/journal 失败")
     entries: list[JournalPullEntry] = []
     for device_id in device_ids:
+        known = request.knownSeqs.get(device_id, 0)
+        head: WebdavJournalHead | None = None
+        if device_id in devices_with_heads:
+            head_response = session.get(_url(settings, _journal_head_path(root, device_id)), timeout=(15, 60))
+            if head_response.status_code == 200:
+                head = _parse_head(head_response.content, device_id)
+            elif head_response.status_code != 404:
+                _fail(head_response, f"下载日志索引 {device_id}.head.json 失败")
+            if head is not None and known >= head.lastSeq:
+                continue
         response = session.get(_url(settings, f"{root}/journal/{device_id}.jsonl"), timeout=(15, 120))
         if response.status_code == 404:
             continue
         if response.status_code != 200:
             _fail(response, f"下载日志 {device_id}.jsonl 失败")
-        text = response.text
+        text = response.content.decode("utf-8")
+        # Long-lived devices may already exceed the legacy 4 MB failure limit;
+        # 100 MB is only a recovery/abuse guard until v5 segments the log.
         if len(text.encode("utf-8")) > MAX_LOG_BYTES:
-            raise RuntimeError(f"远端日志 {device_id}.jsonl 超过 4 MB 上限")
-        known = request.knownSeqs.get(device_id, 0)
+            raise RuntimeError(f"远端日志 {device_id}.jsonl 超过 100 MB 上限")
+        journal: list[WebdavJournalEntry] = []
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
             entry = WebdavJournalEntry.model_validate_json(line)
-            if entry.seq <= known:
+            journal.append(entry)
+        if head is not None:
+            committed = response.content[:head.journalBytes]
+            journal_last_seq = max((entry.seq for entry in journal), default=0)
+            matches = len(response.content) == head.journalBytes and hashlib.sha256(response.content).hexdigest() == head.journalSha256
+            prefix_matches = len(response.content) >= head.journalBytes and hashlib.sha256(committed).hexdigest() == head.journalSha256
+            if not matches and not (journal_last_seq > head.lastSeq and prefix_matches):
+                raise RuntimeError(f"远端日志 {device_id}.jsonl 与提交标记不一致")
+        for entry in journal:
+            if entry.seq <= known or (head is not None and entry.seq > head.lastSeq):
                 continue
             entries.append(JournalPullEntry(**entry.model_dump(), deviceId=device_id))
     entries.sort(key=lambda item: (item.deviceId, item.seq))
@@ -275,6 +371,8 @@ def get_object(request: WebdavObjectRequest) -> WebdavObjectResponse:
     data = response.content
     if len(data) > MAX_OBJECT_BYTES:
         raise RuntimeError("远端对象超过 100 MB 上限")
+    if hashlib.sha256(data).hexdigest() != request.hash.lower():
+        raise RuntimeError(f"远端对象 {request.hash} 的 SHA-256 校验失败")
     return WebdavObjectResponse(dataBase64=base64.b64encode(data).decode())
 
 
@@ -284,8 +382,11 @@ def _put_object(session: requests.Session, settings: WebdavConnection, hash_valu
     if len(data) > MAX_OBJECT_BYTES:
         raise RuntimeError("对象超过 100 MB 上限")
     root = _safe_remote_path(settings.remotePath)
+    target = f"{root}/objects/{hash_value[:2]}/{hash_value}"
+    if _exists(session, settings, target):
+        return
     _ensure_directory(session, settings, f"{root}/objects/{hash_value[:2]}")
-    response = session.put(_url(settings, f"{root}/objects/{hash_value[:2]}/{hash_value}"), data=data, timeout=(15, 600))
+    response = session.put(_url(settings, target), data=data, timeout=(15, 600))
     if response.status_code not in {200, 201, 204}:
         _fail(response, f"上传对象 {hash_value} 失败")
 
@@ -299,23 +400,42 @@ def _append_journal(session: requests.Session, settings: WebdavConnection, devic
     if response.status_code == 404:
         pass
     elif response.status_code == 200:
-        existing = [WebdavJournalEntry.model_validate_json(line) for line in response.text.splitlines() if line.strip()]
+        text = response.text
+        if len(text.encode("utf-8")) > MAX_LOG_BYTES:
+            raise RuntimeError(f"远端日志 {device_id}.jsonl 超过 100 MB 上限")
+        existing = [WebdavJournalEntry.model_validate_json(line) for line in text.splitlines() if line.strip()]
     else:
         _fail(response, f"读取日志 {device_id}.jsonl 失败")
-    if len(existing) + len(entries) > MAX_ENTRIES:
-        raise RuntimeError("设备日志条目数超过 10 万，请先压缩日志")
-    first_seq = (existing[-1].seq + 1) if existing else 1
-    lines = [json.dumps(entry.model_dump(), ensure_ascii=False) for entry in existing]
-    lines.extend(
-        json.dumps({**entry.model_dump(), "seq": first_seq + index}, ensure_ascii=False)
-        for index, entry in enumerate(entries)
-    )
+    first_seq = max((entry.seq for entry in existing), default=0) + 1
+    journal_entries: list[WebdavJournalEntry] = [*existing]
+    journal_entries.extend(WebdavJournalEntry(**entry.model_dump(), seq=first_seq + index) for index, entry in enumerate(entries))
+    journal_entries, state_entries, history_entries = _compact_journal(journal_entries)
+    lines = [json.dumps(entry.model_dump(), ensure_ascii=False, separators=(",", ":")) for entry in journal_entries]
     body = ("\n".join(lines) + "\n").encode("utf-8")
+    if len(journal_entries) > MAX_ENTRIES:
+        raise RuntimeError("设备日志条目数超过 10 万，请先压缩日志")
     if len(body) > MAX_LOG_BYTES:
-        raise RuntimeError("设备日志超过 4 MB 上限")
+        raise RuntimeError("设备日志压缩后超过 100 MB 上限")
     response = session.put(_url(settings, path), data=body, timeout=(15, 600))
     if response.status_code not in {200, 201, 204}:
         _fail(response, f"上传日志 {device_id}.jsonl 失败")
+    head = WebdavJournalHead(
+        version=1,
+        deviceId=device_id,
+        lastSeq=max((entry.seq for entry in journal_entries), default=0),
+        journalBytes=len(body),
+        journalSha256=hashlib.sha256(body).hexdigest(),
+        updatedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        stateEntries=state_entries,
+        historyEntries=history_entries,
+    )
+    response = session.put(
+        _url(settings, _journal_head_path(root, device_id)),
+        data=head.model_dump_json().encode("utf-8"),
+        timeout=(15, 60),
+    )
+    if response.status_code not in {200, 201, 204}:
+        _fail(response, f"上传日志索引 {device_id}.head.json 失败")
     return WebdavPushResult(firstSeq=first_seq, count=len(entries))
 
 

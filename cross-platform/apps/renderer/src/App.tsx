@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Button,
   Input,
@@ -53,6 +53,8 @@ import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
 import { emptyPageVisitHistory, pageVisitTarget, recordPageVisit } from './pageVisitHistory'
 import { installRendererDiagnostics } from './diagnostics/diagnostics'
+import { registerAfterFlushHandler, registerFlushHandler } from './data/flushCoordinator'
+import { createBackgroundSyncGate } from './sync/syncLifecycle'
 import { useAutomationBridge } from './automation/automationBridge'
 import { BackupPasswordDialog } from './components/BackupPasswordDialog'
 import { CreateItemDialog } from './components/CreateItemDialog'
@@ -108,7 +110,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, focusSync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -121,6 +123,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const syncCompletionTimer = useRef<number | undefined>(undefined)
   const [showSyncCompleted, setShowSyncCompleted] = useState(false)
   const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const dirtyReadingPositionIds = useRef(new Set<string>())
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const readingPositions = useRef(new Map<string, ViewportPosition>(Object.entries(readLocalReadingPositions())))
   const [loadedReadingPosition, setLoadedReadingPosition] = useState<{ pageId: string; position: ViewportPosition }>()
@@ -257,14 +260,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     globalThis.localStorage?.setItem(EXPANDED_PAGES_KEY, JSON.stringify([...expandedPageIds]))
   }, [expandedPageIds])
 
-  // Opening a note loads it and syncs that note: remote edits are pulled
-  // first (journals are append-only, so the pull stays full-increment) and
-  // this note's pending local changes are pushed immediately.
+  // Opening a note is deliberately local: fetching/pushing on every page
+  // switch causes substantial WebDAV traffic for normal navigation.
   useEffect(() => {
     if (!hasCurrentPage) return
     void loadDocument(currentPage.id)
-    void focusSync(currentPage.id)
-  }, [currentPage.id, hasCurrentPage, loadDocument, focusSync])
+  }, [currentPage.id, hasCurrentPage, loadDocument])
   useEffect(() => () => clearTimeout(documentPrefetchTimer.current), [])
   useEffect(() => {
     clearTimeout(readingPositionTimer.current)
@@ -290,9 +291,66 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       const position = savedPositions.get(pageId)
       if (!position) return
       writeLocalReadingPositions(savedPositions)
-      void saveReadingPosition(pageId, position.fraction)
     }
-  }, [activeArea, currentPage.id, hasCurrentPage, loadReadingPosition, saveReadingPosition])
+  }, [activeArea, currentPage.id, hasCurrentPage, loadReadingPosition])
+
+  const flushDirtyReadingPositions = useCallback(async () => {
+    clearTimeout(readingPositionTimer.current)
+    writeLocalReadingPositions(readingPositions.current)
+    const dirtyIds = [...dirtyReadingPositionIds.current]
+    if (!dirtyIds.length) return
+    dirtyReadingPositionIds.current.clear()
+    try {
+      await Promise.all(dirtyIds.map(async (pageId) => {
+        const position = readingPositions.current.get(pageId)
+        if (position) await saveReadingPosition(pageId, position.fraction)
+      }))
+    } catch (error) {
+      for (const pageId of dirtyIds) dirtyReadingPositionIds.current.add(pageId)
+      throw error
+    }
+  }, [saveReadingPosition])
+
+  useEffect(() => registerFlushHandler(flushDirtyReadingPositions), [flushDirtyReadingPositions])
+
+  useEffect(() => registerAfterFlushHandler(async () => {
+    // Quitting must not strand a durable outbox behind an unbounded network
+    // request. A timeout leaves the outbox intact for the next launch.
+    let timer: number | undefined
+    try {
+      await Promise.race([
+        syncNow(),
+        new Promise<void>((resolve) => { timer = window.setTimeout(resolve, 4_000) }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }), [syncNow])
+
+  const backgroundSyncGate = useMemo(() => createBackgroundSyncGate(async () => {
+    await flushDirtyReadingPositions()
+    await syncNow()
+  }), [flushDirtyReadingPositions, syncNow])
+
+  useEffect(() => {
+    const onFocus = () => {
+      backgroundSyncGate.foreground()
+      void syncNow()
+    }
+    const onBlur = () => { backgroundSyncGate.background() }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') backgroundSyncGate.background()
+      else backgroundSyncGate.foreground()
+    }
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [backgroundSyncGate, syncNow])
   useEffect(() => {
     if (activeArea !== 'notes' || !hasCurrentPage || currentPage.kind === 'task') return
     setRecentPageIds((current) => {
@@ -882,10 +940,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 const pageId = currentPage.id
                 readingPositions.current.delete(pageId)
                 readingPositions.current.set(pageId, position)
+                dirtyReadingPositionIds.current.add(pageId)
                 clearTimeout(readingPositionTimer.current)
                 readingPositionTimer.current = setTimeout(() => {
                   writeLocalReadingPositions(readingPositions.current)
-                  void saveReadingPosition(pageId, position.fraction)
                 }, 350)
               }}
               />

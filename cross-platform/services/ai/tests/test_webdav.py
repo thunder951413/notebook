@@ -1,6 +1,7 @@
 """WebDAV v4 journal transport and loopback bridge tests."""
 
 import base64
+import hashlib
 import json
 import threading
 from collections.abc import Iterator
@@ -10,6 +11,7 @@ from urllib.parse import unquote, urlparse
 import pytest
 from fastapi.testclient import TestClient
 
+import notebook_ai.legacy_webdav as legacy_webdav
 from notebook_ai.legacy_webdav import (
     WebdavConnection,
     WebdavObjectRequest,
@@ -41,6 +43,9 @@ class FakeWebdavServer:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.dirs: set[str] = set()
+        self.gets: list[str] = []
+        self.puts: list[str] = []
+        self.propfind_failure_status: int | None = None
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_factory())
 
     def _handler_factory(self):
@@ -70,17 +75,24 @@ class FakeWebdavServer:
 
             def do_PUT(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
-                owner.files[self._path()] = self.rfile.read(length)
+                path = self._path()
+                owner.puts.append(path)
+                owner.files[path] = self.rfile.read(length)
                 self._send(201)
 
             def do_GET(self) -> None:
-                data = owner.files.get(self._path())
+                path = self._path()
+                owner.gets.append(path)
+                data = owner.files.get(path)
                 if data is None:
                     self._send(404)
                     return
                 self._send(200, data)
 
             def do_PROPFIND(self) -> None:
+                if owner.propfind_failure_status is not None:
+                    self._send(owner.propfind_failure_status)
+                    return
                 path = self._path()
                 depth = self.headers.get("Depth", "1")
                 if not (path in owner.dirs or path in owner.files or any(item.startswith(f"{path}/") for item in owner.dirs | owner.files.keys())):
@@ -188,23 +200,102 @@ def test_connection_probe_and_append_pull_round_trip(webdav_server: FakeWebdavSe
         (DEVICE_B, 1, "page", "page-3"),
     ]
     assert pulled.fingerprint == f"http://127.0.0.1:{webdav_server.port}/dav|user|notebook_backup"
+    webdav_server.gets.clear()
     assert pull_journals(WebdavPullRequest(settings=settings, knownSeqs={DEVICE_A: 3, DEVICE_B: 1})).entries == []
+    assert all(not path.endswith(".jsonl") for path in webdav_server.gets)
+    assert sum(path.endswith(".head.json") for path in webdav_server.gets) == 2
 
 
 def test_push_publishes_objects_before_the_journal(webdav_server: FakeWebdavServer) -> None:
     settings = connection(webdav_server)
-    hash_value = "ab" * 32
+    object_bytes = b"\x00\x01\xfe\xff"
+    hash_value = hashlib.sha256(object_bytes).hexdigest()
     result = push_repository(WebdavPushRequest(
         settings=settings,
         deviceId=DEVICE_A,
         entries=[JournalPushEntry(ts="t", op="upsert", type="document", id="page-1", ver=0, hash=hash_value, payload={"tiptapJson": {"$object": hash_value}})],
-        objects=[PushObject(hash=hash_value, dataBase64=base64.b64encode(b"\x00\x01\xfe\xff").decode())],
+        objects=[PushObject(hash=hash_value, dataBase64=base64.b64encode(object_bytes).decode())],
     ))
     assert result == WebdavPushResult(firstSeq=1, count=1)
     stored = get_object(WebdavObjectRequest(settings=settings, hash=hash_value))
-    assert base64.b64decode(stored.dataBase64) == b"\x00\x01\xfe\xff"
+    assert base64.b64decode(stored.dataBase64) == object_bytes
     with pytest.raises(RuntimeError, match="不存在"):
         get_object(WebdavObjectRequest(settings=settings, hash="cd" * 32))
+    object_path = f"notebook_backup/objects/{hash_value[:2]}/{hash_value}"
+    before = webdav_server.puts.count(object_path)
+    push_repository(WebdavPushRequest(settings=settings, deviceId=DEVICE_A, entries=[], objects=[PushObject(hash=hash_value, dataBase64=base64.b64encode(b"different").decode())]))
+    assert webdav_server.puts.count(object_path) == before
+
+
+def test_head_checksum_and_bounded_revision_ring(webdav_server: FakeWebdavServer, monkeypatch) -> None:
+    monkeypatch.setattr(legacy_webdav, "MAX_REVISION_ENTRIES", 2)
+    settings = connection(webdav_server)
+    push_repository(WebdavPushRequest(
+        settings=settings,
+        deviceId=DEVICE_A,
+        entries=[
+            JournalPushEntry(ts="t0", op="delete", type="page", id="page-current", ver=1, payload={}),
+            *[JournalPushEntry(ts=f"t{index + 1}", op="upsert", type="revision", id=f"revision-{index}", ver=0, payload={"body": str(index)}) for index in range(3)],
+        ],
+    ))
+    journal = [json.loads(line) for line in webdav_server.journal(DEVICE_A).splitlines()]
+    assert [entry["id"] for entry in journal if entry["type"] == "revision"] == ["revision-1", "revision-2"]
+    assert next(entry for entry in journal if entry["type"] == "page")["op"] == "delete"
+    head_path = f"notebook_backup/journal/{DEVICE_A}.head.json"
+    head = json.loads(webdav_server.files[head_path])
+    assert head["historyEntries"] == 2
+    head["journalSha256"] = "0" * 64
+    webdav_server.files[head_path] = json.dumps(head).encode()
+    with pytest.raises(RuntimeError, match="提交标记不一致"):
+        pull_journals(WebdavPullRequest(settings=settings, knownSeqs={}))
+
+
+def test_push_compacts_an_entry_count_overflow_and_preserves_tail_sequence(webdav_server: FakeWebdavServer, monkeypatch) -> None:
+    monkeypatch.setattr(legacy_webdav, "MAX_ENTRIES", 2)
+    settings = connection(webdav_server)
+    initial = push_repository(WebdavPushRequest(
+        settings=settings,
+        deviceId=DEVICE_A,
+        entries=[
+            JournalPushEntry(ts="t1", op="upsert", type="page", id="page-1", ver=0, payload={}),
+            JournalPushEntry(ts="t2", op="upsert", type="page", id="page-1", ver=1, payload={}),
+        ],
+    ))
+    assert initial == WebdavPushResult(firstSeq=1, count=2)
+    appended = push_repository(WebdavPushRequest(
+        settings=settings,
+        deviceId=DEVICE_A,
+        entries=[JournalPushEntry(ts="t3", op="upsert", type="page", id="page-2", ver=0, payload={})],
+    ))
+    assert appended == WebdavPushResult(firstSeq=3, count=1)
+    assert [json.loads(line)["seq"] for line in webdav_server.journal(DEVICE_A).splitlines()] == [2, 3]
+
+
+def test_journal_caps_are_utf8_byte_accurate_and_recovery_reads_are_bounded(webdav_server: FakeWebdavServer, monkeypatch) -> None:
+    settings = connection(webdav_server)
+    entry = JournalPushEntry(ts="t", op="upsert", type="page", id="page-1", ver=0, payload={"body": "中" * 30})
+    body = json.dumps({**entry.model_dump(), "seq": 1}, ensure_ascii=False, separators=(",", ":")) + "\n"
+    assert len(body) < len(body.encode("utf-8"))
+    monkeypatch.setattr(legacy_webdav, "MAX_LOG_BYTES", len(body.encode("utf-8")) - 1)
+    with pytest.raises(RuntimeError, match="设备日志.*超过"):
+        push_repository(WebdavPushRequest(settings=settings, deviceId=DEVICE_A, entries=[entry]))
+
+    monkeypatch.setattr(legacy_webdav, "MAX_LOG_BYTES", 100)
+    webdav_server.files[f"notebook_backup/journal/{DEVICE_A}.jsonl"] = b"x" * 101
+    webdav_server.dirs.add("notebook_backup/journal")
+    with pytest.raises(RuntimeError, match="远端日志.*100 MB"):
+        pull_journals(WebdavPullRequest(settings=settings, knownSeqs={}))
+    with pytest.raises(RuntimeError, match="远端日志.*100 MB"):
+        push_repository(WebdavPushRequest(settings=settings, deviceId=DEVICE_A, entries=[]))
+
+
+def test_pull_ignores_invalid_filenames_but_surfaces_propfind_errors(webdav_server: FakeWebdavServer) -> None:
+    settings = connection(webdav_server)
+    webdav_server.put_journal("not-a-device", ["{not json}"])
+    assert pull_journals(WebdavPullRequest(settings=settings, knownSeqs={})).entries == []
+    webdav_server.propfind_failure_status = 401
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        pull_journals(WebdavPullRequest(settings=settings, knownSeqs={}))
 
 
 def test_connection_rejects_unsafe_paths(webdav_server: FakeWebdavServer) -> None:

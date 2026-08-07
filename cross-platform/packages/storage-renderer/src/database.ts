@@ -45,6 +45,13 @@ export interface EditorCache {
 }
 
 export const MAX_EDITOR_CACHE_BYTES = 64 * 1024 * 1024
+/**
+ * Per-page history is a bounded ring. Current page/document state is stored in
+ * separate tables, so evicting an old revision can never remove live content.
+ */
+export const MAX_AUTOSAVE_REVISIONS_PER_PAGE = 50
+export const MAX_PINNED_REVISIONS_PER_PAGE = 20
+export const MAX_REVISIONS_PER_PAGE = MAX_AUTOSAVE_REVISIONS_PER_PAGE + MAX_PINNED_REVISIONS_PER_PAGE
 
 export class NotebookRendererDatabase extends Dexie {
   notebooks!: EntityTable<Notebook, 'id'>
@@ -241,5 +248,29 @@ export class NotebookRendererDatabase extends Dexie {
     // `documents` prevents it from entering sync, history, or exported data.
     this.version(17).stores({ editorCaches: 'pageId, sourceVersion, accessedAt' })
     this.version(18).stores({ automationProposals: 'id, workspaceId, status, createdAt' })
+    this.version(19).stores({}).upgrade(async (transaction) => {
+      const revisions = transaction.table<PageRevision>('revisions')
+      const grouped = new Map<string, PageRevision[]>()
+      for (const revision of await revisions.toArray()) {
+        const values = grouped.get(revision.pageId) ?? []
+        values.push(revision)
+        grouped.set(revision.pageId, values)
+      }
+      const staleIds: string[] = []
+      for (const values of grouped.values()) {
+        values.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+        staleIds.push(...values.filter((revision) => revision.reason === 'autosave').slice(MAX_AUTOSAVE_REVISIONS_PER_PAGE).map((revision) => revision.id))
+        staleIds.push(...values.filter((revision) => revision.reason !== 'autosave').slice(MAX_PINNED_REVISIONS_PER_PAGE).map((revision) => revision.id))
+      }
+      if (staleIds.length) {
+        await revisions.bulkDelete(staleIds)
+        const stale = new Set(staleIds)
+        const outbox = transaction.table<SyncOutboxItem>('syncOutbox')
+        const staleOutboxIds = (await outbox.toArray())
+          .filter((item) => item.entityType === 'revision' && stale.has(item.entityId))
+          .map((item) => item.id)
+        if (staleOutboxIds.length) await outbox.bulkDelete(staleOutboxIds)
+      }
+    })
   }
 }
