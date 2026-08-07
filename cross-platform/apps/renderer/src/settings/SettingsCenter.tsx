@@ -3,6 +3,8 @@ import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/reac
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearWebdavAppPassword, clearWebdavSyncPassword, getWebdavAppPassword, getWebdavSyncPassword, hasWebdavAppPassword, loadWebdavSettings, saveWebdavSettings, type WebdavSettings } from '../sync/webdavSettings'
 import { testWebdavConnection } from '../sync/webdavSync'
+import { serializeWebdavQrPayload } from '../sync/webdavQrConfig'
+import QRCode from 'qrcode'
 import type { LegacySyncMode } from '../sync/legacySshSync'
 import { ACCENT_PRESETS, type AccentColor } from '../appearance/accent'
 import type { ThemePreference } from '../appearance/theme'
@@ -75,6 +77,9 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   const [syncMessage, setSyncMessage] = useState<string>()
   const [syncMessageIsError, setSyncMessageIsError] = useState(false)
   const [migrating, setMigrating] = useState(false)
+  const [webdavQrOpen, setWebdavQrOpen] = useState(false)
+  const [webdavQrDataUrl, setWebdavQrDataUrl] = useState<string>()
+  const [webdavQrError, setWebdavQrError] = useState<string>()
   const [updateState, setUpdateState] = useState<DesktopUpdateState>()
   const [updateActionError, setUpdateActionError] = useState<string>()
   const [githubReleaseToken, setGithubReleaseToken] = useState('')
@@ -317,6 +322,20 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     }
   }
 
+  /** Encode the current WebDAV configuration into a QR code for Android to scan. */
+  const showWebdavQr = async () => {
+    const appPassword = webdavAppPassword || await getWebdavAppPassword() || ''
+    const syncPassword = webdavSyncPassword || ((await getWebdavSyncPassword()) ?? '')
+    try {
+      const payload = serializeWebdavQrPayload(webdavSettings, appPassword, syncPassword)
+      setWebdavQrDataUrl(await QRCode.toDataURL(payload, { width: 300, margin: 1 }))
+      setWebdavQrError(undefined)
+      setWebdavQrOpen(true)
+    } catch (error) {
+      setWebdavQrError(error instanceof Error ? error.message : '无法生成配置二维码')
+    }
+  }
+
   const removeWebdavAppPassword = async () => {
     await clearWebdavAppPassword()
     setWebdavAppPassword('')
@@ -516,6 +535,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   <div className="sync-primary-actions">
                     <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void testWebdavServer()}>{checkingServer ? '正在检测…' : '检测服务器连接'}</Button>
                     <Button appearance="primary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync()}>{savingSync || syncState === 'syncing' ? '正在同步…' : '立即同步'}</Button>
+                    <Button appearance="secondary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void showWebdavQr()}>生成配置二维码</Button>
                   </div>
                 </div>
                 <div className="sync-utility-actions">
@@ -604,6 +624,16 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
         </div>
       </div>
     </section>
+    {webdavQrOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWebdavQrOpen(false) }}>
+      <section className="settings-dialog webdav-qr-dialog" role="dialog" aria-label="坚果云配置二维码">
+        <div><h2>坚果云配置二维码</h2><Button appearance="subtle" onClick={() => setWebdavQrOpen(false)}>关闭</Button></div>
+        {webdavQrDataUrl
+          ? <img src={webdavQrDataUrl} alt="坚果云 WebDAV 配置二维码" style={{ width: 300, height: 300 }} />
+          : <div className="sync-settings-result error">{webdavQrError ?? '正在生成…'}</div>}
+        <p className="settings-note">使用 Android 端「设置与同步」中的扫描按钮扫码，即可自动填入服务器地址、用户名、应用密码与远端目录并开始同步。</p>
+        <p className="settings-note error">⚠ 二维码包含 WebDAV 应用密码，扫描后请在坚果云安全选项重新生成应用密码，并清除本端已保存的应用密码；不要截图或转发二维码。</p>
+      </section>
+    </div>}
   </div>
 }
 
