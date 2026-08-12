@@ -61,10 +61,7 @@ export async function synchronizeMetadata(repository: DexieNotebookRepository, w
       if (!assetResponse.ok) throw new Error(`附件下载失败：${assetResponse.status}`)
       downloadedAssets.set(item.entityId, new Uint8Array(await assetResponse.arrayBuffer()))
     }
-    const applied = await repository.applyRemoteChanges(workspaceId, changes, result.cursor)
-    const appliedAssets = new Map([...downloadedAssets].filter(([assetId]) =>
-      changes.some((change) => change.cursor <= applied.cursor && change.entityType === 'asset' && change.entityId === assetId)))
-    await repository.importAssetContents(appliedAssets)
+    const applied = await repository.applyRemoteChanges(workspaceId, changes, result.cursor, downloadedAssets)
     conflicts += applied.conflicts.length
     cursor = applied.cursor
     // A blocked change remains intentionally pullable. End this cycle instead

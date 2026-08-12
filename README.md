@@ -1,6 +1,8 @@
 # Notebook Next
 
-Notebook Next 是面向 Windows、Linux 和 macOS 的 Electron 桌面笔记应用。`next` 分支只维护 Electron 产品及其运行所需的渲染层、共享数据模型、SSH/SFTP 同步协议和迁移工具；旧 Swift/macOS 应用不在本分支中。
+Notebook Next 是面向 Windows、Linux 和 macOS 的 Electron 桌面笔记应用。`next` 分支维护 Electron 产品及其运行所需的渲染层、共享数据模型、坚果云 WebDAV 同步协议和旧数据迁移工具；旧 Swift/macOS 应用不在本分支中。
+
+坚果云 WebDAV 是当前正式、推荐的跨设备同步方式。SSH/SFTP 只保留为旧仓库迁移与故障恢复兼容工具，不建议继续作为日常同步后端。
 
 ## 核心能力
 
@@ -8,7 +10,7 @@ Notebook Next 是面向 Windows、Linux 和 macOS 的 Electron 桌面笔记应�
 - 图片、附件和录音作为内容寻址资源保存，不写入正文或历史快照。
 - 本地优先编辑、版本历史、回收站、提醒、任务、导入导出和隐私笔记本访问锁。
 - 即时崩溃草稿、退出前保存握手、原子数据目录切换和 Markdown-only 历史压缩。
-- 通过 SSH/SFTP 与 Android 共享 Markdown repository v3。
+- 通过坚果云 WebDAV 与 Android 共享笔记、附件、版本和阅读位置。
 - Electron 打包目标：Windows NSIS/portable、Linux AppImage/deb、macOS dmg/zip。
 
 ## 目录
@@ -55,7 +57,17 @@ pnpm --filter @notebook/desktop dist
 
 Electron 数据目录与旧 SwiftData 数据库不兼容，旧数据必须通过导出包导入。不要把旧 `NotebookData` 或 `notebook.store` 直接设为 Electron 数据目录。具体见 [数据迁移说明](docs/DATA_MIGRATION_READINESS.md) 和 [SSH Markdown v3](docs/SSH_MARKDOWN_SYNC_V3.md)。
 
-隐私笔记本提供应用内访问控制。通过 SSH 同步时，其标题、正文、历史和笔记内元数据使用由 SSH 密码派生的 AES-256-GCM 密钥加密，Electron 与 Android 使用相同格式，并在导入前通过协议级密钥探针验证密码一致性；附件二进制仍依赖 SSH 账户和服务器磁盘保护。
+隐私笔记本提供应用内访问控制。当前 WebDAV 会在页面从公开转为私密时撤回已发布实体，随后把私密正文、附件、历史和关系严格保留在本机。旧 SSH 迁移兼容路径仍会加密私密正文，但私密附件不会上传。
+
+## 桌面发行
+
+版本标签会为 Windows、Linux 和 macOS 生成安装包及 SHA-256 清单。项目没有 Apple Developer 账号，因此 macOS 产物有意保持未签名、未公证；下载后如被系统隔离，可在终端对解压出的应用执行：
+
+```bash
+xattr -rc "/Applications/notebook-next.app"
+```
+
+然后从 Finder 打开。该命令只应对从本项目 Release 下载并核对过 SHA-256 的应用执行。
 
 ## 许可
 

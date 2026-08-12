@@ -225,7 +225,8 @@ export class DexieNotebookRepository implements NotebookRepository {
   }
 
   async savePage(page: Page, document?: PageDocument): Promise<void> {
-    await this.db.transaction('rw', [this.db.pages, this.db.documents, this.db.revisions, this.db.syncOutbox, this.db.syncVersions, this.db.drafts], async () => {
+    await this.db.transaction('rw', this.db.tables, async () => {
+      const previousPage = await this.db.pages.get(page.id)
       await this.db.pages.put(page)
       if (document) {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
@@ -254,6 +255,9 @@ export class DexieNotebookRepository implements NotebookRepository {
         if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'document', page.id, 'upsert', { ...document, yjsState: undefined })
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
+      if (page.syncStatus === 'pending' && page.locked && previousPage && !previousPage.locked) {
+        await this.retractPublicPageForPrivacy(page.workspaceId, page.id)
+      }
     })
     this.searchIndex.invalidate(page.workspaceId)
   }
@@ -386,6 +390,11 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   async enqueueChange(workspaceId: string, entityType: string, entityId: string, operation: 'upsert' | 'delete', payload: Record<string, unknown>): Promise<void> {
     const version = await this.db.syncVersions.get(this.versionId(workspaceId, entityType, entityId))
+    const existing = await this.db.syncOutbox.where('[entityType+entityId]').equals([entityType, entityId]).and((item) => item.workspaceId === workspaceId).first()
+    // A privacy retraction must reach the remote journal even when later local
+    // edits keep changing the now-private entity. Those later edits are local
+    // only, so replacing the delete here would leak the old remote copy.
+    if (existing?.payload.privacyRetraction === true && payload.privacyRetraction !== true) return
     // Keep only the latest unsent mutation for an entity. Multiple autosaves made
     // before a sync tick share the same expected version and would otherwise
     // conflict with each other after the first mutation is accepted remotely.
@@ -400,6 +409,9 @@ export class DexieNotebookRepository implements NotebookRepository {
   /** Until the shared encrypted journal envelope ships, private entities are
    * deliberately local-only instead of being published as plaintext. */
   async isPrivateSyncItem(item: SyncOutboxItem): Promise<boolean> {
+    // A privacy retraction is deliberately public: it deletes the previous
+    // remote representation before later private edits become local-only.
+    if (item.payload.privacyRetraction === true) return false
     if (item.payload.locked === true) return true
     if (item.entityType === 'notebook') return Boolean((await this.db.notebooks.get(item.entityId))?.locked)
     if (item.entityType === 'section') {
@@ -412,7 +424,16 @@ export class DexieNotebookRepository implements NotebookRepository {
     const pageId = item.entityType === 'page' || item.entityType === 'document'
       ? item.entityId
       : payloadPageId ?? sourcePageId ?? (item.entityType === 'page_tag' ? item.entityId.split(':')[0] : undefined)
-    return pageId ? Boolean((await this.db.pages.get(pageId))?.locked) : false
+    return pageId ? this.isPrivatePage(pageId) : false
+  }
+
+  private async isPrivatePage(pageId: string): Promise<boolean> {
+    const page = await this.db.pages.get(pageId)
+    if (!page) return false
+    if (page.locked) return true
+    if (!page.sectionId) return false
+    const section = await this.db.sections.get(page.sectionId)
+    return Boolean(section && (await this.db.notebooks.get(section.notebookId))?.locked)
   }
 
   async acknowledgeLocalOnlySync(items: SyncOutboxItem[]): Promise<void> {
@@ -424,11 +445,15 @@ export class DexieNotebookRepository implements NotebookRepository {
     })
   }
 
-  async acknowledgeSync(workspaceId: string, applied: Array<{ operation_id: string; entity_type: string; entity_id: string; version: number }>, cursor?: number) {
+  async acknowledgeSync(workspaceId: string, applied: Array<{ operation_id: string; entity_type: string; entity_id: string; version: number }>, cursor?: number, webdavParentVersion = false) {
     await this.db.transaction('rw', this.db.syncOutbox, this.db.syncVersions, this.db.syncCursors, this.db.pages, async () => {
       for (const item of applied) {
         await this.db.syncOutbox.delete(item.operation_id)
-        await this.db.syncVersions.put({ id: this.versionId(workspaceId, item.entity_type, item.entity_id), version: item.version })
+        await this.db.syncVersions.put({
+          id: this.versionId(workspaceId, item.entity_type, item.entity_id),
+          version: item.version,
+          ...(webdavParentVersion ? { webdavParentVersion: true as const } : {}),
+        })
         if (item.entity_type === 'page') await this.db.pages.update(item.entity_id, { syncStatus: 'synced' })
       }
       if (cursor !== undefined) await this.db.syncCursors.put({ workspaceId, cursor })
@@ -480,7 +505,65 @@ export class DexieNotebookRepository implements NotebookRepository {
     return []
   }
 
-  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number): Promise<RemoteApplyResult> {
+  private async currentRemoteEntity(change: RemoteSyncChange): Promise<Record<string, unknown> | undefined> {
+    if (change.entityType === 'page') return await this.db.pages.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'document') return await this.db.documents.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'notebook') return await this.db.notebooks.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'section') return await this.db.sections.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'tag') return await this.db.tags.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'task_step') return await this.db.taskSteps.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'asset') return await this.db.assets.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'page_link') return await this.db.pageLinks.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'reading_position') return await this.db.readingPositions.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'revision') return await this.db.revisions.get(change.entityId) as Record<string, unknown> | undefined
+    if (change.entityType === 'page_tag') {
+      const [pageId, tagId] = change.entityId.split(':')
+      return pageId && tagId ? await this.db.pageTags.where('[pageId+tagId]').equals([pageId, tagId]).first() as Record<string, unknown> | undefined : undefined
+    }
+    return undefined
+  }
+
+  private sameRemoteEntity(left: Record<string, unknown> | undefined, right: Record<string, unknown> | undefined): boolean {
+    if (!left || !right) return false
+    const normalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(normalize)
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+          .filter(([key, item]) => key !== 'syncStatus' && key !== 'localPath' && item !== undefined)
+          .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+          .map(([key, item]) => [key, normalize(item)]))
+      }
+      return value
+    }
+    return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right))
+  }
+
+  private async queuePrivacyRetractionIfPublished(workspaceId: string, entityType: string, entityId: string) {
+    if (!await this.db.syncVersions.get(this.versionId(workspaceId, entityType, entityId))) return
+    await this.enqueueChange(workspaceId, entityType, entityId, 'delete', { privacyRetraction: true })
+  }
+
+  private async retractPublicPageForPrivacy(workspaceId: string, pageId: string) {
+    await this.queuePrivacyRetractionIfPublished(workspaceId, 'page', pageId)
+    await this.queuePrivacyRetractionIfPublished(workspaceId, 'document', pageId)
+    const [steps, assets, positions, revisions, pageTags, sourceLinks, targetLinks] = await Promise.all([
+      this.db.taskSteps.where('pageId').equals(pageId).toArray(),
+      this.db.assets.where('pageId').equals(pageId).toArray(),
+      this.db.readingPositions.where('pageId').equals(pageId).toArray(),
+      this.db.revisions.where('pageId').equals(pageId).toArray(),
+      this.db.pageTags.where('pageId').equals(pageId).toArray(),
+      this.db.pageLinks.where('sourcePageId').equals(pageId).toArray(),
+      this.db.pageLinks.where('targetPageId').equals(pageId).toArray(),
+    ])
+    for (const item of steps) await this.queuePrivacyRetractionIfPublished(workspaceId, 'task_step', item.id)
+    for (const item of assets) await this.queuePrivacyRetractionIfPublished(workspaceId, 'asset', item.id)
+    for (const item of positions) await this.queuePrivacyRetractionIfPublished(workspaceId, 'reading_position', item.id)
+    for (const item of revisions) await this.queuePrivacyRetractionIfPublished(workspaceId, 'revision', item.id)
+    for (const item of pageTags) await this.queuePrivacyRetractionIfPublished(workspaceId, 'page_tag', `${item.pageId}:${item.tagId}`)
+    for (const item of new Map([...sourceLinks, ...targetLinks].map((link) => [link.id, link])).values()) await this.queuePrivacyRetractionIfPublished(workspaceId, 'page_link', item.id)
+  }
+
+  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false): Promise<RemoteApplyResult> {
     return this.db.transaction('rw', this.db.tables, async () => {
       const previousCursor = await this.getSyncCursor(workspaceId)
       let appliedCursor = cursor
@@ -494,17 +577,53 @@ export class DexieNotebookRepository implements NotebookRepository {
         if (payload && typeof payload.workspaceId === 'string' && payload.workspaceId !== workspaceId) {
           throw new Error(`Remote ${change.entityType} belongs to another workspace`)
         }
+        const pageIds = await this.conflictPageIds(change, payload)
+        // Once local data has moved into a private notebook, remote history is
+        // never allowed to make it public again. Consume the stale entry but
+        // retain the local private state; the explicit retraction is queued
+        // separately while the page is still public.
+        let privatePage = false
+        for (const pageId of pageIds) {
+          if (await this.isPrivatePage(pageId)) { privatePage = true; break }
+        }
+        if (privatePage) continue
         const pendingExact = await this.db.syncOutbox.where('[entityType+entityId]').equals([change.entityType, change.entityId]).and((item) => item.workspaceId === workspaceId).first()
         const pendingPage = change.entityType === 'document'
           ? await this.db.syncOutbox.where('[entityType+entityId]').equals(['page', change.entityId]).and((item) => item.workspaceId === workspaceId).first()
           : undefined
-        if (pendingExact || pendingPage) {
-          const pageIds = await this.conflictPageIds(change, payload)
+        const pending = pendingExact ?? pendingPage
+        const current = await this.currentRemoteEntity(change)
+        const equivalentPending = pending && change.version === pending.expectedVersion && change.operation === pending.operation && (
+          change.operation === 'delete' || this.sameRemoteEntity(current ?? pending.payload, payload ?? pending.payload)
+        )
+        if (equivalentPending) {
+          await this.db.syncOutbox.delete(pending.id)
+          if (change.entityType === 'page') await this.db.pages.update(change.entityId, { syncStatus: 'synced' })
+        } else if (pending) {
           if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
           conflicts.push({ entityType: change.entityType, entityId: change.entityId, pageIds })
           // The skipped change must remain pullable. Stop at the first conflict
           // and retain the cursor immediately before it instead of silently
           // acknowledging data that was never applied.
+          appliedCursor = Math.max(previousCursor, change.cursor - 1)
+          break
+        }
+        const localVersion = await this.db.syncVersions.get(this.versionId(workspaceId, change.entityType, change.entityId))
+        const compatibleLegacyAdvance = webdavParentVersion
+          && localVersion !== undefined
+          && localVersion.webdavParentVersion !== true
+          && change.version === localVersion.version + 1
+        if (webdavParentVersion && localVersion && change.version !== localVersion.version && !compatibleLegacyAdvance) {
+          // Older clients stored a received journal's parent version rather
+          // than its resulting version. An identical stale entry is harmless;
+          // any different payload is a real concurrent update and must never
+          // silently overwrite current data.
+          const duplicate = change.operation === 'upsert'
+            ? this.sameRemoteEntity(current, payload)
+            : current === undefined
+          if (duplicate && change.version < localVersion.version) continue
+          if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
+          conflicts.push({ entityType: change.entityType, entityId: change.entityId, pageIds })
           appliedCursor = Math.max(previousCursor, change.cursor - 1)
           break
         }
@@ -530,7 +649,11 @@ export class DexieNotebookRepository implements NotebookRepository {
         else if (change.entityType === 'section') await this.db.sections.put(payload as unknown as Section)
         else if (change.entityType === 'tag') await this.db.tags.put(payload as unknown as Tag)
         else if (change.entityType === 'task_step') await this.db.taskSteps.put(payload as unknown as TaskStep)
-        else if (change.entityType === 'asset') await this.db.assets.put(payload as unknown as Asset)
+        else if (change.entityType === 'asset') {
+          await this.db.assets.put(payload as unknown as Asset)
+          const content = assetContents?.get(change.entityId)
+          if (content) await this.db.assetContents.put({ id: change.entityId, data: new Blob([content as BlobPart]) })
+        }
         else if (change.entityType === 'page_link') await this.db.pageLinks.put(payload as unknown as PageLink)
         else if (change.entityType === 'reading_position') await this.db.readingPositions.put(payload as unknown as ReadingPosition)
         else if (change.entityType === 'revision') {
@@ -539,7 +662,13 @@ export class DexieNotebookRepository implements NotebookRepository {
           await this.pruneRevisionRing(workspaceId, revision.pageId)
         }
         else if (change.entityType === 'page_tag') await this.db.pageTags.put(payload as unknown as PageTag)
-        await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version: change.version })
+        // WebDAV v4 `ver` is a parent; the HTTP API returns a resulting
+        // version. Keep their persistence semantics explicit per backend.
+        await this.db.syncVersions.put({
+          id: this.versionId(workspaceId, change.entityType, change.entityId),
+          version: webdavParentVersion ? change.version + 1 : change.version,
+          ...(webdavParentVersion ? { webdavParentVersion: true as const } : {}),
+        })
       }
       await this.db.syncCursors.put({ workspaceId, cursor: appliedCursor })
       return { cursor: appliedCursor, conflicts }
@@ -674,6 +803,24 @@ export class DexieNotebookRepository implements NotebookRepository {
 
   async importAssetContents(contents: Map<string, Uint8Array>) {
     await this.db.assetContents.bulkPut([...contents].map(([id, data]) => ({ id, data: new Blob([data as BlobPart]) })))
+  }
+
+  /**
+   * Restores a complete backup as one database commit. Metadata, attachment
+   * bytes and the publication outbox must never become visible separately:
+   * otherwise a failed restore can leave dangling attachment rows or publish a
+   * half-imported workspace on the next background sync.
+   */
+  async restoreCompleteBackup(bundle: NotebookDataBundle, contents: Map<string, Uint8Array>) {
+    const expectedAssetIds = new Set(bundle.assets.map((asset) => asset.id))
+    if (contents.size !== expectedAssetIds.size || [...expectedAssetIds].some((id) => !contents.has(id))) {
+      throw new Error('完整备份的附件清单与内容对象不一致，已中止恢复')
+    }
+    await this.db.transaction('rw', this.db.tables, async () => {
+      await this.importData(bundle)
+      await this.importAssetContents(contents)
+      await this.queueImportedData(bundle)
+    })
   }
 
   async exportAssetContentsByIds(assetIds: Set<string>) {

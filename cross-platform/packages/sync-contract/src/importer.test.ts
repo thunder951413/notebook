@@ -357,7 +357,7 @@ test('rejects missing or corrupted current and historical Markdown objects', asy
   await expect(importMarkdownRepository({ library, notes: [missing] }, workspaceId)).rejects.toThrow(/缺少当前正文/)
 })
 
-test('encrypts private note metadata, body and history with the SSH secret', async () => {
+test('encrypts private note metadata, body and history and keeps private attachments out of SSH objects', async () => {
   const workspaceId = '00000000-0000-4000-8000-000000000001'
   const notebookId = '10000000-0000-4000-8000-000000000001'
   const pageId = '30000000-0000-4000-8000-000000000005'
@@ -366,12 +366,19 @@ test('encrypts private note metadata, body and history with the SSH secret', asy
     notebooks: [{ id: notebookId, workspaceId, name: '隐私笔记本', sortOrder: 0, createdAt: now, updatedAt: now, locked: true }], sections: [],
     pages: [{ id: pageId, workspaceId, kind: 'document', title: '不能泄露的标题', preview: '不能泄露的摘要', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: true }],
     documents: [{ pageId, schemaVersion: 3, markdown: '绝密正文', tiptapJson: { type: 'doc' }, updatedAt: now }],
-    revisions: [], tags: [], pageTags: [], taskSteps: [], assets: [], pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+    revisions: [], tags: [], pageTags: [], taskSteps: [],
+    assets: [{ id: 'private-asset', pageId, kind: 'file', filename: '绝密附件.txt', mimeType: 'text/plain', createdAt: now }],
+    pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
-  const encoded = await encodeMarkdownRepository(bundle, new Map(), 'electron', 'strong ssh password')
+  const privateBytes = new TextEncoder().encode('绝密附件内容')
+  const encoded = await encodeMarkdownRepository(bundle, new Map([['private-asset', privateBytes]]), 'electron', 'strong ssh password')
   const storedText = new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))
   expect(storedText).not.toContain('不能泄露的标题')
   expect(storedText).not.toContain('绝密正文')
+  expect(storedText).not.toContain('绝密附件.txt')
+  expect([...encoded.files.values()].some((value) => new TextDecoder().decode(value).includes('绝密附件内容'))).toBe(false)
+  const manifest = JSON.parse(new TextDecoder().decode(encoded.files.get('notes/assets_manifest.json'))) as { entries: unknown[] }
+  expect(manifest.entries).toEqual([])
   const stored = JSON.parse(storedText)
   const privacyCheck = JSON.parse(new TextDecoder().decode(encoded.files.get('notes/privacy.json'))) as PrivacyKeyCheck
   await expect(verifyPrivacyKeyCheck(privacyCheck, 'strong ssh password')).resolves.toBeUndefined()
@@ -380,6 +387,7 @@ test('encrypts private note metadata, body and history with the SSH secret', asy
   const imported = await importMarkdownRepository({ library, notes: [stored], privacySecret: 'strong ssh password' }, workspaceId)
   expect(imported.pages[0]?.title).toBe('不能泄露的标题')
   expect(imported.documents[0]?.markdown).toBe('绝密正文')
+  expect(imported.assets).toEqual([])
   await expect(importMarkdownRepository({ library, notes: [stored], privacySecret: 'wrong password' }, workspaceId)).rejects.toThrow(/解密失败/)
 })
 

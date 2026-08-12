@@ -71,10 +71,11 @@ export interface NotebookDesktopApi {
     helper(settings: { host: string; port: number; username: string; remotePath: string; fingerprint?: string; password?: string; privateKeyPath?: string; privateKeyPassphrase?: string }, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<{ ok: boolean; data?: Uint8Array; message?: string }>
   }
   webdav: {
-    test(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
-    pull(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, knownSeqs: Record<string, number>): Promise<{ entries: Array<{ seq: number; ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown>; deviceId: string }>; fingerprint: string }>
-    objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string): Promise<Uint8Array>
-    push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>): Promise<{ firstSeq: number; count: number }>
+    test(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, requestId: string): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
+    pull(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, knownSeqs: Record<string, number>, requestId: string): Promise<{ entries: Array<{ seq: number; ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown>; deviceId: string }>; fingerprint: string }>
+    objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string, requestId: string): Promise<Uint8Array>
+    push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string): Promise<{ firstSeq: number; count: number }>
+    cancel(requestId: string): Promise<void>
   }
   events: {
     onQuickCapture(callback: () => void): () => void
@@ -150,10 +151,11 @@ const api: NotebookDesktopApi = Object.freeze({
     helper: (settings: Parameters<NotebookDesktopApi['legacySftp']['helper']>[0], operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array) => ipcRenderer.invoke('legacySftp:helper', settings, operation, input),
   }),
   webdav: Object.freeze({
-    test: (settings: Parameters<NotebookDesktopApi['webdav']['test']>[0]) => ipcRenderer.invoke('webdav:test', settings),
-    pull: (settings: Parameters<NotebookDesktopApi['webdav']['pull']>[0], knownSeqs: Record<string, number>) => ipcRenderer.invoke('webdav:pull', settings, knownSeqs),
-    objectGet: (settings: Parameters<NotebookDesktopApi['webdav']['objectGet']>[0], hash: string) => ipcRenderer.invoke('webdav:object:get', settings, hash),
-    push: (settings: Parameters<NotebookDesktopApi['webdav']['push']>[0], deviceId: string, entries: Parameters<NotebookDesktopApi['webdav']['push']>[2], objects: Parameters<NotebookDesktopApi['webdav']['push']>[3]) => ipcRenderer.invoke('webdav:push', settings, deviceId, entries, objects),
+    test: (settings: Parameters<NotebookDesktopApi['webdav']['test']>[0], requestId: string) => ipcRenderer.invoke('webdav:test', settings, requestId),
+    pull: (settings: Parameters<NotebookDesktopApi['webdav']['pull']>[0], knownSeqs: Record<string, number>, requestId: string) => ipcRenderer.invoke('webdav:pull', settings, knownSeqs, requestId),
+    objectGet: (settings: Parameters<NotebookDesktopApi['webdav']['objectGet']>[0], hash: string, requestId: string) => ipcRenderer.invoke('webdav:object:get', settings, hash, requestId),
+    push: (settings: Parameters<NotebookDesktopApi['webdav']['push']>[0], deviceId: string, entries: Parameters<NotebookDesktopApi['webdav']['push']>[2], objects: Parameters<NotebookDesktopApi['webdav']['push']>[3], requestId: string) => ipcRenderer.invoke('webdav:push', settings, deviceId, entries, objects, requestId),
+    cancel: (requestId: string) => ipcRenderer.invoke('webdav:cancel', requestId),
   }),
   events: Object.freeze({
     onQuickCapture: (callback: () => void) => {

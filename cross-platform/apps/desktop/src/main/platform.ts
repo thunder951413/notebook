@@ -10,6 +10,7 @@ import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObje
 import { appendDiagnosticEvent, diagnosticLogPath, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
+const WEBDAV_OPERATION_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
 
 function macInputSourceHelperPath() {
@@ -116,7 +117,35 @@ export async function deleteStoredSecret(key: string): Promise<void> {
   await writeCredentialStore(store)
 }
 
+function assertWebdavRequestId(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !/^[0-9a-f-]{36}$/i.test(value)) throw new Error('WebDAV 请求标识无效')
+}
+
+async function withWebdavDeadline<T>(requestId: string, requests: Map<string, AbortController>, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  assertWebdavRequestId(requestId)
+  if (requests.has(requestId)) throw new Error('WebDAV 请求标识重复')
+  const controller = new AbortController()
+  requests.set(requestId, controller)
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort(new Error('WebDAV 操作超时'))
+  }, WEBDAV_OPERATION_TIMEOUT_MS)
+  try {
+    return await operation(controller.signal)
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(timedOut ? 'WebDAV 操作超时（60 秒）' : 'WebDAV 操作已取消', { cause: error })
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    requests.delete(requestId)
+  }
+}
+
 export function registerPlatformHandlers(options: { defaultUserDataPath: string; dataRootSource: DataRootSelection['source'] }) {
+  const webdavRequests = new Map<string, AbortController>()
   ipcMain.handle('platform:showNotification', (event, value: { title: string; body: string }) => {
     assertTrustedSender(event)
     if (!Notification.isSupported()) return false
@@ -262,21 +291,28 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     return runRepositoryHelper(settings, operation, input)
   })
 
-  ipcMain.handle('webdav:test', async (event, settings: WebdavConnection) => {
+  ipcMain.handle('webdav:test', async (event, settings: WebdavConnection, requestId: string) => {
     assertTrustedSender(event)
-    return testWebdavConnection(settings)
+    return withWebdavDeadline(requestId, webdavRequests, (signal) => testWebdavConnection(settings, signal))
   })
-  ipcMain.handle('webdav:pull', async (event, settings: WebdavConnection, knownSeqs: Record<string, number>) => {
+  ipcMain.handle('webdav:pull', async (event, settings: WebdavConnection, knownSeqs: Record<string, number>, requestId: string) => {
     assertTrustedSender(event)
-    return pullWebdavJournals(settings, knownSeqs)
+    return withWebdavDeadline(requestId, webdavRequests, (signal) => pullWebdavJournals(settings, knownSeqs, signal))
   })
-  ipcMain.handle('webdav:object:get', async (event, settings: WebdavConnection, hash: string) => {
+  ipcMain.handle('webdav:object:get', async (event, settings: WebdavConnection, hash: string, requestId: string) => {
     assertTrustedSender(event)
-    return getWebdavObject(settings, hash)
+    return withWebdavDeadline(requestId, webdavRequests, (signal) => getWebdavObject(settings, hash, signal))
   })
-  ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>) => {
+  ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string) => {
     assertTrustedSender(event)
-    for (const object of objects) await putWebdavObject(settings, object.hash, object.data)
-    return appendWebdavJournal(settings, deviceId, entries)
+    return withWebdavDeadline(requestId, webdavRequests, async (signal) => {
+      for (const object of objects) await putWebdavObject(settings, object.hash, object.data, signal)
+      return appendWebdavJournal(settings, deviceId, entries, signal)
+    })
+  })
+  ipcMain.handle('webdav:cancel', (event, requestId: string) => {
+    assertTrustedSender(event)
+    assertWebdavRequestId(requestId)
+    webdavRequests.get(requestId)?.abort(new Error('渲染进程取消 WebDAV 请求'))
   })
 }

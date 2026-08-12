@@ -51,11 +51,15 @@ function documentPlainText(value: unknown): string {
   return documentPlainText(node.content)
 }
 
-function verified(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>): DecodedImport {
+function verified(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>, requireCompleteAssets = false): DecodedImport {
   for (const asset of bundle.assets) {
     const declaredHash = (asset as typeof asset & { objectHash?: string }).objectHash ?? asset.checksum
-    if (!declaredHash) continue
     const content = assetContents.get(asset.id)
+    if (requireCompleteAssets && !content) throw new Error(`资源 ${asset.filename} 缺少内容对象，已中止导入`)
+    if (!declaredHash) {
+      if (requireCompleteAssets) throw new Error(`资源 ${asset.filename} 缺少 SHA-256 校验值，已中止导入`)
+      continue
+    }
     if (!content) throw new Error(`资源 ${asset.filename} 缺少内容对象，已中止导入`)
     if (sha256Hex(content) !== declaredHash.toLocaleLowerCase()) throw new Error(`资源 ${asset.filename} 的 SHA-256 校验失败，已中止导入`)
     if (asset.byteSize !== undefined && asset.byteSize !== content.byteLength) throw new Error(`资源 ${asset.filename} 的大小与清单不一致，已中止导入`)
@@ -123,7 +127,22 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
       const file = expanded.find((item) => item.name === `assets/${asset.id}`)
       return file ? [[asset.id, file.data] as const] : []
     }))
-    return verified(bundle, assetContents)
+    // Early complete-backup exports predate integrity metadata. Keep those
+    // archives importable when every byte object is present, then persist the
+    // calculated checksum so every subsequent export is fully verifiable.
+    const normalizedBundle: NotebookDataBundle = {
+      ...bundle,
+      assets: bundle.assets.map((asset) => {
+        const content = assetContents.get(asset.id)
+        if (!content) return asset
+        return {
+          ...asset,
+          checksum: asset.checksum ?? sha256Hex(content),
+          byteSize: asset.byteSize ?? content.byteLength,
+        }
+      }),
+    }
+    return verified(normalizedBundle, assetContents, true)
   }
 
   const manifestFile = expanded.find((file) => file.name.endsWith('manifest.json'))
@@ -217,7 +236,12 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
 }
 
 export function encodeExport(bundle: NotebookDataBundle, assetContents: Map<string, Uint8Array>) {
-  const payload = { format: 'notebook-next', schemaVersion: 1, exportedAt: new Date().toISOString(), bundle }
+  const assets = bundle.assets.map((asset) => {
+    const content = assetContents.get(asset.id)
+    if (!content) throw new Error(`资源 ${asset.filename} 缺少内容对象，已中止导出`)
+    return { ...asset, checksum: sha256Hex(content), byteSize: content.byteLength }
+  })
+  const payload = { format: 'notebook-next', schemaVersion: 1, exportedAt: new Date().toISOString(), bundle: { ...bundle, assets } }
   return zipSync({ 'notebook-next.json': strToU8(JSON.stringify(payload)), ...Object.fromEntries([...assetContents].map(([id, data]) => [`assets/${id}`, data])) }, { level: 6 })
 }
 

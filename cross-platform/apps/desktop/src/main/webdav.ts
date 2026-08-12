@@ -85,8 +85,24 @@ function safeRemotePath(value: string): string {
   return normalized
 }
 
+export function validatedWebdavBaseUrl(value: string): URL {
+  let base: URL
+  try {
+    base = new URL(value.trim())
+  } catch {
+    throw new Error('WebDAV 服务器地址不正确')
+  }
+  if (base.protocol === 'https:') return base
+  // HTTP is only useful for a local development/test endpoint. Requiring TLS
+  // everywhere else prevents the app password and journal from crossing a
+  // network in clear text.
+  const hostname = base.hostname.toLowerCase()
+  if (base.protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]')) return base
+  throw new Error('WebDAV 服务器必须使用 HTTPS；仅 localhost 可使用 HTTP')
+}
+
 function clientFor(settings: WebdavConnection): WebDAVClient {
-  if (!settings.baseUrl.trim() || !/^https?:\/\//.test(settings.baseUrl.trim())) throw new Error('WebDAV 服务器地址不正确')
+  const baseUrl = validatedWebdavBaseUrl(settings.baseUrl)
   if (!settings.username.trim()) throw new Error('请填写 WebDAV 用户名')
   if (!settings.appPassword) throw new Error('请填写 WebDAV 应用密码')
   safeRemotePath(settings.remotePath)
@@ -95,7 +111,7 @@ function clientFor(settings: WebdavConnection): WebDAVClient {
     password: settings.appPassword,
     maxBodyLength: MAX_OBJECT_BYTES + MAX_LOG_BYTES,
   }
-  return createClient(settings.baseUrl.trim().replace(/\/+$/, ''), options)
+  return createClient(baseUrl.toString().replace(/\/+$/, ''), options)
 }
 
 const journalPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.jsonl`
@@ -103,7 +119,7 @@ const journalHeadPath = (root: string, deviceId: string) => `${root}/journal/${d
 const objectPath = (root: string, hash: string) => `${root}/objects/${hash.slice(0, 2)}/${hash}`
 const objectCacheKey = (settings: WebdavConnection, root: string, hash: string) => `${settings.baseUrl.trim()}|${settings.username.trim()}|${root}|${hash}`
 
-async function ensureDirectory(client: WebDAVClient, path: string) {
+async function ensureDirectory(client: WebDAVClient, path: string, signal?: AbortSignal) {
   // 坚果云 rejects nested MKCOL with 409 when the parent is missing, so every
   // segment is created from the root down. 201 (idempotent create) and the
   // usual already-exists codes are both tolerated.
@@ -111,7 +127,7 @@ async function ensureDirectory(client: WebDAVClient, path: string) {
   for (const segment of path.split('/')) {
     current = current ? `${current}/${segment}` : segment
     try {
-      await client.createDirectory(current)
+      await client.createDirectory(current, { signal })
     } catch (error) {
       // 405/409/301/302 mean the directory already exists; anything else rethrows.
       const status = (error as { status?: number })?.status
@@ -194,15 +210,20 @@ function parseHead(text: string, deviceId: string): WebdavJournalHead {
   return head as WebdavJournalHead
 }
 
-export async function testWebdavConnection(settings: WebdavConnection): Promise<WebdavTestResult> {
+export async function testWebdavConnection(settings: WebdavConnection, signal?: AbortSignal): Promise<WebdavTestResult> {
   const startedAt = Date.now()
+  if (signal?.aborted) throw signal.reason ?? new DOMException('WebDAV 操作已取消', 'AbortError')
   try {
     const client = clientFor(settings)
     const root = safeRemotePath(settings.remotePath)
-    await ensureDirectory(client, root)
-    const exists = await client.exists(`${root}/journal`)
+    await ensureDirectory(client, root, signal)
+    const exists = await client.exists(`${root}/journal`, { signal })
     return { ok: true, remotePathExists: exists, latencyMs: Date.now() - startedAt, message: '' }
   } catch (error) {
+    // An aborted probe is a control-flow outcome, not a failed connection
+    // result. Let the IPC deadline wrapper convert it to a clear cancellation
+    // or timeout error instead of returning a misleading `ok: false` value.
+    if (signal?.aborted) throw error
     const message = error instanceof Error ? error.message : String(error)
     return { ok: false, remotePathExists: false, latencyMs: Date.now() - startedAt, message }
   }
@@ -213,14 +234,14 @@ export async function testWebdavConnection(settings: WebdavConnection): Promise<
  * client already consumed. Journals are small (KB), so each file is fetched
  * in full and filtered locally.
  */
-export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: Record<string, number> = {}): Promise<WebdavPullResult> {
+export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: Record<string, number> = {}, signal?: AbortSignal): Promise<WebdavPullResult> {
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
-  await ensureDirectory(client, `${root}/journal`)
+  await ensureDirectory(client, `${root}/journal`, signal)
   let deviceIds: string[] = []
   const devicesWithHeads = new Set<string>()
   try {
-    const contents = await client.getDirectoryContents(`${root}/journal`)
+    const contents = await client.getDirectoryContents(`${root}/journal`, { signal })
     const names = (Array.isArray(contents) ? contents : []).map((item) => item.basename)
     deviceIds = names
       .filter((name) => name.endsWith('.jsonl'))
@@ -243,7 +264,7 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     let head: WebdavJournalHead | undefined
     if (devicesWithHeads.has(deviceId)) {
       try {
-        const data = await client.getFileContents(journalHeadPath(root, deviceId), { format: 'text' })
+        const data = await client.getFileContents(journalHeadPath(root, deviceId), { format: 'text', signal })
         const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
         head = parseHead(text, deviceId)
       } catch (error) {
@@ -256,7 +277,7 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     }
     let text = ''
     try {
-      const data = await client.getFileContents(journalPath(root, deviceId), { format: 'text' })
+      const data = await client.getFileContents(journalPath(root, deviceId), { format: 'text', signal })
       text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
     } catch (error) {
       const status = (error as { status?: number })?.status
@@ -286,18 +307,18 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
   return { entries, fingerprint: `${settings.baseUrl.trim()}|${settings.username.trim()}|${safeRemotePath(settings.remotePath)}` }
 }
 
-export async function getWebdavObject(settings: WebdavConnection, hash: string): Promise<Uint8Array> {
+export async function getWebdavObject(settings: WebdavConnection, hash: string, signal?: AbortSignal): Promise<Uint8Array> {
   if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`对象哈希格式不正确：${hash}`)
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
-  const data = await client.getFileContents(objectPath(root, hash), { format: 'binary' })
+  const data = await client.getFileContents(objectPath(root, hash), { format: 'binary', signal })
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(Buffer.from(data as ArrayBuffer))
   if (bytes.byteLength > MAX_OBJECT_BYTES) throw new Error('远端对象超过 100 MB 上限')
   if (sha256(Buffer.from(bytes)) !== hash) throw new Error(`远端对象 ${hash} 的 SHA-256 校验失败`)
   return bytes
 }
 
-export async function putWebdavObject(settings: WebdavConnection, hash: string, data: Uint8Array): Promise<void> {
+export async function putWebdavObject(settings: WebdavConnection, hash: string, data: Uint8Array, signal?: AbortSignal): Promise<void> {
   if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`对象哈希格式不正确：${hash}`)
   if (data.byteLength > MAX_OBJECT_BYTES) throw new Error('对象超过 100 MB 上限')
   const client = clientFor(settings)
@@ -305,12 +326,12 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
   const target = objectPath(root, hash)
   const cacheKey = objectCacheKey(settings, root, hash)
   if (objectPresenceCache.has(cacheKey)) return
-  if (await client.exists(target)) {
+  if (await client.exists(target, { signal })) {
     objectPresenceCache.add(cacheKey)
     return
   }
-  await ensureDirectory(client, `${root}/objects/${hash.slice(0, 2)}`)
-  await client.putFileContents(target, Buffer.from(data), { overwrite: true })
+  await ensureDirectory(client, `${root}/objects/${hash.slice(0, 2)}`, signal)
+  await client.putFileContents(target, Buffer.from(data), { overwrite: true, signal })
   objectPresenceCache.add(cacheKey)
 }
 
@@ -320,15 +341,15 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
  * whole file is written back. This is safe because only one device ever
  * writes a given journal file.
  */
-export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>): Promise<{ firstSeq: number; count: number }> {
+export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, signal?: AbortSignal): Promise<{ firstSeq: number; count: number }> {
   if (!DEVICE_ID_PATTERN.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
   const path = journalPath(root, deviceId)
-  await ensureDirectory(client, `${root}/journal`)
+  await ensureDirectory(client, `${root}/journal`, signal)
   let existing: WebdavJournalEntry[] = []
   try {
-    const data = await client.getFileContents(path, { format: 'text' })
+    const data = await client.getFileContents(path, { format: 'text', signal })
     const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
     if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
     existing = text ? parseJournal(text) : []
@@ -344,9 +365,9 @@ export async function appendWebdavJournal(settings: WebdavConnection, deviceId: 
   if (compacted.entries.length > MAX_ENTRIES) throw new Error('设备日志条目数超过 10 万，请先压缩日志')
   const body = compacted.entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
   if (utf8Bytes(body) > MAX_LOG_BYTES) throw new Error('设备日志压缩后超过 100 MB 上限')
-  await client.putFileContents(path, body, { overwrite: true })
+  await client.putFileContents(path, body, { overwrite: true, signal })
   // Commit only after the journal bytes are durable. A failed marker PUT keeps
   // readers on the previous committed view rather than exposing this write.
-  await client.putFileContents(journalHeadPath(root, deviceId), JSON.stringify(buildHead(deviceId, body, compacted.entries, compacted.stateEntries, compacted.historyEntries)), { overwrite: true })
+  await client.putFileContents(journalHeadPath(root, deviceId), JSON.stringify(buildHead(deviceId, body, compacted.entries, compacted.stateEntries, compacted.historyEntries)), { overwrite: true, signal })
   return { firstSeq, count: entries.length }
 }

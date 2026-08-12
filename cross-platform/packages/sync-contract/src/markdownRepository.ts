@@ -10,6 +10,31 @@ import { extractNotebookReferences, pageLinksFromNotebookMarkdown } from './refe
 
 const encoder = new TextEncoder()
 
+/**
+ * SSH repository v3 encrypts a private note envelope, but its content-addressed
+ * object store is shared and unencrypted. Publishing private attachment bytes
+ * there would therefore disclose the file even though the note JSON is opaque.
+ * Until an authenticated encrypted-object protocol is shared by every client,
+ * private attachment metadata and bytes are deliberately local-only.
+ */
+export function stripPrivateAttachmentsForSsh(bundle: NotebookDataBundle): {
+  bundle: NotebookDataBundle
+  privateAssetIds: Set<string>
+} {
+  const privateNotebookIds = new Set(bundle.notebooks.filter((notebook) => notebook.locked).map((notebook) => notebook.id))
+  const privateSectionIds = new Set(bundle.sections.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id))
+  const privatePageIds = new Set(bundle.pages.filter((page) => page.locked || Boolean(page.sectionId && privateSectionIds.has(page.sectionId))).map((page) => page.id))
+  const privateAssetIds = new Set(bundle.assets.filter((asset) => privatePageIds.has(asset.pageId)).map((asset) => asset.id))
+  if (!privateAssetIds.size) return { bundle, privateAssetIds }
+  return {
+    bundle: {
+      ...bundle,
+      assets: bundle.assets.filter((asset) => !privateAssetIds.has(asset.id)),
+    },
+    privateAssetIds,
+  }
+}
+
 export function sha256Hex(value: Uint8Array | string) {
   const bytes = typeof value === 'string' ? encoder.encode(value) : value
   return bytesToHex(sha256(bytes))
@@ -230,39 +255,40 @@ export async function encodeMarkdownRepository(
   privacySecret?: string,
   reuseNoteSignatures: Map<string, string> = new Map(),
 ): Promise<EncodedMarkdownRepository> {
-  const legacy = await encodeLegacyRepository({ ...bundle, revisions: [] }, assetContents, deviceId)
+  const safe = stripPrivateAttachmentsForSsh(bundle).bundle
+  const legacy = await encodeLegacyRepository({ ...safe, revisions: [] }, assetContents, deviceId)
   const files = new Map([...legacy.files].filter(([name]) => !/^notes\/[0-9a-f-]{36}\.json$/i.test(name) && !name.startsWith('attachments/')))
   const manifests = new Map<string, { relativePath: string; contentHash: string; size: number }>()
   const indexEntries: Array<{ noteID: string; version: number; contentHash: string; historyCount: number }> = []
   const pageVersions = new Map<string, number>()
   const validPageIds = new Set(legacy.pageVersions.keys())
-  const documentsByPage = new Map(bundle.documents.map((document) => [document.pageId, document]))
+  const documentsByPage = new Map(safe.documents.map((document) => [document.pageId, document]))
   const revisionsByPage = new Map<string, PageRevision[]>()
   const assetsByPage = new Map<string, Asset[]>()
   const taskStepsByPage = new Map<string, NotebookDataBundle['taskSteps']>()
   const tagIdsByPage = new Map<string, string[]>()
-  for (const revision of bundle.revisions) {
+  for (const revision of safe.revisions) {
     const values = revisionsByPage.get(revision.pageId) ?? []
     values.push(revision)
     revisionsByPage.set(revision.pageId, values)
   }
-  for (const asset of bundle.assets) {
+  for (const asset of safe.assets) {
     const values = assetsByPage.get(asset.pageId) ?? []
     values.push(asset)
     assetsByPage.set(asset.pageId, values)
   }
-  for (const step of bundle.taskSteps) {
+  for (const step of safe.taskSteps) {
     const values = taskStepsByPage.get(step.pageId) ?? []
     values.push(step)
     taskStepsByPage.set(step.pageId, values)
   }
-  for (const pageTag of bundle.pageTags) {
+  for (const pageTag of safe.pageTags) {
     const values = tagIdsByPage.get(pageTag.pageId) ?? []
     values.push(pageTag.tagId)
     tagIdsByPage.set(pageTag.pageId, values)
   }
 
-  for (const page of bundle.pages.filter((item) => validPageIds.has(item.id))) {
+  for (const page of safe.pages.filter((item) => validPageIds.has(item.id))) {
     const document = documentsByPage.get(page.id)
     if (!document) continue
     const currentMarkdown = markdownOf(document)
@@ -328,16 +354,16 @@ export async function encodeMarkdownRepository(
   }
 
   files.set('notes/assets_manifest.json', encoder.encode(JSON.stringify({ schemaVersion: 3, deviceID: deviceId, entries: [...manifests.values()] })))
-  if (bundle.pages.some((page) => page.locked)) {
+  if (safe.pages.some((page) => page.locked)) {
     if (!privacySecret) throw new Error('隐私笔记无法安全同步：缺少 SSH 加密密码')
     files.set('notes/privacy.json', encoder.encode(JSON.stringify(await createPrivacyKeyCheck(privacySecret))))
   }
-  const livePages = new Map(bundle.pages.filter((page) => isRepositoryUuid(page.id) && !page.deletedAt).map((page) => [page.id, page]))
+  const livePages = new Map(safe.pages.filter((page) => isRepositoryUuid(page.id) && !page.deletedAt).map((page) => [page.id, page]))
   // Old seed builds used readable IDs such as "migration" and "vision".
   // They are not valid shared-repository identities. Never publish those stale
   // tombstones: strict Android/macOS readers reject them and one old record
   // would otherwise block the entire repository.
-  const activeTombstones = bundle.tombstones.filter((item) =>
+  const activeTombstones = safe.tombstones.filter((item) =>
     item.entityType === 'page'
     && isRepositoryUuid(item.entityId)
     && (!livePages.get(item.entityId) || item.deletedAt >= livePages.get(item.entityId)!.updatedAt)

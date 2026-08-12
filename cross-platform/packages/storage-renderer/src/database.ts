@@ -33,7 +33,12 @@ export interface SyncOutboxItem {
 }
 
 export interface SyncCursor { workspaceId: string; cursor: number }
-export interface SyncVersion { id: string; version: number }
+export interface SyncVersion {
+  id: string
+  version: number
+  /** Set only when `version` is the result of applying a WebDAV parent `ver`. */
+  webdavParentVersion?: true
+}
 export interface AssetContent { id: string; data: Blob }
 export interface PageDraft { pageId: string; document: PageDocument; createdAt: string }
 export interface EditorCache {

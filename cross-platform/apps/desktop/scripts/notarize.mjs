@@ -2,6 +2,9 @@ import { notarize } from '@electron/notarize'
 import { join } from 'node:path'
 
 export default async function notarizeAfterSign(context) {
+  // Official releases are intentionally unsigned because this project has no
+  // Apple Developer account. CI sets SKIP_NOTARIZE explicitly and publishes a
+  // deterministic dmg/zip that users can locally de-quarantine with xattr.
   if (context.electronPlatformName !== 'darwin' || process.env.SKIP_NOTARIZE === 'true') return
   const appPath = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
   const keyCredentials = process.env.APPLE_API_KEY

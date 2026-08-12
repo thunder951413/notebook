@@ -174,6 +174,13 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [restoreToken, setRestoreToken] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsPage, setSettingsPage] = useState<'general' | 'data' | 'services'>('general')
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false)
+    // The trigger remains mounted while the lazily loaded dialog unmounts.
+    // Restore focus from its owner, after React has removed the modal.
+    requestAnimationFrame(() => settingsTriggerRef.current?.focus())
+  }, [])
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [dataRoot, setDataRoot] = useState<{ path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }>()
   const [createRequest, setCreateRequest] = useState<'notebook' | 'rootPage'>()
@@ -709,7 +716,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           <RailButton label="任务" selected={activeArea === 'tasks'} icon={<CheckmarkCircle20Regular />} onClick={() => selectArea('tasks')} />
           <RailButton label="回收站" selected={activeArea === 'trash'} icon={<Delete20Regular />} onClick={() => selectArea('trash')} />
           <span className="rail-spacer" />
-          <RailButton label="设置" selected={settingsOpen} icon={<Settings20Regular />} onClick={() => { setSettingsPage('general'); setSettingsOpen(true) }} />
+          <RailButton buttonRef={settingsTriggerRef} label="设置" selected={settingsOpen} icon={<Settings20Regular />} onClick={() => { setSettingsPage('general'); setSettingsOpen(true) }} />
         </aside>
 
         {showNotebookPane && (
@@ -990,7 +997,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         privacyAvailable={notebooks.some((notebook) => notebook.locked)}
         privacyConfigured={privacyConfigured}
         privacyUnlocked={privacyUnlocked}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         onThemePreferenceChange={(preference) => onThemePreferenceChange?.(preference)}
         onAccentColorChange={(color) => onAccentColorChange?.(color)}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}

@@ -183,6 +183,50 @@ test('rejects an attachment whose bytes do not match its declared SHA-256', asyn
     assets: [{ id: 'asset', pageId: 'page', kind: 'file', filename: 'damaged.bin', mimeType: 'application/octet-stream', checksum: '0'.repeat(64), byteSize: 3, createdAt: now }],
     tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], revisions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
-  const archive = encodeExport(bundle, new Map([['asset', new Uint8Array([1, 2, 3])]]))
+  const archive = zipSync({
+    'notebook-next.json': strToU8(JSON.stringify({ format: 'notebook-next', schemaVersion: 1, exportedAt: now, bundle })),
+    'assets/asset': new Uint8Array([1, 2, 3]),
+  })
   await expect(decodeImport([{ name: 'damaged.zip', data: archive }], 'workspace')).rejects.toThrow(/SHA-256/)
+})
+
+test('complete backup export refuses to omit attachment bytes and records their integrity metadata', async () => {
+  const now = '2026-07-22T00:00:00.000Z'
+  const bundle: NotebookDataBundle = {
+    notebooks: [], sections: [], pages: [{ id: 'page', workspaceId: 'workspace', kind: 'document', title: 'x', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' }], documents: [],
+    assets: [{ id: 'asset', pageId: 'page', kind: 'file', filename: 'required.bin', mimeType: 'application/octet-stream', createdAt: now }],
+    tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], revisions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+  }
+  expect(() => encodeExport(bundle, new Map())).toThrow(/缺少内容对象/)
+  const bytes = new Uint8Array([4, 5, 6])
+  const decoded = await decodeImport([{ name: 'complete.zip', data: encodeExport(bundle, new Map([['asset', bytes]])) }], 'workspace')
+  expect(decoded.bundle.assets[0]).toMatchObject({ checksum: sha256Hex(bytes), byteSize: bytes.byteLength })
+})
+
+test('complete backup restore rejects an archive with a missing attachment object even when legacy metadata has no hash', async () => {
+  const now = '2026-07-22T00:00:00.000Z'
+  const bundle: NotebookDataBundle = {
+    notebooks: [], sections: [], pages: [{ id: 'page', workspaceId: 'workspace', kind: 'document', title: 'x', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' }], documents: [],
+    assets: [{ id: 'asset', pageId: 'page', kind: 'file', filename: 'missing.bin', mimeType: 'application/octet-stream', createdAt: now }],
+    tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], revisions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+  }
+  const archive = zipSync({ 'notebook-next.json': strToU8(JSON.stringify({ format: 'notebook-next', schemaVersion: 1, exportedAt: now, bundle })) })
+  await expect(decodeImport([{ name: 'missing.zip', data: archive }], 'workspace')).rejects.toThrow(/缺少内容对象/)
+})
+
+test('complete backup restore upgrades legacy attachment metadata when all bytes are present', async () => {
+  const now = '2026-07-22T00:00:00.000Z'
+  const bundle: NotebookDataBundle = {
+    notebooks: [], sections: [], pages: [{ id: 'page', workspaceId: 'workspace', kind: 'document', title: 'x', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'synced' }], documents: [],
+    assets: [{ id: 'asset', pageId: 'page', kind: 'file', filename: 'legacy.bin', mimeType: 'application/octet-stream', createdAt: now }],
+    tags: [], pageTags: [], taskSteps: [], pageLinks: [], readingPositions: [], revisions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
+  }
+  const bytes = new Uint8Array([9, 8, 7])
+  const archive = zipSync({
+    'notebook-next.json': strToU8(JSON.stringify({ format: 'notebook-next', schemaVersion: 1, exportedAt: now, bundle })),
+    'assets/asset': bytes,
+  })
+  const decoded = await decodeImport([{ name: 'legacy-complete.zip', data: archive }], 'workspace')
+  expect(decoded.assetContents.get('asset')).toEqual(bytes)
+  expect(decoded.bundle.assets[0]).toMatchObject({ checksum: sha256Hex(bytes), byteSize: bytes.byteLength })
 })

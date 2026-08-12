@@ -1,7 +1,7 @@
 import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { migrateSshToWebdav, synchronizeWebdav } from './webdavSync'
+import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS } from './webdavSync'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -72,6 +72,7 @@ function installDesktopMock() {
     pull: vi.fn(async (): Promise<PullResult> => ({ entries: [], fingerprint: 'fp' })),
     objectGet: vi.fn(async (_settings: unknown, hash: string) => new TextEncoder().encode(`content-of-${hash}`)),
     push: vi.fn(async () => ({ firstSeq: 1, count: 0 })),
+    cancel: vi.fn(async () => undefined),
   }
   const secrets = {
     get: vi.fn(async (key: string) => key === 'webdav-app-password' ? appPassword : undefined),
@@ -98,6 +99,80 @@ describe('synchronizeWebdav', () => {
     await expect(synchronizeWebdav(repo, workspaceId)).resolves.toEqual({ state: 'offline', skipped: 0, conflicts: 0 })
   })
 
+  test('cancels a never-settling desktop request without acknowledging outbox and allows the next sync', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const outboxItem = {
+      id: 'op-cancel', workspaceId, entityType: 'page', entityId: pageId, operation: 'upsert' as const, expectedVersion: 0,
+      payload: { id: pageId, workspaceId, kind: 'document', title: '不应确认', preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp, syncStatus: 'pending' },
+    }
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([outboxItem])
+    let resolvePull: (() => void) | undefined
+    webdav.pull.mockImplementationOnce(() => new Promise<{ entries: []; fingerprint: string }>((resolve) => { resolvePull = () => resolve({ entries: [], fingerprint: 'fp' }) }))
+    const controller = new AbortController()
+    const running = synchronizeWebdav(repo, workspaceId, controller.signal)
+    await vi.waitFor(() => expect(webdav.pull).toHaveBeenCalledTimes(1))
+    controller.abort()
+
+    await expect(running).rejects.toMatchObject({ name: 'AbortError' })
+    expect(webdav.cancel).toHaveBeenCalledWith(expect.any(String))
+    expect(calls.acknowledge).toEqual([])
+
+    // The abandoned IPC promise may settle later, but it cannot retain the
+    // renderer's sync state or prevent a new request from starting.
+    resolvePull?.()
+    webdav.pull.mockResolvedValue({ entries: [], fingerprint: 'fp' })
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 1 })
+    await expect(synchronizeWebdav(repo, workspaceId)).resolves.toMatchObject({ state: 'synced' })
+    expect(webdav.pull).toHaveBeenCalledTimes(3)
+    expect(calls.acknowledge).toHaveLength(1)
+  })
+
+  test('times out a never-settling desktop request and leaves the outbox pending', async () => {
+    vi.useFakeTimers()
+    try {
+      const { webdav } = installDesktopMock()
+      seedWebdavSettings()
+      const { repo, calls } = repository()
+      const outboxItem = {
+        id: 'op-timeout', workspaceId, entityType: 'page', entityId: pageId, operation: 'upsert' as const, expectedVersion: 0,
+        payload: { id: pageId, workspaceId, kind: 'document', title: '超时不确认', preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp, syncStatus: 'pending' },
+      }
+      ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([outboxItem])
+      webdav.pull.mockImplementationOnce(() => new Promise(() => undefined))
+      const running = synchronizeWebdav(repo, workspaceId)
+      const outcome = expect(running).rejects.toThrow('读取远端日志 超时（60 秒）')
+      await vi.advanceTimersByTimeAsync(WEBDAV_OPERATION_TIMEOUT_MS)
+
+      await outcome
+      expect(webdav.cancel).toHaveBeenCalledWith(expect.any(String))
+      expect(calls.acknowledge).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('does not acknowledge private local-only changes when the sync is cancelled', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    const privateItem = {
+      id: 'op-private-cancel', workspaceId, entityType: 'page', entityId: pageId, operation: 'upsert' as const, expectedVersion: 0,
+      payload: { id: pageId, locked: true, title: 'local only' },
+    }
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([privateItem])
+    ;(repo.isPrivateSyncItem as ReturnType<typeof vi.fn>).mockResolvedValue(true)
+    const controller = new AbortController()
+    webdav.pull.mockImplementationOnce(() => new Promise(() => undefined))
+    const running = synchronizeWebdav(repo, workspaceId, controller.signal)
+    await vi.waitFor(() => expect(webdav.pull).toHaveBeenCalledTimes(1))
+    controller.abort()
+
+    await expect(running).rejects.toMatchObject({ name: 'AbortError' })
+    expect(repo.acknowledgeLocalOnlySync).not.toHaveBeenCalled()
+  })
+
   test('pulls remote entries, materializes externalized documents and advances cursors', async () => {
     const { webdav } = installDesktopMock()
     seedWebdavSettings()
@@ -116,7 +191,7 @@ describe('synchronizeWebdav', () => {
     const result = await synchronizeWebdav(repo, workspaceId)
 
     expect(result).toEqual({ state: 'synced', skipped: 0, conflicts: 0 })
-    expect(webdav.objectGet).toHaveBeenCalledWith(connection, externalizedHash)
+    expect(webdav.objectGet).toHaveBeenCalledWith(connection, externalizedHash, expect.any(String))
     expect(calls.applyChanges).toHaveLength(1)
     const { changes, cursor } = calls.applyChanges[0]!
     expect(cursor).toBe(2)
@@ -160,6 +235,20 @@ describe('synchronizeWebdav', () => {
     expect(calls.importedAssets).toEqual([['asset-1', bytes]])
   })
 
+  test('refuses an asset journal row without bytes before metadata or cursors can advance', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    webdav.pull.mockResolvedValue({
+      entries: [remoteEntry({ seq: 1, type: 'asset', id: 'asset-missing-bytes', payload: { id: 'asset-missing-bytes', pageId, kind: 'file', filename: 'missing.bin', mimeType: 'application/octet-stream', createdAt: timestamp } })],
+      fingerprint: 'fp',
+    })
+
+    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('缺少内容哈希')
+    expect(calls.applyChanges).toEqual([])
+    expect(calls.importedAssets).toEqual([])
+  })
+
   test('pushes pending local changes into this device journal and acknowledges them', async () => {
     const { webdav } = installDesktopMock()
     seedWebdavSettings()
@@ -176,7 +265,7 @@ describe('synchronizeWebdav', () => {
     expect(result.state).toBe('synced')
     expect(webdav.push).toHaveBeenCalledWith(connection, deviceId, [
       expect.objectContaining({ op: 'upsert', type: 'page', id: pageId, ver: 3 }),
-    ], [])
+    ], [], expect.any(String))
     expect(calls.acknowledge).toEqual([[{ operation_id: 'op-1', entity_type: 'page', entity_id: pageId, version: 4 }]])
     // Own journal read cursor advanced past the appended entries.
     expect(JSON.parse(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup') ?? '{}')).toEqual({ 'device-0001': 7 })
@@ -200,6 +289,23 @@ describe('synchronizeWebdav', () => {
     expect(repo.acknowledgeLocalOnlySync).toHaveBeenCalledWith(privateItems)
     expect(webdav.push).not.toHaveBeenCalled()
     expect(repo.getAssetContent).not.toHaveBeenCalled()
+  })
+
+  test('publishes privacy retractions but keeps subsequent private edits local-only', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    const retraction = { id: 'privacy-delete', workspaceId, entityType: 'page', entityId: pageId, operation: 'delete' as const, expectedVersion: 2, payload: { privacyRetraction: true }, createdAt: timestamp }
+    const privateUpdate = { id: 'privacy-local', workspaceId, entityType: 'document', entityId: pageId, operation: 'upsert' as const, expectedVersion: 2, payload: { pageId, locked: true, markdown: 'PRIVATE' }, createdAt: timestamp }
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([retraction, privateUpdate])
+    ;(repo.isPrivateSyncItem as ReturnType<typeof vi.fn>).mockImplementation(async (item) => item.id === privateUpdate.id)
+    webdav.push.mockResolvedValue({ firstSeq: 9, count: 1 })
+
+    await synchronizeWebdav(repo, workspaceId)
+
+    expect(webdav.push).toHaveBeenCalledWith(connection, deviceId, [expect.objectContaining({ op: 'delete', type: 'page', id: pageId, ver: 2 })], [], expect.any(String))
+    expect(repo.acknowledgeLocalOnlySync).toHaveBeenCalledWith([privateUpdate])
+    expect(repo.acknowledgeSync).toHaveBeenCalledWith(workspaceId, [expect.objectContaining({ operation_id: 'privacy-delete' })], undefined, true)
   })
 
   test('externalizes large document bodies into content-addressed objects', async () => {

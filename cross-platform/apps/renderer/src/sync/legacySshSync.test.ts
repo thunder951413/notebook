@@ -1,5 +1,5 @@
 import type { NotebookDataBundle, Page, PageDocument } from '@notebook/domain'
-import { sha256Hex } from '@notebook/sync-contract'
+import { encodeMarkdownRepository, sha256Hex, stripPrivateAttachmentsForSsh } from '@notebook/sync-contract'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { mergeBundles, publicationBundleWithRemoteConflicts, retryRemoteIndexChanges, semanticallyEqualRepositoryJson, synchronizeLegacySsh } from './legacySshSync'
 
@@ -24,6 +24,33 @@ function bundle(currentPage?: Page, currentDocument?: PageDocument): NotebookDat
 }
 
 describe('legacy SSH conflict merge', () => {
+  test('keeps private SSH attachment bytes local while ordinary attachments still publish', async () => {
+    const privatePageId = '30000000-0000-4000-8000-0000000000aa'
+    const privateNotebookId = '20000000-0000-4000-8000-0000000000aa'
+    const privateBytes = new TextEncoder().encode('PRIVATE ATTACHMENT BYTES')
+    const publicBytes = new TextEncoder().encode('PUBLIC ATTACHMENT BYTES')
+    const value = bundle(page(), document('public body'))
+    value.notebooks.push({ id: privateNotebookId, workspaceId, name: 'Private', sortOrder: 1, createdAt: timestamp, updatedAt: timestamp, locked: true })
+    value.pages.push(page({ id: privatePageId, title: 'private title', locked: true }))
+    value.documents.push({ ...document('private body'), pageId: privatePageId })
+    value.assets.push(
+      { id: 'asset-public', pageId, kind: 'file', filename: 'public.txt', mimeType: 'text/plain', createdAt: timestamp },
+      { id: 'asset-private', pageId: privatePageId, kind: 'file', filename: 'private.txt', mimeType: 'text/plain', createdAt: timestamp },
+    )
+    const safe = stripPrivateAttachmentsForSsh(value)
+    expect(safe.privateAssetIds).toEqual(new Set(['asset-private']))
+    const encoded = await encodeMarkdownRepository(value, new Map([
+      ['asset-public', publicBytes],
+      ['asset-private', privateBytes],
+    ]), 'electron', 'test-password')
+    const filenames = [...encoded.files.keys()]
+    expect(filenames).toContain(`objects/${sha256Hex(publicBytes).slice(0, 2)}/${sha256Hex(publicBytes)}`)
+    expect(filenames).not.toContain(`objects/${sha256Hex(privateBytes).slice(0, 2)}/${sha256Hex(privateBytes)}`)
+    const serialized = [...encoded.files.values()].map((bytes) => new TextDecoder().decode(bytes)).join('\n')
+    expect(serialized).not.toContain('private.txt')
+    expect(serialized).not.toContain('PRIVATE ATTACHMENT BYTES')
+  })
+
   test('re-pulls and retries when another device publishes during the sync window', async () => {
     const operation = vi.fn()
       .mockRejectedValueOnce(new Error("Error invoking remote method 'legacySftp:push': Error: 远端索引在同步期间已变化，请重新同步"))

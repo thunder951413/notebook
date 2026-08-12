@@ -46,7 +46,7 @@ NOTEBOOK_NEXT_DATA_DIR=/absolute/path Notebook Next
 | 历史版本 | 支持 | 通过旧版本同步信封导入为 Revision；普通文档迁移包本身不含历史 |
 | 删除墓碑 | 支持 | 通过 note index/library envelope 导入 |
 | 旧同步状态和后端游标 | 归档保留，不复用 | 原始状态放入迁移元数据；新协议重新建立游标，避免把旧后端版本误当成新服务版本 |
-| 隐私文件夹映射 | 支持 | 锁定笔记 ID 可从 library envelope 识别；旧 Keychain 密码不导出，需要在新设备设置本地访问密码。SSH 同步使用 SSH 密码派生的 AES-256-GCM 密钥保护笔记信封 |
+| 隐私文件夹映射 | 支持 | 锁定笔记 ID 可从 library envelope 识别；旧 Keychain 密码不导出，需要在新设备设置本地访问密码。新 WebDAV 同步与 SSH 兼容迁移都将私密笔记及附件保持为本机数据，不上传附件字节 |
 | 直接打开 `notebook.store` | 不支持且禁止 | 必须经过只读转换；不能让 Electron/IndexedDB 写入旧目录 |
 
 “完全兼容”应区分可恢复数据与完全一致呈现：当前可保留迁移协议公开的内容和原始富文本载荷，但不能从普通文档迁移包恢复它从未包含的 1,227 个历史版本、旧后端游标或系统 Keychain 密钥。历史必须同时提供旧同步信封，密钥必须人工重建。
@@ -71,7 +71,7 @@ Dexie 中的 Markdown 是唯一耐久正文。编辑输入先立即写入轻量�
 ## 推荐接入顺序
 
 1. 退出旧应用，复制整个旧 `NotebookData`（包括 `notebook.store-wal`、`notebook.store-shm` 和 `Attachments`），保留只读原件。
-2. 用旧应用导出“文档迁移包”；如需历史、阅读位置和墓碑，再复制/打包旧 SSH 或本地目录同步仓库中的 library envelope、note envelopes、note index、reading positions 与附件。
+2. 用旧应用导出“文档迁移包”；如需历史、阅读位置和墓碑，再复制/打包旧 SSH 或本地目录同步仓库中的 library envelope、note envelopes、note index、reading positions 与公开附件。SSH 仓库仅作迁移/恢复输入，迁移完成后请改用 WebDAV 日常同步。
 3. 给 Notebook Next 选择一个全新的空数据目录，绝不能选旧 `NotebookData`。
 4. 先导入迁移包，再导入同步仓库包；重复 UUID 会更新同一记录，历史和墓碑会补入。
 5. 对照本报告中的旧库计数，并随机抽查富文本、Todo、图片、音频 sidecar、已删除笔记和至少三个历史版本。

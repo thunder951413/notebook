@@ -1,6 +1,6 @@
 import type { NotebookDataBundle, Page, PageDocument, PageRevision } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
-import { encodeMarkdownRepository, sha256Hex } from '@notebook/sync-contract'
+import { encodeMarkdownRepository, sha256Hex, stripPrivateAttachmentsForSsh } from '@notebook/sync-contract'
 import { decodeImport, type ImportFile } from '../data/transfer'
 import { getLegacySshPassphrase, getLegacySshPassword, legacyDeviceId, loadLegacySshSettings, saveLegacySshSettings } from './legacySshSettings'
 import { loadSyncSettings } from './syncSettings'
@@ -380,7 +380,10 @@ async function synchronizeLegacySshAttempt(repository: DexieNotebookRepository, 
       }
     }
     // The probe session (if any) is reused for the full pull below.
-    const localContents = await repository.exportAssetContents(new Set(localBundle.pages.map((page) => page.id)))
+    const sshSafeLocal = stripPrivateAttachmentsForSsh(localBundle)
+    const publicPageIds = new Set(sshSafeLocal.bundle.assets.map((asset) => asset.pageId))
+    const localContents = await repository.exportAssetContents(publicPageIds)
+    for (const privateAssetId of sshSafeLocal.privateAssetIds) localContents.delete(privateAssetId)
     const knownObjectHashes = [...localContents].map(([assetId, bytes]) => {
       const declared = localAssets.get(assetId)?.checksum?.toLowerCase()
       return declared && /^[0-9a-f]{64}$/.test(declared) ? declared : sha256Hex(bytes)

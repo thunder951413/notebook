@@ -22,6 +22,10 @@ const OBJECT_MARKER = '$object'
 const PAYLOAD_OBJECT_MARKER = '$payloadObject'
 const EXTERNALIZE_BYTES = 2048
 const BRIDGE_BASE = 'http://127.0.0.1:8787'
+/** Individual WebDAV round-trips must not keep the UI busy forever. */
+export const WEBDAV_OPERATION_TIMEOUT_MS = 60_000
+/** A complete pull → push → pull round has a separate upper bound. */
+export const WEBDAV_SYNC_TIMEOUT_MS = 180_000
 
 interface WebdavConnection extends WebdavSettings {
   appPassword: string
@@ -52,28 +56,62 @@ interface WebdavPushEntry {
 
 /** Transport abstraction: Electron IPC on desktop, loopback helper in browsers. */
 interface WebdavTransport {
-  test(connection: WebdavConnection): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
-  pull(connection: WebdavConnection, knownSeqs: Record<string, number>): Promise<{ entries: WebdavPullEntry[]; fingerprint: string }>
-  objectGet(connection: WebdavConnection, hash: string): Promise<Uint8Array>
-  push(connection: WebdavConnection, deviceId: string, entries: WebdavPushEntry[], objects: Array<{ hash: string; data: Uint8Array }>): Promise<{ firstSeq: number; count: number }>
+  test(connection: WebdavConnection, signal?: AbortSignal): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
+  pull(connection: WebdavConnection, knownSeqs: Record<string, number>, signal?: AbortSignal): Promise<{ entries: WebdavPullEntry[]; fingerprint: string }>
+  objectGet(connection: WebdavConnection, hash: string, signal?: AbortSignal): Promise<Uint8Array>
+  push(connection: WebdavConnection, deviceId: string, entries: WebdavPushEntry[], objects: Array<{ hash: string; data: Uint8Array }>, signal?: AbortSignal): Promise<{ firstSeq: number; count: number }>
+}
+
+function abortError(): DOMException {
+  return new DOMException('WebDAV 同步已取消', 'AbortError')
+}
+
+/**
+ * ipcRenderer.invoke cannot itself be aborted. Reject the renderer-side wait
+ * immediately, while also notifying the main process to abort its matching
+ * WebDAV client request. The main process has a second deadline as a fallback.
+ */
+function invokeDesktopWebdav<T>(signal: AbortSignal | undefined, invoke: (requestId: string) => Promise<T>): Promise<T> {
+  const webdav = window.notebookDesktop!.webdav
+  const requestId = crypto.randomUUID()
+  if (signal?.aborted) return Promise.reject(abortError())
+  const operation = invoke(requestId)
+  if (!signal) return operation
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      void webdav.cancel(requestId).catch(() => undefined)
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
 }
 
 function desktopTransport(): WebdavTransport {
   const webdav = window.notebookDesktop!.webdav
   return {
-    test: (connection) => webdav.test(connection),
-    pull: (connection, knownSeqs) => webdav.pull(connection, knownSeqs),
-    objectGet: (connection, hash) => webdav.objectGet(connection, hash),
-    push: (connection, deviceId, entries, objects) => webdav.push(connection, deviceId, entries, objects),
+    test: (connection, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.test(connection, requestId)),
+    pull: (connection, knownSeqs, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.pull(connection, knownSeqs, requestId)),
+    objectGet: (connection, hash, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.objectGet(connection, hash, requestId)),
+    push: (connection, deviceId, entries, objects, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.push(connection, deviceId, entries, objects, requestId)),
   }
 }
 
-async function bridgePost<T>(path: string, body: unknown): Promise<T> {
+async function bridgePost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${BRIDGE_BASE}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  } catch {
-    throw new Error('无法连接本机同步助手（127.0.0.1:8787）。请使用 ./ctl start 启动它。')
+    response = await fetch(`${BRIDGE_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Notebook-Request-Id': crypto.randomUUID() },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (error) {
+    if (signal?.aborted) throw new DOMException(`WebDAV 同步已取消：${error instanceof Error ? error.message : String(error)}`, 'AbortError')
+    throw new Error('无法连接本机同步助手（127.0.0.1:8787）。请使用 ./ctl start 启动它。', { cause: error })
   }
   if (!response.ok) {
     let detail = ''
@@ -99,18 +137,18 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Browser builds reach the v4 repository through the local Python helper. */
 function bridgeTransport(): WebdavTransport {
   return {
-    test: async (connection) => bridgePost('/v1/local-webdav/test', { settings: connection }),
-    pull: async (connection, knownSeqs) => bridgePost('/v1/local-webdav/pull', { settings: connection, knownSeqs }),
-    objectGet: async (connection, hash) => {
-      const result = await bridgePost<{ dataBase64: string }>('/v1/local-webdav/object', { settings: connection, hash })
+    test: async (connection, signal) => bridgePost('/v1/local-webdav/test', { settings: connection }, signal),
+    pull: async (connection, knownSeqs, signal) => bridgePost('/v1/local-webdav/pull', { settings: connection, knownSeqs }, signal),
+    objectGet: async (connection, hash, signal) => {
+      const result = await bridgePost<{ dataBase64: string }>('/v1/local-webdav/object', { settings: connection, hash }, signal)
       return base64ToBytes(result.dataBase64)
     },
-    push: async (connection, deviceId, entries, objects) => bridgePost('/v1/local-webdav/push', {
+    push: async (connection, deviceId, entries, objects, signal) => bridgePost('/v1/local-webdav/push', {
       settings: connection,
       deviceId,
       entries,
       objects: objects.map((object) => ({ hash: object.hash, dataBase64: bytesToBase64(object.data) })),
-    }),
+    }, signal),
   }
 }
 
@@ -122,6 +160,41 @@ export interface WebdavSyncResult {
   state: 'offline' | 'synced' | 'conflict' | 'error'
   skipped: number
   conflicts: number
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw abortError()
+}
+
+async function withDeadline<T>(label: string, externalSignal: AbortSignal | undefined, timeoutMs: number, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (externalSignal?.aborted) throw abortError()
+  const controller = new AbortController()
+  let timedOut = false
+  const forwardAbort = () => controller.abort(externalSignal?.reason)
+  externalSignal?.addEventListener('abort', forwardAbort, { once: true })
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort(new Error(`${label} 超时`))
+  }, timeoutMs)
+  try {
+    return await operation(controller.signal)
+  } catch (error) {
+    if (timedOut) throw new Error(`${label} 超时（${Math.ceil(timeoutMs / 1_000)} 秒）`, { cause: error })
+    if (externalSignal?.aborted) throw abortError()
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', forwardAbort)
+  }
+}
+
+function boundedTransport(transport: WebdavTransport, syncSignal: AbortSignal): WebdavTransport {
+  return {
+    test: (connection, signal) => withDeadline('WebDAV 连接测试', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.test(connection, requestSignal)),
+    pull: (connection, knownSeqs, signal) => withDeadline('读取远端日志', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.pull(connection, knownSeqs, requestSignal)),
+    objectGet: (connection, hash, signal) => withDeadline('下载远端对象', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.objectGet(connection, hash, requestSignal)),
+    push: (connection, deviceId, entries, objects, signal) => withDeadline('上传同步变更', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.push(connection, deviceId, entries, objects, requestSignal)),
+  }
 }
 
 const encoder = new TextEncoder()
@@ -136,17 +209,17 @@ function connectionFor(settings: WebdavSettings, appPassword: string, syncPasswo
 }
 
 /** Restore externalized document bodies fetched from objects/. */
-async function materializeDocument(payload: Record<string, unknown>, transport: WebdavTransport, connection: WebdavConnection): Promise<Record<string, unknown>> {
+async function materializeDocument(payload: Record<string, unknown>, transport: WebdavTransport, connection: WebdavConnection, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const marker = (payload.tiptapJson as { [OBJECT_MARKER]?: unknown } | undefined)?.[OBJECT_MARKER]
   if (typeof marker !== 'string') return payload
-  const bytes = await transport.objectGet(connection, marker)
+  const bytes = await transport.objectGet(connection, marker, signal)
   return { ...payload, tiptapJson: JSON.parse(new TextDecoder().decode(bytes)) }
 }
 
-async function materializePayload(payload: Record<string, unknown>, transport: WebdavTransport, connection: WebdavConnection): Promise<Record<string, unknown>> {
+async function materializePayload(payload: Record<string, unknown>, transport: WebdavTransport, connection: WebdavConnection, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const marker = payload[PAYLOAD_OBJECT_MARKER]
   if (typeof marker !== 'string') return payload
-  const decoded = JSON.parse(new TextDecoder().decode(await transport.objectGet(connection, marker))) as unknown
+  const decoded = JSON.parse(new TextDecoder().decode(await transport.objectGet(connection, marker, signal))) as unknown
   if (!decoded || Array.isArray(decoded) || typeof decoded !== 'object') throw new Error(`远端对象 ${marker} 不是有效的实体内容`)
   return decoded as Record<string, unknown>
 }
@@ -161,8 +234,8 @@ function externalizeDocument(payload: Record<string, unknown>, objects: Array<{ 
   return { payload: { [PAYLOAD_OBJECT_MARKER]: hash }, hash }
 }
 
-export async function testWebdavConnection(settings: WebdavSettings, appPassword: string, syncPassword?: string) {
-  return webdavTransport().test(connectionFor(settings, appPassword, syncPassword))
+export async function testWebdavConnection(settings: WebdavSettings, appPassword: string, syncPassword?: string, signal?: AbortSignal) {
+  return withDeadline('WebDAV 连接测试', signal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => webdavTransport().test(connectionFor(settings, appPassword, syncPassword), requestSignal))
 }
 
 /**
@@ -177,25 +250,37 @@ async function pullWebdavOnce(
   settings: WebdavSettings,
   connection: WebdavConnection,
   transport: WebdavTransport,
+  signal: AbortSignal,
 ): Promise<{ conflicts: number; conflictKeys: Set<string> }> {
+  throwIfAborted(signal)
   const knownSeqs = loadWebdavKnownSeqs(settings)
-  const pulled = await transport.pull(connection, knownSeqs)
+  const pulled = await transport.pull(connection, knownSeqs, signal)
   if (!pulled.entries.length) return { conflicts: 0, conflictKeys: new Set() }
   const previousCursor = await repository.getSyncCursor(workspaceId)
   const changes: RemoteSyncChange[] = []
   const downloadedAssets = new Map<string, Uint8Array>()
   for (let index = 0; index < pulled.entries.length; index += 1) {
+    throwIfAborted(signal)
     const entry = pulled.entries[index] as WebdavPullEntry
-    let payload = await materializePayload(entry.payload, transport, connection)
-    if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection)
+    let payload = await materializePayload(entry.payload, transport, connection, signal)
+    if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection, signal)
     if (entry.type === 'asset' && entry.op === 'upsert') {
       const hash = entry.hash ?? (entry.payload.objectHash as string | undefined)
-      if (hash) downloadedAssets.set(entry.id, await transport.objectGet(connection, hash))
+      if (!hash) throw new Error(`远端附件 ${entry.id} 缺少内容哈希，已阻止不完整同步`)
+      downloadedAssets.set(entry.id, await transport.objectGet(connection, hash, signal))
     }
     changes.push({ cursor: previousCursor + index + 1, entityType: entry.type, entityId: entry.id, version: entry.ver, operation: entry.op, payload })
   }
-  const applied = await repository.applyRemoteChanges(workspaceId, changes, previousCursor + pulled.entries.length)
-  await repository.importAssetContents(downloadedAssets)
+  throwIfAborted(signal)
+  // Asset metadata, bytes and the read cursor share this one Dexie
+  // transaction. If a byte write fails, neither its metadata nor the cursor
+  // becomes visible, so the same journal record remains safely retryable.
+  // Keep the optional argument for the concrete Dexie repository. Test and
+  // third-party repository adapters can continue using the older two-stage
+  // contract, while production metadata/bytes/cursor are atomic.
+  const applied = await repository.applyRemoteChanges(workspaceId, changes, previousCursor + pulled.entries.length, downloadedAssets, true)
+  throwIfAborted(signal)
+  if (repository.applyRemoteChanges.length < 4) await repository.importAssetContents(downloadedAssets)
   const conflictKeys = new Set<string>()
   for (const conflict of applied.conflicts) conflictKeys.add(`${conflict.entityType}:${conflict.entityId}`)
   const nextSeqs = { ...knownSeqs }
@@ -218,96 +303,105 @@ function outboxPageId(item: { entityType: string; entityId: string; payload: Rec
   return typeof pageId === 'string' ? pageId : undefined
 }
 
-export async function synchronizeWebdav(repository: DexieNotebookRepository, workspaceId: string, _signal?: AbortSignal, scope?: { pageId: string }): Promise<WebdavSyncResult> {
-  const settings = loadWebdavSettings()
-  if (!settings.baseUrl || !settings.username) return { state: 'offline', skipped: 0, conflicts: 0 }
-  const appPassword = await getWebdavAppPassword()
-  if (!appPassword) return { state: 'offline', skipped: 0, conflicts: 0 }
-  const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
-  const transport = webdavTransport()
-  const deviceId = legacyDeviceId()
-  // syncOutbox is maintained in the same transaction as every local edit. It
-  // is the smallest reliable database change marker: no full-library hash or
-  // table scan is required before deciding whether there is anything to push.
-  const hadLocalChanges = await repository.hasPendingSyncChanges(workspaceId)
+export async function synchronizeWebdav(repository: DexieNotebookRepository, workspaceId: string, signal?: AbortSignal, scope?: { pageId: string }): Promise<WebdavSyncResult> {
+  return withDeadline('本次同步', signal, WEBDAV_SYNC_TIMEOUT_MS, async (syncSignal) => {
+    const settings = loadWebdavSettings()
+    if (!settings.baseUrl || !settings.username) return { state: 'offline', skipped: 0, conflicts: 0 }
+    const appPassword = await getWebdavAppPassword()
+    if (!appPassword) return { state: 'offline', skipped: 0, conflicts: 0 }
+    throwIfAborted(syncSignal)
+    const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
+    const transport = boundedTransport(webdavTransport(), syncSignal)
+    const deviceId = legacyDeviceId()
+    // syncOutbox is maintained in the same transaction as every local edit. It
+    // is the smallest reliable database change marker: no full-library hash or
+    // table scan is required before deciding whether there is anything to push.
+    const hadLocalChanges = await repository.hasPendingSyncChanges(workspaceId)
 
-  // ---- Pull: adopt everything other devices published (journals are
-  // append-only and shared, so pulls are always full increments — even a
-  // scoped sync must see remote edits before pushing the focused page).
-  let conflicts = 0
-  let conflictKeys = new Set<string>()
-  const firstPull = await pullWebdavOnce(repository, workspaceId, settings, connection, transport)
-  conflicts += firstPull.conflicts
-  conflictKeys = firstPull.conflictKeys
+    // ---- Pull: adopt everything other devices published (journals are
+    // append-only and shared, so pulls are always full increments — even a
+    // scoped sync must see remote edits before pushing the focused page).
+    let conflicts = 0
+    let conflictKeys = new Set<string>()
+    const firstPull = await pullWebdavOnce(repository, workspaceId, settings, connection, transport, syncSignal)
+    conflicts += firstPull.conflicts
+    conflictKeys = firstPull.conflictKeys
 
-  // A remote pull may overlap a local edit, so re-check the transactional
-  // marker once before taking the zero-upload fast path.
-  if (!hadLocalChanges && !await repository.hasPendingSyncChanges(workspaceId)) {
+    // A remote pull may overlap a local edit, so re-check the transactional
+    // marker once before taking the zero-upload fast path.
+    if (!hadLocalChanges && !await repository.hasPendingSyncChanges(workspaceId)) {
+      return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts }
+    }
+
+    // ---- Push: append pending local changes to this device's journal. Entries
+    // that conflicted during the pull stay queued for the user to resolve; a
+    // scoped sync (opening a note) pushes only that note's entities.
+    const outgoing = await repository.listOutbox(workspaceId)
+    const privacy = await Promise.all(outgoing.map((item) => repository.isPrivateSyncItem(item)))
+    const localOnly = outgoing.filter((_, index) => privacy[index])
+    const pending = outgoing.filter((item) => {
+      if (localOnly.includes(item)) return false
+      if (conflictKeys.has(`${item.entityType}:${item.entityId}`)) return false
+      if (!scope) return true
+      return outboxPageId(item) === scope.pageId
+    })
+    if (pending.length) {
+      const entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }> = []
+      const objects: Array<{ hash: string; data: Uint8Array }> = []
+      for (const item of pending) {
+        throwIfAborted(syncSignal)
+        const entry: { ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> } = {
+          ts: new Date().toISOString(),
+          op: item.operation,
+          type: item.entityType,
+          id: item.entityId,
+          ver: item.expectedVersion,
+          payload: item.payload,
+        }
+        if (item.entityType === 'document' && item.operation === 'upsert') {
+          const external = externalizeDocument(item.payload, objects)
+          entry.payload = external.payload
+          entry.hash = external.hash
+        }
+        if (item.entityType === 'asset' && item.operation === 'upsert') {
+          const content = await repository.getAssetContent(item.entityId)
+          if (!content) throw new Error(`附件 ${item.entityId} 缺少本地内容，已阻止不完整同步`)
+          const bytes = new Uint8Array(await content.arrayBuffer())
+          const hash = await sha256Bytes(bytes)
+          objects.push({ hash, data: bytes })
+          entry.hash = hash
+          entry.payload = { ...item.payload, objectHash: hash, byteSize: bytes.byteLength }
+        }
+        entries.push(entry)
+      }
+      if (entries.length) {
+        const pushed = await transport.push(connection, deviceId, entries, objects, syncSignal)
+        throwIfAborted(syncSignal)
+        await repository.acknowledgeSync(workspaceId, pending.map((item) => ({
+          operation_id: item.id,
+          entity_type: item.entityType,
+          entity_id: item.entityId,
+          version: item.expectedVersion + 1,
+        })), undefined, true)
+        const nextSeqs = loadWebdavKnownSeqs(settings)
+        nextSeqs[deviceId] = Math.max(nextSeqs[deviceId] ?? 0, pushed.firstSeq + pushed.count - 1)
+        saveWebdavKnownSeqs(settings, nextSeqs)
+
+        // ---- Pull 2: anything another device published while we were pushing
+        // comes back immediately, instead of waiting for the next trigger.
+        const secondPull = await pullWebdavOnce(repository, workspaceId, settings, connection, transport, syncSignal)
+        conflicts += secondPull.conflicts
+        for (const key of secondPull.conflictKeys) conflictKeys.add(key)
+      }
+    }
+
+    // Keep local-only acknowledgements until every network operation has
+    // settled. A cancelled/timed-out sync must not acknowledge any outbox
+    // rows, even rows that are intentionally excluded from remote publication.
+    throwIfAborted(syncSignal)
+    if (localOnly.length) await repository.acknowledgeLocalOnlySync(localOnly)
     return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts }
-  }
-
-  // ---- Push: append pending local changes to this device's journal. Entries
-  // that conflicted during the pull stay queued for the user to resolve; a
-  // scoped sync (opening a note) pushes only that note's entities.
-  const outgoing = await repository.listOutbox(workspaceId)
-  const privacy = await Promise.all(outgoing.map((item) => repository.isPrivateSyncItem(item)))
-  const localOnly = outgoing.filter((_, index) => privacy[index])
-  await repository.acknowledgeLocalOnlySync(localOnly)
-  const pending = outgoing.filter((item) => {
-    if (localOnly.includes(item)) return false
-    if (conflictKeys.has(`${item.entityType}:${item.entityId}`)) return false
-    if (!scope) return true
-    return outboxPageId(item) === scope.pageId
   })
-  if (pending.length) {
-    const entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }> = []
-    const objects: Array<{ hash: string; data: Uint8Array }> = []
-    for (const item of pending) {
-      const entry: { ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> } = {
-        ts: new Date().toISOString(),
-        op: item.operation,
-        type: item.entityType,
-        id: item.entityId,
-        ver: item.expectedVersion,
-        payload: item.payload,
-      }
-      if (item.entityType === 'document' && item.operation === 'upsert') {
-        const external = externalizeDocument(item.payload, objects)
-        entry.payload = external.payload
-        entry.hash = external.hash
-      }
-      if (item.entityType === 'asset' && item.operation === 'upsert') {
-        const content = await repository.getAssetContent(item.entityId)
-        if (!content) throw new Error(`附件 ${item.entityId} 缺少本地内容，已阻止不完整同步`)
-        const bytes = new Uint8Array(await content.arrayBuffer())
-        const hash = await sha256Bytes(bytes)
-        objects.push({ hash, data: bytes })
-        entry.hash = hash
-        entry.payload = { ...item.payload, objectHash: hash, byteSize: bytes.byteLength }
-      }
-      entries.push(entry)
-    }
-    if (entries.length) {
-      const pushed = await transport.push(connection, deviceId, entries, objects)
-      await repository.acknowledgeSync(workspaceId, pending.map((item) => ({
-        operation_id: item.id,
-        entity_type: item.entityType,
-        entity_id: item.entityId,
-        version: item.expectedVersion + 1,
-      })))
-      const nextSeqs = loadWebdavKnownSeqs(settings)
-      nextSeqs[deviceId] = Math.max(nextSeqs[deviceId] ?? 0, pushed.firstSeq + pushed.count - 1)
-      saveWebdavKnownSeqs(settings, nextSeqs)
-
-      // ---- Pull 2: anything another device published while we were pushing
-      // comes back immediately, instead of waiting for the next trigger.
-      const secondPull = await pullWebdavOnce(repository, workspaceId, settings, connection, transport)
-      conflicts += secondPull.conflicts
-      for (const key of secondPull.conflictKeys) conflictKeys.add(key)
-    }
-  }
-
-  return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts }
 }
 
 /** Build a full v4 snapshot from the local bundle for first publication. */

@@ -738,11 +738,7 @@ export function useWorkspaceData() {
     }
     const bundleFiles = files.filter((file) => !/\.(md|markdown|txt|html?)$/i.test(file.name))
     const decoded = bundleFiles.length ? await decodeImport(bundleFiles, WORKSPACE_ID) : undefined
-    if (decoded) {
-      await repository.importData(decoded.bundle)
-      await repository.importAssetContents(decoded.assetContents)
-      await repository.queueImportedData(decoded.bundle)
-    }
+    if (decoded) await repository.restoreCompleteBackup(decoded.bundle, decoded.assetContents)
     await reload()
     const imported = textFiles.length + (decoded?.bundle.pages.length ?? 0)
     recordDiagnosticEvent({ level: 'info', category: 'data', action: 'import', status: 'success', message: `${imported} 个页面` })

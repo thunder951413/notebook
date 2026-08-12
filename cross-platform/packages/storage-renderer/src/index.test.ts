@@ -219,6 +219,15 @@ test('queues page bodies and applies remote body updates and deletes', async () 
   expect(await repository.getPageDocument(value.id)).toBeUndefined()
 })
 
+test('keeps HTTP API resulting-version semantics separate from WebDAV parent versions', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-api-version', 'API result'), syncStatus: 'synced' as const }
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 7, operation: 'upsert', payload: value }], 1)
+  expect(await repository.db.syncVersions.get(`workspace-a:page:${value.id}`)).toEqual({ id: `workspace-a:page:${value.id}`, version: 7 })
+  await repository.savePage({ ...(await repository.getPage(value.id))!, title: 'next API edit', syncStatus: 'pending' })
+  expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page')?.expectedVersion).toBe(7)
+})
+
 test('rejects malformed remote payloads and never overwrites a pending local body', async () => {
   const repository = makeRepository()
   const value = { ...page('page-protected', 'Local'), syncStatus: 'pending' as const }
@@ -227,7 +236,7 @@ test('rejects malformed remote payloads and never overwrites a pending local bod
   await repository.applyRemoteChanges('workspace-a', [{
     cursor: 1, entityType: 'document', entityId: value.id, version: 1, operation: 'upsert',
     payload: { ...document, markdown: 'remote' },
-  }], 1)
+  }], 1, undefined, true)
   expect(await repository.getPageDocument(value.id)).toMatchObject({ markdown: 'local' })
   expect(await repository.getPage(value.id)).toMatchObject({ syncStatus: 'conflict' })
   await expect(repository.applyRemoteChanges('workspace-a', [{
@@ -257,7 +266,7 @@ test('keeps a conflicted child entity pullable instead of advancing the cursor',
     version: 1,
     operation: 'upsert',
     payload: { ...localAsset, filename: 'remote.png' },
-  }], 1)
+  }], 1, undefined, true)
 
   expect(applied).toEqual({
     cursor: 0,
@@ -266,6 +275,70 @@ test('keeps a conflicted child entity pullable instead of advancing the cursor',
   expect(await repository.getSyncCursor('workspace-a')).toBe(0)
   expect(await repository.db.assets.get(localAsset.id)).toMatchObject({ filename: 'local.png' })
   expect(await repository.getPage(value.id)).toMatchObject({ syncStatus: 'conflict' })
+})
+
+test('treats WebDAV ver as a parent version and preserves concurrent siblings as a visible conflict', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-parent-version', 'Remote one'), syncStatus: 'synced' as const }
+  const first = await repository.applyRemoteChanges('workspace-a', [{
+    cursor: 1, entityType: 'page', entityId: value.id, version: 0, operation: 'upsert', payload: value,
+  }], 1, undefined, true)
+  expect(first).toEqual({ cursor: 1, conflicts: [] })
+  expect(await repository.db.syncVersions.get('workspace-a:page:page-parent-version')).toMatchObject({ version: 1, webdavParentVersion: true })
+
+  // A duplicate journal row remains harmless and can be consumed.
+  await expect(repository.applyRemoteChanges('workspace-a', [{
+    cursor: 2, entityType: 'page', entityId: value.id, version: 0, operation: 'upsert', payload: value,
+  }], 2, undefined, true)).resolves.toEqual({ cursor: 2, conflicts: [] })
+
+  // A different record with the same parent version is a sibling concurrent
+  // write; stopping before it prevents a deterministic-but-silent overwrite.
+  const sibling = await repository.applyRemoteChanges('workspace-a', [{
+    cursor: 3, entityType: 'page', entityId: value.id, version: 0, operation: 'upsert', payload: { ...value, title: 'Other device' },
+  }], 3, undefined, true)
+  expect(sibling).toEqual({ cursor: 2, conflicts: [{ entityType: 'page', entityId: value.id, pageIds: [value.id] }] })
+  expect(await repository.getPage(value.id)).toMatchObject({ title: 'Remote one', syncStatus: 'conflict' })
+
+  await repository.savePage({ ...(await repository.getPage(value.id))!, title: 'Local follow-up', syncStatus: 'pending' })
+  expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page')?.expectedVersion).toBe(1)
+})
+
+test('retracts previously published page data before keeping private edits local-only', async () => {
+  const repository = makeRepository()
+  const value = { ...page('page-private-retract', 'Public'), syncStatus: 'pending' as const }
+  const document: PageDocument = { pageId: value.id, schemaVersion: 3, markdown: 'public', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt }
+  await repository.savePage(value, document)
+  const initial = await repository.listOutbox('workspace-a')
+  await repository.acknowledgeSync('workspace-a', initial.map((item) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: 1 })))
+  const asset = { id: 'asset-private-retract', pageId: value.id, kind: 'image' as const, filename: 'public.png', mimeType: 'image/png', createdAt: value.createdAt }
+  await repository.saveAsset(asset, new Blob([new Uint8Array([7])]))
+  const pendingAsset = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'asset')!
+  await repository.acknowledgeSync('workspace-a', [{ operation_id: pendingAsset.id, entity_type: 'asset', entity_id: asset.id, version: 1 }])
+
+  await repository.savePage({ ...(await repository.getPage(value.id))!, locked: true, syncStatus: 'pending' }, { ...document, markdown: 'private', updatedAt: '2026-01-03T00:00:00.000Z' })
+  const retractions = await repository.listOutbox('workspace-a')
+  expect(retractions.filter((item) => item.payload.privacyRetraction).map((item) => `${item.operation}:${item.entityType}`).sort()).toEqual(['delete:asset', 'delete:document', 'delete:page'])
+  const retractionFlags = await Promise.all(retractions.map((item) => repository.isPrivateSyncItem(item)))
+  expect(retractions.map((item, index) => item.payload.privacyRetraction ? retractionFlags[index] : undefined).filter((flag) => flag !== undefined)).toEqual([false, false, false])
+
+  // Subsequent changes cannot replace the public tombstone with a private
+  // upsert, and stale remote history cannot reopen the page.
+  await repository.savePage({ ...(await repository.getPage(value.id))!, title: 'Still private', locked: true, syncStatus: 'pending' })
+  expect((await repository.listOutbox('workspace-a')).filter((item) => item.entityType === 'page')).toEqual([
+    expect.objectContaining({ operation: 'delete', payload: { privacyRetraction: true } }),
+  ])
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 1, operation: 'upsert', payload: { ...value, title: 'Old public copy', syncStatus: 'synced' } }], 1)
+  expect(await repository.getPage(value.id)).toMatchObject({ title: 'Still private', locked: true })
+})
+
+test('applies remote asset metadata bytes and cursor atomically', async () => {
+  const repository = makeRepository()
+  const asset = { id: 'asset-atomic-remote', pageId: 'page-atomic-remote', kind: 'file' as const, filename: 'remote.bin', mimeType: 'application/octet-stream', createdAt: '2026-01-01T00:00:00.000Z' }
+  const bytes = new Uint8Array([1, 2, 3])
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'asset', entityId: asset.id, version: 0, operation: 'upsert', payload: asset }], 1, new Map([[asset.id, bytes]]))
+  expect(await repository.db.assets.get(asset.id)).toMatchObject(asset)
+  expect(new Uint8Array(await (await repository.getAssetContent(asset.id))!.arrayBuffer())).toEqual(bytes)
+  expect(await repository.getSyncCursor('workspace-a')).toBe(1)
 })
 
 test('queues notebook hierarchy and task steps for cross-device sync', async () => {
@@ -885,6 +958,25 @@ test('queues a complete imported bundle for first publication after attachment b
     'page_tag:upsert', 'section:upsert', 'tag:upsert',
   ])
   expect((await repository.getPage(value.id))?.syncStatus).toBe('pending')
+})
+
+test('restores complete backup metadata bytes and outbox in one transaction', async () => {
+  const repository = makeRepository()
+  const value = page('page-atomic-restore', 'Atomic restore')
+  const bundle = {
+    notebooks: [{ id: 'notebook-atomic', workspaceId: 'workspace-a', name: 'Imported', sortOrder: 0, createdAt: value.createdAt, updatedAt: value.updatedAt }],
+    sections: [], pages: [value], documents: [], tags: [], pageTags: [], taskSteps: [],
+    assets: [{ id: 'asset-atomic', pageId: value.id, kind: 'file' as const, filename: 'atomic.bin', mimeType: 'application/octet-stream', createdAt: value.createdAt }],
+    pageLinks: [], knowledgeEntities: [], knowledgeRelations: [], readingPositions: [], revisions: [], comments: [], tombstones: [],
+  }
+  await expect(repository.restoreCompleteBackup(bundle, new Map())).rejects.toThrow(/附件清单/)
+  expect(await repository.getPage(value.id)).toBeUndefined()
+  expect(await repository.listOutbox('workspace-a')).toHaveLength(0)
+
+  await repository.restoreCompleteBackup(bundle, new Map([['asset-atomic', new Uint8Array([1, 2, 3])]]))
+  expect(await repository.getPage(value.id)).toMatchObject({ syncStatus: 'pending' })
+  expect(new Uint8Array(await (await repository.getAssetContent('asset-atomic'))!.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
+  expect((await repository.listOutbox('workspace-a')).map((item) => item.entityType)).toEqual(expect.arrayContaining(['notebook', 'page', 'asset']))
 })
 
 test('indexes document bodies for Latin and CJK full-text search', async () => {

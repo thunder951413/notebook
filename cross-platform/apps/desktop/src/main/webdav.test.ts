@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, type WebdavConnection } from './webdav'
+import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, validatedWebdavBaseUrl, type WebdavConnection } from './webdav'
 
 /**
  * Minimal in-memory WebDAV server (MKCOL/PUT/GET/DELETE/PROPFIND) exercising
@@ -125,6 +125,21 @@ afterAll(async () => {
 })
 
 describe('webdav transport', () => {
+  test('requires HTTPS except for exact loopback WebDAV endpoints', () => {
+    expect(validatedWebdavBaseUrl('https://dav.jianguoyun.com/dav/').protocol).toBe('https:')
+    expect(validatedWebdavBaseUrl('http://localhost:8787/dav/').hostname).toBe('localhost')
+    expect(validatedWebdavBaseUrl('http://127.0.0.1:8787/dav/').hostname).toBe('127.0.0.1')
+    expect(validatedWebdavBaseUrl('http://[::1]:8787/dav/').protocol).toBe('http:')
+    expect(() => validatedWebdavBaseUrl('http://dav.jianguoyun.com/dav/')).toThrow('必须使用 HTTPS')
+    expect(() => validatedWebdavBaseUrl('http://localhost.example/dav/')).toThrow('必须使用 HTTPS')
+  })
+
+  test('propagates a cancelled connection probe instead of reporting it as a failed server', async () => {
+    const controller = new AbortController()
+    controller.abort(new DOMException('cancelled by user', 'AbortError'))
+    await expect(testWebdavConnection(connection, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
   test('tests the connection and creates the repository root', async () => {
     const result = await testWebdavConnection(connection)
     expect(result.ok).toBe(true)

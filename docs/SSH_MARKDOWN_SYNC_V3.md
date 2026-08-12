@@ -1,8 +1,10 @@
-# SSH Markdown repository v3
+# Legacy SSH Markdown repository v3
+
+> 产品定位：坚果云 WebDAV 是 Notebook 唯一正式的日常跨设备同步方式。SSH/SFTP v3 仅保留用于旧仓库迁移、兼容读取和故障恢复；不要再将其配置为新的持续同步后端。
 
 ## Canonical data model
 
-Repository v3 keeps SSH/SFTP and makes GFM Markdown the only durable note body. Tiptap/ProseMirror JSON is a rebuildable local editor cache and is never synchronized or written to history.
+Repository v3 is the legacy SSH/SFTP compatibility format and makes GFM Markdown the only durable note body. Tiptap/ProseMirror JSON is a rebuildable local editor cache and is never synchronized or written to history.
 
 `notes/index.json` stays compact, uncompressed UTF-8 JSON and declares:
 
@@ -41,7 +43,7 @@ The hierarchy is not a linked list: each page stores only its parent and sibling
 
 ## Private notes
 
-Notes marked as private wrap the complete note envelope (title, preview, Markdown objects, history and note-local metadata) in AES-256-GCM. The key is derived from the configured SSH password with PBKDF2-HMAC-SHA256 (310,000 iterations); the note ID is authenticated as additional data. Electron and Android reject a wrong password or modified ciphertext without replacing local content. Binary resource objects are not encrypted by this layer and continue to rely on SSH transport, account permissions and server-disk protection.
+Notes marked as private wrap the note envelope (title, preview, Markdown objects, history and note-local metadata) in AES-256-GCM. The key is derived from the configured SSH password with PBKDF2-HMAC-SHA256 (310,000 iterations); the note ID is authenticated as additional data. Electron and Android reject a wrong password or modified ciphertext without replacing local content. Binary objects are not encrypted by this legacy layer, so private-note attachment metadata and bytes are deliberately omitted from envelopes, manifests and uploads; public assets continue to use the content-addressed object store.
 
 Repositories containing private notes also publish `notes/privacy.json`, an authenticated key-check record using the same KDF and cipher. Both clients verify it before importing any note. A wrong or changed SSH password therefore stops before merge; clients never “skip” an unreadable private note and rebuild an index that could orphan it.
 
@@ -66,7 +68,7 @@ The verified pre-migration archive must be retained until Electron-to-Android ro
 
 ## Server maintenance helper
 
-The Electron-only server helper is an optional, manual maintenance tool. It does not participate in daily synchronization or automatically accelerate a first sync; ordinary SFTP remains the normal path and fallback. It runs over SSH only on POSIX servers with `python3` available.
+The Electron-only server helper is an optional, manual compatibility maintenance tool for legacy repositories. It does not participate in daily synchronization or automatically accelerate a first sync. It runs over SSH only on POSIX servers with `python3` available.
 
 `export-tar` acquires the shared repository lock, keeps it alive with heartbeats, verifies repository integrity, then emits a consistent tar snapshot. `import-tar` first unpacks into a stage and validates archive paths and limits, object and note hashes, cross-file references, and overall repository integrity. Only a valid stage is published while holding the lock, with overwritten files retained in the private recovery area and `notes/index.json` committed last; a rejected import leaves the existing repository unchanged. `verify` reports the concrete broken object, note, index, manifest, or reference rather than a generic failure.
 

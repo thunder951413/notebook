@@ -244,6 +244,9 @@ test('renders the OneNote-style workspace and editor', async () => {
   fireEvent.click(screen.getByRole('button', { name: '设置' }))
   const settings = screen.getByRole('dialog', { name: '设置' })
   expect(within(settings).getByText('Notebook 设置')).toBeInTheDocument()
+  expect(settings).toHaveAttribute('aria-modal', 'true')
+  const closeSettings = within(settings).getByRole('button', { name: '关闭设置' })
+  await waitFor(() => expect(closeSettings).toHaveFocus())
   expect(within(settings).getByRole('tab', { name: '常规' })).toBeInTheDocument()
   const accentOptions = within(settings).getByRole('radiogroup', { name: '高亮色' })
   expect(within(accentOptions).getAllByRole('radio')).toHaveLength(7)
@@ -264,15 +267,26 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(within(settings).queryByLabelText('同步服务地址')).not.toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '检测服务器连接' })).toBeInTheDocument()
   expect(within(settings).getByRole('button', { name: '立即同步' })).toBeInTheDocument()
-  expect(within(settings).getByRole('button', { name: '迁移 SSH 数据到坚果云' })).toBeInTheDocument()
+  // SSH compatibility tools are desktop-only and intentionally collapsed;
+  // browser/WebDAV users are never guided toward the legacy backend.
+  expect(within(settings).queryByText('从旧 SSH 迁移 / 兼容工具')).not.toBeInTheDocument()
   const automaticSync = within(settings).getByRole('switch', { name: '启用自动同步' })
   // WebDAV is the default backend, so auto-sync starts enabled; toggling it
   // off must persist across reopening the settings dialog.
   expect(automaticSync).toBeChecked()
   fireEvent.click(automaticSync)
   await waitFor(() => expect(automaticSync).not.toBeChecked())
-  fireEvent.click(within(settings).getByRole('button', { name: '关闭设置' }))
+  const focusableControls = [...settings.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((control) => control.getAttribute('aria-hidden') !== 'true' && !control.hasAttribute('data-tabster-dummy'))
+  const lastFocusableControl = focusableControls[focusableControls.length - 1]!
+  closeSettings.focus()
+  fireEvent.keyDown(closeSettings, { key: 'Tab', shiftKey: true })
+  await waitFor(() => expect(lastFocusableControl).toHaveFocus())
+  fireEvent.keyDown(lastFocusableControl, { key: 'Tab' })
+  await waitFor(() => expect(closeSettings).toHaveFocus())
+  fireEvent.keyDown(settings, { key: 'Escape' })
   expect(screen.queryByRole('dialog', { name: '设置' })).not.toBeInTheDocument()
+  await waitFor(() => expect(screen.getByRole('button', { name: '设置' })).toHaveFocus())
   fireEvent.click(screen.getByRole('button', { name: '设置' }))
   const reopenedSettings = screen.getByRole('dialog', { name: '设置' })
   fireEvent.click(within(reopenedSettings).getByRole('tab', { name: '同步与连接' }))

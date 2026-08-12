@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/react-components'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearWebdavAppPassword, clearWebdavSyncPassword, getWebdavAppPassword, getWebdavSyncPassword, hasWebdavAppPassword, loadWebdavSettings, saveWebdavSettings, type WebdavSettings } from '../sync/webdavSettings'
@@ -63,7 +63,43 @@ const syncLabels: Record<SyncState, string> = {
   error: '同步失败',
 }
 
+function focusableChildren(container: HTMLElement) {
+  return [...container.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    // Fluent UI's mover inserts aria-hidden tab sentinels. They must not
+    // become our dialog's tab boundary.
+    .filter((element) => !element.hasAttribute('hidden') && element.getAttribute('aria-hidden') !== 'true' && !element.hasAttribute('data-tabster-dummy'))
+}
+
+function trapDialogKey(event: KeyboardEvent, container: HTMLElement, onClose: () => void) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    onClose()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const controls = focusableChildren(container)
+  if (!controls.length) return
+  const first = controls[0]!
+  const last = controls[controls.length - 1]!
+  const source = event.target
+  if (event.shiftKey && (document.activeElement === first || source === first)) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    last.focus()
+  } else if (!event.shiftKey && (document.activeElement === last || source === last)) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    first.focus()
+  }
+}
+
 export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
+  const dialogRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const qrDialogRef = useRef<HTMLElement>(null)
+  const qrCloseButtonRef = useRef<HTMLButtonElement>(null)
+  const qrReturnFocusRef = useRef<HTMLElement | null>(null)
   const [page, setPage] = useState<SettingsPage>(initialPage)
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => loadSyncSettings())
   const [webdavSettings, setWebdavSettings] = useState<WebdavSettings>(() => loadWebdavSettings())
@@ -92,6 +128,39 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   const [automationBusy, setAutomationBusy] = useState(false)
 
   useEffect(() => setPage(initialPage), [initialPage])
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => closeButtonRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [])
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const dialog = dialogRef.current
+      if (!dialog || webdavQrOpen || !(event.target instanceof Node) || !dialog.contains(event.target)) return
+      trapDialogKey(event, dialog, onClose)
+    }
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => document.removeEventListener('keydown', handleKeyDown, true)
+  }, [onClose, webdavQrOpen])
+  useEffect(() => {
+    if (!webdavQrOpen) return
+    qrReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = requestAnimationFrame(() => qrCloseButtonRef.current?.focus())
+    return () => {
+      cancelAnimationFrame(frame)
+      const target = qrReturnFocusRef.current
+      requestAnimationFrame(() => target?.isConnected && target.focus())
+    }
+  }, [webdavQrOpen])
+  useEffect(() => {
+    if (!webdavQrOpen) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const dialog = qrDialogRef.current
+      if (!dialog || !(event.target instanceof Node) || !dialog.contains(event.target)) return
+      trapDialogKey(event, dialog, () => setWebdavQrOpen(false))
+    }
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => document.removeEventListener('keydown', handleKeyDown, true)
+  }, [webdavQrOpen])
   useEffect(() => { void hasWebdavAppPassword().then(setStoredWebdavAppPassword) }, [])
   useEffect(() => { void getWebdavSyncPassword().then((value) => setStoredWebdavSyncPassword(Boolean(value))) }, [])
   useEffect(() => {
@@ -354,7 +423,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const migrateFromSsh = async () => {
     if (migrating || savingSync || syncState === 'syncing') return
-    if (!window.confirm('将先从 SSH 服务器同步最新数据，再把全部笔记发布到坚果云 WebDAV。迁移后 SSH 同步将不再使用（可在设置中重新启用）。确定继续吗？')) return
+    if (!window.confirm('将从旧 SSH/SFTP 仓库读取最新数据，并一次性发布到坚果云 WebDAV。SSH 仅用于本次迁移或兼容恢复，不作为日常同步。确定继续吗？')) return
     setMigrating(true)
     setSyncMessage(undefined)
     setSyncMessageIsError(false)
@@ -393,8 +462,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   }
 
   return <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-    <section className="settings-dialog settings-center" role="dialog" aria-label="设置">
-      <header className="settings-center-header"><div><h2>Notebook 设置</h2><p>应用的外观、数据、服务和安全选项都集中在这里。</p></div><Button appearance="subtle" aria-label="关闭设置" onClick={onClose}>关闭</Button></header>
+    <section ref={dialogRef} className="settings-dialog settings-center" role="dialog" aria-modal="true" aria-label="设置">
+      <header className="settings-center-header"><div><h2>Notebook 设置</h2><p>应用的外观、数据、服务和安全选项都集中在这里。</p></div><Button ref={closeButtonRef} appearance="subtle" aria-label="关闭设置" onClick={onClose}>关闭</Button></header>
       <div className="settings-center-layout">
         <TabList vertical selectedValue={page} onTabSelect={(_, data) => setPage(data.value as SettingsPage)} aria-label="设置类别">
           <Tab value="general">常规</Tab>
@@ -490,7 +559,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>
             <SettingsSection title="版本历史" description="永久移除旧版本，只把每篇笔记的当前正文保留为新的初始版本。">
               <div className="settings-action-grid"><Button appearance="secondary" disabled={savingSync || syncState === 'syncing'} onClick={() => void resetHistory()}>删除旧历史并重建基线</Button></div>
-              <Text size={200}>此操作不会删除当前正文、图片或附件；完成后会立即通过 SSH 覆盖远端历史。</Text>
+              <Text size={200}>此操作不会删除当前正文、图片或附件；完成后会通过 WebDAV 发布新的同步基线。</Text>
             </SettingsSection>
             <SettingsSection title="当前页面" description={currentPageTitle}>
               <div className="settings-action-grid"><Button onClick={() => onExportPage('md')}>导出 Markdown</Button><Button onClick={() => onExportPage('html')}>导出 HTML</Button><Button onClick={onPrint}>打印 / 导出 PDF</Button></div>
@@ -519,7 +588,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>}
           </>}
           {page === 'services' && <>
-            <SettingsSection title="WebDAV 同步" description="笔记以 v4 日志格式同步到坚果云 WebDAV，Electron、Android 与浏览器共用同一远端仓库。">
+            <SettingsSection title="WebDAV 同步" description="坚果云 WebDAV 是跨设备日常同步的唯一正式方式；笔记以 v4 日志格式同步到同一远端仓库。">
               <div className="sync-settings-form">
                 <Switch aria-label="启用自动同步" checked={syncSettings.enabled} disabled={savingAutoSync} onChange={(_, data) => void toggleAutoSync(data.checked)} label={savingAutoSync ? '正在保存自动同步设置…' : '启用自动同步（关闭后仍可手动同步）'} />
                 {!desktop && <div className="sync-settings-result">浏览器通过 127.0.0.1:8787 的本机 Python 助手连接 WebDAV 同步；应用密码仅保存在当前标签会话。</div>}
@@ -531,7 +600,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   <label><span>远端同步目录</span><Input value={webdavSettings.remotePath} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="notebook_backup" aria-label="远端同步目录" /></label>
                   <label><span>同步密码（预留）</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '供后续跨端隐私加密协议使用；当前隐私笔记不上传'} aria-label="同步密码" /></label>
                 <div className="sync-action-panel">
-                  <div className="sync-action-heading"><strong>连接与同步</strong><span>先检测连接；日常使用双向同步。</span></div>
+                  <div className="sync-action-heading"><strong>连接与同步</strong><span>先检测连接；日常多设备同步只使用 WebDAV。</span></div>
                   <div className="sync-primary-actions">
                     <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void testWebdavServer()}>{checkingServer ? '正在检测…' : '检测服务器连接'}</Button>
                     <Button appearance="primary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void saveAndSync()}>{savingSync || syncState === 'syncing' ? '正在同步…' : '立即同步'}</Button>
@@ -542,12 +611,13 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   {storedWebdavSyncPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavSyncPassword()}>清除已保存同步密码</Button>}
                   {storedWebdavAppPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavAppPassword()}>清除已保存应用密码</Button>}
                 </div>
-                <div className="sync-action-panel">
-                  <div className="sync-action-heading"><strong>从 SSH 迁移</strong><span>把原 SSH 服务器上的笔记一次性发布到坚果云 WebDAV。</span></div>
+                {desktop && <details className="sync-action-panel">
+                  <summary>从旧 SSH 迁移 / 兼容工具</summary>
+                  <div className="sync-action-heading"><strong>旧 SSH/SFTP 仓库</strong><span>仅用于一次性迁移、恢复或核对历史仓库；不再推荐作为持续同步后端。</span></div>
                   <div className="sync-primary-actions">
                     <Button appearance="subtle" disabled={migrating || savingSync || checkingServer || syncState === 'syncing'} onClick={() => void migrateFromSsh()}>{migrating ? '正在迁移…' : '迁移 SSH 数据到坚果云'}</Button>
                   </div>
-                </div>
+                </details>}
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
               <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。正文和一般变更会在停止修改 30 秒后合并同步；窗口失焦、重新聚焦和退出时立即同步。阅读位置只在失焦或退出时发布，页面切换不会联网。</Text>
               </div>
@@ -625,8 +695,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
       </div>
     </section>
     {webdavQrOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWebdavQrOpen(false) }}>
-      <section className="settings-dialog webdav-qr-dialog" role="dialog" aria-label="坚果云配置二维码">
-        <div><h2>坚果云配置二维码</h2><Button appearance="subtle" onClick={() => setWebdavQrOpen(false)}>关闭</Button></div>
+      <section ref={qrDialogRef} className="settings-dialog webdav-qr-dialog" role="dialog" aria-modal="true" aria-label="坚果云配置二维码">
+        <div><h2>坚果云配置二维码</h2><Button ref={qrCloseButtonRef} appearance="subtle" onClick={() => setWebdavQrOpen(false)}>关闭</Button></div>
         {webdavQrDataUrl
           ? <img src={webdavQrDataUrl} alt="坚果云 WebDAV 配置二维码" style={{ width: 300, height: 300 }} />
           : <div className="sync-settings-result error">{webdavQrError ?? '正在生成…'}</div>}
