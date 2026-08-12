@@ -15,7 +15,7 @@ import { pageLinksFromMarkdown } from './referenceIndex'
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
-import { AUTO_SYNC_DEBOUNCE_MS, createQuietSyncScheduler, schedulePendingSyncBatch } from '../sync/syncLifecycle'
+import { AUTO_SYNC_DEBOUNCE_MS, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type SettledSyncState } from '../sync/syncLifecycle'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 const db = new NotebookRendererDatabase(import.meta.env.VITE_NOTEBOOK_DATABASE_NAME ?? 'notebook-next')
@@ -174,6 +174,7 @@ export function useWorkspaceData() {
   const loadedDocumentIds = useRef(new Set<string>())
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
   const [syncError, setSyncError] = useState<string>()
+  const settledSyncState = useRef<SettledSyncState>('offline')
   const syncRunning = useRef(false)
   const syncTask = useRef<Promise<boolean> | undefined>(undefined)
   const queuedSyncTask = useRef<Promise<boolean> | undefined>(undefined)
@@ -279,6 +280,10 @@ export function useWorkspaceData() {
       syncRunning.current = true
       const startedAt = performance.now()
       const mode = options?.mode ?? 'bidirectional'
+      const stateFinalizer = createSyncStateFinalizer(settledSyncState.current, (state) => {
+        settledSyncState.current = state
+        setSyncState(state)
+      })
       setSyncState('syncing')
       setSyncError(undefined)
       recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'started', message: mode })
@@ -286,7 +291,7 @@ export function useWorkspaceData() {
         const result = loadSyncBackend() === 'webdav'
           ? await synchronizeWebdav(repository, WORKSPACE_ID, options?.signal, options?.scope)
           : await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
-        setSyncState(result.state)
+        stateFinalizer.complete(result.state)
         if (result.state !== 'offline') await reload()
         // WebDAV acknowledges one bounded outbox batch at a time. Acking 200
         // items does not create another Dexie record, so schedule the next
@@ -310,14 +315,21 @@ export function useWorkspaceData() {
       } catch (error) {
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
           const message = error instanceof Error ? error.message : '同步失败'
-          setSyncState('error')
+          stateFinalizer.complete('error')
           setSyncError(message)
           recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'run', status: 'failed', message, durationMs: performance.now() - startedAt })
         } else {
           recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'cancelled', durationMs: performance.now() - startedAt })
         }
         return false
-      } finally { syncRunning.current = false }
+      } finally {
+        // Commit the terminal state at the actual end of the run. Keeping this
+        // in finally prevents an aborted lifecycle request or an overlapping
+        // reload from leaving the toolbar permanently stuck on `syncing` even
+        // though the transport already completed (and logged success).
+        stateFinalizer.finish()
+        syncRunning.current = false
+      }
       })()
       syncTask.current = operation
       void operation.finally(() => {

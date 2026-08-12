@@ -1,5 +1,22 @@
 export const AUTO_SYNC_DEBOUNCE_MS = 30_000
 
+export type SettledSyncState = 'offline' | 'synced' | 'conflict' | 'error'
+
+/**
+ * Keeps the last non-transient state while a run is active. A cancelled run
+ * must return to that state instead of leaving the toolbar on `syncing`.
+ */
+export function createSyncStateFinalizer(previous: SettledSyncState, commit: (state: SettledSyncState) => void) {
+  let terminal = previous
+  return {
+    complete(state: SettledSyncState) { terminal = state },
+    finish() {
+      commit(terminal)
+      return terminal
+    },
+  }
+}
+
 /** Coalesces normal durable outbox writes into one quiet-period sync. */
 export function createQuietSyncScheduler(run: () => void | Promise<void>, delayMs = AUTO_SYNC_DEBOUNCE_MS) {
   let timer: ReturnType<typeof setTimeout> | undefined

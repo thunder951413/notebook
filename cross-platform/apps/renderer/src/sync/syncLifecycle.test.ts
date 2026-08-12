@@ -1,9 +1,21 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { createBackgroundSyncGate, createQuietSyncScheduler, schedulePendingSyncBatch } from './syncLifecycle'
+import { createBackgroundSyncGate, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch } from './syncLifecycle'
 
 afterEach(() => vi.useRealTimers())
 
 describe('sync lifecycle scheduling', () => {
+  test('always commits a non-transient state when a sync run finishes', () => {
+    const commit = vi.fn()
+    const successful = createSyncStateFinalizer('offline', commit)
+    successful.complete('synced')
+    expect(successful.finish()).toBe('synced')
+    expect(commit).toHaveBeenLastCalledWith('synced')
+
+    const cancelled = createSyncStateFinalizer('synced', commit)
+    expect(cancelled.finish()).toBe('synced')
+    expect(commit).toHaveBeenLastCalledWith('synced')
+  })
+
   test('waits for a full quiet period before running normal outbox sync', () => {
     vi.useFakeTimers()
     const run = vi.fn()
