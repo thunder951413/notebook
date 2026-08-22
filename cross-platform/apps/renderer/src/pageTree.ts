@@ -43,6 +43,39 @@ export function ancestorsOf(pages: PageSummary[], pageId: string) {
   return result
 }
 
+/**
+ * Descendant count per page in one pass over the tree. Tree rows show this as
+ * a child-count badge; computing it per row during render costs O(n²).
+ * Malformed parent cycles are simply unreachable from the roots and end at 0.
+ */
+export function descendantCountsOf(pages: PageSummary[]) {
+  const knownIds = new Set(pages.map((page) => page.id))
+  const children = new Map<string, string[]>()
+  const roots: string[] = []
+  for (const page of pages) {
+    if (!page.parentPageId || !knownIds.has(page.parentPageId)) roots.push(page.id)
+    else {
+      const bucket = children.get(page.parentPageId) ?? []
+      bucket.push(page.id)
+      children.set(page.parentPageId, bucket)
+    }
+  }
+  const counts = new Map<string, number>()
+  for (const page of pages) counts.set(page.id, 0)
+  const visited = new Set<string>()
+  const path: string[] = []
+  const visit = (pageId: string) => {
+    if (visited.has(pageId)) return
+    visited.add(pageId)
+    for (const ancestorId of path) counts.set(ancestorId, (counts.get(ancestorId) ?? 0) + 1)
+    path.push(pageId)
+    for (const childId of children.get(pageId) ?? []) visit(childId)
+    path.pop()
+  }
+  for (const root of roots) visit(root)
+  return counts
+}
+
 export function flattenPageTree(pages: PageSummary[], expanded: Set<string>, matchingIds?: Set<string>): VisibleTreePage[] {
   const byId = new Map(pages.map((page) => [page.id, page]))
   const children = new Map<string, PageSummary[]>()

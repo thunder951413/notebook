@@ -12,6 +12,7 @@ import type { Asset, AutomationProposal, AutomationProposalChange } from '@noteb
 import type { AIContextBundle } from '@notebook/sync-contract'
 import { diffLines } from 'diff'
 import type { NotebookSummary, PageSummary } from '../model'
+import { requestConfirm } from '../components/confirmDialog'
 import { buildNotebookAIContext, type NotebookAIContextScope } from '../ai/notebookContext'
 import { requestNotebookProposal, streamNotebookAnswer } from '../ai/client'
 import {
@@ -305,7 +306,7 @@ export function AIWorkspace({
       return
     }
     const acceptedDeletes = proposal.changes.filter((change) => accepted.includes(change.id) && change.type === 'delete-page')
-    if (acceptedDeletes.length && !window.confirm(`将把 ${acceptedDeletes.length} 篇页面移到回收站，并连同其他已接受修改一起应用。确定继续吗？`)) return
+    if (acceptedDeletes.length && !(await requestConfirm({ title: `移到回收站 ${acceptedDeletes.length} 篇页面？`, description: '将连同其他已接受修改一起应用。确定继续吗？', confirmLabel: '应用并移到回收站', destructive: true }))) return
     setBusy(true)
     setStatus(undefined)
     try {
@@ -320,7 +321,7 @@ export function AIWorkspace({
 
   const discardProposal = async () => {
     if (!proposal || proposal.status !== 'pending') return
-    if (!window.confirm('放弃整批暂存修改？现有笔记不会发生变化。')) return
+    if (!(await requestConfirm({ title: '放弃整批暂存修改？', description: '现有笔记不会发生变化。', confirmLabel: '放弃修改', destructive: true }))) return
     setBusy(true)
     try {
       await onRejectProposal(proposal.id)

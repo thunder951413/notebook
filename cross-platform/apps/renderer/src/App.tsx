@@ -33,7 +33,7 @@ import {
   WeatherSunny20Regular,
 } from '@fluentui/react-icons'
 import type { PageSummary } from './model'
-import { useWorkspaceData, WORKSPACE_ID, automationRepository } from './data/useWorkspaceData'
+import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from './editor/extensions'
@@ -46,7 +46,7 @@ import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
 import { configureReferenceRuntime } from './editor/referenceRuntime'
 import { OPEN_REFERENCE_PICKER_EVENT } from './editor/referenceCommands'
-import { ancestorsOf, descendantsOf, flattenPageTree } from './pageTree'
+import { ancestorsOf, descendantCountsOf, descendantsOf, flattenPageTree } from './pageTree'
 import { useAbcInputSourceForVimNormal } from './editor/vimInputSource'
 import { referenceTargetElement } from './editor/referenceContent'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
@@ -57,12 +57,14 @@ import { registerAfterFlushHandler, registerFlushHandler } from './data/flushCoo
 import { createBackgroundSyncGate } from './sync/syncLifecycle'
 import { useAutomationBridge } from './automation/automationBridge'
 import { BackupPasswordDialog } from './components/BackupPasswordDialog'
+import { ConfirmDialogHost, requestConfirm } from './components/confirmDialog'
+import { ToastHost, showToast } from './components/toast'
 import { CreateItemDialog } from './components/CreateItemDialog'
 import { EmptyParentPageHint } from './components/EmptyParentPageHint'
 import { ModePlaceholder } from './components/ModePlaceholder'
 import { MovePageDialog } from './components/MovePageDialog'
 import { PageIconPicker } from './components/PageIconPicker'
-import { PageTreeRow, type PageTreeDropTarget } from './components/PageTreeRow'
+import { PageTreeRow, type PageTreeDropTarget, type PageTreeRowActions } from './components/PageTreeRow'
 import { PanelResizer } from './components/PanelResizer'
 import { PrivacyPasswordDialog } from './components/PrivacyPasswordDialog'
 import { RailButton } from './components/RailButton'
@@ -100,6 +102,7 @@ const ReferenceHelpDialog = lazy(() => import('./editor/ReferenceHelpDialog').th
 const AIWorkspace = lazy(() => import('./ai-workspace/AIWorkspace').then((module) => ({ default: module.AIWorkspace })))
 
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
+const emptyPageList: PageSummary[] = []
 
 export interface AppProps {
   theme?: 'light' | 'dark'
@@ -128,10 +131,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const readingPositions = useRef(new Map<string, ViewportPosition>(Object.entries(readLocalReadingPositions())))
   const [loadedReadingPosition, setLoadedReadingPosition] = useState<{ pageId: string; position: ViewportPosition }>()
   const [activeArea, setActiveArea] = useState('notes')
-  const [activeNotebook, setActiveNotebook] = useState('team')
-  const [expandedNotebook, setExpandedNotebook] = useState<string | undefined>('team')
-  const [activeSection, setActiveSection] = useState('product')
-  const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? 'vision')
+  const [activeNotebook, setActiveNotebook] = useState(STARTUP_NOTEBOOK_ID)
+  const [expandedNotebook, setExpandedNotebook] = useState<string | undefined>(STARTUP_NOTEBOOK_ID)
+  const [activeSection, setActiveSection] = useState(STARTUP_SECTION_ID)
+  const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? STARTUP_PAGE_ID)
   const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
 
   useEffect(() => installRendererDiagnostics(), [])
@@ -215,6 +218,21 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   useEffect(() => {
     useAbcInputSourceForVimNormal(vimEnabled, vimCommandMode)
   }, [vimCommandMode, vimEnabled])
+  // Operation feedback used to be visible only inside the settings dialog;
+  // surface it as a toast wherever it was produced.
+  useEffect(() => {
+    if (transferMessage) showToast(transferMessage)
+  }, [transferMessage])
+  // Safety net: async operations without an explicit catch still reach the user.
+  useEffect(() => {
+    const onRejection = (event: PromiseRejectionEvent) => {
+      if (event.reason instanceof DOMException && event.reason.name === 'AbortError') return
+      const message = event.reason instanceof Error ? event.reason.message : typeof event.reason === 'string' && event.reason ? event.reason : undefined
+      if (message) showToast(message, { kind: 'error' })
+    }
+    window.addEventListener('unhandledrejection', onRejection)
+    return () => window.removeEventListener('unhandledrejection', onRejection)
+  }, [])
 
   const visiblePages = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
@@ -226,7 +244,28 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     })
     return pageSort === 'title' ? [...filtered].sort((left, right) => left.title.localeCompare(right.title, 'zh-CN')) : filtered
   }, [accessiblePages, accessibleTrashPages, activeArea, activeSection, pageSort, query])
-  const sectionPages = useMemo(() => accessiblePages.filter((page) => page.kind !== 'task' && page.sectionId === activeSection), [accessiblePages, activeSection])
+  // Grouped once per library change so tree rows receive a stable array
+  // identity (inline filters would break their memoization every render).
+  const pagesBySection = useMemo(() => {
+    const map = new Map<string, PageSummary[]>()
+    for (const page of accessiblePages) {
+      if (page.kind === 'task') continue
+      const bucket = map.get(page.sectionId) ?? []
+      bucket.push(page)
+      map.set(page.sectionId, bucket)
+    }
+    return map
+  }, [accessiblePages])
+  const sectionPages = useMemo(() => pagesBySection.get(activeSection) ?? emptyPageList, [activeSection, pagesBySection])
+  // Per-section descendant counts, merged into one map. Rows render the badge
+  // from this instead of walking the subtree on every render.
+  const pageDescendantCounts = useMemo(() => {
+    const merged = new Map<string, number>()
+    for (const sectionPagesList of pagesBySection.values()) {
+      for (const [pageId, count] of descendantCountsOf(sectionPagesList)) merged.set(pageId, count)
+    }
+    return merged
+  }, [pagesBySection])
   const matchingTreeIds = useMemo(() => {
     if (!query.trim()) return undefined
     const normalized = query.trim().toLocaleLowerCase()
@@ -234,7 +273,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   }, [accessiblePages, query])
   const visibleTreePages = useMemo(() => flattenPageTree(sectionPages, expandedPageIds, matchingTreeIds), [expandedPageIds, matchingTreeIds, sectionPages])
 
-  const currentPage = [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0] ?? emptyPage
+  const currentPage = useMemo(() => [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0] ?? emptyPage, [activePage, accessiblePages, accessibleTrashPages])
   const hasCurrentPage = Boolean(currentPage.id)
   const currentDocument = documents[currentPage.id]
   const currentNotebook = notebooks.find((notebook) => notebook.id === activeNotebook) ?? notebooks[0]
@@ -453,11 +492,15 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setSettingsOpen(true)
   }), [])
 
-  const scheduleDocumentPrefetch = (pageId: string, delay = 160) => {
+  const documentsRef = useRef(documents)
+  documentsRef.current = documents
+  const scheduleDocumentPrefetch = useCallback((pageId: string, delay = 160) => {
     clearTimeout(documentPrefetchTimer.current)
-    if (documents[pageId]) return
+    if (documentsRef.current[pageId]) return
     documentPrefetchTimer.current = setTimeout(() => { void loadDocument(pageId) }, delay)
-  }
+  }, [loadDocument])
+  const stopDocumentPrefetch = useCallback(() => clearTimeout(documentPrefetchTimer.current), [])
+  const clearDropTarget = useCallback(() => setPageDropTarget(undefined), [])
 
   const navigation = usePageNavigation({
     accessiblePages,
@@ -508,6 +551,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setExpandedNotebook,
     setExpandedPageIds,
     setPageDropTarget,
+    onMoveError: (message) => showToast(message, { kind: 'error' }),
   })
   const { togglePageExpanded, createTreePage, createTopLevelPage, setDropPosition, movePageRelative, dropPage } = treeActions
 
@@ -520,10 +564,52 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     const description = referencedBy > 0
       ? `“${page.title}”被 ${referencedBy} 篇页面引用${descendantCount ? `，并包含 ${descendantCount} 篇子页面` : ''}。移到回收站后，这些位置会显示为失效引用，但恢复页面即可重新生效。仍要继续吗？`
       : descendantCount ? `将“${page.title}”及其 ${descendantCount} 篇子页面一起移到回收站？` : `将“${page.title}”移到回收站？`
-    if ((alwaysConfirm || referencedBy > 0) && !window.confirm(description)) return
+    if ((alwaysConfirm || referencedBy > 0) && !(await requestConfirm({ title: '移到回收站', description, confirmLabel: '移到回收站', destructive: true }))) return
     await moveToTrash(pageId)
     if (pageId === currentPage.id) setActivePage(accessiblePages.find((candidate) => candidate.id !== pageId)?.id ?? '')
   }
+
+  // Row menus capture the current library, but PageTreeRow needs a stable
+  // actions object to stay memoized: forward every call through a latest-ref.
+  const latestRowHandlersRef = useRef<PageTreeRowActions | undefined>(undefined)
+  latestRowHandlersRef.current = {
+    createChildPage: (page) => { void createTreePage(page.id) },
+    createSiblingPage: (page) => {
+      if (page.notebookRoot) {
+        setActiveNotebook(notebooks.find((owner) => owner.sections.some((ownerSection) => ownerSection.id === page.sectionId))?.id ?? activeNotebook)
+        setCreateRequest('rootPage')
+        return
+      }
+      void createTreePage(page.parentPageId)
+    },
+    changeIcon: (page) => setIconPickerPage(page),
+    updatePageProps: (page, patch) => { void updatePage(page.id, patch) },
+    duplicatePage: (page) => { void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) }) },
+    promoteToRoot: (page, variant) => {
+      if (variant === 'pages') {
+        const roots = sectionPages.filter((item) => !item.parentPageId && item.id !== page.id)
+        void movePageInTree(page.id, page.sectionId, undefined, Math.max(0, ...roots.map((item) => item.sortOrder ?? 0)) + 1000)
+        return
+      }
+      void promotePageToNotebookRoot(page.id).then((sectionId) => { setActivePage(page.id); setActiveSection(sectionId) })
+    },
+    requestMove: (page) => setMovePageRequest(page),
+    trashPage: (page) => { void trashPage(page.id, true) },
+  }
+  const rowActionsRef = useRef<PageTreeRowActions | undefined>(undefined)
+  if (!rowActionsRef.current) {
+    rowActionsRef.current = {
+      createChildPage: (page) => latestRowHandlersRef.current?.createChildPage(page),
+      createSiblingPage: (page) => latestRowHandlersRef.current?.createSiblingPage(page),
+      changeIcon: (page) => latestRowHandlersRef.current?.changeIcon(page),
+      updatePageProps: (page, patch) => latestRowHandlersRef.current?.updatePageProps(page, patch),
+      duplicatePage: (page) => latestRowHandlersRef.current?.duplicatePage(page),
+      promoteToRoot: (page, variant) => latestRowHandlersRef.current?.promoteToRoot(page, variant),
+      requestMove: (page) => latestRowHandlersRef.current?.requestMove(page),
+      trashPage: (page) => latestRowHandlersRef.current?.trashPage(page),
+    }
+  }
+  const rowActions = rowActionsRef.current
 
   const createPageFromMarkdown = async (title: string, markdown: string) => {
     if (!currentSection) return
@@ -750,10 +836,17 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                       {expanded ? <ChevronDown16Regular /> : <ChevronRight16Regular />}
                       <span>{notebook.emoji}</span><span>{notebook.name}</span>{notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen20Regular /> : <LockClosed20Regular />}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { if (window.confirm(`删除笔记本“${notebook.name}”及其中全部页面、任务、附件和历史版本？此操作无法撤销。`)) void deleteNotebook(notebook.id).catch((error: unknown) => window.alert(error instanceof Error ? error.message : '无法删除笔记本')) }}>删除笔记本及全部内容</button></>}
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
+                      if (!(await requestConfirm({ title: `删除笔记本“${notebook.name}”？`, description: '将删除其中全部页面、任务、附件和历史版本，此操作无法撤销。', confirmLabel: '删除笔记本', destructive: true }))) return
+                      try {
+                        await deleteNotebook(notebook.id)
+                      } catch (error) {
+                        showToast(error instanceof Error ? error.message : '无法删除笔记本', { kind: 'error' })
+                      }
+                    })() }}>删除笔记本及全部内容</button></>}
                     </ActionMenu>
                     {expanded && notebook.sections.map((section) => {
-                      const pagesInSection = accessiblePages.filter((page) => page.kind !== 'task' && page.sectionId === section.id)
+                      const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
                       const treeRows = flattenPageTree(pagesInSection, expandedPageIds, matchingTreeIds)
                       if (treeRows.length === 0) return null
                       return <Fragment key={section.id}>
@@ -762,42 +855,20 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                           page={page}
                           depth={depth}
                           hasChildren={hasChildren}
+                          childCount={pageDescendantCounts.get(page.id) ?? 0}
                           pagesInSection={pagesInSection}
                           variant="navigation"
                           selected={activePage === page.id}
                           expanded={expandedPageIds.has(page.id)}
-                          dropTarget={pageDropTarget}
-                          onActivate={() => activateTreePage(page, hasChildren, 'navigation')}
-                          onToggleExpanded={() => togglePageExpanded(page.id)}
-                          onIconChange={() => setIconPickerPage(page)}
+                          dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
+                          actions={rowActions}
+                          onActivate={activateTreePage}
+                          onToggleExpanded={togglePageExpanded}
                           onPrefetch={scheduleDocumentPrefetch}
-                          onPrefetchStop={() => clearTimeout(documentPrefetchTimer.current)}
+                          onPrefetchStop={stopDocumentPrefetch}
                           onDropPosition={setDropPosition}
                           onDrop={dropPage}
-                          onDragEnd={() => setPageDropTarget(undefined)}
-                          menu={<>
-                            <button onClick={() => { void createTreePage(page.id) }}>新建子页面</button>
-                            <button onClick={() => {
-                              if (page.notebookRoot) {
-                                setActiveNotebook(notebooks.find((owner) => owner.sections.some((ownerSection) => ownerSection.id === page.sectionId))?.id ?? activeNotebook)
-                                setCreateRequest('rootPage')
-                              } else void createTreePage(page.parentPageId)
-                            }}>新建同级页面</button>
-                            <ActionMenuDivider />
-                            <button onClick={() => setIconPickerPage(page)}>更换图标…</button>
-                            {page.icon && <button onClick={() => void updatePage(page.id, { icon: undefined })}>恢复默认图标</button>}
-                            <button onClick={() => void updatePage(page.id, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
-                            {!page.notebookRoot && <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>}
-                            {page.parentPageId && <button onClick={() => {
-                              void promotePageToNotebookRoot(page.id).then((sectionId) => {
-                                setActivePage(page.id)
-                                setActiveSection(sectionId)
-                              })
-                            }}>提升为顶层页面</button>}
-                            <button onClick={() => setMovePageRequest(page)}>移动到…</button>
-                            <ActionMenuDivider />
-                            <button className="destructive-menu-item" onClick={() => { void trashPage(page.id, true) }}>移到回收站</button>
-                          </>}
+                          onDragEnd={clearDropTarget}
                         />)}
                       </Fragment>
                     })}
@@ -822,35 +893,20 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 page={page}
                 depth={depth}
                 hasChildren={hasChildren}
+                childCount={pageDescendantCounts.get(page.id) ?? 0}
                 pagesInSection={sectionPages}
                 variant="pages"
                 selected={activePage === page.id}
                 expanded={expandedPageIds.has(page.id)}
-                dropTarget={pageDropTarget}
-                onActivate={() => activateTreePage(page, hasChildren, 'pages')}
-                onToggleExpanded={() => togglePageExpanded(page.id)}
-                onIconChange={() => setIconPickerPage(page)}
+                dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
+                actions={rowActions}
+                onActivate={activateTreePage}
+                onToggleExpanded={togglePageExpanded}
                 onPrefetch={scheduleDocumentPrefetch}
-                onPrefetchStop={() => clearTimeout(documentPrefetchTimer.current)}
+                onPrefetchStop={stopDocumentPrefetch}
                 onDropPosition={setDropPosition}
                 onDrop={dropPage}
-                onDragEnd={() => setPageDropTarget(undefined)}
-                menu={<>
-                  <button onClick={() => { void createTreePage(page.id) }}>新建子页面</button>
-                  <button onClick={() => { void createTreePage(page.parentPageId) }}>新建同级页面</button>
-                  <ActionMenuDivider />
-                  <button onClick={() => setIconPickerPage(page)}>更换图标…</button>
-                  {page.icon && <button onClick={() => void updatePage(page.id, { icon: undefined })}>恢复默认图标</button>}
-                  <button onClick={() => void updatePage(page.id, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
-                  <button onClick={() => void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) })}>创建副本</button>
-                  {page.parentPageId && <button onClick={() => {
-                    const roots = sectionPages.filter((item) => !item.parentPageId && item.id !== page.id)
-                    void movePageInTree(page.id, page.sectionId, undefined, Math.max(0, ...roots.map((item) => item.sortOrder ?? 0)) + 1000)
-                  }}>提升为顶层页面</button>}
-                  <button onClick={() => setMovePageRequest(page)}>移动到其他分区…</button>
-                  <ActionMenuDivider />
-                  <button className="destructive-menu-item" onClick={() => { void trashPage(page.id, true) }}>移到回收站</button>
-                </>}
+                onDragEnd={clearDropTarget}
               />
             )) : visiblePages.map((page) => (
               <ActionMenu openOnContext key={page.id} label={`${page.title}页面操作`} trigger={<button className={`page-card ${activePage === page.id ? 'selected' : ''}`} onClick={() => {
@@ -866,7 +922,14 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 <p>{page.preview}</p>
                 <div className="page-card-meta"><span>{page.updatedLabel}</span><span>{page.tags.slice(0, 2).join(' · ')}</span></div>
               </button>}>
-                {activeArea === 'trash' ? <><button onClick={() => void restorePage(page.id)}>恢复页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { if (window.confirm(`永久删除“${page.title}”？此操作无法撤销。`)) void purgePage(page.id) }}>永久删除</button></> : <>
+                {activeArea === 'trash' ? <><button onClick={() => void restorePage(page.id)}>恢复页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
+                  if (!(await requestConfirm({ title: `永久删除“${page.title}”？`, description: '此操作无法撤销。', confirmLabel: '永久删除', destructive: true }))) return
+                  try {
+                    await purgePage(page.id)
+                  } catch (error) {
+                    showToast(error instanceof Error ? error.message : '无法永久删除页面', { kind: 'error' })
+                  }
+                })() }}>永久删除</button></> : <>
                   {page.kind === 'task' && <button onClick={() => void updatePage(page.id, { completedAt: page.completedAt ? undefined : new Date().toISOString() })}>{page.completedAt ? '重新打开任务' : '标记为已完成'}</button>}
                   {page.kind === 'task' && <button onClick={() => void updatePage(page.id, { important: !page.important })}>{page.important ? '取消重要标记' : '标记为重要'}</button>}
                   {page.kind === 'task' && (page.reminderAt ? <button onClick={() => void updatePage(page.id, { reminderAt: undefined, recurrenceRule: undefined })}>清除提醒</button> : <button onClick={() => void updatePage(page.id, { reminderAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() })}>1 小时后提醒</button>)}
@@ -922,7 +985,15 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           </div>
           <section className="document-surface">
             {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>检测到其他设备也修改了此笔记</strong><span>当前正文保持本机版本，远端版本已安全保存在“版本”中。继续编辑可保留本机版本；从版本历史恢复远端版本可采用远端内容。</span></div>}
-            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { if (window.confirm('永久删除后无法恢复，确定继续吗？')) void purgePage(currentPage.id).then(() => setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')) }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (visiblePages.length ? <Suspense fallback={null}><TaskDetail task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /></Suspense> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title="还没有任务" description="创建任务后，可以在这里集中跟踪状态、截止时间和步骤。" {...(currentSection ? { actionLabel: '新建任务', onAction: () => { void createPage(activeSection, 'task').then(setActivePage) } } : {})} />) : !currentSection ? <ModePlaceholder icon={<Document20Regular />} title="工作区是空的" description="新建一个笔记本后，再创建分区和页面。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : sectionIsEmpty ? <ModePlaceholder icon={<Document20Regular />} title="这个分区还没有页面" description="创建一篇新页面，开始记录会议、想法或资料。" actionLabel="新建页面" onAction={() => { void createPage(activeSection).then(setActivePage) }} /> : <>
+            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
+                  if (!(await requestConfirm({ title: `永久删除“${currentPage.title}”？`, description: '永久删除后无法恢复，确定继续吗？', confirmLabel: '永久删除', destructive: true }))) return
+                  try {
+                    await purgePage(currentPage.id)
+                    setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')
+                  } catch (error) {
+                    showToast(error instanceof Error ? error.message : '无法永久删除页面', { kind: 'error' })
+                  }
+                })() }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (visiblePages.length ? <Suspense fallback={null}><TaskDetail task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /></Suspense> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title="还没有任务" description="创建任务后，可以在这里集中跟踪状态、截止时间和步骤。" {...(currentSection ? { actionLabel: '新建任务', onAction: () => { void createPage(activeSection, 'task').then(setActivePage) } } : {})} />) : !currentSection ? <ModePlaceholder icon={<Document20Regular />} title="工作区是空的" description="新建一个笔记本后，再创建分区和页面。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : sectionIsEmpty ? <ModePlaceholder icon={<Document20Regular />} title="这个分区还没有页面" description="创建一篇新页面，开始记录会议、想法或资料。" actionLabel="新建页面" onAction={() => { void createPage(activeSection).then(setActivePage) }} /> : !hasActivePage ? <ModePlaceholder icon={<Document20Regular />} title="未选择页面" description="从左侧选择一篇页面，或新建页面开始记录。" /> : <>
             {!currentDocument ? <div className="document-loading" role="status" aria-live="polite">
               <span className="document-loading-spinner" />
               <strong>正在准备笔记…</strong>
@@ -1064,6 +1135,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         if (notebookId) window.setTimeout(() => activateNotebook(notebookId), 0)
       }} />}
       {referencePickerOpen && <Suspense fallback={null}><ReferencePicker pages={accessiblePages} currentPageId={currentPage.id} loadDocument={loadDocument} saveDocument={saveDocument} onClose={() => setReferencePickerOpen(false)} /></Suspense>}
+      <ConfirmDialogHost />
+      <ToastHost />
     </div>
   )
 }

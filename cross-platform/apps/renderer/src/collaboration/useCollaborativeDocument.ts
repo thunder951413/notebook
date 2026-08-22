@@ -17,16 +17,20 @@ async function getAccessToken() {
 }
 
 export function useCollaborativeDocument(workspaceId: string, pageId: string) {
-  const [session, setSession] = useState<CollaborativeDocumentSession>()
+  // Without a collaboration server the session is fully synchronous: creating
+  // it in the initializer avoids a spurious loading frame on every page open.
+  const [session, setSession] = useState<CollaborativeDocumentSession | undefined>(() => (
+    collaborationUrl ? undefined : { document: new Y.Doc(), status: 'offline' }
+  ))
 
   useEffect(() => {
+    if (!collaborationUrl) return
     let disposed = false
     const document = new Y.Doc()
     const documentName = `${workspaceId}:page:${pageId}`
     let provider: HocuspocusProvider | undefined
 
-    if (!collaborationUrl) setSession({ document, status: 'offline' })
-    else void (async () => {
+    void (async () => {
       const token = await getAccessToken()
       if (disposed) return
       provider = new HocuspocusProvider({

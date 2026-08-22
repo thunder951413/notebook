@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { requestConfirm } from '../components/confirmDialog'
 import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/react-components'
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearWebdavAppPassword, clearWebdavSyncPassword, getWebdavAppPassword, getWebdavSyncPassword, hasWebdavAppPassword, loadWebdavSettings, saveWebdavSettings, type WebdavSettings } from '../sync/webdavSettings'
@@ -207,7 +208,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   }
 
   const regenerateAutomationToken = async () => {
-    if (!window.notebookDesktop || automationBusy || !window.confirm('旧 Token 会立即失效。确定重新生成吗？')) return
+    if (!window.notebookDesktop || automationBusy) return
+    if (!(await requestConfirm({ title: '重新生成自动化 Token？', description: '旧 Token 会立即失效。确定重新生成吗？', confirmLabel: '重新生成', destructive: true }))) return
     setAutomationBusy(true)
     try {
       setAutomationState(await window.notebookDesktop.automation.regenerateToken())
@@ -236,7 +238,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const reviewAutomationProposal = async (proposal: AutomationProposal, decision: 'apply' | 'reject') => {
     if (automationBusy) return
-    if (decision === 'apply' && !window.confirm(`将应用“${proposal.title}”中的 ${proposal.changes.length} 项修改。每篇现有笔记都会先保留历史版本，确定继续吗？`)) return
+    if (decision === 'apply' && !(await requestConfirm({ title: `应用“${proposal.title}”？`, description: `将应用其中的 ${proposal.changes.length} 项修改。每篇现有笔记都会先保留历史版本，确定继续吗？`, confirmLabel: '应用修改', destructive: true }))) return
     setAutomationBusy(true)
     setAutomationMessage(undefined)
     try {
@@ -423,7 +425,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const migrateFromSsh = async () => {
     if (migrating || savingSync || syncState === 'syncing') return
-    if (!window.confirm('将从旧 SSH/SFTP 仓库读取最新数据，并一次性发布到坚果云 WebDAV。SSH 仅用于本次迁移或兼容恢复，不作为日常同步。确定继续吗？')) return
+    if (!(await requestConfirm({ title: '从 SSH 迁移到坚果云 WebDAV？', description: '将从旧 SSH/SFTP 仓库读取最新数据，并一次性发布到坚果云 WebDAV。SSH 仅用于本次迁移或兼容恢复，不作为日常同步。确定继续吗？', confirmLabel: '开始迁移', destructive: true }))) return
     setMigrating(true)
     setSyncMessage(undefined)
     setSyncMessageIsError(false)
@@ -445,7 +447,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
   }
 
   const resetHistory = async () => {
-    if (savingSync || !window.confirm('这会永久删除所有旧历史版本，并将每篇笔记的当前内容设为唯一初始版本。随后需要同步覆盖远端。确定继续吗？')) return
+    if (savingSync) return
+    if (!(await requestConfirm({ title: '重置全部版本历史？', description: '这会永久删除所有旧历史版本，并将每篇笔记的当前内容设为唯一初始版本。随后需要同步覆盖远端。确定继续吗？', confirmLabel: '重置历史', destructive: true }))) return
     setSavingSync(true)
     setSyncMessage(undefined)
     try {

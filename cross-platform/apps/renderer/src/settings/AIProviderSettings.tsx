@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { requestConfirm } from '../components/confirmDialog'
 import { Button, Input, Select, Switch, Text } from '@fluentui/react-components'
 import {
   AI_PROVIDER_PRESETS,
@@ -76,7 +77,8 @@ export function AIProviderSettingsPanel() {
   }
 
   const removeKey = async () => {
-    if (!window.notebookDesktop || busy || !window.confirm('确定删除本机保存的 AI API Key 吗？')) return
+    if (!window.notebookDesktop || busy) return
+    if (!(await requestConfirm({ title: '删除本机保存的 AI API Key？', confirmLabel: '删除', destructive: true }))) return
     setBusy(true)
     try {
       await window.notebookDesktop.ai.deleteKey(settings.provider, settings.baseUrl)

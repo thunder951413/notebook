@@ -29,71 +29,81 @@ export interface PageNavigationOptions {
  * Navigation actions shared by the rail, page tree, history buttons and the
  * command palette. All of them resolve a target page through the accessible
  * page set and keep notebook/section/page state consistent.
+ *
+ * Callbacks read the latest options through a ref so their identity stays
+ * stable across renders; tree rows and rail buttons can therefore be memoized.
  */
 export function usePageNavigation(options: PageNavigationOptions) {
+  const optionsRef = useRef(options)
+  optionsRef.current = options
   const historyNavigationTarget = useRef<string | undefined>(undefined)
 
   const selectArea = useCallback((area: 'notes' | 'tasks' | 'trash') => {
-    options.setActiveArea(area)
-    options.setQuery('')
+    const current = optionsRef.current
+    current.setActiveArea(area)
+    current.setQuery('')
     if (area === 'notes') {
-      const firstPage = options.accessiblePages.find((page) => page.kind !== 'task' && page.sectionId === options.activeSection)
-      if (firstPage) options.setActivePage(firstPage.id)
+      const firstPage = current.accessiblePages.find((page) => page.kind !== 'task' && page.sectionId === current.activeSection)
+      if (firstPage) current.setActivePage(firstPage.id)
       return
     }
     if (area === 'tasks') {
-      options.setPagesOpen(true)
-      const firstTask = options.accessiblePages.find((page) => page.kind === 'task')
-      if (firstTask) options.setActivePage(firstTask.id)
+      current.setPagesOpen(true)
+      const firstTask = current.accessiblePages.find((page) => page.kind === 'task')
+      if (firstTask) current.setActivePage(firstTask.id)
       return
     }
-    options.setPagesOpen(true)
-    if (options.accessibleTrashPages[0]) options.setActivePage(options.accessibleTrashPages[0].id)
-  }, [options])
+    current.setPagesOpen(true)
+    if (current.accessibleTrashPages[0]) current.setActivePage(current.accessibleTrashPages[0].id)
+  }, [])
 
   const toggleNavigation = useCallback(() => {
-    if (options.navigationOpen) {
-      options.setNavOpen(false)
-      options.setPagesOpen(false)
+    const current = optionsRef.current
+    if (current.navigationOpen) {
+      current.setNavOpen(false)
+      current.setPagesOpen(false)
       return
     }
-    options.setPagesOpen(true)
-    if (options.activeArea === 'notes') options.setNavOpen(true)
-  }, [options])
+    current.setPagesOpen(true)
+    if (current.activeArea === 'notes') current.setNavOpen(true)
+  }, [])
 
   const openRecentPage = useCallback((pageId: string) => {
-    const page = options.accessiblePages.find((candidate) => candidate.id === pageId)
+    const current = optionsRef.current
+    const page = current.accessiblePages.find((candidate) => candidate.id === pageId)
     if (!page) return
-    const notebook = options.notebooks.find((candidate) => candidate.sections.some((section) => section.id === page.sectionId))
-    options.setActiveArea('notes')
-    options.setActivePage(page.id)
-    options.setActiveSection(page.sectionId)
-    if (notebook) { options.setActiveNotebook(notebook.id); options.setExpandedNotebook(notebook.id) }
-  }, [options])
+    const notebook = current.notebooks.find((candidate) => candidate.sections.some((section) => section.id === page.sectionId))
+    current.setActiveArea('notes')
+    current.setActivePage(page.id)
+    current.setActiveSection(page.sectionId)
+    if (notebook) { current.setActiveNotebook(notebook.id); current.setExpandedNotebook(notebook.id) }
+  }, [])
 
   const navigatePageHistory = useCallback((direction: -1 | 1) => {
-    const result = pageVisitTarget(options.pageHistory, direction, (pageId) => options.accessibleDocumentPageIds.has(pageId))
+    const current = optionsRef.current
+    const result = pageVisitTarget(current.pageHistory, direction, (pageId) => current.accessibleDocumentPageIds.has(pageId))
     if (!result.pageId) return
     historyNavigationTarget.current = result.pageId
-    options.setPageHistory(result.history)
+    current.setPageHistory(result.history)
     openRecentPage(result.pageId)
-  }, [openRecentPage, options])
+  }, [openRecentPage])
 
   const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
-    options.setActivePage(page.id)
-    options.setActiveSection(page.sectionId)
-    const owner = options.notebooks.find((notebook) => notebook.sections.some((section) => section.id === page.sectionId))
+    const current = optionsRef.current
+    current.setActivePage(page.id)
+    current.setActiveSection(page.sectionId)
+    const owner = current.notebooks.find((notebook) => notebook.sections.some((section) => section.id === page.sectionId))
     if (owner) {
-      options.setActiveNotebook(owner.id)
-      options.setExpandedNotebook(owner.id)
+      current.setActiveNotebook(owner.id)
+      current.setExpandedNotebook(owner.id)
     }
     if (hasChildren) {
-      options.setExpandedPageIds((current) => current.has(page.id) ? current : new Set([...current, page.id]))
+      current.setExpandedPageIds((currentIds) => currentIds.has(page.id) ? currentIds : new Set([...currentIds, page.id]))
     }
     if (!window.matchMedia('(max-width: 680px)').matches) return
-    if (closeOnNarrow === 'navigation') options.setNavOpen(false)
-    options.setPagesOpen(false)
-  }, [options])
+    if (closeOnNarrow === 'navigation') current.setNavOpen(false)
+    current.setPagesOpen(false)
+  }, [])
 
   return { selectArea, toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget }
 }

@@ -12,12 +12,20 @@ import { synchronizeWebdav } from '../sync/webdavSync'
 import { normalizeReferenceTargetIds } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
+import { formatUpdatedLabel } from '../updatedLabel'
+import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
 import { AUTO_SYNC_DEBOUNCE_MS, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type SettledSyncState } from '../sync/syncLifecycle'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
+// A fresh install opens on the bundled sample workspace so the first screen has
+// content. These IDs seed the database below and are the single source of truth
+// for the app shell's initial selection.
+export const STARTUP_NOTEBOOK_ID = 'team'
+export const STARTUP_SECTION_ID = 'product'
+export const STARTUP_PAGE_ID = 'vision'
 const db = new NotebookRendererDatabase(import.meta.env.VITE_NOTEBOOK_DATABASE_NAME ?? 'notebook-next')
 const repository = new DexieNotebookRepository(db)
 export const automationRepository = repository
@@ -118,17 +126,17 @@ function enqueuePageMutation<T>(pageId: string, mutation: () => Promise<T>): Pro
 const timestamps = { createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z' }
 const seedNotebooks: Notebook[] = [
   { id: 'personal', workspaceId: WORKSPACE_ID, name: '我的笔记本', emoji: '📓', sortOrder: 0, ...timestamps },
-  { id: 'team', workspaceId: WORKSPACE_ID, name: '产品团队', emoji: '👥', sortOrder: 1, ...timestamps },
+  { id: STARTUP_NOTEBOOK_ID, workspaceId: WORKSPACE_ID, name: '产品团队', emoji: '👥', sortOrder: 1, ...timestamps },
 ]
 const seedSections: Section[] = [
   { id: 'inbox', notebookId: 'personal', name: '快速记录', color: '#7c3aed', sortOrder: 0, ...timestamps },
   { id: 'research', notebookId: 'personal', name: '研究与阅读', color: '#2563eb', sortOrder: 1, ...timestamps },
   { id: 'projects', notebookId: 'personal', name: '项目', color: '#0f766e', sortOrder: 2, ...timestamps },
-  { id: 'product', notebookId: 'team', name: '产品设计', color: '#c2410c', sortOrder: 0, ...timestamps },
+  { id: 'product', notebookId: STARTUP_NOTEBOOK_ID, name: '产品设计', color: '#c2410c', sortOrder: 0, ...timestamps },
   { id: 'meetings', notebookId: 'team', name: '会议记录', color: '#be185d', sortOrder: 1, ...timestamps },
 ]
 const seedPages: Page[] = [
-  { id: 'vision', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'document', title: 'Notebook Next 产品愿景', preview: '把笔记、任务、AI 与跨设备编辑放进同一个可靠的工作区。', favorite: true, syncStatus: 'local', ...timestamps },
+  { id: STARTUP_PAGE_ID, workspaceId: WORKSPACE_ID, sectionId: STARTUP_SECTION_ID, kind: 'document', title: 'Notebook Next 产品愿景', preview: '把笔记、任务、AI 与跨设备编辑放进同一个可靠的工作区。', favorite: true, syncStatus: 'local', ...timestamps },
   { id: 'ai-workflow', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'document', title: 'AI 工作流设计', preview: '选择内容后可以总结、解释、改写，并把结果安全地写回当前笔记。', favorite: false, syncStatus: 'local', ...timestamps },
   { id: 'migration', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'document', title: '旧版本数据迁移', preview: '保留 UUID、附件校验、墓碑与版本历史，并提供迁移前快照。', favorite: false, syncStatus: 'local', ...timestamps },
   { id: 'task-review', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'task', title: '完成跨平台编辑器验收', preview: '验证表格、代码、附件、离线保存和三平台输入法。', favorite: false, important: true, dueAt: '2026-07-22T10:00:00.000Z', syncStatus: 'local', ...timestamps },
@@ -136,7 +144,7 @@ const seedPages: Page[] = [
 ]
 
 const tagMap: Record<string, string[]> = {
-  vision: ['产品', '愿景'], 'ai-workflow': ['AI', '交互'], migration: ['迁移', '可靠性'],
+  [STARTUP_PAGE_ID]: ['产品', '愿景'], 'ai-workflow': ['AI', '交互'], migration: ['迁移', '可靠性'],
 }
 
 const toPageSummary = (page: Page): PageSummary => ({
@@ -149,7 +157,7 @@ const toPageSummary = (page: Page): PageSummary => ({
   treeUpdatedAt: page.treeUpdatedAt,
   title: page.title,
   preview: page.preview,
-  updatedLabel: page.updatedAt.startsWith('2026-07-21') ? '刚刚' : new Date(page.updatedAt).toLocaleDateString(),
+  updatedLabel: formatUpdatedLabel(page.updatedAt),
   tags: tagMap[page.id] ?? [],
   favorite: page.favorite,
   kind: page.kind,
@@ -172,6 +180,13 @@ export function useWorkspaceData() {
   const [referenceIndexRevision, setReferenceIndexRevision] = useState(0)
   const documentsRef = useRef(documents)
   const loadedDocumentIds = useRef(new Set<string>())
+  // Latest-record mirrors for callbacks that must not depend on state identity.
+  const sectionRecordsRef = useRef(sectionRecords)
+  const pageRecordsRef = useRef(pageRecords)
+  const trashRecordsRef = useRef(trashRecords)
+  sectionRecordsRef.current = sectionRecords
+  pageRecordsRef.current = pageRecords
+  trashRecordsRef.current = trashRecords
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
   const [syncError, setSyncError] = useState<string>()
   const settledSyncState = useRef<SettledSyncState>('offline')
@@ -570,15 +585,26 @@ export function useWorkspaceData() {
         await repository.createManualRevision(pageId)
       }
       const updatedAt = new Date().toISOString()
-      await repository.savePage({ ...page, ...patch, id: page.id, updatedAt, syncStatus: 'pending' })
+      const saved = applyPendingPatch(page, patch, updatedAt)
+      await repository.savePage(saved)
+      // A top-level page owns a transparent legacy Section whose name follows
+      // the title, so the rename touches two records.
+      let renamedSection: Section | undefined
       const rootSectionId = notebookRootSectionId(page)
       if (rootSectionId && typeof patch.title === 'string') {
-        const section = sectionRecords.find((item) => item.id === rootSectionId)
-        if (section) await repository.saveSection({ ...section, name: patch.title, updatedAt })
+        const section = sectionRecordsRef.current.find((item) => item.id === rootSectionId)
+        if (section) {
+          renamedSection = { ...section, name: patch.title, updatedAt }
+          await repository.saveSection(renamedSection)
+        }
       }
-      await reload()
+      // Mirror just the touched records; reloading the entire library for a
+      // favorite/icon/reminder toggle cost a full scan plus one read per page.
+      setPageRecords((current) => replaceById(current, saved))
+      if (renamedSection) setSectionRecords((current) => replaceById(current, renamedSection))
+      setReferenceIndexRevision((current) => current + 1)
     })
-  }, [reload, sectionRecords])
+  }, [])
 
   const movePageInTree = useCallback(async (pageId: string, sectionId: string, parentPageId: string | undefined, sortOrder: number) => {
     await enqueuePageMutation(pageId, async () => {
@@ -779,32 +805,53 @@ export function useWorkspaceData() {
     return results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? '')).slice(0, limit)
   }, [privateSectionIds])
   const moveToTrash = useCallback(async (pageId: string) => {
-    const ids = treePageIds(pageRecords, pageId)
+    const ids = new Set(treePageIds(pageRecordsRef.current, pageId))
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.movePageToTrash(id, deletedAt, legacyDeviceId())
-    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'trash', status: 'success', message: `${ids.length} 个页面` })
-    await reload()
-  }, [pageRecords, reload])
+    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'trash', status: 'success', message: `${ids.size} 个页面` })
+    // Read the moved records back so the mirror matches storage exactly.
+    const trashed: Page[] = []
+    for (const id of ids) {
+      const page = await repository.getPage(id)
+      if (page?.deletedAt) trashed.push(page)
+    }
+    setPageRecords((current) => withoutIds(current, ids))
+    setTrashRecords((current) => withRecords(current, trashed))
+    setReferenceIndexRevision((current) => current + 1)
+  }, [])
   const restorePage = useCallback(async (pageId: string) => {
-    const ids = treePageIds(trashRecords, pageId)
+    const ids = new Set(treePageIds(trashRecordsRef.current, pageId))
     for (const id of ids) await repository.restorePage(id)
-    recordDiagnosticEvent({ level: 'info', category: 'page', action: 'restore', status: 'success', message: `${ids.length} 个页面` })
-    await reload()
-  }, [reload, trashRecords])
+    recordDiagnosticEvent({ level: 'info', category: 'page', action: 'restore', status: 'success', message: `${ids.size} 个页面` })
+    const restored: Page[] = []
+    for (const id of ids) {
+      const page = await repository.getPage(id)
+      if (page && !page.deletedAt) restored.push(page)
+    }
+    setTrashRecords((current) => withoutIds(current, ids))
+    setPageRecords((current) => withRecords(current, restored))
+    setReferenceIndexRevision((current) => current + 1)
+  }, [])
   const purgePage = useCallback(async (pageId: string) => {
-    const page = await repository.getPage(pageId)
+    const page = trashRecordsRef.current.find((item) => item.id === pageId) ?? await repository.getPage(pageId)
     const rootSectionId = page ? notebookRootSectionId(page) : undefined
     if (rootSectionId) {
       await repository.deleteSection(rootSectionId, new Date().toISOString(), legacyDeviceId())
-      await reload()
+      // The section cascade purges every page that lives in it, trashed or not.
+      setPageRecords((current) => current.filter((item) => item.sectionId !== rootSectionId))
+      setSectionRecords((current) => current.filter((item) => item.id !== rootSectionId))
+      setTrashRecords((current) => current.filter((item) => item.sectionId !== rootSectionId))
+      recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success' })
+      setReferenceIndexRevision((current) => current + 1)
       return
     }
-    const ids = treePageIds(trashRecords, pageId)
+    const ids = new Set(treePageIds(trashRecordsRef.current, pageId))
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.purgePage(id, deletedAt, legacyDeviceId())
-    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success', message: `${ids.length} 个页面` })
-    await reload()
-  }, [reload, trashRecords])
+    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success', message: `${ids.size} 个页面` })
+    setTrashRecords((current) => withoutIds(current, ids))
+    setReferenceIndexRevision((current) => current + 1)
+  }, [])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
   const resetRevisionHistory = useCallback(async () => {

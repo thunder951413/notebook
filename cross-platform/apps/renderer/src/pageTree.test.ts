@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PageSummary } from './model'
-import { ancestorsOf, descendantsOf, flattenPageTree } from './pageTree'
+import { ancestorsOf, descendantCountsOf, descendantsOf, flattenPageTree } from './pageTree'
 
 const page = (id: string, parentPageId?: string, sortOrder = 1000): PageSummary => ({
   id,
@@ -48,5 +48,19 @@ describe('page tree', () => {
     const cyclic = [page('one', 'two'), page('two', 'one')]
     expect([...descendantsOf(cyclic, 'one')]).toEqual(['two'])
     expect(flattenPageTree(cyclic, new Set(['one', 'two']))).toEqual([])
+  })
+
+  it('counts descendants per page in one pass and tolerates cycles', () => {
+    const counts = descendantCountsOf(pages)
+    expect(counts.get('root-a')).toBe(2)
+    expect(counts.get('child')).toBe(1)
+    expect(counts.get('grandchild')).toBe(0)
+    expect(counts.get('root-b')).toBe(0)
+    // Cycle members are unreachable from any root, so they stay at zero
+    // instead of recursing forever.
+    const cyclic = descendantCountsOf([page('one', 'two'), page('two', 'one'), page('leaf')])
+    expect(cyclic.get('one')).toBe(0)
+    expect(cyclic.get('two')).toBe(0)
+    expect(cyclic.get('leaf')).toBe(0)
   })
 })

@@ -10,6 +10,7 @@ import type { Asset } from '@notebook/domain'
 import { useCollaborativeDocument } from '../collaboration/useCollaborativeDocument'
 import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from './extensions'
 import { registerFlushHandler } from '../data/flushCoordinator'
+import { createTrailingDebounce, type TrailingDebounce } from './saveScheduler'
 import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail } from './referenceCommands'
 import { OUTLINE_JUMP_EVENT } from './OutlinePanel'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
@@ -48,6 +49,11 @@ export interface DocumentEditorProps {
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
+
+// Crash drafts stay bounded behind a short trailing debounce; the durable save
+// keeps its original 450ms idle cadence. Both flush immediately on quit.
+const DRAFT_DEBOUNCE_MS = 250
+const SAVE_DEBOUNCE_MS = 450
 
 const vimBlockCursorPluginKey = new PluginKey<boolean>('vimBlockCursor')
 
@@ -174,7 +180,6 @@ export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initi
 }
 
 function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const bodyRef = useRef<HTMLDivElement>(null)
   const restoreTimers = useRef<number[]>([])
   const restoredViewportPage = useRef<string | undefined>(undefined)
@@ -182,7 +187,9 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const userMovedViewport = useRef(false)
   const viewportInteractionVersion = useRef(0)
   const latestJson = useRef<Record<string, unknown> | undefined>(undefined)
-  const latestJsonSignature = useRef<string | undefined>(content ? JSON.stringify(content) : undefined)
+  // Signature of the JSON last known to be accepted by storage (or delivered
+  // from it). Compared lazily so typing never serializes the whole document.
+  const lastCommittedSignature = useRef<string | undefined>(undefined)
   const lastAppliedContent = useRef(content)
   const onChangeRef = useRef(onChange)
   const onDraftRef = useRef(onDraft)
@@ -192,6 +199,8 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const vimModeRef = useRef<'normal' | 'insert'>('insert')
   const pendingVimKey = useRef<string | undefined>(undefined)
   const suppressedVimTransitionText = useRef<string | undefined>(undefined)
+  const draftScheduler = useRef<TrailingDebounce | undefined>(undefined)
+  const commitScheduler = useRef<TrailingDebounce | undefined>(undefined)
   const [vimMode, setVimMode] = useState<'normal' | 'insert'>('insert')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -202,6 +211,24 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   onViewportChangeRef.current = onViewportChange
   onVimCommandModeChangeRef.current = onVimCommandModeChange
   vimEnabledRef.current = vimEnabled
+  const commitNow = async () => {
+    commitScheduler.current?.cancel()
+    draftScheduler.current?.cancel()
+    const json = latestJson.current
+    if (!json) return
+    const signature = JSON.stringify(json)
+    await onChangeRef.current?.(json)
+    lastCommittedSignature.current = signature
+  }
+  if (!draftScheduler.current) {
+    draftScheduler.current = createTrailingDebounce(DRAFT_DEBOUNCE_MS, () => {
+      const json = latestJson.current
+      if (json) void Promise.resolve(onDraftRef.current?.(json)).catch(() => undefined)
+    })
+  }
+  if (!commitScheduler.current) {
+    commitScheduler.current = createTrailingDebounce(SAVE_DEBOUNCE_MS, () => { void commitNow().catch(() => undefined) })
+  }
   const changeVimMode = (mode: 'normal' | 'insert') => {
     vimModeRef.current = mode
     pendingVimKey.current = undefined
@@ -241,13 +268,11 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         const next = isLargeEditorDocument(currentEditor)
         return current === next ? current : next
       })
+      // Typing stays O(1) per transaction here: no full-document serialization
+      // until the draft/save debounces actually fire.
       latestJson.current = currentEditor.getJSON()
-      latestJsonSignature.current = JSON.stringify(latestJson.current)
-      void Promise.resolve(onDraftRef.current?.(latestJson.current)).catch(() => undefined)
-      clearTimeout(saveTimer.current)
-      saveTimer.current = setTimeout(() => {
-        if (latestJson.current) onChangeRef.current?.(latestJson.current)
-      }, 450)
+      draftScheduler.current?.call()
+      commitScheduler.current?.call()
     },
     editorProps: {
       attributes: {
@@ -457,7 +482,9 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     if (!editor || !content) return
     if (lastAppliedContent.current === content) return
     const contentSignature = JSON.stringify(content)
-    if (latestJsonSignature.current === contentSignature) {
+    if (lastCommittedSignature.current === contentSignature) {
+      // Our own committed save round-tripped through storage; nothing to apply.
+      // Uncommitted typing after that commit is intentionally preserved.
       lastAppliedContent.current = content
       return
     }
@@ -470,7 +497,8 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     const previousScrollTop = body?.scrollTop
     const previousSelection = editor.state.selection
     const interactionVersion = viewportInteractionVersion.current
-    clearTimeout(saveTimer.current)
+    draftScheduler.current?.cancel()
+    commitScheduler.current?.cancel()
     editor.commands.setContent(content, { emitUpdate: false })
     const maximumPosition = editor.state.doc.content.size
     try {
@@ -491,7 +519,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       })
     }
     latestJson.current = editor.getJSON()
-    latestJsonSignature.current = JSON.stringify(latestJson.current)
+    lastCommittedSignature.current = contentSignature
     lastAppliedContent.current = content
     setLargeDocument(isLargeEditorDocument(editor))
   }, [content, editor])
@@ -541,14 +569,14 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }, [editor, pageId, viewportPosition])
 
   useEffect(() => () => {
-    clearTimeout(saveTimer.current)
-    if (latestJson.current) onChangeRef.current?.(latestJson.current)
+    // Final save on unmount (page switch), but only when the editor holds
+    // content storage has not already accepted — no redundant pending marks.
+    draftScheduler.current?.cancel()
+    commitScheduler.current?.cancel()
+    void commitNow().catch(() => undefined)
   }, [])
 
-  useEffect(() => registerFlushHandler(async () => {
-    clearTimeout(saveTimer.current)
-    if (latestJson.current) await onChangeRef.current?.(latestJson.current)
-  }), [])
+  useEffect(() => registerFlushHandler(() => commitNow()), [])
 
   useEffect(() => {
     if (!editor) return
