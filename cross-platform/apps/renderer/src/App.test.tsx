@@ -164,7 +164,7 @@ test('renders the OneNote-style workspace and editor', async () => {
   expect(syncButton.compareDocumentPosition(trashButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   fireEvent.click(syncButton)
   const syncDetails = await within(container).findByRole('dialog', { name: '同步状态详情' })
-  expect(within(syncDetails).getByText('尚未配置坚果云 WebDAV 同步，当前修改只保存在本机。')).toBeInTheDocument()
+  expect(within(syncDetails).getByText('自动同步未启用或尚未配置，当前修改保存在本机。')).toBeInTheDocument()
   fireEvent.keyDown(document, { key: 'Escape' })
 
   const pageList = screen.getByRole('complementary', { name: '文档导航' })

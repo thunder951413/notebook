@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, validatedWebdavBaseUrl, type WebdavConnection } from './webdav'
+import { configureWebdavFetch } from './webdavFetch'
 
 /**
  * Minimal in-memory WebDAV server (MKCOL/PUT/GET/DELETE/PROPFIND) exercising
@@ -17,14 +18,15 @@ const decodePath = (raw: string) => {
 
 const xmlEscape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
 
-function multistatus(entries: Array<{ href: string; isDirectory: boolean }>) {
-  const responses = entries.map(({ href, isDirectory }) => [
+function multistatus(entries: Array<{ href: string; isDirectory: boolean; data: Buffer | null }>) {
+  const responses = entries.map(({ href, isDirectory, data }) => [
     '  <d:response>',
     `    <d:href>${xmlEscape(href)}</d:href>`,
     '    <d:propstat>',
     '      <d:prop>',
     isDirectory ? '        <d:resourcetype><d:collection/></d:resourcetype>' : '        <d:resourcetype/>',
     `        <d:displayname>${xmlEscape(href.split('/').filter(Boolean).pop() ?? '')}</d:displayname>`,
+    data && etagMode !== 'missing' ? `        <d:getetag>${xmlEscape(`${etagMode === 'weak' ? 'W/' : ''}"${createHash('sha256').update(data).digest('hex')}"`)}</d:getetag>` : '',
     '      </d:prop>',
     '      <d:status>HTTP/1.1 200 OK</d:status>',
     '    </d:propstat>',
@@ -35,11 +37,14 @@ function multistatus(entries: Array<{ href: string; isDirectory: boolean }>) {
 
 function serve(entries: Map<string, ServerEntry>) {
   return createServer(async (request: IncomingMessage, response: ServerResponse) => {
-    const path = decodePath(request.url ?? '/')
-    requestLog.push({ method: request.method ?? '', path })
+    const path = decodePath(request.url ?? '/').replace(/\/$/, '')
+    const requestEntry = { method: request.method ?? '', path, bytes: 0 }
+    requestLog.push(requestEntry)
     try {
       switch (request.method) {
         case 'MKCOL': {
+          const parent = path.slice(0, path.lastIndexOf('/'))
+          if (parent !== '/dav' && !entries.has(parent)) { response.writeHead(409).end(); break }
           if (entries.has(path) || [...entries.keys()].some((key) => key.startsWith(`${path}/`))) {
             response.writeHead(405).end()
           } else {
@@ -51,14 +56,17 @@ function serve(entries: Map<string, ServerEntry>) {
         case 'PUT': {
           const chunks: Buffer[] = []
           for await (const chunk of request) chunks.push(chunk as Buffer)
-          entries.set(path, { data: Buffer.concat(chunks) })
+          const data = Buffer.concat(chunks)
+          requestEntry.bytes = data.byteLength
+          if (!entries.has(path.slice(0, path.lastIndexOf('/')))) { response.writeHead(409).end(); break }
+          entries.set(path, { data })
           response.writeHead(201).end()
           break
         }
         case 'GET': {
           const entry = entries.get(path)
           if (!entry || entry.data === null) { response.writeHead(404).end(); break }
-          response.writeHead(200, { 'content-type': 'application/octet-stream' })
+          response.writeHead(200, { 'content-type': 'application/octet-stream', etag: `"${createHash('sha256').update(entry.data).digest('hex')}"` })
           response.end(entry.data)
           break
         }
@@ -89,7 +97,7 @@ function serve(entries: Map<string, ServerEntry>) {
             return false
           })
           response.writeHead(207, { 'content-type': 'application/xml; charset=utf-8' })
-          response.end(multistatus(children.map((key) => ({ href: key, isDirectory: entries.get(key)!.data === null }))))
+          response.end(multistatus(children.map((key) => ({ href: key, isDirectory: entries.get(key)!.data === null, data: entries.get(key)!.data }))))
           break
         }
         case 'OPTIONS':
@@ -109,9 +117,12 @@ let baseUrl = ''
 let connection: WebdavConnection
 const entries = new Map<string, ServerEntry>()
 let propfindFailureStatus: number | undefined
-const requestLog: Array<{ method: string; path: string }> = []
+let etagMode: 'strong' | 'weak' | 'missing' = 'strong'
+const requestLog: Array<{ method: string; path: string; bytes: number }> = []
 
 beforeAll(async () => {
+  // Exercise the same WHATWG fetch/Response adapter used by Electron net.fetch.
+  configureWebdavFetch((url, init) => fetch(url, init))
   server = serve(entries)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -144,10 +155,84 @@ describe('webdav transport', () => {
     const result = await testWebdavConnection(connection)
     expect(result.ok).toBe(true)
     expect(result.remotePathExists).toBe(false)
-    // A pull provisions journal/, so the next probe sees a fully usable root.
+    // Reading an empty repository must not create directories or upload data.
+    const start = requestLog.length
     await pullWebdavJournals(connection, {})
+    expect(requestLog.slice(start).map((request) => request.method)).toEqual(['PROPFIND'])
     const second = await testWebdavConnection(connection)
-    expect(second.remotePathExists).toBe(true)
+    expect(second.remotePathExists).toBe(false)
+  })
+
+  test('warm unchanged pulls use only one listing; changed heads and missing/weak validators are re-read', async () => {
+    const isolated = { ...connection, remotePath: 'etag-test' }
+    const deviceId = '00000000-0000-4000-8000-0000000000aa'
+    const row = { ts: '2026-09-04T00:00:00.000Z', op: 'upsert' as const, type: 'page', id: 'etag-page', ver: 0, payload: { title: 'first' } }
+    await appendWebdavJournal(isolated, deviceId, [row])
+    await pullWebdavJournals(isolated)
+    const start = requestLog.length
+    expect((await pullWebdavJournals(isolated, { [deviceId]: 1 })).entries).toHaveLength(0)
+    expect(requestLog.slice(start).map((request) => request.method)).toEqual(['PROPFIND'])
+    await appendWebdavJournal(isolated, deviceId, [{ ...row, ver: 1, payload: { title: 'second' } }])
+    expect((await pullWebdavJournals(isolated, { [deviceId]: 1 })).entries[0]?.payload.title).toBe('second')
+    try {
+      for (const mode of ['missing', 'weak'] as const) {
+        etagMode = mode
+        const before = requestLog.length
+        await pullWebdavJournals(isolated, { [deviceId]: 2 })
+        expect(requestLog.slice(before).map((request) => request.method)).toEqual(['PROPFIND', 'GET'])
+      }
+    } finally { etagMode = 'strong' }
+  })
+
+  test('successive journal batches reuse provisioned directories', async () => {
+    const isolated = { ...connection, remotePath: 'mkdir-test/nested' }
+    const deviceId = '00000000-0000-4000-8000-0000000000bb'
+    const row = { ts: '2026-09-04T00:00:00.000Z', op: 'delete' as const, type: 'page', id: 'removed', ver: 0, payload: {} }
+    await appendWebdavJournal(isolated, deviceId, [row])
+    const before = requestLog.length
+    await appendWebdavJournal(isolated, deviceId, [{ ...row, ver: 1 }])
+    expect(requestLog.slice(before).map((request) => request.method)).toEqual(['GET', 'PUT', 'PUT'])
+  })
+
+  test('recovers cached directories removed remotely without an unbounded retry', async () => {
+    const isolated = { ...connection, remotePath: 'removed-directory' }
+    const deviceId = '00000000-0000-4000-8000-0000000000cc'
+    const row = { ts: '2026-09-04T00:00:00.000Z', op: 'delete' as const, type: 'page', id: 'removed', ver: 0, payload: {} }
+    await appendWebdavJournal(isolated, deviceId, [row])
+    for (const key of entries.keys()) if (key.startsWith('/dav/removed-directory/journal')) entries.delete(key)
+    const before = requestLog.length
+    await appendWebdavJournal(isolated, deviceId, [{ ...row, ver: 1 }])
+    expect(entries.has('/dav/removed-directory/journal')).toBe(true)
+    const requests = requestLog.slice(before)
+    expect(requests.filter((request) => request.method === 'PUT' && request.path.endsWith('.jsonl'))).toHaveLength(2)
+    expect(requests.filter((request) => request.method === 'MKCOL')).toHaveLength(2)
+  })
+
+  test('combining metadata batches reduces uploaded journal bytes while preserving the same state', async () => {
+    const deviceId = '00000000-0000-4000-8000-0000000000dd'
+    const rows = Array.from({ length: 200 }, (_, index) => ({ ts: '2026-09-04T00:00:00.000Z', op: 'upsert' as const, type: 'page_tag', id: `page:tag-${index}`, ver: 0, payload: { pageId: 'page', tagId: `tag-${index}` } }))
+    const measurements: number[] = []
+    for (const batchSize of [25, 200]) {
+      const isolated = { ...connection, remotePath: `metadata-benchmark-${batchSize}` }
+      const before = requestLog.length
+      for (let offset = 0; offset < rows.length; offset += batchSize) await appendWebdavJournal(isolated, deviceId, rows.slice(offset, offset + batchSize))
+      const uploads = requestLog.slice(before).filter((request) => request.method === 'PUT')
+      measurements.push(uploads.reduce((total, request) => total + request.bytes, 0))
+      expect(uploads.filter((request) => request.path.endsWith('.jsonl'))).toHaveLength(200 / batchSize)
+      expect((await pullWebdavJournals(isolated)).entries).toHaveLength(200)
+    }
+    expect(measurements[1]!).toBeLessThan(measurements[0]! / 4)
+  })
+
+  test('invalidates cached ancestors if provisioning a new child returns missing-parent 409', async () => {
+    const isolated = { ...connection, remotePath: 'missing-ancestor' }
+    const deviceId = '00000000-0000-4000-8000-0000000000ee'
+    await appendWebdavJournal(isolated, deviceId, [{ ts: 't', op: 'delete', type: 'page', id: 'gone', ver: 0, payload: {} }])
+    for (const key of entries.keys()) if (key.startsWith('/dav/missing-ancestor')) entries.delete(key)
+    const data = Buffer.from('new attachment after remote directory removal')
+    const hash = createHash('sha256').update(data).digest('hex')
+    await putWebdavObject(isolated, hash, data)
+    expect(await getWebdavObject(isolated, hash)).toEqual(data)
   })
 
   test('appends per-device journals with monotonic sequence numbers', async () => {
@@ -250,7 +335,7 @@ describe('webdav transport', () => {
       '00000000-0000-4000-8000-000000000001': 3,
       '00000000-0000-4000-8000-000000000002': 1,
     })).resolves.toMatchObject({ entries: [] })
-    expect(requestLog.filter((request) => request.method === 'GET' && request.path.endsWith('.head.json'))).toHaveLength(2)
+    expect(requestLog.filter((request) => request.method === 'GET' && request.path.endsWith('.head.json'))).toHaveLength(0)
     expect(requestLog.filter((request) => request.method === 'GET' && request.path.endsWith('.jsonl'))).toHaveLength(0)
   })
 
@@ -366,12 +451,14 @@ describe('webdav transport', () => {
   })
 
   test('does not upload an object body that already exists remotely', async () => {
-    const hash = 'd'.repeat(64)
-    const target = `/dav/notebook_backup/objects/dd/${hash}`
-    entries.set(target, { data: Buffer.from('already-there') })
+    const data = Buffer.from('already-there')
+    const hash = createHash('sha256').update(data).digest('hex')
+    const target = `/dav/notebook_backup/objects/${hash.slice(0, 2)}/${hash}`
+    entries.set(target, { data })
     requestLog.length = 0
-    await putWebdavObject(connection, hash, new Uint8Array([1, 2, 3]))
+    await putWebdavObject(connection, hash, data)
     expect(requestLog.some((request) => request.method === 'PUT' && request.path === target)).toBe(false)
+    await expect(putWebdavObject(connection, hash, new Uint8Array([1, 2, 3]))).rejects.toThrow('本地对象 SHA-256 校验失败')
   })
 
   test('rejects oversized journals and unsafe remote paths', async () => {

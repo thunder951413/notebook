@@ -64,7 +64,30 @@ const DEVICE_ID_PATTERN = /^[0-9a-f-]{36}$/i
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8')
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const isNonNegativeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-const objectPresenceCache = new Set<string>()
+/** Bounded, short-lived caches; credentials are part of the opaque namespace. */
+class SyncCache<T> {
+  private values = new Map<string, { value: T; expires: number }>()
+  constructor(private limit: number) {}
+  get(key: string): T | undefined {
+    const entry = this.values.get(key)
+    if (!entry) return undefined
+    this.values.delete(key)
+    if (entry.expires <= Date.now()) return undefined
+    this.values.set(key, entry)
+    return entry.value
+  }
+  set(key: string, value: T) {
+    this.values.delete(key)
+    this.values.set(key, { value, expires: Date.now() + 5 * 60_000 })
+    if (this.values.size > this.limit) this.values.delete(this.values.keys().next().value!)
+  }
+  invalidate(prefix: string) {
+    for (const key of this.values.keys()) if (key.startsWith(prefix)) this.values.delete(key)
+  }
+}
+const objectPresenceCache = new SyncCache<boolean>(4096)
+const directoryCache = new SyncCache<boolean>(1024)
+const headCache = new SyncCache<{ etag: string; head: WebdavJournalHead }>(256)
 
 interface WebdavJournalHead {
   version: 1
@@ -117,22 +140,44 @@ function clientFor(settings: WebdavConnection): WebDAVClient {
 const journalPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.jsonl`
 const journalHeadPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.head.json`
 const objectPath = (root: string, hash: string) => `${root}/objects/${hash.slice(0, 2)}/${hash}`
-const objectCacheKey = (settings: WebdavConnection, root: string, hash: string) => `${settings.baseUrl.trim()}|${settings.username.trim()}|${root}|${hash}`
+const cacheNamespace = (settings: WebdavConnection) => `${sha256(JSON.stringify([settings.baseUrl.trim(), settings.username.trim(), settings.appPassword, safeRemotePath(settings.remotePath)]))}:`
+// webdav normalizes PROPFIND ETags by removing quotes. Weak validators must
+// never authorize reuse of a commit marker whose content may have changed.
+const strongEtag = (value: string | null | undefined) => value && !/^W\//i.test(value) ? value.replaceAll('"', '') : undefined
 
-async function ensureDirectory(client: WebDAVClient, path: string, signal?: AbortSignal) {
+async function ensureDirectory(client: WebDAVClient, path: string, signal?: AbortSignal, namespace = '') {
   // 坚果云 rejects nested MKCOL with 409 when the parent is missing, so every
   // segment is created from the root down. 201 (idempotent create) and the
   // usual already-exists codes are both tolerated.
   let current = ''
   for (const segment of path.split('/')) {
     current = current ? `${current}/${segment}` : segment
+    if (signal?.aborted) throw signal.reason ?? new DOMException('WebDAV 操作已取消', 'AbortError')
+    if (namespace && directoryCache.get(namespace + current)) continue
     try {
       await client.createDirectory(current, { signal })
     } catch (error) {
-      // 405/409/301/302 mean the directory already exists; anything else rethrows.
+      // 409 is a missing parent, not evidence that this directory exists.
       const status = (error as { status?: number })?.status
-      if (status !== 405 && status !== 409 && status !== 301 && status !== 302) throw error
+      if (status !== 405 && status !== 301 && status !== 302) throw error
     }
+    if (namespace) directoryCache.set(namespace + current, true)
+  }
+}
+
+async function putWithDirectory(client: WebDAVClient, settings: WebdavConnection, path: string, data: string | Buffer, signal?: AbortSignal) {
+  const namespace = cacheNamespace(settings)
+  try {
+    await ensureDirectory(client, posix.dirname(path), signal, namespace)
+    await client.putFileContents(path, data, { overwrite: true, signal })
+  } catch (error) {
+    const status = (error as { status?: number })?.status
+    if (status !== 404 && status !== 409) throw error
+    // A directory removed on another device invalidates cached provisioning.
+    directoryCache.invalidate(namespace)
+    objectPresenceCache.invalidate(namespace)
+    await ensureDirectory(client, posix.dirname(path), signal, namespace)
+    await client.putFileContents(path, data, { overwrite: true, signal })
   }
 }
 
@@ -216,7 +261,7 @@ export async function testWebdavConnection(settings: WebdavConnection, signal?: 
   try {
     const client = clientFor(settings)
     const root = safeRemotePath(settings.remotePath)
-    await ensureDirectory(client, root, signal)
+    await ensureDirectory(client, root, signal, cacheNamespace(settings))
     const exists = await client.exists(`${root}/journal`, { signal })
     return { ok: true, remotePathExists: exists, latencyMs: Date.now() - startedAt, message: '' }
   } catch (error) {
@@ -237,26 +282,33 @@ export async function testWebdavConnection(settings: WebdavConnection, signal?: 
 export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: Record<string, number> = {}, signal?: AbortSignal): Promise<WebdavPullResult> {
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
-  await ensureDirectory(client, `${root}/journal`, signal)
   let deviceIds: string[] = []
   const devicesWithHeads = new Set<string>()
+  const headEtags = new Map<string, string>()
   try {
     const contents = await client.getDirectoryContents(`${root}/journal`, { signal })
-    const names = (Array.isArray(contents) ? contents : []).map((item) => item.basename)
+    const items = Array.isArray(contents) ? contents : []
+    const names = items.map((item) => item.basename)
     deviceIds = names
       .filter((name) => name.endsWith('.jsonl'))
       .map((name) => name.slice(0, -'.jsonl'.length))
       .filter((deviceId) => DEVICE_ID_PATTERN.test(deviceId))
-    for (const name of names) {
+    for (const item of items) {
+      const name = item.basename
       if (!name.endsWith('.head.json')) continue
       const deviceId = name.slice(0, -'.head.json'.length)
       if (DEVICE_ID_PATTERN.test(deviceId)) devicesWithHeads.add(deviceId)
+      const etag = strongEtag(item.etag)
+      if (etag) headEtags.set(deviceId, etag)
     }
   } catch (error) {
     // A missing journal directory means an empty repository. Authentication
     // and server failures must remain visible to the caller.
     const status = (error as { status?: number })?.status
     if (status !== 404) throw error
+    directoryCache.invalidate(cacheNamespace(settings))
+    objectPresenceCache.invalidate(cacheNamespace(settings))
+    headCache.invalidate(cacheNamespace(settings))
   }
   const entries: Array<WebdavJournalEntry & { deviceId: string }> = []
   for (const deviceId of deviceIds) {
@@ -264,9 +316,20 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     let head: WebdavJournalHead | undefined
     if (devicesWithHeads.has(deviceId)) {
       try {
-        const data = await client.getFileContents(journalHeadPath(root, deviceId), { format: 'text', signal })
-        const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
-        head = parseHead(text, deviceId)
+        const key = cacheNamespace(settings) + deviceId
+        const etag = headEtags.get(deviceId)
+        const cached = etag ? headCache.get(key) : undefined
+        if (cached && cached.etag === etag) head = cached.head
+        else {
+          const response = await client.getFileContents(journalHeadPath(root, deviceId), { format: 'text', details: true, signal })
+          if (typeof response !== 'object' || !('data' in response)) throw new Error('WebDAV 提交标记响应缺少详情')
+          const data = response.data
+          const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
+          head = parseHead(text, deviceId)
+          // Only bind the body to the listing validator if GET confirms it;
+          // a concurrent writer may change the marker between these requests.
+          if (etag && strongEtag(response.headers.etag) === etag) headCache.set(key, { etag, head })
+        }
       } catch (error) {
         const status = (error as { status?: number })?.status
         if (status !== 404) throw error
@@ -321,18 +384,19 @@ export async function getWebdavObject(settings: WebdavConnection, hash: string, 
 export async function putWebdavObject(settings: WebdavConnection, hash: string, data: Uint8Array, signal?: AbortSignal): Promise<void> {
   if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`对象哈希格式不正确：${hash}`)
   if (data.byteLength > MAX_OBJECT_BYTES) throw new Error('对象超过 100 MB 上限')
+  if (sha256(Buffer.from(data)) !== hash) throw new Error('本地对象 SHA-256 校验失败')
+  if (signal?.aborted) throw signal.reason ?? new DOMException('WebDAV 操作已取消', 'AbortError')
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
   const target = objectPath(root, hash)
-  const cacheKey = objectCacheKey(settings, root, hash)
-  if (objectPresenceCache.has(cacheKey)) return
+  const cacheKey = cacheNamespace(settings) + hash
+  if (objectPresenceCache.get(cacheKey)) return
   if (await client.exists(target, { signal })) {
-    objectPresenceCache.add(cacheKey)
+    objectPresenceCache.set(cacheKey, true)
     return
   }
-  await ensureDirectory(client, `${root}/objects/${hash.slice(0, 2)}`, signal)
-  await client.putFileContents(target, Buffer.from(data), { overwrite: true, signal })
-  objectPresenceCache.add(cacheKey)
+  await putWithDirectory(client, settings, target, Buffer.from(data), signal)
+  objectPresenceCache.set(cacheKey, true)
 }
 
 /**
@@ -346,7 +410,6 @@ export async function appendWebdavJournal(settings: WebdavConnection, deviceId: 
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
   const path = journalPath(root, deviceId)
-  await ensureDirectory(client, `${root}/journal`, signal)
   let existing: WebdavJournalEntry[] = []
   try {
     const data = await client.getFileContents(path, { format: 'text', signal })
@@ -365,7 +428,7 @@ export async function appendWebdavJournal(settings: WebdavConnection, deviceId: 
   if (compacted.entries.length > MAX_ENTRIES) throw new Error('设备日志条目数超过 10 万，请先压缩日志')
   const body = compacted.entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
   if (utf8Bytes(body) > MAX_LOG_BYTES) throw new Error('设备日志压缩后超过 100 MB 上限')
-  await client.putFileContents(path, body, { overwrite: true, signal })
+  await putWithDirectory(client, settings, path, body, signal)
   // Commit only after the journal bytes are durable. A failed marker PUT keeps
   // readers on the previous committed view rather than exposing this write.
   await client.putFileContents(journalHeadPath(root, deviceId), JSON.stringify(buildHead(deviceId, body, compacted.entries, compacted.stateEntries, compacted.historyEntries)), { overwrite: true, signal })

@@ -17,7 +17,7 @@ import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageS
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
-import { AUTO_SYNC_DEBOUNCE_MS, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type SettledSyncState } from '../sync/syncLifecycle'
+import { AUTO_SYNC_DEBOUNCE_MS, createAutomaticSyncPolicy, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 // A fresh install opens on the bundled sample workspace so the first screen has
@@ -189,10 +189,14 @@ export function useWorkspaceData() {
   trashRecordsRef.current = trashRecords
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
   const [syncError, setSyncError] = useState<string>()
+  const [syncProgress, setSyncProgress] = useState<string>()
   const settledSyncState = useRef<SettledSyncState>('offline')
   const syncRunning = useRef(false)
   const syncTask = useRef<Promise<boolean> | undefined>(undefined)
   const queuedSyncTask = useRef<Promise<boolean> | undefined>(undefined)
+  const activeSyncSignal = useRef<AbortSignal | undefined>(undefined)
+  const automaticSyncPolicy = useRef(createAutomaticSyncPolicy())
+  const syncRetryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const syncScheduler = useRef<ReturnType<typeof createQuietSyncScheduler> | undefined>(undefined)
   const privateNotebookIds = useMemo(() => new Set(notebookRecords.filter((notebook) => notebook.locked).map((notebook) => notebook.id)), [notebookRecords])
   const privateSectionIds = useMemo(() => new Set(sectionRecords.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id)), [privateNotebookIds, sectionRecords])
@@ -271,11 +275,14 @@ export function useWorkspaceData() {
     return () => { cancelled = true }
   }, [reload])
 
-  const syncNow = useCallback((options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode; scope?: { pageId: string } }): Promise<boolean> => {
+  const syncNow = useCallback((options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode; scope?: { pageId: string }; reason?: AutomaticSyncReason }): Promise<boolean> => {
       if (syncTask.current) {
-        // A blur/focus may make a durable change while a quiet-period sync is
-        // already in flight. Coalesce one follow-up so that change is not
-        // left behind until another unrelated edit occurs.
+        // Automatic events join the current run. Durable outbox writes and
+        // the completion check schedule any remaining edits after a quiet
+        // period. Only an explicit manual request needs an immediate follow-up.
+        // React may replace an aborted startup effect with a fresh one. It
+        // must not join the cancelled run and silently lose the startup pull.
+        if (!options?.force && !activeSyncSignal.current?.aborted) return syncTask.current
         if (!queuedSyncTask.current) {
           queuedSyncTask.current = syncTask.current.then(() => {
             queuedSyncTask.current = undefined
@@ -284,13 +291,32 @@ export function useWorkspaceData() {
         }
         return queuedSyncTask.current
       }
-      syncScheduler.current?.cancel()
+      activeSyncSignal.current = options?.signal
       const operation = (async () => {
       // The auto-sync switch gates every automatic trigger (startup, opening
       // a note, debounced edit sync); the manual toolbar button forces through.
       if (!options?.force && !loadSyncSettings().enabled) {
-        setSyncState('offline')
+        // Skipping an automatic trigger must not erase the last manual
+        // result (especially an actionable conflict or upload failure).
         return false
+      }
+      // Focus/blur and quiet-period triggers cannot resolve a conflict. Keep
+      // its actionable state visible until the user explicitly retries or
+      // chooses a winner, instead of repeatedly downloading the same prefix.
+      if (!options?.force && settledSyncState.current === 'conflict') return false
+      if (!options?.force && !automaticSyncPolicy.current.shouldRun(
+        options?.reason ?? 'foreground', await repository.hasPendingSyncChanges(WORKSPACE_ID),
+      )) return false
+      if (options?.signal?.aborted) return false
+      syncScheduler.current?.cancel()
+      if (syncRetryTimer.current !== undefined) clearTimeout(syncRetryTimer.current)
+      syncRetryTimer.current = undefined
+      const retryLater = () => {
+        const delay = automaticSyncPolicy.current.failed()
+        if (loadSyncSettings().enabled) syncRetryTimer.current = setTimeout(() => {
+          syncRetryTimer.current = undefined
+          void syncNow({ reason: 'retry' })
+        }, delay)
       }
       syncRunning.current = true
       const startedAt = performance.now()
@@ -300,14 +326,17 @@ export function useWorkspaceData() {
         setSyncState(state)
       })
       setSyncState('syncing')
+      setSyncProgress('正在准备同步…')
       setSyncError(undefined)
       recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'started', message: mode })
       try {
         const result = loadSyncBackend() === 'webdav'
-          ? await synchronizeWebdav(repository, WORKSPACE_ID, options?.signal, options?.scope)
+          ? await synchronizeWebdav(repository, WORKSPACE_ID, options?.signal, options?.scope, mode, setSyncProgress)
           : await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         stateFinalizer.complete(result.state)
-        if (result.state !== 'offline') await reload()
+        if (result.state !== 'offline' && !('changed' in result && result.changed === false)) await reload()
+        if (result.state === 'synced') automaticSyncPolicy.current.succeeded()
+        if (result.state === 'error') retryLater()
         // WebDAV acknowledges one bounded outbox batch at a time. Acking 200
         // items does not create another Dexie record, so schedule the next
         // batch explicitly instead of leaving the tail stranded forever. The
@@ -326,12 +355,13 @@ export function useWorkspaceData() {
           message: retryCount ? `${result.state} · 远端并发更新后自动重试 ${retryCount} 次` : result.state,
           durationMs: performance.now() - startedAt,
         })
-        return result.state !== 'offline'
+        return result.state === 'synced'
       } catch (error) {
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
           const message = error instanceof Error ? error.message : '同步失败'
           stateFinalizer.complete('error')
           setSyncError(message)
+          retryLater()
           recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'run', status: 'failed', message, durationMs: performance.now() - startedAt })
         } else {
           recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'cancelled', durationMs: performance.now() - startedAt })
@@ -343,6 +373,7 @@ export function useWorkspaceData() {
         // reload from leaving the toolbar permanently stuck on `syncing` even
         // though the transport already completed (and logged success).
         stateFinalizer.finish()
+        setSyncProgress(undefined)
         syncRunning.current = false
       }
       })()
@@ -357,19 +388,20 @@ export function useWorkspaceData() {
   // polling: durable outbox writes schedule their own quiet-period sync.
   useEffect(() => {
     const controller = new AbortController()
-    const sync = () => { void syncNow({ signal: controller.signal }) }
-    sync()
+    const sync = () => { void syncNow({ signal: controller.signal, reason: 'online' }) }
+    void syncNow({ signal: controller.signal, reason: 'startup' })
     window.addEventListener('online', sync)
     return () => { controller.abort(); window.removeEventListener('online', sync) }
   }, [syncNow])
 
-  // Every durable outbox append gets one 30-second quiet-period sync. Draft
+  // Every durable outbox append gets one quiet-period sync. Draft
   // and scroll-local writes do not enter this path until explicitly flushed.
   useEffect(() => {
-    const scheduler = createQuietSyncScheduler(() => { void syncNow() }, AUTO_SYNC_DEBOUNCE_MS)
+    const scheduler = createQuietSyncScheduler(() => { void syncNow({ reason: 'changes' }) }, AUTO_SYNC_DEBOUNCE_MS)
     syncScheduler.current = scheduler
     return () => {
       scheduler.cancel()
+      if (syncRetryTimer.current !== undefined) clearTimeout(syncRetryTimer.current)
       if (syncScheduler.current === scheduler) syncScheduler.current = undefined
     }
   }, [syncNow])
@@ -872,7 +904,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

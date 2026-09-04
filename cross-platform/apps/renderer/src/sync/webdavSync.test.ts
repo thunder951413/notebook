@@ -1,7 +1,11 @@
 import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
+import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS } from './webdavSync'
+import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_TIMEOUT_MS } from './webdavSync'
+import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+
+vi.mock('../diagnostics/diagnostics', () => ({ recordDiagnosticEvent: vi.fn() }))
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -93,10 +97,164 @@ describe('synchronizeWebdav', () => {
     delete (window as unknown as Record<string, unknown>).notebookDesktop
   })
 
+  test('push recovery re-reads remote heads and explicitly preserves local content; pull mode never publishes', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    webdav.pull.mockResolvedValueOnce({ entries: [remoteEntry()], fingerprint: 'fp' })
+    await synchronizeWebdav(repo, workspaceId, undefined, undefined, 'push')
+    expect(webdav.pull).toHaveBeenCalledWith(expect.any(Object), {}, expect.any(String))
+    expect(repo.applyRemoteChanges).toHaveBeenCalledWith(workspaceId, expect.any(Array), 1, expect.any(Map), true, true)
+    ;(repo.hasPendingSyncChanges as ReturnType<typeof vi.fn>).mockResolvedValue(true)
+    await synchronizeWebdav(repo, workspaceId, undefined, undefined, 'pull')
+    expect(webdav.push).not.toHaveBeenCalled()
+  })
+
+  test('does not push any remaining entities when the incoming prefix is blocked by a conflict', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    webdav.pull.mockResolvedValue({ entries: [remoteEntry()], fingerprint: 'fp' })
+    ;(repo.hasPendingSyncChanges as ReturnType<typeof vi.fn>).mockResolvedValue(true)
+    ;(repo.applyRemoteChanges as ReturnType<typeof vi.fn>).mockResolvedValue({ cursor: 0, conflicts: [{ entityType: 'page', entityId: pageId, pageIds: [pageId] }] })
+    expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('conflict')
+    expect(webdav.push).not.toHaveBeenCalled()
+    expect(repo.listOutbox).not.toHaveBeenCalled()
+  })
+
+  test('real repository recovers legacy conflicts, survives a failed upload, and stays synced on subsequent pulls', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const db = new NotebookRendererDatabase(`webdav-recovery-${crypto.randomUUID()}`)
+    const repo = new RealRepository(db)
+    try {
+      const local = { ...bundle().pages[0]!, title: '本机权威内容', important: true, legacyMetadata: { syncBaselineHash: 'local-hash' } }
+      await db.pages.put(local)
+      await db.syncVersions.put({ id: `${workspaceId}:page:${pageId}`, version: 1 })
+      webdav.pull.mockResolvedValueOnce({ entries: [remoteEntry({ deviceId: 'old-device' })], fingerprint: 'fp' })
+      webdav.push.mockRejectedValueOnce(new Error('temporary connection failure'))
+      await expect(synchronizeWebdav(repo, workspaceId, undefined, undefined, 'push')).rejects.toThrow('temporary connection failure')
+      expect((await repo.getPage(pageId))?.title).toBe(local.title)
+      expect(await repo.listOutbox(workspaceId)).toEqual([expect.objectContaining({ expectedVersion: 1, payload: expect.objectContaining({ title: local.title, important: true }) })])
+      webdav.push.mockResolvedValue({ firstSeq: 20, count: 1 })
+      expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('synced')
+      expect(await repo.hasPendingSyncChanges(workspaceId)).toBe(false)
+      expect(await db.syncVersions.get(`${workspaceId}:page:${pageId}`)).toMatchObject({ version: 2, webdavParentVersion: true })
+      expect((await repo.getPage(pageId))?.title).toBe(local.title)
+      const pushes = webdav.push.mock.calls.length
+      expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('synced')
+      expect(webdav.push).toHaveBeenCalledTimes(pushes)
+    } finally {
+      db.close()
+      await db.delete()
+    }
+  })
+
   test('returns offline before the repository is configured', async () => {
     const { repo } = repository()
     await expect(synchronizeWebdav(repo, workspaceId)).resolves.toEqual({ state: 'offline', skipped: 0, conflicts: 0 })
     await expect(synchronizeWebdav(repo, workspaceId)).resolves.toEqual({ state: 'offline', skipped: 0, conflicts: 0 })
+  })
+
+  test('the whole-sync deadline settles even when credential IPC ignores cancellation', async () => {
+    vi.useFakeTimers()
+    try {
+      const { webdav, secrets } = installDesktopMock()
+      seedWebdavSettings()
+      const { repo } = repository()
+      let releaseSecret: (value: typeof appPassword) => void = () => undefined
+      secrets.get.mockImplementationOnce(() => new Promise<typeof appPassword>((resolve) => { releaseSecret = resolve }))
+      const run = synchronizeWebdav(repo, workspaceId)
+      const outcome = expect(run).rejects.toThrow('本次同步 超时（180 秒）')
+      await vi.advanceTimersByTimeAsync(WEBDAV_SYNC_TIMEOUT_MS)
+      await outcome
+      releaseSecret(appPassword)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(webdav.pull).not.toHaveBeenCalled()
+      expect(webdav.push).not.toHaveBeenCalled()
+      expect(repo.acknowledgeSync).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('small upload batches send only their objects and acknowledge only completed batches', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const items = Array.from({ length: 60 }, (_, index) => ({
+      id: `upload-${index}`, workspaceId, entityType: 'document', entityId: `doc-${index}`,
+      expectedVersion: 1, operation: 'upsert', createdAt: timestamp,
+      payload: { pageId: `doc-${index}`, schemaVersion: 3, markdown: `${index}-${'body'.repeat(900)}`, tiptapJson: { type: 'doc' }, updatedAt: timestamp },
+    }))
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue(items)
+    webdav.push.mockResolvedValueOnce({ firstSeq: 1, count: 25 }).mockRejectedValueOnce(new Error('interrupted batch'))
+    const progress = vi.fn()
+    await expect(synchronizeWebdav(repo, workspaceId, undefined, undefined, 'bidirectional', progress)).rejects.toThrow('interrupted batch')
+    const pushes = webdav.push.mock.calls as unknown as Array<[unknown, string, unknown[], unknown[]]>
+    expect(pushes.map((call) => [call[2].length, call[3].length])).toEqual([[25, 25], [25, 25]])
+    expect(calls.acknowledge).toEqual([items.slice(0, 25).map((item) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: 2 }))])
+    expect(progress).toHaveBeenCalledWith('正在上传本机内容 26–50 / 60')
+  })
+
+  test('combines 200 small metadata changes into one journal commit instead of eight', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const items = Array.from({ length: 200 }, (_, index) => ({
+      id: `op-${index}`, workspaceId, entityType: 'page_tag', entityId: `${pageId}:tag-${index}`,
+      expectedVersion: 0, operation: 'upsert', payload: { pageId, tagId: `tag-${index}` },
+    }))
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue(items)
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 200 })
+    await expect(synchronizeWebdav(repo, workspaceId)).resolves.toMatchObject({ state: 'synced' })
+    const pushes = webdav.push.mock.calls as unknown as Array<[unknown, string, unknown[], unknown[]]>
+    expect(pushes.map((call) => [call[2].length, call[3].length])).toEqual([[200, 0]])
+    expect(calls.acknowledge).toHaveLength(1)
+    expect(calls.acknowledge[0]).toHaveLength(200)
+  })
+
+  test('deduplicates identical objects inside an upload batch', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    const items = Array.from({ length: 30 }, (_, index) => ({
+      id: `op-${index}`, workspaceId, entityType: 'asset', entityId: `asset-${index}`,
+      expectedVersion: 0, operation: 'upsert', payload: { pageId, id: `asset-${index}` },
+    }))
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue(items)
+    ;(repo.getAssetContent as ReturnType<typeof vi.fn>).mockResolvedValue({ arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer })
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 30 })
+    await synchronizeWebdav(repo, workspaceId)
+    const pushes = webdav.push.mock.calls as unknown as Array<[unknown, string, unknown[], unknown[]]>
+    expect(pushes.map((call) => [call[2].length, call[3].length])).toEqual([[30, 1]])
+  })
+
+  test('bounds large attachment batches by bytes and preserves completed progress', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const items = Array.from({ length: 3 }, (_, index) => ({
+      id: `op-${index}`, workspaceId, entityType: 'asset', entityId: `asset-${index}`,
+      expectedVersion: 0, operation: 'upsert', payload: { pageId, id: `asset-${index}` },
+    }))
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue(items)
+    ;(repo.getAssetContent as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => ({ arrayBuffer: async () => new Uint8Array(5 * 1024 * 1024).fill(Number(id.slice(-1))).buffer }))
+    webdav.push.mockResolvedValueOnce({ firstSeq: 1, count: 1 }).mockRejectedValueOnce(new Error('network stopped'))
+    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('network stopped')
+    const pushes = webdav.push.mock.calls as unknown as Array<[unknown, string, unknown[], unknown[]]>
+    expect(pushes.map((call) => [call[2].length, call[3].length])).toEqual([[1, 1], [1, 1]])
+    expect(calls.acknowledge[0]).toHaveLength(1)
+  })
+
+  test('does not acknowledge a partial remote batch receipt', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: 'op', workspaceId, entityType: 'page', entityId: pageId, expectedVersion: 0, operation: 'delete', payload: {} }])
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 0 })
+    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('远端上传确认不完整')
+    expect(calls.acknowledge).toEqual([])
   })
 
   test('cancels a never-settling desktop request without acknowledging outbox and allows the next sync', async () => {
@@ -375,6 +533,10 @@ describe('synchronizeWebdav', () => {
     const result = await synchronizeWebdav(repo, workspaceId)
 
     expect(result).toEqual({ state: 'conflict', skipped: 0, conflicts: 1 })
+    expect(recordDiagnosticEvent).toHaveBeenCalledWith({
+      level: 'warning', category: 'sync', action: 'conflict', status: 'failed',
+      message: `page:${pageId} · remote parent 0 · affected pages 1`,
+    })
     expect(webdav.push).not.toHaveBeenCalled()
     expect(calls.acknowledge).toHaveLength(0)
     // The unapplied conflicting row must remain pullable on the next round.

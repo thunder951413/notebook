@@ -28,6 +28,102 @@ const page = (id: string, title: string, sectionId = 'section-a'): Page => ({
   syncStatus: 'local',
 })
 
+test('unchanged tags, task steps, links and reading positions do not create sync traffic', async () => {
+  const repository = makeRepository()
+  const value = page('quiet-page', 'Quiet')
+  await repository.savePage(value)
+  const steps = [0, 1, 2].map((index) => ({ id: `step-${index}`, pageId: value.id, text: `${index}`, checked: false, sortOrder: index, createdAt: value.createdAt }))
+  const link = { id: 'link-1', workspaceId: value.workspaceId, sourcePageId: value.id, targetPageId: 'other', kind: 'link' as const, createdAt: value.createdAt }
+  const position = { id: value.id, pageId: value.id, anchorUtf16Offset: 0, viewportOffsetFraction: 0.5, updatedAt: value.updatedAt, deviceId: 'device-1' }
+  await repository.savePageTags(value.id, ['a', 'b'])
+  await repository.saveTaskSteps(value.id, steps)
+  await repository.replacePageLinks(value.id, [link])
+  await repository.saveReadingPosition(position)
+  await repository.db.syncOutbox.clear()
+  await repository.savePageTags(value.id, ['b', 'a', 'a'])
+  await repository.saveTaskSteps(value.id, steps)
+  await repository.replacePageLinks(value.id, [link])
+  await repository.saveReadingPosition({ ...position, updatedAt: '2026-09-04T00:00:00.000Z' })
+  expect(await repository.hasPendingSyncChanges(value.workspaceId)).toBe(false)
+  await repository.savePageTags(value.id, ['b', 'c'])
+  await repository.saveTaskSteps(value.id, steps.map((step, index) => index === 1 ? { ...step, checked: true } : step))
+  const outgoing = await repository.listOutbox(value.workspaceId)
+  expect(outgoing).toHaveLength(3)
+  expect(outgoing).toEqual(expect.arrayContaining([
+    expect.objectContaining({ entityId: `${value.id}:a`, operation: 'delete' }),
+    expect.objectContaining({ entityId: `${value.id}:c`, operation: 'upsert' }),
+    expect.objectContaining({ entityId: 'step-1', payload: expect.objectContaining({ checked: true }) }),
+  ]))
+})
+
+test('identical queued saves keep their id, while an edit during upload survives and uses the acknowledged parent', async () => {
+  const repository = makeRepository()
+  const value = { ...page('in-flight', 'Initial'), syncStatus: 'pending' as const }
+  await repository.savePage(value)
+  const [original] = await repository.listOutbox(value.workspaceId)
+  await repository.savePage(value)
+  expect((await repository.listOutbox(value.workspaceId))[0]?.id).toBe(original!.id)
+  await repository.savePage({ ...value, title: 'Edited during upload' })
+  const [newer] = await repository.listOutbox(value.workspaceId)
+  expect(newer!.id).not.toBe(original!.id)
+  await repository.acknowledgeSync(value.workspaceId, [{ operation_id: original!.id, entity_type: 'page', entity_id: value.id, version: 1 }], undefined, true)
+  expect(await repository.listOutbox(value.workspaceId)).toEqual([expect.objectContaining({ id: newer!.id, expectedVersion: 1, payload: expect.objectContaining({ title: 'Edited during upload' }) })])
+  expect((await repository.getPage(value.id))?.syncStatus).toBe('pending')
+})
+
+test('an unchanged editor flush does not publish timestamp-only changes or discard a newer draft', async () => {
+  const repository = makeRepository()
+  const value = { ...page('no-op-flush', 'Saved'), syncStatus: 'synced' as const }
+  const document = { pageId: value.id, schemaVersion: 3, markdown: 'unchanged', tiptapJson: { type: 'doc', content: [] }, updatedAt: value.updatedAt }
+  await repository.savePage(value, document)
+  const flushed = { ...document, updatedAt: '2026-09-04T00:00:00.000Z' }
+  await repository.stageDraft(flushed)
+  await repository.savePage({ ...value, syncStatus: 'pending', updatedAt: flushed.updatedAt }, flushed)
+  expect(await repository.listOutbox(value.workspaceId)).toEqual([])
+  expect(await repository.getPage(value.id)).toEqual(value)
+  expect(await repository.getPageDocument(value.id)).toEqual(document)
+  expect(await repository.db.drafts.get(value.id)).toBeUndefined()
+  const newer = { ...document, markdown: 'new unsaved edit', updatedAt: '2026-09-04T01:00:00.000Z' }
+  await repository.stageDraft(newer)
+  await repository.savePage({ ...value, syncStatus: 'pending', updatedAt: flushed.updatedAt }, flushed)
+  expect((await repository.db.drafts.get(value.id))?.document).toEqual(newer)
+})
+
+test('explicit WebDAV recovery preserves local content and rebases queued writes beyond all remote parents', async () => {
+  const repository = makeRepository()
+  const local = { ...page('recover-local', '本机会议记录'), important: true, legacyMetadata: { syncBaselineHash: 'local' } }
+  await repository.savePage(local, { pageId: local.id, schemaVersion: 3, markdown: '本机正文', tiptapJson: { type: 'doc', content: [] }, updatedAt: local.updatedAt })
+  await repository.db.syncVersions.put({ id: `workspace-a:page:${local.id}`, version: 1 })
+  const remote = { ...local, title: '远端旧标题', important: false, legacyMetadata: {} }
+  const change = { cursor: 1, entityType: 'page', entityId: local.id, version: 0, operation: 'upsert', payload: remote }
+  expect((await repository.applyRemoteChanges('workspace-a', [change], 1, undefined, true)).conflicts).toHaveLength(1)
+  const result = await repository.applyRemoteChanges('workspace-a', [change, { ...change, cursor: 2, version: 7 }], 2, undefined, true, true)
+  expect(result).toEqual({ cursor: 2, conflicts: [] })
+  expect(await repository.getPage(local.id)).toMatchObject({ title: local.title, important: true, legacyMetadata: local.legacyMetadata, syncStatus: 'pending' })
+  expect((await repository.getPageDocument(local.id))?.markdown).toBe('本机正文')
+  const outgoing = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page')!
+  expect(outgoing).toMatchObject({ expectedVersion: 8, payload: { title: local.title, important: true } })
+  // Failed transport leaves the choice durable. Successful publication makes
+  // the next ordinary change use the resulting (not old legacy) baseline.
+  await repository.acknowledgeSync('workspace-a', [{ operation_id: outgoing.id, entity_type: 'page', entity_id: local.id, version: 9 }], undefined, true)
+  expect((await repository.applyRemoteChanges('workspace-a', [{ ...change, cursor: 3, version: 9, payload: { ...local, title: '之后的正常远端修改' } }], 3, undefined, true)).conflicts).toEqual([])
+  expect((await repository.getPage(local.id))?.title).toBe('之后的正常远端修改')
+})
+
+test('WebDAV recovery preserves local deletes, imports remote-only pages, and keeps private data local', async () => {
+  const repository = makeRepository()
+  await repository.db.syncVersions.put({ id: 'workspace-a:page:deleted-page', version: 4, webdavParentVersion: true })
+  await repository.enqueueChange('workspace-a', 'page', 'deleted-page', 'delete', {})
+  const privatePage = { ...page('private-page', '不公开'), locked: true }
+  await repository.db.pages.put(privatePage)
+  const changes = ['deleted-page', 'remote-only', 'private-page'].map((id, index) => ({ cursor: index + 1, entityType: 'page', entityId: id, version: 0, operation: 'upsert', payload: { ...page(id, '远端') } }))
+  expect((await repository.applyRemoteChanges('workspace-a', changes, 3, undefined, true, true)).conflicts).toEqual([])
+  expect(await repository.getPage('deleted-page')).toBeUndefined()
+  expect((await repository.getPage('remote-only'))?.title).toBe('远端')
+  expect(await repository.getPage('private-page')).toEqual(privatePage)
+  expect(await repository.listOutbox('workspace-a')).toEqual([expect.objectContaining({ entityId: 'deleted-page', operation: 'delete', expectedVersion: 4 })])
+})
+
 test('atomically saves and loads a page with its document', async () => {
   const repository = makeRepository()
   const value = page('page-a', 'Knowledge Graph')
@@ -301,6 +397,59 @@ test('treats WebDAV ver as a parent version and preserves concurrent siblings as
 
   await repository.savePage({ ...(await repository.getPage(value.id))!, title: 'Local follow-up', syncStatus: 'pending' })
   expect((await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page')?.expectedVersion).toBe(1)
+})
+
+test('consumes legacy directory bootstrap replays without losing richer local metadata', async () => {
+  const repository = makeRepository()
+  const local = { id: 'legacy-section', notebookId: 'personal', name: 'demux', color: '#7c3aed', sortOrder: 1, createdAt: '2026-07-24T07:54:48.994Z', updatedAt: '2026-07-24T07:55:01.172Z' }
+  await repository.db.sections.put(local)
+  await repository.db.syncVersions.put({ id: 'workspace-a:section:legacy-section', version: 1 })
+  const { color: _color, ...snapshot } = local
+  const replay = { cursor: 1, entityType: 'section', entityId: local.id, version: 0, operation: 'upsert' as const, payload: { ...snapshot, createdAt: local.updatedAt } }
+
+  await expect(repository.applyRemoteChanges('workspace-a', [replay], 1, undefined, true)).resolves.toEqual({ cursor: 1, conflicts: [] })
+  expect(await repository.db.sections.get(local.id)).toEqual(local)
+
+  // Renames and explicit color changes still need conflict resolution.
+  for (const patch of [{ name: 'Another name' }, { color: '#ffffff' }, { notebookId: 'another-notebook' }]) {
+    const result = await repository.applyRemoteChanges('workspace-a', [{ ...replay, cursor: 2, payload: { ...replay.payload, ...patch } }], 2, undefined, true)
+    expect(result.cursor).toBe(1)
+    expect(result.conflicts).toHaveLength(1)
+    expect(await repository.db.sections.get(local.id)).toEqual(local)
+  }
+  await repository.db.syncVersions.put({ id: 'workspace-a:section:legacy-section', version: 1, webdavParentVersion: true })
+  expect((await repository.applyRemoteChanges('workspace-a', [{ ...replay, cursor: 2 }], 2, undefined, true)).conflicts).toHaveLength(1)
+})
+
+test('retains page placement when replaying a sparse legacy bootstrap snapshot', async () => {
+  const repository = makeRepository()
+  const local = { ...page('legacy-page', 'Original title'), sectionId: 'current-section', sortOrder: 3, syncStatus: 'synced' as const }
+  await repository.db.pages.put(local)
+  await repository.db.syncVersions.put({ id: 'workspace-a:page:legacy-page', version: 1 })
+  const { sectionId: _section, sortOrder: _order, ...payload } = local
+  const replay = { cursor: 1, entityType: 'page', entityId: local.id, version: 0, operation: 'upsert' as const, payload }
+  await expect(repository.applyRemoteChanges('workspace-a', [replay], 1, undefined, true)).resolves.toEqual({ cursor: 1, conflicts: [] })
+  expect(await repository.db.pages.get(local.id)).toEqual(local)
+  const renamed = { ...replay, cursor: 2, payload: { ...payload, title: 'Remote rename' } }
+  expect((await repository.applyRemoteChanges('workspace-a', [renamed], 2, undefined, true)).conflicts).toHaveLength(1)
+  expect((await repository.getPage(local.id))?.title).toBe(local.title)
+})
+
+test('recognizes a legacy rich-text bootstrap only when its canonical body is identical', async () => {
+  const repository = makeRepository()
+  const localPage = { ...page('legacy-document', 'Same body'), syncStatus: 'conflict' as const }
+  const local: PageDocument = { pageId: localPage.id, schemaVersion: 3, markdown: 'Same body', tiptapJson: { type: 'doc', content: [] }, updatedAt: localPage.updatedAt }
+  await repository.db.pages.put(localPage)
+  await repository.db.documents.put(local)
+  await repository.db.syncVersions.put({ id: 'workspace-a:document:legacy-document', version: 1 })
+  const payload = { pageId: localPage.id, schemaVersion: 1, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Same body' }] }] }, updatedAt: '2026-07-24T05:45:08.167Z' }
+  const replay = { cursor: 1, entityType: 'document', entityId: localPage.id, version: 0, operation: 'upsert' as const, payload }
+  await expect(repository.applyRemoteChanges('workspace-a', [replay], 1, undefined, true)).resolves.toEqual({ cursor: 1, conflicts: [] })
+  expect(await repository.db.documents.get(localPage.id)).toEqual(local)
+  expect((await repository.getPage(localPage.id))?.syncStatus).toBe('synced')
+  const changed = { ...payload, tiptapJson: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Different body' }] }] } }
+  expect((await repository.applyRemoteChanges('workspace-a', [{ ...replay, cursor: 2, payload: changed }], 2, undefined, true)).conflicts).toHaveLength(1)
+  expect(await repository.db.documents.get(localPage.id)).toEqual(local)
 })
 
 test('retracts previously published page data before keeping private edits local-only', async () => {

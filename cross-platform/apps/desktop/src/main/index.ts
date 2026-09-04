@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, shell, Tray } from 'electron'
 import { join } from 'node:path'
 import { deleteStoredSecret, flushRenderer, getStoredSecret, registerPlatformHandlers, setStoredSecret } from './platform'
 import { resolveDataRoot } from './dataRoot'
@@ -8,6 +8,7 @@ import { AutomationApiServer } from './automationServer'
 import type { AutomationBridgeResponse } from '../automationContract'
 import { aiProviderCredentialKey, completeAIChat } from './aiProvider'
 import type { DesktopAIChatRequest } from '../aiContract'
+import { configureWebdavFetch } from './webdavFetch'
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
@@ -132,6 +133,7 @@ function createTray() {
 }
 
 app.whenReady().then(() => {
+  configureWebdavFetch((url, init) => net.fetch(url, init))
   registerPlatformHandlers({ defaultUserDataPath, dataRootSource: dataRoot.source })
   void appendDiagnosticEvent({ level: 'info', category: 'app', action: 'started', status: 'success', message: `Notebook ${app.getVersion()} · ${process.platform} ${process.arch}` })
   ipcMain.handle('updates:getState', () => updateService.getState())

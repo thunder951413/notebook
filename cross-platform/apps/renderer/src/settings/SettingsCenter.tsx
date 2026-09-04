@@ -26,6 +26,7 @@ interface SettingsCenterProps {
   accentColor: AccentColor
   syncState: SyncState
   syncError?: string
+  syncProgress?: string
   currentPageTitle: string
   transferMessage?: string
   dataRoot?: { path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }
@@ -95,7 +96,7 @@ function trapDialogKey(event: KeyboardEvent, container: HTMLElement, onClose: ()
   }
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, syncProgress, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const qrDialogRef = useRef<HTMLElement>(null)
@@ -360,6 +361,24 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
     }
   }
 
+  const keepLocalAndSync = async () => {
+    if (savingSync || checkingServer || syncState === 'syncing') return
+    if (!await requestConfirm({ title: '以本机内容解决同步冲突？', description: '请先导出完整备份。本机已有内容将覆盖远端对应记录，远端独有内容仍会保留并下载；隐私笔记不会上传。此选择仅用于本次恢复，之后仍使用正常双向同步。', confirmLabel: '保留本机并同步' })) return
+    setSavingSync(true)
+    setSyncMessage(undefined)
+    setSyncMessageIsError(false)
+    try {
+      const succeeded = await onSyncNow('push')
+      setSyncMessage(succeeded ? '已保留本机内容并发布本批变更；如仍有待上传项，请继续同步。' : '恢复未完成，本机内容和待上传变更仍保留，请查看错误后重试。')
+      setSyncMessageIsError(!succeeded)
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '无法完成本机优先同步')
+      setSyncMessageIsError(true)
+    } finally {
+      setSavingSync(false)
+    }
+  }
+
   const testWebdavServer = async () => {
     if (savingSync || checkingServer || syncState === 'syncing') return
     setCheckingServer(true)
@@ -610,7 +629,9 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                     <Button appearance="secondary" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void showWebdavQr()}>生成配置二维码</Button>
                   </div>
                 </div>
+                {syncState === 'syncing' && syncProgress && <div className="sync-settings-result" role="status">{syncProgress}</div>}
                 <div className="sync-utility-actions">
+                  <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void keepLocalAndSync()}>以本机为准解决冲突</Button>
                   {storedWebdavSyncPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavSyncPassword()}>清除已保存同步密码</Button>}
                   {storedWebdavAppPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavAppPassword()}>清除已保存应用密码</Button>}
                 </div>
@@ -622,7 +643,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   </div>
                 </details>}
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
-              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。正文和一般变更会在停止修改 30 秒后合并同步；窗口失焦、重新聚焦和退出时立即同步。阅读位置只在失焦或退出时发布，页面切换不会联网。</Text>
+              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。修改停止 60 秒后合并同步，持续编辑最多等待 5 分钟；失焦和退出仅在有待上传内容时同步。回到窗口时最多每 2 分钟检查一次远端，无定时轮询。失败后逐步延长重试间隔，手动同步可立即重试。阅读位置只在失焦或退出时发布，页面切换不会联网。</Text>
               </div>
             </SettingsSection>
             <SettingsSection title="其他服务" description="AI 与实时协作可以独立部署；未配置时不影响本地笔记和数据同步。">

@@ -21,7 +21,7 @@ objects/<first-two-hex>/<sha256>
 ```
 
 - `syncOutbox` 是 Electron 的事务性本地变化标记；Android 使用 outbox count，并仅在 outbox 为空但 dirty count 非零时执行修复扫描。
-- `head.json` 约数百字节，包含最后序号、日志字节数与 SHA-256。无变化时只做目录 PROPFIND 和每设备一次小 head GET，不下载 `.jsonl`。
+- `head.json` 约数百字节，包含最后序号、日志字节数与 SHA-256。无变化时只做目录 PROPFIND 和每设备一次小 head GET，不下载 `.jsonl`。Electron 进一步利用强 ETag 缓存提交标记：缓存有效且标记未变时只需一次 PROPFIND；缺失或弱 ETag 时正常读取 head。
 - journal 先写、head 后写；只有 head 成功才确认 outbox。读取端只消费 head 已提交的序号前缀。
 - 非 `revision` 实体始终只保留每个 `type:id` 的最新状态，包括删除墓碑。
 - 远端 revision 环每设备最多 256 条且序列化总量最多 2 MiB；Electron 本地每页最多保留 50 个自动版本和 20 个手动/导入版本。
@@ -29,6 +29,8 @@ objects/<first-two-hex>/<sha256>
 - Electron、Android 和 Python 本地桥使用同一 head 字段、UTF-8 字节计算和历史环规则；缺少 head 的旧 v4 日志仍可读取。
 
 v4.1 仍不是最终协议：有变化时会完整重写自己的日志；全局 `objects/` 尚无跨设备安全垃圾回收；旧版本客户端在已存在 head 后继续写入会留下未提交尾部，需由新版所属设备再次发布 head；设备日志仍没有全局因果顺序。因此 v5 仍有必要。
+
+2026-09-04 Electron 的触发合并、按上传成本分批和无变化写入过滤，见 [同步性能优化与验证](SYNC_EFFICIENCY_2026-09-04.md)。本轮未迁移远端协议，也未修改 Android 独立实现。
 
 ## 2. 坚果云约束
 

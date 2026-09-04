@@ -113,7 +113,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -365,7 +365,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     let timer: number | undefined
     try {
       await Promise.race([
-        syncNow(),
+        syncNow({ reason: 'shutdown' }),
         new Promise<void>((resolve) => { timer = window.setTimeout(resolve, 4_000) }),
       ])
     } finally {
@@ -375,18 +375,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   const backgroundSyncGate = useMemo(() => createBackgroundSyncGate(async () => {
     await flushDirtyReadingPositions()
-    await syncNow()
+    await syncNow({ reason: 'background' })
   }), [flushDirtyReadingPositions, syncNow])
 
   useEffect(() => {
     const onFocus = () => {
       backgroundSyncGate.foreground()
-      void syncNow()
+      void syncNow({ reason: 'foreground' })
     }
     const onBlur = () => { backgroundSyncGate.background() }
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') backgroundSyncGate.background()
-      else backgroundSyncGate.foreground()
+      else onFocus()
     }
     window.addEventListener('focus', onFocus)
     window.addEventListener('blur', onBlur)
@@ -967,7 +967,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               />}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
-                  <span>{syncState === 'offline' ? '尚未配置坚果云 WebDAV 同步，当前修改只保存在本机。' : syncState === 'syncing' ? '正在与坚果云交换最新数据。' : syncState === 'synced' ? '本机与坚果云已完成最近一次同步。' : syncState === 'conflict' ? '检测到多设备同时修改，请打开相关笔记的版本历史处理。' : '最近一次同步没有完成。'}</span>
+                  <span>{syncState === 'offline' ? '自动同步未启用或尚未配置，当前修改保存在本机。' : syncState === 'syncing' ? syncProgress ?? '正在与坚果云交换最新数据。' : syncState === 'synced' ? '本机与坚果云已完成最近一次同步。' : syncState === 'conflict' ? '同步版本存在冲突，自动重试已暂停。请先备份，再到同步设置选择处理方式。' : '最近一次同步没有完成。'}</span>
                   {(syncState === 'error' || syncState === 'conflict') && <code>{syncError ?? (syncState === 'conflict' ? accessiblePages.filter((page) => page.syncStatus === 'conflict').map((page) => page.title).join('、') || '存在尚未处理的同步冲突。' : '没有提供更详细的错误信息。')}</code>}
                 </div>
                 <ActionMenuDivider />
@@ -984,7 +984,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             </div>
           </div>
           <section className="document-surface">
-            {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>检测到其他设备也修改了此笔记</strong><span>当前正文保持本机版本，远端版本已安全保存在“版本”中。继续编辑可保留本机版本；从版本历史恢复远端版本可采用远端内容。</span></div>}
+            {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>此笔记存在尚未处理的同步冲突</strong><span>本机内容未被覆盖，自动重试已暂停。请先备份，再到“设置 → 同步与连接”选择“以本机为准解决冲突”；继续编辑不会自动解决版本冲突。</span></div>}
             {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { selectArea('notes'); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
                   if (!(await requestConfirm({ title: `永久删除“${currentPage.title}”？`, description: '永久删除后无法恢复，确定继续吗？', confirmLabel: '永久删除', destructive: true }))) return
                   try {
@@ -1054,6 +1054,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         accentColor={accentColor}
         syncState={syncState}
         syncError={syncError}
+        syncProgress={syncProgress}
         currentPageTitle={currentPage.title}
         transferMessage={transferMessage}
         dataRoot={dataRoot}

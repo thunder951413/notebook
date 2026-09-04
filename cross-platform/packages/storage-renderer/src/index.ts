@@ -206,6 +206,9 @@ export class DexieNotebookRepository implements NotebookRepository {
     await this.db.transaction('rw', [this.db.pages, this.db.readingPositions, this.db.syncOutbox, this.db.syncVersions], async () => {
       const page = await this.db.pages.get(position.pageId)
       if (!page || page.deletedAt) return
+      const previous = await this.db.readingPositions.get(position.id)
+      if (previous?.pageId === position.pageId && previous.anchorUtf16Offset === position.anchorUtf16Offset
+        && previous.viewportOffsetFraction === position.viewportOffsetFraction && previous.deviceId === position.deviceId) return
       await this.db.readingPositions.put(position)
       await this.enqueueChange(page.workspaceId, 'reading_position', position.id, 'upsert', { ...position })
     })
@@ -216,21 +219,35 @@ export class DexieNotebookRepository implements NotebookRepository {
       const page = await this.db.pages.get(pageId)
       if (!page) throw new Error(`Page not found: ${pageId}`)
       const previous = await this.db.pageTags.where('pageId').equals(pageId).toArray()
+      const previousIds = new Set(previous.map((item) => item.tagId))
+      if (next.length === previous.length && next.every((item) => previousIds.has(item.tagId))) return
       await this.db.pageTags.where('pageId').equals(pageId).delete()
       await this.db.pageTags.bulkPut(next)
       const nextIds = new Set(tagIds)
       for (const value of previous.filter((item) => !nextIds.has(item.tagId))) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'delete', {})
-      for (const value of next) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'upsert', value)
+      for (const value of next.filter((item) => !previousIds.has(item.tagId))) await this.enqueueChange(page.workspaceId, 'page_tag', `${pageId}:${value.tagId}`, 'upsert', value)
     })
   }
 
   async savePage(page: Page, document?: PageDocument): Promise<void> {
     await this.db.transaction('rw', this.db.tables, async () => {
       const previousPage = await this.db.pages.get(page.id)
+      const previousDocument = document ? await this.db.documents.get(page.id) : undefined
+      // Editor lifecycle flushes also run when nothing was typed. Do not
+      // manufacture a document/page update merely because the flush supplies
+      // a new timestamp; retain the durable saved version and pending state.
+      if (page.syncStatus === 'pending' && document && previousPage && previousDocument
+        && this.sameRemoteEntity({ ...previousPage, updatedAt: page.updatedAt }, page)
+        && this.sameRemoteEntity({ ...previousDocument, updatedAt: document.updatedAt }, document)) {
+        if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
+        const draft = await this.db.drafts.get(page.id)
+        if (draft && draft.document.updatedAt <= document.updatedAt) await this.db.drafts.delete(page.id)
+        return
+      }
       await this.db.pages.put(page)
       if (document) {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
-        const existing = await this.db.documents.get(page.id)
+        const existing = previousDocument
         const existingMarkdown = existing?.markdown ?? (existing ? legacyTiptapToCanonicalMarkdown(existing.tiptapJson) : undefined)
         const nextMarkdown = document.markdown ?? legacyTiptapToCanonicalMarkdown(document.tiptapJson)
         if (existing && existingMarkdown !== nextMarkdown) {
@@ -354,11 +371,14 @@ export class DexieNotebookRepository implements NotebookRepository {
       const page = await this.db.pages.get(pageId)
       if (!page) throw new Error(`Page not found: ${pageId}`)
       const previous = await this.db.taskSteps.where('pageId').equals(pageId).toArray()
+      const previousById = new Map(previous.map((step) => [step.id, step]))
+      const changed = steps.filter((step) => !this.sameRemoteEntity(previousById.get(step.id), step))
+      if (changed.length === 0 && previous.length === steps.length) return
       await this.db.taskSteps.where('pageId').equals(pageId).delete()
       await this.db.taskSteps.bulkPut(steps)
       const nextIds = new Set(steps.map((step) => step.id))
       for (const removed of previous.filter((step) => !nextIds.has(step.id))) await this.enqueueChange(page.workspaceId, 'task_step', removed.id, 'delete', { ...removed })
-      for (const step of steps) await this.enqueueChange(page.workspaceId, 'task_step', step.id, 'upsert', { ...step })
+      for (const step of changed) await this.enqueueChange(page.workspaceId, 'task_step', step.id, 'upsert', { ...step })
     })
   }
 
@@ -395,6 +415,10 @@ export class DexieNotebookRepository implements NotebookRepository {
     // edits keep changing the now-private entity. Those later edits are local
     // only, so replacing the delete here would leak the old remote copy.
     if (existing?.payload.privacyRetraction === true && payload.privacyRetraction !== true) return
+    // Preserve the operation id for an identical save. A real edit must still
+    // receive a new id so an in-flight acknowledgement cannot delete it.
+    if (existing?.operation === operation && existing.expectedVersion === (version?.version ?? 0)
+      && this.sameRemoteEntity(existing.payload, payload)) return
     // Keep only the latest unsent mutation for an entity. Multiple autosaves made
     // before a sync tick share the same expected version and would otherwise
     // conflict with each other after the first mutation is accepted remotely.
@@ -454,7 +478,14 @@ export class DexieNotebookRepository implements NotebookRepository {
           version: item.version,
           ...(webdavParentVersion ? { webdavParentVersion: true as const } : {}),
         })
-        if (item.entity_type === 'page') await this.db.pages.update(item.entity_id, { syncStatus: 'synced' })
+        const newer = await this.db.syncOutbox.where('[entityType+entityId]').equals([item.entity_type, item.entity_id])
+          .and((pending) => pending.workspaceId === workspaceId).first()
+        // A save while the old snapshot was uploading is its successor, not
+        // a competing branch. Only rebase the exact acknowledged parent.
+        if (webdavParentVersion && newer?.expectedVersion === item.version - 1) {
+          await this.db.syncOutbox.update(newer.id, { expectedVersion: item.version })
+        }
+        if (item.entity_type === 'page') await this.db.pages.update(item.entity_id, { syncStatus: newer ? 'pending' : 'synced' })
       }
       if (cursor !== undefined) await this.db.syncCursors.put({ workspaceId, cursor })
     })
@@ -523,7 +554,7 @@ export class DexieNotebookRepository implements NotebookRepository {
     return undefined
   }
 
-  private sameRemoteEntity(left: Record<string, unknown> | undefined, right: Record<string, unknown> | undefined): boolean {
+  private sameRemoteEntity(left: object | undefined, right: object | undefined): boolean {
     if (!left || !right) return false
     const normalize = (value: unknown): unknown => {
       if (Array.isArray(value)) return value.map(normalize)
@@ -563,7 +594,8 @@ export class DexieNotebookRepository implements NotebookRepository {
     for (const item of new Map([...sourceLinks, ...targetLinks].map((link) => [link.id, link])).values()) await this.queuePrivacyRetractionIfPublished(workspaceId, 'page_link', item.id)
   }
 
-  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false): Promise<RemoteApplyResult> {
+  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false, keepLocal = false): Promise<RemoteApplyResult> {
+    if (keepLocal && !webdavParentVersion) throw new Error('Local conflict recovery is only supported for WebDAV')
     return this.db.transaction('rw', this.db.tables, async () => {
       const previousCursor = await this.getSyncCursor(workspaceId)
       let appliedCursor = cursor
@@ -593,6 +625,26 @@ export class DexieNotebookRepository implements NotebookRepository {
           : undefined
         const pending = pendingExact ?? pendingPage
         const current = await this.currentRemoteEntity(change)
+        const localVersion = await this.db.syncVersions.get(this.versionId(workspaceId, change.entityType, change.entityId))
+        // Explicit, one-shot user choice, never the automatic merge policy.
+        // Keep the current record (not a stale outbox payload), and publish it
+        // as a successor of every observed remote branch. Queue + baseline +
+        // cursor are atomic: failed uploads remain durable pending work.
+        // Unknown remote entities still flow through the normal import path.
+        if (keepLocal && (current || pendingExact || localVersion)) {
+          const version = Math.max(localVersion?.version ?? 0, pendingExact?.expectedVersion ?? 0, change.version + 1)
+          await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version, webdavParentVersion: true })
+          const operation = pendingExact?.operation === 'delete' || !current ? 'delete' : 'upsert'
+          const equivalent = operation === change.operation && (operation === 'delete' || this.sameRemoteEntity(current, payload))
+          if (pendingExact || !equivalent) {
+            await this.enqueueChange(workspaceId, change.entityType, change.entityId, operation,
+              operation === 'delete' ? pendingExact?.payload ?? {} : current!)
+            if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'pending' })
+          } else if (change.entityType === 'page') {
+            await this.db.pages.update(change.entityId, { syncStatus: 'synced' })
+          }
+          continue
+        }
         const equivalentPending = pending && change.version === pending.expectedVersion && change.operation === pending.operation && (
           change.operation === 'delete' || this.sameRemoteEntity(current ?? pending.payload, payload ?? pending.payload)
         )
@@ -608,7 +660,6 @@ export class DexieNotebookRepository implements NotebookRepository {
           appliedCursor = Math.max(previousCursor, change.cursor - 1)
           break
         }
-        const localVersion = await this.db.syncVersions.get(this.versionId(workspaceId, change.entityType, change.entityId))
         const compatibleLegacyAdvance = webdavParentVersion
           && localVersion !== undefined
           && localVersion.webdavParentVersion !== true
@@ -621,7 +672,29 @@ export class DexieNotebookRepository implements NotebookRepository {
           const duplicate = change.operation === 'upsert'
             ? this.sameRemoteEntity(current, payload)
             : current === undefined
-          if (duplicate && change.version < localVersion.version) continue
+          // Legacy bootstrap journals omitted optional metadata properties
+          // (such as color and page placement) and could synthesize createdAt during import. A
+          // replay of that initial snapshot is not a concurrent rename/move.
+          // Keep the richer local record only when every supplied mutable
+          // field, including updatedAt, still matches. Pending writes have
+          // already been handled above; modern siblings keep strict checks.
+          const legacyMetadataSnapshot = localVersion.webdavParentVersion !== true
+            && localVersion.version === 1 && change.version === 0
+            && ['section', 'notebook', 'page'].includes(change.entityType)
+            && change.operation === 'upsert' && current !== undefined && payload !== undefined
+            && this.sameRemoteEntity(current, { ...current, ...payload, createdAt: current.createdAt })
+          const legacyDocumentSnapshot = localVersion.webdavParentVersion !== true
+            && localVersion.version === 1 && change.version === 0
+            && change.entityType === 'document' && change.operation === 'upsert'
+            && current !== undefined && payload !== undefined
+            && Number(payload.schemaVersion) < 3 && typeof current.markdown === 'string'
+            && current.markdown === legacyTiptapToCanonicalMarkdown(payload.tiptapJson as Record<string, unknown>)
+          if ((duplicate || legacyMetadataSnapshot || legacyDocumentSnapshot) && change.version < localVersion.version) {
+            // This document was previously flagged only because its imported
+            // rich-text representation differed from the migrated Markdown.
+            if (legacyDocumentSnapshot) await this.db.pages.update(change.entityId, { syncStatus: 'synced' })
+            continue
+          }
           if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
           conflicts.push({ entityType: change.entityType, entityId: change.entityId, pageIds })
           appliedCursor = Math.max(previousCursor, change.cursor - 1)
@@ -688,11 +761,14 @@ export class DexieNotebookRepository implements NotebookRepository {
       const page = await this.db.pages.get(pageId)
       if (!page) throw new Error(`Page not found: ${pageId}`)
       const previous = await this.db.pageLinks.where('sourcePageId').equals(pageId).toArray()
+      const previousById = new Map(previous.map((link) => [link.id, link]))
+      const changed = links.filter((link) => !this.sameRemoteEntity(previousById.get(link.id), link))
+      if (changed.length === 0 && previous.length === links.length) return
       await this.db.pageLinks.where('sourcePageId').equals(pageId).delete()
       await this.db.pageLinks.bulkPut(links)
       const nextIds = new Set(links.map((link) => link.id))
       for (const removed of previous.filter((link) => !nextIds.has(link.id))) await this.enqueueChange(page.workspaceId, 'page_link', removed.id, 'delete', {})
-      for (const link of links) await this.enqueueChange(page.workspaceId, 'page_link', link.id, 'upsert', { ...link })
+      for (const link of changed) await this.enqueueChange(page.workspaceId, 'page_link', link.id, 'upsert', { ...link })
     })
   }
 
