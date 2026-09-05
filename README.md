@@ -11,7 +11,7 @@ Notebook Next 是面向 Windows、Linux 和 macOS 的 Electron 桌面笔记应�
 - 本地优先编辑、版本历史、回收站、提醒、任务、导入导出和隐私笔记本访问锁。
 - 即时崩溃草稿、退出前保存握手、原子数据目录切换和 Markdown-only 历史压缩。
 - 通过坚果云 WebDAV 与 Android 共享笔记、附件、版本和阅读位置。
-- Electron 打包目标：Windows NSIS/portable、Linux AppImage/deb、macOS dmg/zip。
+- Electron 打包目标：Windows NSIS/portable、Linux AppImage、macOS dmg/zip。
 
 ## 目录
 
@@ -72,3 +72,7 @@ xattr -rc "/Applications/notebook-next.app"
 ## 许可
 
 [MIT](LICENSE)
+
+## 问题诊断
+
+各端都提供容量受限的本地诊断日志。发生问题时提供时间和操作，按 [日志提取说明](docs/DIAGNOSTICS.md) 导出；Android Debug 可通过 adb 提取。

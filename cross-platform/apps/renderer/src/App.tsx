@@ -451,9 +451,28 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   }, [activeArea, hasActivePage])
 
   useEffect(() => {
-    if (window.matchMedia('(max-width: 1180px)').matches) setNavOpen(false)
-    if (window.matchMedia('(max-width: 680px)').matches) setPagesOpen(false)
+    const navigationQuery = window.matchMedia('(max-width: 1180px)')
+    const panelQuery = window.matchMedia('(max-width: 1300px)')
+    const adaptLayout = () => {
+      if (navigationQuery.matches) { setNavOpen(false); setPagesOpen(false) }
+      if (panelQuery.matches) setAiOpen(false)
+    }
+    adaptLayout()
+    navigationQuery.addEventListener('change', adaptLayout)
+    panelQuery.addEventListener('change', adaptLayout)
+    return () => {
+      navigationQuery.removeEventListener('change', adaptLayout)
+      panelQuery.removeEventListener('change', adaptLayout)
+    }
   }, [])
+  // On narrow windows the navigation and inspector are temporary drawers.
+  useEffect(() => {
+    if (navigationOpen && window.matchMedia('(max-width: 1180px)').matches) setAiOpen(false)
+  }, [navigationOpen])
+  const showRightPanel = (open: boolean) => {
+    if (open && window.matchMedia('(max-width: 1180px)').matches) { setNavOpen(false); setPagesOpen(false) }
+    setAiOpen(open)
+  }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1037,11 +1056,11 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             {rightPanel === 'backlinks' && <Suspense fallback={null}><BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} refreshKey={referenceIndexRevision} /></Suspense>}
           </div>}
           <nav className="right-sidebar-rail" aria-label="页面辅助工具">
-            <Button appearance="subtle" icon={<PanelRight20Regular />} aria-label={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} title={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} aria-pressed={aiOpen} onClick={() => setAiOpen((value) => !value)} />
+            <Button appearance="subtle" icon={<PanelRight20Regular />} aria-label={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} title={aiOpen ? '隐藏右侧面板' : '显示右侧面板'} aria-pressed={aiOpen} onClick={() => showRightPanel(!aiOpen)} />
             <span className="right-sidebar-divider" />
-            <Button className={aiOpen && rightPanel === 'outline' ? 'selected' : ''} appearance="subtle" icon={<TextBulletListSquare20Regular />} aria-label="大纲" title="大纲" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('outline'); setAiOpen(true) }} />
+            <Button className={aiOpen && rightPanel === 'outline' ? 'selected' : ''} appearance="subtle" icon={<TextBulletListSquare20Regular />} aria-label="大纲" title="大纲" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('outline'); showRightPanel(true) }} />
             <Button appearance="subtle" icon={<Link20Regular />} aria-label="双链" title="插入双链" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => setReferencePickerOpen(true)} />
-            <Button className={aiOpen && rightPanel === 'backlinks' ? 'selected' : ''} appearance="subtle" icon={<ArrowReply20Regular />} aria-label="引用" title="查看引用" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('backlinks'); setAiOpen(true) }} />
+            <Button className={aiOpen && rightPanel === 'backlinks' ? 'selected' : ''} appearance="subtle" icon={<ArrowReply20Regular />} aria-label="引用" title="查看引用" disabled={!hasActivePage || activeArea !== 'notes'} onClick={() => { setRightPanel('backlinks'); showRightPanel(true) }} />
             <Button appearance="subtle" icon={<Bot20Regular />} aria-label="AI" title="打开 AI 工作区" onClick={() => setAiWorkspaceOpen(true)} />
           </nav>
         </aside>

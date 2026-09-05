@@ -223,7 +223,11 @@ export class AutomationApiServer {
               : 500)
       const publicMessage = status >= 500 && status !== 503 && status !== 504 ? 'Notebook 内部处理失败' : value.message
       sendJson(response, status, { error: { code: value.code ?? (status === 500 ? 'internal_error' : 'request_error'), message: publicMessage } })
-      void appendDiagnosticEvent({ level: status >= 500 ? 'error' : 'warning', category: 'automation', action: 'request', status: 'failed', message: status >= 500 ? `HTTP ${status}` : value.message, durationMs: performance.now() - startedAt })
+      void appendDiagnosticEvent({
+        level: status >= 500 ? 'error' : 'warning', category: 'automation', action: 'request', status: 'failed',
+        message: `HTTP ${status}`, durationMs: performance.now() - startedAt,
+        errorType: value.name, ...(value.code ? { errorCode: value.code } : {}),
+      })
     }
   }
 

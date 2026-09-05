@@ -1,0 +1,64 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+import {startServerFixture} from './server-fixture.mjs';
+const until=async(fn)=>{for(let i=0;i<120;i++){if(await fn())return;await new Promise(r=>setTimeout(r,25));}assert.fail('UI condition timed out');};
+test('browser editor recovers drafts, retains page snapshots, and honors task creation',async t=>{
+ const f=await startServerFixture(t);
+ const nb=f.store.createNotebook({name:'Test'});
+ const a=await f.store.createPage({notebookId:nb.id,title:'A',markdown:'# A\nserver A'});
+ const b=await f.store.createPage({notebookId:nb.id,title:'B',markdown:'# B\nserver B'});
+ const dom=new JSDOM(await readFile(new URL('../web/index.html',import.meta.url),'utf8'),{url:f.baseUrl+'/#/page/'+a.id,pretendToBeVisual:true});
+ const w=dom.window;
+ for(const key of ['window','document','location','localStorage','sessionStorage','CustomEvent','HTMLElement'])globalThis[key]=key==='window'?w:w[key];
+ Object.defineProperty(globalThis,'navigator',{value:w.navigator,configurable:true});
+ Object.defineProperty(w,'innerWidth',{value:390,writable:true});
+ globalThis.getComputedStyle=w.getComputedStyle.bind(w);globalThis.confirm=()=>true;globalThis.prompt=()=>'';
+ const originalFetch=globalThis.fetch,originalInterval=globalThis.setInterval,intervals=[];
+ globalThis.setInterval=(...args)=>{const timer=originalInterval(...args);intervals.push(timer);return timer;};
+ let holdPut=null;let writes=0;
+ globalThis.fetch=async(url,options)=>{if(options?.method==='PUT'&&url==='/api/pages/'+a.id){writes++;if(holdPut)await holdPut;}return originalFetch(new URL(url,f.baseUrl),options);};
+ t.after(()=>{intervals.forEach(clearInterval);globalThis.setInterval=originalInterval;globalThis.fetch=originalFetch;dom.window.close();});
+ const $=id=>w.document.getElementById(id);
+ const edit=body=>{$('editor').value=body;$('editor').dispatchEvent(new w.Event('input',{bubbles:true}));};
+ const save=()=>w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'s',ctrlKey:true,bubbles:true}));
+ localStorage.setItem('nb-draft-'+a.id,JSON.stringify({version:2,patch:{markdown:'# Recovered\nlocal only',title:'A'},baseUpdatedAt:a.updatedAt}));
+ await import('../web/js/app.js');
+ await until(()=>$('draft-use'));
+ await t.test('recovery is visible and cannot be silently replaced by new typing',async()=>{
+  assert.equal($('editor').readOnly,true);assert.equal($('editor-header').previousElementSibling.className,'draft-bar');
+  assert.ok(localStorage.getItem('nb-draft-'+a.id));$('draft-use').click();save();
+  await until(()=>$('save-status').textContent==='已保存');
+  assert.equal(await f.store.readBody(a.id),'# Recovered\nlocal only');assert.equal(localStorage.getItem('nb-draft-'+a.id),null);
+ });
+ await t.test('fast navigation and return during an in-flight save shows latest local text',async()=>{
+  let release;holdPut=new Promise(r=>release=r);edit('# Recovered\nnewest unsaved snapshot');
+  location.hash='#/page/'+b.id;await until(()=>$('page-title-input').value==='B');
+  location.hash='#/page/'+a.id;await until(()=>$('editor').value.includes('newest unsaved snapshot'));
+  assert.equal($('draft-use'),null);release();holdPut=null;
+  await until(()=>$('save-status').textContent==='已保存');assert.match(await f.store.readBody(a.id),/newest unsaved snapshot/);
+ });
+ await t.test('server conflict retains local draft and stops automatic retries',async()=>{
+  await f.store.savePage(a.id,{markdown:'# Other device\nremote'},new Set());
+  edit('# Recovered\nlocal conflict');save();await until(()=>$('save-status').textContent.includes('版本冲突'));
+  const before=writes;w.dispatchEvent(new w.Event('online'));await new Promise(r=>setTimeout(r,60));assert.equal(writes,before);
+  assert.match(localStorage.getItem('nb-draft-'+a.id),/local conflict/);assert.match(await f.store.readBody(a.id),/Other device/);
+  $('btn-save-retry').click();$('conflict-server').click();await until(()=>$('editor').value.includes('Other device'));
+ });
+ await t.test('mobile drawers have working close/back controls and split falls back to editing',async()=>{
+  assert.equal($('editor-body').classList.contains('edit-only'),true);
+  $('btn-navigation').click();assert.equal($('app').classList.contains('navigation-open'),true);
+  $('btn-panel-close').click();assert.equal($('app').classList.contains('navigation-open'),false);
+  $('btn-page-info').click();assert.equal($('inspector').classList.contains('hidden'),false);
+  $('panel-backdrop').click();assert.equal($('inspector').classList.contains('hidden'),true);
+  $('btn-editor-back').click();await until(()=>$('editor-view').classList.contains('hidden'));
+ });
+ await t.test('create-task checkbox controls kind without an extra confirm',async()=>{
+  $('btn-new-page').click();
+  const checkbox=w.document.querySelector('.modal input[type=checkbox]');assert.ok(checkbox);checkbox.checked=true;
+  const create=[...w.document.querySelectorAll('.modal-footer button')].find(el=>el.classList.contains('primary'));create.click();
+  await until(()=>$('kind-task').classList.contains('active')&&!$('editor-view').classList.contains('hidden'));
+  assert.equal(f.store.s.pages.find(p=>p.id===location.hash.split('/').pop()).kind,'task');
+ });
+});

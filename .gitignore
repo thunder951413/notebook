@@ -38,3 +38,6 @@ output/
 notebook_android/
 recovery/
 .zcode/
+
+# Local audit screenshots, test runs and diagnostic bundles (reports stay tracked).
+docs/audits/**/evidence/

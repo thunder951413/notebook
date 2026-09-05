@@ -7,11 +7,37 @@ import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
 import { pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection, type LegacySftpFile, type LegacySftpHelperResult, type LegacySftpPullOptions, type LegacySftpPushOptions, type LegacySshConnection } from './legacySftp'
 import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, type WebdavConnection, type WebdavJournalEntry } from './webdav'
-import { appendDiagnosticEvent, diagnosticLogPath, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
+import { appendDiagnosticEvent, diagnosticErrorDetails, diagnosticLogPath, exportDiagnosticEvents, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
 const WEBDAV_OPERATION_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
+
+async function diagnoseOperation<T>(options: {
+  category: string
+  action: string
+  operationId?: string
+  resource?: DiagnosticEventInput['resource']
+  summarize?: (result: T) => string | undefined
+}, operation: () => Promise<T>): Promise<T> {
+  const operationId = options.operationId ?? randomUUID()
+  const startedAt = Date.now()
+  void appendDiagnosticEvent({ level: 'info', category: options.category, action: options.action, status: 'started', operationId, resource: options.resource })
+  try {
+    const result = await operation()
+    void appendDiagnosticEvent({
+      level: 'info', category: options.category, action: options.action, status: 'success', operationId,
+      resource: options.resource, durationMs: Date.now() - startedAt, message: options.summarize?.(result),
+    })
+    return result
+  } catch (error) {
+    void appendDiagnosticEvent({
+      level: 'error', category: options.category, action: options.action, status: 'failed', operationId,
+      resource: options.resource, durationMs: Date.now() - startedAt, ...diagnosticErrorDetails(error),
+    })
+    throw error
+  }
+}
 
 function macInputSourceHelperPath() {
   return app.isPackaged
@@ -59,10 +85,12 @@ async function atomicWriteFile(target: string, data: string | Uint8Array, mode?:
 // Renderer shutdown includes durable drafts/reading positions plus a bounded
 // best-effort sync, so leave enough room for that handshake without waiting
 // indefinitely on a broken renderer or network.
-export function flushRenderer(contents: WebContents, timeoutMs = 8_000): Promise<void> {
+export function flushRenderer(contents: WebContents, timeoutMs = 8_000, operationId: string = randomUUID()): Promise<void> {
   if (contents.isDestroyed()) return Promise.resolve()
-  const requestId = randomUUID()
-  return new Promise((resolve, reject) => {
+  const requestId = operationId
+  const startedAt = Date.now()
+  void appendDiagnosticEvent({ level: 'info', category: 'storage', action: 'renderer-flush', status: 'started', operationId: requestId })
+  const flush = new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer)
       ipcMain.removeListener('renderer:flush-complete', listener)
@@ -78,8 +106,21 @@ export function flushRenderer(contents: WebContents, timeoutMs = 8_000): Promise
       reject(new Error('保存编辑内容超时，已取消退出或重启'))
     }, timeoutMs)
     ipcMain.on('renderer:flush-complete', listener)
-    contents.send('notebook:flush-request', requestId)
+    try {
+      contents.send('notebook:flush-request', requestId)
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
+  void flush.then(() => appendDiagnosticEvent({
+    level: 'info', category: 'storage', action: 'renderer-flush', status: 'success',
+    operationId: requestId, durationMs: Date.now() - startedAt,
+  }), (error) => appendDiagnosticEvent({
+    level: 'error', category: 'storage', action: 'renderer-flush', status: 'failed',
+    operationId: requestId, durationMs: Date.now() - startedAt, ...diagnosticErrorDetails(error),
+  }))
+  return flush
 }
 
 async function readCredentialStore(): Promise<Record<string, string>> {
@@ -260,7 +301,7 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
       filters: [{ name: 'JSON Lines', extensions: ['jsonl'] }],
     })
     if (result.canceled || !result.filePath) return undefined
-    const entries = await readDiagnosticEvents(500)
+    const entries = await exportDiagnosticEvents()
     await atomicWriteFile(result.filePath, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 0o600)
     return result.filePath
   })
@@ -272,15 +313,18 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
 
   ipcMain.handle('legacySftp:pull', async (event, settings: LegacySshConnection, pullOptions?: LegacySftpPullOptions) => {
     assertTrustedSender(event)
-    return pullLegacyRepository(settings, pullOptions)
+    return diagnoseOperation({
+      category: 'sync', action: 'legacy-pull',
+      summarize: (result) => `${result.files.length} files · ${result.reusedObjectCount} objects reused`,
+    }, () => pullLegacyRepository(settings, pullOptions))
   })
   ipcMain.handle('legacySftp:test', async (event, settings: LegacySshConnection) => {
     assertTrustedSender(event)
-    return testLegacyConnection(settings)
+    return diagnoseOperation({ category: 'sync', action: 'legacy-test' }, () => testLegacyConnection(settings))
   })
   ipcMain.handle('legacySftp:push', async (event, settings: LegacySshConnection, files: LegacySftpFile[], expectedIndexHash: string, pushOptions?: LegacySftpPushOptions) => {
     assertTrustedSender(event)
-    return pushLegacyRepository(settings, files, expectedIndexHash, pushOptions)
+    return diagnoseOperation({ category: 'sync', action: 'legacy-push', summarize: () => `${files.length} files` }, () => pushLegacyRepository(settings, files, expectedIndexHash, pushOptions))
   })
   ipcMain.handle('legacySftp:release', async (event, sessionId: string) => {
     assertTrustedSender(event)
@@ -288,27 +332,31 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
   })
   ipcMain.handle('legacySftp:helper', async (event, settings: LegacySshConnection, operation: 'export-tar' | 'import-tar' | 'verify' | 'gc', input?: Uint8Array): Promise<LegacySftpHelperResult> => {
     assertTrustedSender(event)
-    return runRepositoryHelper(settings, operation, input)
+    return diagnoseOperation({ category: 'sync', action: `legacy-${operation}` }, () => runRepositoryHelper(settings, operation, input))
   })
 
   ipcMain.handle('webdav:test', async (event, settings: WebdavConnection, requestId: string) => {
     assertTrustedSender(event)
-    return withWebdavDeadline(requestId, webdavRequests, (signal) => testWebdavConnection(settings, signal))
+    return diagnoseOperation({ category: 'sync', action: 'webdav-test', operationId: requestId },
+      () => withWebdavDeadline(requestId, webdavRequests, (signal) => testWebdavConnection(settings, signal)))
   })
   ipcMain.handle('webdav:pull', async (event, settings: WebdavConnection, knownSeqs: Record<string, number>, requestId: string) => {
     assertTrustedSender(event)
-    return withWebdavDeadline(requestId, webdavRequests, (signal) => pullWebdavJournals(settings, knownSeqs, signal))
+    return diagnoseOperation({ category: 'sync', action: 'webdav-pull', operationId: requestId, summarize: (result) => `${result.entries.length} entries` },
+      () => withWebdavDeadline(requestId, webdavRequests, (signal) => pullWebdavJournals(settings, knownSeqs, signal)))
   })
   ipcMain.handle('webdav:object:get', async (event, settings: WebdavConnection, hash: string, requestId: string) => {
     assertTrustedSender(event)
-    return withWebdavDeadline(requestId, webdavRequests, (signal) => getWebdavObject(settings, hash, signal))
+    return diagnoseOperation({ category: 'sync', action: 'webdav-object-get', operationId: requestId, resource: { type: 'object', id: hash } },
+      () => withWebdavDeadline(requestId, webdavRequests, (signal) => getWebdavObject(settings, hash, signal)))
   })
   ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string) => {
     assertTrustedSender(event)
-    return withWebdavDeadline(requestId, webdavRequests, async (signal) => {
-      for (const object of objects) await putWebdavObject(settings, object.hash, object.data, signal)
-      return appendWebdavJournal(settings, deviceId, entries, signal)
-    })
+    return diagnoseOperation({ category: 'sync', action: 'webdav-push', operationId: requestId, summarize: (result) => `${result.count} entries · ${objects.length} objects` },
+      () => withWebdavDeadline(requestId, webdavRequests, async (signal) => {
+        for (const object of objects) await putWebdavObject(settings, object.hash, object.data, signal)
+        return appendWebdavJournal(settings, deviceId, entries, signal)
+      }))
   })
   ipcMain.handle('webdav:cancel', (event, requestId: string) => {
     assertTrustedSender(event)

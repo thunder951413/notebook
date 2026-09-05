@@ -8,6 +8,11 @@ export interface DiagnosticEventInput {
   status: DiagnosticStatus
   message?: string
   durationMs?: number
+  operationId?: string
+  resource?: { type: string; id?: string }
+  errorType?: string
+  errorCode?: string
+  stack?: string[]
 }
 
 export interface DiagnosticEntry extends DiagnosticEventInput {
@@ -15,8 +20,42 @@ export interface DiagnosticEntry extends DiagnosticEventInput {
   timestamp: string
 }
 
+// Messages are denied by default because renderer strings can originate from
+// note content, filenames, remote responses, or user-supplied automation data.
+// This list contains only enum labels and numeric/count summaries audited at
+// their producers.
+const SAFE_MESSAGE_EVENTS = new Set([
+  'asset/save',
+  'data/export',
+  'data/import',
+  'page/create',
+  'page/restore',
+  'page/trash',
+  'privacy/normalize-page-placement',
+  'settings/automatic-sync',
+  'sync/conflict',
+  'sync/entity-conflict',
+  'sync/keep-local',
+  'sync/outbox',
+  'sync/run',
+  'sync/server-check',
+  'sync/upload-batch',
+])
+
 export function recordDiagnosticEvent(event: DiagnosticEventInput) {
-  void window.notebookDesktop?.diagnostics.record(event).catch(() => undefined)
+  const keepMessage = event.level !== 'error' && SAFE_MESSAGE_EVENTS.has(`${event.category}/${event.action}`)
+  const safeEvent = keepMessage ? event : { ...event, message: undefined, resource: undefined }
+  void window.notebookDesktop?.diagnostics.record(safeEvent).catch(() => undefined)
+}
+
+export function rendererErrorDetails(error: unknown) {
+  if (!(error instanceof Error)) return { errorType: typeof error }
+  const code = (error as Error & { code?: unknown }).code
+  return {
+    errorType: error.name,
+    ...(code !== undefined ? { errorCode: String(code) } : {}),
+    ...(error.stack ? { stack: error.stack.split('\n').slice(1, 6) } : {}),
+  }
 }
 
 export function installRendererDiagnostics() {
@@ -26,14 +65,14 @@ export function installRendererDiagnostics() {
     category: 'renderer',
     action: 'uncaught-error',
     status: 'failed',
-    message: event.error instanceof Error ? event.error.message : event.message || '界面发生未捕获错误',
+    ...rendererErrorDetails(event.error),
   })
   const onRejection = (event: PromiseRejectionEvent) => recordDiagnosticEvent({
     level: 'error',
     category: 'renderer',
     action: 'unhandled-rejection',
     status: 'failed',
-    message: event.reason instanceof Error ? event.reason.message : '界面发生未处理的异步错误',
+    ...rendererErrorDetails(event.reason),
   })
   window.addEventListener('error', onError)
   window.addEventListener('unhandledrejection', onRejection)

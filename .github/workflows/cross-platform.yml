@@ -7,10 +7,10 @@ on:
   push:
     branches: [next]
     tags: ['v*']
-    paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
+    paths: ['cross-platform/**', 'sub/**', '.github/workflows/cross-platform.yml']
   pull_request:
     branches: [next]
-    paths: ['cross-platform/**', '.github/workflows/cross-platform.yml']
+    paths: ['cross-platform/**', 'sub/**', '.github/workflows/cross-platform.yml']
   workflow_dispatch:
 
 jobs:
@@ -31,6 +31,9 @@ jobs:
       - name: Lint, typecheck, test and build
         working-directory: cross-platform
         run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
+      - name: Test web application
+        working-directory: sub
+        run: npm ci && npm test
       - name: Test Python AI service
         working-directory: cross-platform/services/ai
         run: |

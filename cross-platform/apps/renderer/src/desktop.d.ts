@@ -51,8 +51,8 @@ declare global {
         onStateChanged(callback: (state: DesktopUpdateState) => void): () => void
       }
       diagnostics: {
-        record(event: { level: 'info' | 'warning' | 'error'; category: string; action: string; status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'; message?: string; durationMs?: number }): Promise<void>
-        list(limit?: number): Promise<Array<{ id: string; timestamp: string; level: 'info' | 'warning' | 'error'; category: string; action: string; status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'; message?: string; durationMs?: number }>>
+        record(event: { level: 'info' | 'warning' | 'error'; category: string; action: string; status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'; message?: string; durationMs?: number; operationId?: string; resource?: { type: string; id?: string }; errorType?: string; errorCode?: string; stack?: string[] }): Promise<void>
+        list(limit?: number): Promise<Array<{ id: string; timestamp: string; sessionId: string; appVersion: string; platform: string; arch: string; level: 'info' | 'warning' | 'error'; category: string; action: string; status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'; message?: string; durationMs?: number; operationId?: string; resource?: { type: string; id?: string }; errorType?: string; errorCode?: string; stack?: string[] }>>
         export(): Promise<string | undefined>
         reveal(): Promise<void>
       }

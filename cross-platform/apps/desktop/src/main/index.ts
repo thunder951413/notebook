@@ -3,12 +3,13 @@ import { join } from 'node:path'
 import { deleteStoredSecret, flushRenderer, getStoredSecret, registerPlatformHandlers, setStoredSecret } from './platform'
 import { resolveDataRoot } from './dataRoot'
 import { DesktopUpdateService } from './updater'
-import { appendDiagnosticEvent } from './diagnostics'
+import { appendDiagnosticEvent, appendFatalDiagnosticEvent, diagnosticErrorDetails } from './diagnostics'
 import { AutomationApiServer } from './automationServer'
 import type { AutomationBridgeResponse } from '../automationContract'
 import { aiProviderCredentialKey, completeAIChat } from './aiProvider'
 import type { DesktopAIChatRequest } from '../aiContract'
 import { configureWebdavFetch } from './webdavFetch'
+import { createRendererReloader } from './reloadLifecycle'
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
@@ -29,6 +30,28 @@ const automationApi = new AutomationApiServer(
   },
 )
 const aiRequests = new Map<string, AbortController>()
+const reloadRenderer = createRendererReloader({
+  getContents: () => mainWindow?.webContents,
+  flush: (contents, operationId) => flushRenderer(contents, 8_000, operationId),
+  onError: (error) => dialog.showErrorBox('无法安全重新载入', error instanceof Error ? error.message : '编辑内容尚未保存'),
+  onEvent: ({ phase, operationId, durationMs, error }) => {
+    void appendDiagnosticEvent({
+      level: phase === 'failed' ? 'error' : 'info', category: 'lifecycle', action: 'renderer-reload',
+      status: phase === 'started' ? 'started' : phase === 'failed' ? 'failed' : phase === 'reloaded' ? 'success' : 'info',
+      operationId, durationMs, message: phase, ...(error ? diagnosticErrorDetails(error) : {}),
+    })
+  },
+})
+
+// uncaughtExceptionMonitor observes fatal main-process errors without changing
+// Node/Electron's normal crash behavior. Unhandled rejections promoted to uncaught
+// exceptions are covered by the same monitor.
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  appendFatalDiagnosticEvent({
+    level: 'error', category: 'main', action: 'uncaught-exception', status: 'failed',
+    message: origin, ...diagnosticErrorDetails(error),
+  })
+})
 
 const isAllowedExternalUrl = (value: string) => {
   try {
@@ -72,7 +95,11 @@ function createWindow() {
   })
   window.webContents.on('render-process-gone', (_event, details) => {
     console.error('Notebook renderer process exited', details)
-    void appendDiagnosticEvent({ level: 'error', category: 'renderer', action: 'process-gone', status: 'failed', message: details.reason })
+    void appendDiagnosticEvent({
+      level: 'error', category: 'renderer', action: 'process-gone', status: 'failed',
+      message: `${details.reason} · exit ${details.exitCode}`,
+      resource: { type: 'web-contents', id: String(window.webContents.id) },
+    })
     if (window.isDestroyed()) return
     const now = Date.now()
     if (now - lastRendererRecoveryAt > 30_000) {
@@ -207,7 +234,7 @@ app.whenReady().then(() => {
   const menu = Menu.buildFromTemplate([
     { label: 'Notebook', submenu: [{ role: 'about' }, { label: '命令面板…', accelerator: process.platform === 'darwin' ? 'Command+P' : 'Control+Shift+P', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:command-palette') } }, { label: '检查更新…', click: () => { showMainWindow(); mainWindow?.webContents.send('notebook:update-center'); void updateService.check(true) } }, { type: 'separator' }, { role: 'quit' }] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: '视图', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
+    { label: '视图', submenu: [{ label: '重新载入', accelerator: 'CommandOrControl+R', click: reloadRenderer }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
   ])
   Menu.setApplicationMenu(menu)
   globalShortcut.register('CommandOrControl+Shift+N', () => {

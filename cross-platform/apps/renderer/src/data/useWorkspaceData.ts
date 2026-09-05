@@ -15,7 +15,7 @@ import { pageLinksFromMarkdown } from './referenceIndex'
 import { formatUpdatedLabel } from '../updatedLabel'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
-import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
 import { AUTO_SYNC_DEBOUNCE_MS, createAutomaticSyncPolicy, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
 
@@ -37,6 +37,13 @@ const emptyEditorDocument = () => ({ type: 'doc', content: [{ type: 'paragraph' 
 let notebookRootMigration: Promise<void> | undefined
 let pagePrivacyNormalization: Promise<void> | undefined
 let lastDocumentSaveDiagnosticAt = 0
+const documentFailureDiagnostics = new Map<string, number>()
+function recordDocumentFailure(action: 'autosave' | 'draft-stage', error: unknown, startedAt: number) {
+  const now = Date.now()
+  if (now - (documentFailureDiagnostics.get(action) ?? 0) < 30_000) return
+  documentFailureDiagnostics.set(action, now)
+  recordDiagnosticEvent({ level: 'error', category: 'page', action, status: 'failed', durationMs: now - startedAt, operationId: crypto.randomUUID(), ...rendererErrorDetails(error) })
+}
 
 async function ensureNotebookPageRoots() {
   if (notebookRootMigration) return notebookRootMigration
@@ -139,7 +146,7 @@ const seedPages: Page[] = [
   { id: STARTUP_PAGE_ID, workspaceId: WORKSPACE_ID, sectionId: STARTUP_SECTION_ID, kind: 'document', title: 'Notebook Next 产品愿景', preview: '把笔记、任务、AI 与跨设备编辑放进同一个可靠的工作区。', favorite: true, syncStatus: 'local', ...timestamps },
   { id: 'ai-workflow', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'document', title: 'AI 工作流设计', preview: '选择内容后可以总结、解释、改写，并把结果安全地写回当前笔记。', favorite: false, syncStatus: 'local', ...timestamps },
   { id: 'migration', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'document', title: '旧版本数据迁移', preview: '保留 UUID、附件校验、墓碑与版本历史，并提供迁移前快照。', favorite: false, syncStatus: 'local', ...timestamps },
-  { id: 'task-review', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'task', title: '完成跨平台编辑器验收', preview: '验证表格、代码、附件、离线保存和三平台输入法。', favorite: false, important: true, dueAt: '2026-07-22T10:00:00.000Z', syncStatus: 'local', ...timestamps },
+  { id: 'task-review', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'task', title: '完成跨平台编辑器验收', preview: '验证表格、代码、附件、离线保存和三平台输入法。', favorite: false, important: true, syncStatus: 'local', ...timestamps },
   { id: 'task-migration', workspaceId: WORKSPACE_ID, sectionId: 'product', kind: 'task', title: '演练旧数据迁移', preview: '使用共享契约夹具完成 macOS → Next → Android 往返。', favorite: false, syncStatus: 'local', ...timestamps },
 ]
 
@@ -461,29 +468,41 @@ export function useWorkspaceData() {
   }, [])
 
   const saveDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
-    loadedDocumentIds.current.add(pageId)
-    const updatedAt = new Date().toISOString()
-    const normalized = normalizeReferenceTargetIds(tiptapJson)
-    const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(normalized), tiptapJson: normalized, updatedAt }
-    await repository.stageDraft(document)
-    await enqueuePageMutation(pageId, async () => {
-      const page = await repository.getPage(pageId)
-      if (!page) return
-      await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
-      await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
-      setReferenceIndexRevision((current) => current + 1)
-      setDocuments((current) => ({ ...current, [pageId]: normalized }))
-      if (Date.now() - lastDocumentSaveDiagnosticAt > 30_000) {
-        lastDocumentSaveDiagnosticAt = Date.now()
-        recordDiagnosticEvent({ level: 'info', category: 'page', action: 'autosave', status: 'success' })
-      }
-      if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(normalized)).catch(() => undefined)
-    })
+    const startedAt = Date.now()
+    try {
+      loadedDocumentIds.current.add(pageId)
+      const updatedAt = new Date().toISOString()
+      const normalized = normalizeReferenceTargetIds(tiptapJson)
+      const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(normalized), tiptapJson: normalized, updatedAt }
+      await repository.stageDraft(document)
+      await enqueuePageMutation(pageId, async () => {
+        const page = await repository.getPage(pageId)
+        if (!page) return
+        await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
+        await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
+        setReferenceIndexRevision((current) => current + 1)
+        setDocuments((current) => ({ ...current, [pageId]: normalized }))
+        if (Date.now() - lastDocumentSaveDiagnosticAt > 30_000) {
+          lastDocumentSaveDiagnosticAt = Date.now()
+          recordDiagnosticEvent({ level: 'info', category: 'page', action: 'autosave', status: 'success' })
+        }
+        if (!page.locked && !privateSectionIds.has(page.sectionId ?? '')) void indexPageForRetrieval(WORKSPACE_ID, pageId, page.title, extractDocumentText(normalized)).catch(() => undefined)
+      })
+    } catch (error) {
+      recordDocumentFailure('autosave', error, startedAt)
+      throw error
+    }
   }, [privateSectionIds])
 
   const stageDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
-    const updatedAt = new Date().toISOString()
-    await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt })
+    const startedAt = Date.now()
+    try {
+      const updatedAt = new Date().toISOString()
+      await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt })
+    } catch (error) {
+      recordDocumentFailure('draft-stage', error, startedAt)
+      throw error
+    }
   }, [])
 
   const loadBacklinks = useCallback((pageId: string) => repository.listBacklinks(pageId), [])

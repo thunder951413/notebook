@@ -88,7 +88,7 @@ export function usePageNavigation(options: PageNavigationOptions) {
     openRecentPage(result.pageId)
   }, [openRecentPage])
 
-  const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
+  const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean, _closeOnNarrow: 'navigation' | 'pages') => {
     const current = optionsRef.current
     current.setActivePage(page.id)
     current.setActiveSection(page.sectionId)
@@ -100,8 +100,8 @@ export function usePageNavigation(options: PageNavigationOptions) {
     if (hasChildren) {
       current.setExpandedPageIds((currentIds) => currentIds.has(page.id) ? currentIds : new Set([...currentIds, page.id]))
     }
-    if (!window.matchMedia('(max-width: 680px)').matches) return
-    if (closeOnNarrow === 'navigation') current.setNavOpen(false)
+    if (!window.matchMedia('(max-width: 1180px)').matches) return
+    current.setNavOpen(false)
     current.setPagesOpen(false)
   }, [])
 

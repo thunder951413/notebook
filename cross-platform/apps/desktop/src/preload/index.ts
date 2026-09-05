@@ -10,8 +10,20 @@ type DiagnosticEventInput = {
   status: 'started' | 'success' | 'failed' | 'cancelled' | 'info'
   message?: string
   durationMs?: number
+  operationId?: string
+  resource?: { type: string; id?: string }
+  errorType?: string
+  errorCode?: string
+  stack?: string[]
 }
-type DiagnosticEntry = DiagnosticEventInput & { id: string; timestamp: string }
+type DiagnosticEntry = DiagnosticEventInput & {
+  id: string
+  timestamp: string
+  sessionId: string
+  appVersion: string
+  platform: string
+  arch: string
+}
 
 export interface NotebookDesktopApi {
   platform: NodeJS.Platform
