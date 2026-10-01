@@ -1,11 +1,14 @@
+import { Blob as NodeBlob } from 'node:buffer'
 import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+import { synchronizeLegacySsh } from './legacySshSync'
 
 vi.mock('../diagnostics/diagnostics', () => ({ recordDiagnosticEvent: vi.fn() }))
+vi.mock('./legacySshSync', () => ({ synchronizeLegacySsh: vi.fn(async () => ({ state: 'synced', skipped: 0, fingerprint: 'ssh-test', retryCount: 0 })) }))
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const notebookId = '20000000-0000-4000-8000-000000000001'
@@ -75,11 +78,11 @@ function installDesktopMock() {
     test: vi.fn(async () => ({ ok: true, remotePathExists: true, latencyMs: 12, message: 'ok' })),
     pull: vi.fn(async (): Promise<PullResult> => ({ entries: [], fingerprint: 'fp' })),
     objectGet: vi.fn(async (_settings: unknown, hash: string) => new TextEncoder().encode(`content-of-${hash}`)),
-    push: vi.fn(async () => ({ firstSeq: 1, count: 0 })),
+    push: vi.fn(async (_settings: unknown, _deviceId: string, _entries: Array<Omit<ReturnType<typeof remoteEntry>, 'seq' | 'deviceId'>>, _objects: Array<{ hash: string; data: Uint8Array }>) => ({ firstSeq: 1, count: 0 })),
     cancel: vi.fn(async () => undefined),
   }
   const secrets = {
-    get: vi.fn(async (key: string) => key === 'webdav-app-password' ? appPassword : undefined),
+    get: vi.fn(async (key: string): Promise<string | undefined> => key === 'webdav-app-password' ? appPassword : undefined),
     set: vi.fn(async () => undefined),
     delete: vi.fn(async () => undefined),
   }
@@ -95,6 +98,44 @@ describe('synchronizeWebdav', () => {
     window.localStorage.clear()
     window.sessionStorage.clear()
     delete (window as unknown as Record<string, unknown>).notebookDesktop
+  })
+
+  test('private publication encrypts every payload and attachment and a fresh replica restores authenticated records', async () => {
+    const { webdav, secrets } = installDesktopMock()
+    const secret = 'private-library-test-key'
+    secrets.get.mockImplementation(async key => key === 'webdav-app-password' ? appPassword : secret)
+    webdav.push.mockImplementation(async (_settings, _device, entries) => ({ firstSeq: 1, count: entries.length }))
+    seedWebdavSettings()
+    const { repo } = repository()
+    const items = [
+      { entityType: 'page', entityId: pageId, payload: { id: pageId, locked: true, title: 'PRIVATE TITLE' } },
+      { entityType: 'document', entityId: pageId, payload: { pageId, schemaVersion: 3, markdown: 'PRIVATE BODY\n'.repeat(1000), tiptapJson: { type: 'doc', content: [] } } },
+      { entityType: 'asset', entityId: 'private-asset', payload: { pageId, filename: 'PRIVATE FILE'.repeat(300), mimeType: 'text/plain' } },
+    ].map((item, index) => ({ ...item, id: `op-${index}`, workspaceId, operation: 'upsert' as const, expectedVersion: 0, createdAt: timestamp }))
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue(items)
+    ;(repo.isPrivateSyncItem as ReturnType<typeof vi.fn>).mockResolvedValue(true)
+    ;(repo.getAssetContent as ReturnType<typeof vi.fn>).mockResolvedValue(new NodeBlob(['PRIVATE BYTES']))
+    expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('synced')
+    expect(repo.acknowledgeSync).toHaveBeenCalledWith(workspaceId, expect.any(Array), undefined, true, true)
+    const pushed = webdav.push.mock.calls.flatMap(call => call[2])
+    const objects = new Map(webdav.push.mock.calls.flatMap(call => call[3]).map(object => [object.hash, object.data]))
+    expect(JSON.stringify(pushed)).not.toContain('PRIVATE')
+    for (const bytes of objects.values()) expect(new TextDecoder().decode(bytes)).not.toContain('PRIVATE')
+    const assetEntry = pushed.find(entry => entry.type === 'asset')!
+    expect(objects.has(assetEntry.payload.$assetObject as string)).toBe(true)
+    webdav.objectGet.mockImplementation(async (_connection, hash) => Uint8Array.from(objects.get(hash)!))
+    const received = repository()
+    webdav.pull.mockResolvedValueOnce({ entries: pushed.map((entry, index) => ({ ...entry, seq: index + 1, deviceId: 'peer-private' })), fingerprint: 'fp' })
+    expect((await synchronizeWebdav(received.repo, workspaceId)).state).toBe('synced')
+    const changes = received.calls.applyChanges[0]!.changes as Array<{ authenticatedPrivate?: boolean; payload: Record<string, unknown> }>
+    expect(changes.every(change => change.authenticatedPrivate)).toBe(true)
+    expect(changes.find(change => change.payload.markdown)?.payload.markdown).toBe(items[1]!.payload.markdown)
+    expect(new TextDecoder().decode(received.calls.importedAssets[0]![1])).toBe('PRIVATE BYTES')
+    secrets.get.mockImplementation(async key => key === 'webdav-app-password' ? appPassword : 'wrong-key')
+    webdav.pull.mockResolvedValueOnce({ entries: [{ ...pushed[0]!, seq: 10, deviceId: 'peer-private' }], fingerprint: 'fp' })
+    const wrong = repository()
+    await expect(synchronizeWebdav(wrong.repo, workspaceId)).rejects.toThrow('密钥')
+    expect(wrong.calls.applyChanges).toEqual([])
   })
 
   test('push recovery re-reads remote heads and explicitly preserves local content; pull mode never publishes', async () => {
@@ -718,6 +759,7 @@ describe('migrateSshToWebdav', () => {
   beforeEach(() => {
     window.localStorage.clear()
     window.sessionStorage.clear()
+    vi.mocked(synchronizeLegacySsh).mockResolvedValue({ state: 'synced', skipped: 0, fingerprint: 'ssh-test', retryCount: 0 })
   })
 
   test('requires configured WebDAV credentials before starting', async () => {
@@ -729,39 +771,235 @@ describe('migrateSshToWebdav', () => {
     const { webdav } = installDesktopMock()
     seedWebdavSettings()
     const { repo } = repository()
-    webdav.push.mockResolvedValue({ firstSeq: 1, count: 10 })
+    const legacy = bundle()
+    legacy.documents[0]!.tiptapJson = { type: 'doc', content: [
+      { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: '旧版标题' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: '旧版正文' }] },
+    ] }
+    vi.mocked(repo.exportData).mockResolvedValue(legacy)
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 3 })
 
     const result = await migrateSshToWebdav(repo, workspaceId)
 
     expect(result.published).toBeGreaterThanOrEqual(2)
-    const [pushedConnection, pushedDeviceId, entries] = (webdav.push as ReturnType<typeof vi.fn>).mock.calls[0]! as [unknown, string, Array<{ op: string; type: string; ver: number }>]
+    const [pushedConnection, pushedDeviceId, entries] = (webdav.push as ReturnType<typeof vi.fn>).mock.calls[0]! as [unknown, string, Array<{ op: string; type: string; ver: number; payload: Record<string, unknown> }>]
     expect(pushedConnection).toEqual(connection)
     expect(pushedDeviceId).toBe(deviceId)
     expect(entries.every((entry) => entry.op === 'upsert' && entry.ver === 0)).toBe(true)
     expect(entries.some((entry) => entry.type === 'notebook')).toBe(true)
     expect(entries.some((entry) => entry.type === 'page')).toBe(true)
     expect(entries.some((entry) => entry.type === 'document')).toBe(true)
-    expect(JSON.parse(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup') ?? '{}')).toEqual({ 'device-0001': 10 })
+    expect(entries.find(entry => entry.type === 'document')?.payload).toMatchObject({ schemaVersion: 3, markdown: '# 旧版标题\n\n旧版正文', tiptapJson: { type: 'doc', content: [] } })
+    expect(JSON.parse(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup') ?? '{}')).toEqual({ 'device-0001': 3 })
   })
 
   test('omits private notebooks and all related payloads from SSH migration', async () => {
     const { webdav } = installDesktopMock()
     seedWebdavSettings()
     const { repo } = repository()
-    const source=bundle()
-    const privateNotebookId='90000000-0000-4000-8000-000000000001'
-    const privatePageId='90000000-0000-4000-8000-000000000002'
-    source.notebooks.push({ id:privateNotebookId,workspaceId,name:'PRIVATE NOTEBOOK',sortOrder:9,createdAt:timestamp,updatedAt:timestamp,locked:true })
-    source.pages.push({ id:privatePageId,workspaceId,kind:'document',title:'PRIVATE TITLE',preview:'PRIVATE BODY',favorite:false,createdAt:timestamp,updatedAt:timestamp,syncStatus:'synced',locked:true })
-    source.documents.push({ pageId:privatePageId,schemaVersion:1,tiptapJson:{type:'doc',content:[{type:'text',text:'PRIVATE BODY'}]},updatedAt:timestamp })
-    ;(repo.exportData as ReturnType<typeof vi.fn>).mockResolvedValue(source)
-    webdav.push.mockResolvedValue({ firstSeq:1,count:3 })
+    const source = bundle()
+    const privateNotebookId = '90000000-0000-4000-8000-000000000001'
+    const privatePageId = '90000000-0000-4000-8000-000000000002'
+    const privateSectionId = 'private-section'
+    const inheritedPageId = 'private-inherited-page'
+    source.notebooks.push({ id: privateNotebookId, workspaceId, name: 'PRIVATE NOTEBOOK', sortOrder: 9, createdAt: timestamp, updatedAt: timestamp, locked: true })
+    source.sections.push({ id: privateSectionId, notebookId: privateNotebookId, name: 'PRIVATE SECTION', sortOrder: 0, createdAt: timestamp, updatedAt: timestamp })
+    source.pages.push({ ...source.pages[0]!, id: privatePageId, title: 'PRIVATE TITLE', locked: true })
+    source.pages.push({ ...source.pages[0]!, id: inheritedPageId, sectionId: privateSectionId, title: 'PRIVATE INHERITED' })
+    for (const id of [privatePageId, inheritedPageId]) {
+      source.documents.push({ pageId: id, schemaVersion: 3, markdown: 'PRIVATE BODY', tiptapJson: { type: 'doc', content: [] }, updatedAt: timestamp })
+      source.assets.push({ id: `PRIVATE-ASSET-${id}`, pageId: id, kind: 'file', filename: 'PRIVATE FILE', mimeType: 'text/plain', createdAt: timestamp })
+      source.revisions.push({ id: `PRIVATE-REVISION-${id}`, pageId: id, createdAt: timestamp, reason: 'manual', document: source.documents.at(-1)! })
+      source.pageTags.push({ pageId: id, tagId: 'PRIVATE TAG' })
+      source.taskSteps.push({ id: `PRIVATE-STEP-${id}`, pageId: id, text: 'PRIVATE STEP', checked: false, sortOrder: 0, createdAt: timestamp })
+      source.readingPositions.push({ id: `PRIVATE-POSITION-${id}`, pageId: id, deviceId, anchorUtf16Offset: 1, viewportOffsetFraction: 0, updatedAt: timestamp })
+      source.tombstones.push({ id: `PRIVATE-TOMBSTONE-${id}`, workspaceId, entityType: 'page', entityId: id, deletedAt: timestamp, deviceId })
+    }
+    source.pageLinks.push({ id: 'PRIVATE-LINK', workspaceId, sourcePageId: pageId, targetPageId: inheritedPageId, kind: 'link', createdAt: timestamp })
+    vi.mocked(repo.exportData).mockResolvedValue(source)
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 3 })
 
-    await migrateSshToWebdav(repo,workspaceId)
+    await migrateSshToWebdav(repo, workspaceId)
 
-    const serialized=JSON.stringify((webdav.push as ReturnType<typeof vi.fn>).mock.calls[0]!.slice(2))
+    const serialized = JSON.stringify((webdav.push as ReturnType<typeof vi.fn>).mock.calls[0]!.slice(2))
     expect(serialized).not.toContain('PRIVATE')
     expect(serialized).not.toContain(privateNotebookId)
     expect(serialized).not.toContain(privatePageId)
+    expect(serialized).not.toContain(privateSectionId)
+    expect(serialized).not.toContain(inheritedPageId)
+    expect(repo.getAssetContent).not.toHaveBeenCalled()
+  })
+
+  test('preserves an edit during migration and publishes it as a successor readable by a fresh device', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const sourceDb = new NotebookRendererDatabase(`migration-source-${crypto.randomUUID()}`)
+    const targetDb = new NotebookRendererDatabase(`migration-target-${crypto.randomUUID()}`)
+    const source = new RealRepository(sourceDb)
+    const target = new RealRepository(targetDb)
+    const initial = bundle()
+    const originalDocument = { ...initial.documents[0]!, schemaVersion: 3, markdown: '迁移快照的正文' }
+    const entries: Array<ReturnType<typeof remoteEntry>> = []
+    let editDuringUpload = true
+    const cursorKey = 'notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup'
+    ;(webdav.push as ReturnType<typeof vi.fn>).mockImplementation(async (_settings, _device, batch) => {
+      const firstSeq = entries.length + 1
+      for (const item of batch) entries.push({ ...item, seq: entries.length + 1, deviceId })
+      if (editDuringUpload) {
+        editDuringUpload = false
+        await source.savePage({ ...initial.pages[0]!, title: '上传过程中修改', syncStatus: 'pending' }, { ...originalDocument, markdown: '上传过程中更新的正文' })
+      }
+      return { firstSeq, count: batch.length }
+    })
+    ;(webdav.pull as ReturnType<typeof vi.fn>).mockImplementation(async (_settings, knownSeqs) => ({ entries: entries.filter(entry => entry.seq > (knownSeqs[deviceId] ?? 0)), fingerprint: 'remote' }))
+    try {
+      await source.saveNotebook(initial.notebooks[0]!)
+      await source.savePage({ ...initial.pages[0]!, syncStatus: 'pending' }, originalDocument)
+      expect((await migrateSshToWebdav(source, workspaceId)).published).toBe(3)
+      const pending = await source.listOutbox(workspaceId)
+      expect(pending.filter(item => ['page', 'document'].includes(item.entityType))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ entityType: 'page', expectedVersion: 1 }),
+        expect.objectContaining({ entityType: 'document', expectedVersion: 1 }),
+      ]))
+      expect((await source.getPage(pageId))?.syncStatus).toBe('pending')
+      window.localStorage.removeItem(cursorKey)
+      expect((await synchronizeWebdav(target, workspaceId, undefined, undefined, 'pull')).state).toBe('synced')
+      expect((await target.getPageDocument(pageId))?.markdown).toBe(originalDocument.markdown)
+      const targetCursor = window.localStorage.getItem(cursorKey)!
+      expect((await synchronizeWebdav(source, workspaceId)).state).toBe('synced')
+      expect(await source.hasPendingSyncChanges(workspaceId)).toBe(false)
+      window.localStorage.setItem(cursorKey, targetCursor)
+      expect((await synchronizeWebdav(target, workspaceId, undefined, undefined, 'pull')).state).toBe('synced')
+      expect(await target.getPage(pageId)).toMatchObject({ title: '上传过程中修改', syncStatus: 'synced' })
+      expect((await target.getPageDocument(pageId))?.markdown).toBe('上传过程中更新的正文')
+      expect(await sourceDb.syncVersions.get(`${workspaceId}:document:${pageId}`)).toMatchObject({ version: 2, webdavParentVersion: true })
+    } finally {
+      sourceDb.close(); targetDb.close()
+      await Promise.all([sourceDb.delete(), targetDb.delete()])
+    }
+  })
+
+  test('restores nonempty Markdown, metadata, assets, history and trash on a fresh device', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    const source = bundle()
+    const sectionId = 'section-a'
+    const childId = 'child-a'
+    const assetId = 'asset-a'
+    const tagId = 'tag-a'
+    const trashId = 'trash-a'
+    const markdown = `# 中文迁移\n\n${'保留正文和格式。\n'.repeat(300)}\n![附件](notebook-asset:${assetId})\n`
+    source.notebooks[0] = { ...source.notebooks[0]!, emoji: '📓', color: '#123456' }
+    source.sections.push({ id: sectionId, notebookId, name: '分区', color: '#abcdef', sortOrder: 1, createdAt: timestamp, updatedAt: timestamp })
+    source.pages[0] = { ...source.pages[0]!, sectionId, icon: '✅', sortOrder: 1000, treeUpdatedAt: timestamp, kind: 'task', dueAt: timestamp, reminderAt: timestamp, recurrenceRule: 'weekly', important: true, completedAt: timestamp, assigneeIds: ['user-a'] }
+    source.pages.push({ ...source.pages[0]!, id: childId, parentPageId: pageId, sortOrder: 2000 })
+    source.pages.push({ ...source.pages[0]!, id: trashId, deletedAt: timestamp })
+    source.documents[0] = { pageId, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: timestamp }
+    source.documents.push({ ...source.documents[0]!, pageId: childId, markdown: '子页面正文' })
+    source.documents.push({ ...source.documents[0]!, pageId: trashId, markdown: '可恢复的回收站正文' })
+    source.assets.push({ id: assetId, pageId, kind: 'image', filename: '图片.png', mimeType: 'image/png', width: 40, height: 30, caption: '图片说明', displayWidth: 200, alignment: 'right', sidecarPaths: ['sidecar'], localPath: '/private/local-file', createdAt: timestamp })
+    source.tags.push({ id: tagId, workspaceId, name: '标签', color: '#000000', createdAt: timestamp, updatedAt: timestamp })
+    source.pageTags.push({ pageId, tagId })
+    source.taskSteps.push({ id: 'step-a', pageId, text: '步骤', checked: true, sortOrder: 1, createdAt: timestamp })
+    source.pageLinks.push({ id: 'link-a', workspaceId, sourcePageId: pageId, targetPageId: childId, kind: 'link', excerpt: '引用说明', createdAt: timestamp })
+    source.readingPositions.push({ id: 'position-a', pageId, deviceId, anchorUtf16Offset: 42, viewportOffsetFraction: 0.5, updatedAt: timestamp })
+    source.revisions.push({ id: 'revision-a', pageId, pageIcon: '✅', reason: 'manual', createdAt: timestamp, document: { ...source.documents[0]!, markdown: '# 历史正文\n原始内容', yjsState: new Uint8Array([1, 2]) } })
+    source.tombstones.push({ id: 'gone', workspaceId, entityType: 'page', entityId: 'purged-page', deletedAt: timestamp, deviceId })
+    source.tombstones.push({ id: 'trash', workspaceId, entityType: 'page', entityId: trashId, deletedAt: timestamp, deviceId })
+    vi.mocked(repo.exportData).mockResolvedValue(source)
+    vi.mocked(repo.getAssetContent).mockResolvedValue(new Blob(['immutable attachment bytes']))
+    const entries: Array<ReturnType<typeof remoteEntry>> = []
+    const objects = new Map<string, Uint8Array>()
+    ;(webdav.push as ReturnType<typeof vi.fn>).mockImplementation(async (_settings, _device, batch, uploads) => {
+      const firstSeq = entries.length + 1
+      for (const item of batch) entries.push({ ...item, seq: entries.length + 1, deviceId })
+      for (const item of uploads) objects.set(item.hash, item.data)
+      return { firstSeq, count: batch.length }
+    })
+    const result = await migrateSshToWebdav(repo, workspaceId)
+    expect(result.published).toBe(entries.length)
+    expect(entries.find(entry => entry.type === 'document')?.payload).toHaveProperty('$payloadObject')
+    expect(entries).toContainEqual(expect.objectContaining({ op: 'delete', id: 'purged-page' }))
+    expect(JSON.stringify(entries)).not.toContain('/private/local-file')
+    expect(JSON.stringify(entries)).not.toContain('yjsState')
+
+    // Node's structuredClone (used by fake-indexeddb) preserves native Blob
+    // bytes and methods, whereas jsdom's Blob is cloned as a plain object.
+    vi.stubGlobal('Blob', NodeBlob)
+    const db = new NotebookRendererDatabase(`migration-roundtrip-${crypto.randomUUID()}`)
+    const restored = new RealRepository(db)
+    try {
+      window.localStorage.removeItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup')
+      webdav.pull.mockResolvedValue({ entries, fingerprint: 'remote' })
+      webdav.objectGet.mockImplementation(async (_settings, hash) => new Uint8Array(objects.get(hash)!))
+      expect((await synchronizeWebdav(restored, workspaceId, undefined, undefined, 'pull')).state).toBe('synced')
+      expect((await restored.getPageDocument(pageId))?.markdown).toBe(markdown)
+      expect(await restored.getPage(pageId)).toMatchObject(source.pages[0]!)
+      expect(await restored.getPage(childId)).toMatchObject({ parentPageId: pageId, sectionId, sortOrder: 2000 })
+      expect((await restored.getPage(trashId))?.deletedAt).toBe(timestamp)
+      expect((await restored.getPageDocument(trashId))?.markdown).toBe('可恢复的回收站正文')
+      expect(await restored.listNotebooks(workspaceId)).toEqual(source.notebooks)
+      expect(await restored.listSections(notebookId)).toEqual(source.sections)
+      expect(await restored.listPageTags(pageId)).toEqual(source.pageTags)
+      expect(await restored.listTaskSteps(pageId)).toEqual(source.taskSteps)
+      expect(await restored.listPageLinks(pageId)).toEqual(source.pageLinks)
+      expect((await restored.listAssets(pageId))[0]).toMatchObject({ caption: '图片说明', width: 40, alignment: 'right', sidecarPaths: ['sidecar'] })
+      expect(await (await restored.getAssetContent(assetId))?.text()).toBe('immutable attachment bytes')
+      expect((await restored.exportData(workspaceId)).revisions[0]?.document.markdown).toBe('# 历史正文\n原始内容')
+    } finally {
+      db.close()
+      await db.delete()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  test('does not publish or advance cursors when SSH is unavailable, an asset is missing, or confirmation is incomplete', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    vi.mocked(synchronizeLegacySsh).mockResolvedValueOnce({ state: 'offline', skipped: 0, fingerprint: '', retryCount: 0 })
+    await expect(migrateSshToWebdav(repo, workspaceId)).rejects.toThrow('旧 SSH/SFTP 设置')
+    expect(webdav.push).not.toHaveBeenCalled()
+    vi.mocked(synchronizeLegacySsh).mockResolvedValueOnce({ state: 'conflict', skipped: 0, fingerprint: 'ssh-test', conflicts: [pageId], retryCount: 0 })
+    await expect(migrateSshToWebdav(repo, workspaceId)).rejects.toThrow('内容存在冲突')
+    expect(webdav.push).not.toHaveBeenCalled()
+    const source = bundle()
+    source.assets.push({ id: 'missing-asset', pageId, kind: 'file', filename: 'lost', mimeType: 'text/plain', createdAt: timestamp })
+    vi.mocked(repo.exportData).mockResolvedValueOnce(source)
+    await expect(migrateSshToWebdav(repo, workspaceId)).rejects.toThrow('缺少本地内容')
+    expect(webdav.push).not.toHaveBeenCalled()
+    webdav.push.mockResolvedValueOnce({ firstSeq: 1, count: 1 })
+    await expect(migrateSshToWebdav(repo, workspaceId)).rejects.toThrow('上传确认不完整')
+    expect(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup')).toBeNull()
+  })
+
+  test('batches a large migration and bounds an unresponsive upload', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo } = repository()
+    const source = bundle()
+    source.tags = Array.from({ length: 420 }, (_, index) => ({ id: `tag-${index}`, workspaceId, name: `tag-${index}`, color: '#000', createdAt: timestamp, updatedAt: timestamp }))
+    vi.mocked(repo.exportData).mockResolvedValue(source)
+    let seq = 1
+    ;(webdav.push as ReturnType<typeof vi.fn>).mockImplementation(async (_settings, _device, entries) => {
+      const firstSeq = seq;seq += entries.length
+      return { firstSeq, count: entries.length }
+    })
+    expect((await migrateSshToWebdav(repo, workspaceId)).published).toBe(423)
+    expect(webdav.push).toHaveBeenCalledTimes(3)
+    expect((webdav.push.mock.calls as unknown as Array<[unknown, unknown, unknown[]]>).every(call => call[2].length <= 200)).toBe(true)
+
+    window.localStorage.removeItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup')
+    vi.useFakeTimers()
+    try {
+      webdav.push.mockImplementation(() => new Promise(() => {}))
+      const migration = migrateSshToWebdav(repo, workspaceId)
+      const failure = expect(migration).rejects.toThrow('上传同步变更 超时')
+      await vi.advanceTimersByTimeAsync(WEBDAV_OPERATION_TIMEOUT_MS + 1)
+      await failure
+      expect(webdav.cancel).toHaveBeenCalled()
+      expect(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup')).toBeNull()
+    } finally { vi.useRealTimers() }
   })
 })

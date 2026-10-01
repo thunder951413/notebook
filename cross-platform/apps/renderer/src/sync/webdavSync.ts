@@ -1,10 +1,11 @@
 import type { DexieNotebookRepository, RemoteSyncChange } from '@notebook/storage-renderer'
-import type { NotebookDataBundle } from '@notebook/domain'
 import { sha256Hex } from '@notebook/sync-contract'
 import { legacyDeviceId } from './legacySshSettings'
 import { synchronizeLegacySsh } from './legacySshSync'
 import { getWebdavAppPassword, getWebdavSyncPassword, loadWebdavKnownSeqs, loadWebdavSettings, saveWebdavKnownSeqs, type WebdavSettings } from './webdavSettings'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+import { buildWebdavSnapshot, serializeWebdavPayload } from './webdavPayload'
+import { isEncryptedPayload, WebdavPrivacyCipher } from './webdavPrivacy'
 
 /**
  * v4 append-only journal synchronizer over WebDAV (e.g. 坚果云).
@@ -281,18 +282,24 @@ async function pullWebdavOnce(
   const previousCursor = await repository.getSyncCursor(workspaceId)
   const changes: RemoteSyncChange[] = []
   const downloadedAssets = new Map<string, Uint8Array>()
+  const cipher = new WebdavPrivacyCipher(connection.syncPassword ?? '')
   for (let index = 0; index < pulled.entries.length; index += 1) {
     throwIfAborted(signal)
     onProgress?.(`正在核对远端内容 ${index + 1} / ${pulled.entries.length}`)
     const entry = pulled.entries[index] as WebdavPullEntry
     let payload = await materializePayload(entry.payload, transport, connection, signal)
+    const encrypted = isEncryptedPayload(payload)
+    if (encrypted) payload = await cipher.decryptPayload(entry.type, entry.id, payload, entry.op, entry.ver)
     if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection, signal)
     if (entry.type === 'asset' && entry.op === 'upsert') {
-      const hash = entry.hash ?? (entry.payload.objectHash as string | undefined)
+      const hash = payload.objectHash as string | undefined ?? entry.hash
       if (!hash) throw new Error(`远端附件 ${entry.id} 缺少内容哈希，已阻止不完整同步`)
-      downloadedAssets.set(entry.id, await transport.objectGet(connection, hash, signal))
+      let data = await transport.objectGet(connection, hash, signal)
+      if (encrypted) data = await cipher.decrypt(`asset-bytes:${entry.id}`, JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>)
+      if (typeof payload.checksum === 'string' && await sha256Bytes(data) !== payload.checksum) throw new Error(`附件 ${entry.id} 的内容校验失败`)
+      downloadedAssets.set(entry.id, data)
     }
-    changes.push({ cursor: previousCursor + index + 1, entityType: entry.type, entityId: entry.id, version: entry.ver, operation: entry.op, payload })
+    changes.push({ cursor: previousCursor + index + 1, entityType: entry.type, entityId: entry.id, version: entry.ver, operation: entry.op, payload, ...(encrypted ? { authenticatedPrivate: true as const } : {}) })
   }
   throwIfAborted(signal)
   // Asset metadata, bytes and the read cursor share this one Dexie
@@ -346,6 +353,37 @@ function outboxPageId(item: { entityType: string; entityId: string; payload: Rec
   return typeof pageId === 'string' ? pageId : undefined
 }
 
+function* uploadBatches(entries: WebdavPushEntry[], objects: Array<{ hash: string; data: Uint8Array }>) {
+  const objectsByHash = new Map(objects.map(object => [object.hash, object]))
+  for (let offset = 0; offset < entries.length;) {
+    const batch: WebdavPushEntry[] = []
+    const hashes = new Set<string>()
+    let objectBytes = 0
+    let journalBytes = 0
+    for (let index = offset; index < entries.length; index += 1) {
+      const entry = entries[index]!
+      const references = [entry.hash, typeof entry.payload.$assetObject === 'string' ? entry.payload.$assetObject : undefined].filter((hash): hash is string => Boolean(hash))
+      const newHashes = [...new Set(references)].filter(hash => !hashes.has(hash))
+      const bytes = newHashes.reduce((total, hash) => total + (objectsByHash.get(hash)?.data.byteLength ?? 0), 0)
+      const rowBytes = encoder.encode(JSON.stringify(entry)).byteLength + 1
+      if (batch.length && (batch.length >= WEBDAV_BATCH_MAX_ENTRIES
+        || hashes.size + newHashes.length > WEBDAV_UPLOAD_BATCH_SIZE
+        || objectBytes + bytes > WEBDAV_UPLOAD_BATCH_BYTES
+        || journalBytes + rowBytes > WEBDAV_BATCH_JOURNAL_BYTES)) break
+      batch.push(entry)
+      for (const hash of newHashes) hashes.add(hash)
+      objectBytes += bytes
+      journalBytes += rowBytes
+    }
+    yield { offset, batch, batchObjects: [...hashes].map(hash => objectsByHash.get(hash)!).filter(Boolean), objectBytes, journalBytes }
+    offset += batch.length
+  }
+}
+
+function assertUploadConfirmation(pushed: { firstSeq: number; count: number }, count: number) {
+  if (pushed.count !== count || !Number.isSafeInteger(pushed.firstSeq) || pushed.firstSeq < 1) throw new Error('远端上传确认不完整，待同步内容已保留')
+}
+
 export async function synchronizeWebdav(repository: DexieNotebookRepository, workspaceId: string, signal?: AbortSignal, scope?: { pageId: string }, mode: 'bidirectional' | 'pull' | 'push' = 'bidirectional', onProgress?: (message: string) => void): Promise<WebdavSyncResult> {
   return withDeadline('本次同步', signal, WEBDAV_SYNC_TIMEOUT_MS, async (syncSignal) => {
     const settings = loadWebdavSettings()
@@ -357,6 +395,18 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
     const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
     const transport = boundedTransport(webdavTransport(), syncSignal)
     const deviceId = legacyDeviceId()
+    const cipher = new WebdavPrivacyCipher(connection.syncPassword ?? '')
+    if (connection.syncPassword && repository.db) {
+      const seedKey = `notebook-private-seeded:${settings.baseUrl}|${settings.username}|${settings.remotePath}:${sha256Hex(connection.syncPassword)}`
+      if (!window.localStorage.getItem(seedKey)) {
+        const snapshot = buildWebdavSnapshot(await repository.exportData(workspaceId), deviceId, true)
+        for (const item of snapshot) {
+          const probe = { id: '', workspaceId, entityType: item.type, entityId: item.id, operation: item.op, payload: item.payload, expectedVersion: item.ver, createdAt: '' }
+          if (await repository.isPrivateSyncItem(probe)) await repository.enqueueChange(workspaceId, item.type, item.id, item.op, item.payload)
+        }
+        window.localStorage.setItem(seedKey, '1')
+      }
+    }
     // syncOutbox is maintained in the same transaction as every local edit. It
     // is the smallest reliable database change marker: no full-library hash or
     // table scan is required before deciding whether there is anything to push.
@@ -385,7 +435,7 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
     // scoped sync (opening a note) pushes only that note's entities.
     const outgoing = await repository.listOutbox(workspaceId)
     const privacy = await Promise.all(outgoing.map((item) => repository.isPrivateSyncItem(item)))
-    const localOnly = outgoing.filter((_, index) => privacy[index])
+    const localOnly = outgoing.filter((_, index) => privacy[index] && !connection.syncPassword)
     const pending = outgoing.filter((item) => {
       if (localOnly.includes(item)) return false
       if (conflictKeys.has(`${item.entityType}:${item.entityId}`)) return false
@@ -403,10 +453,11 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
           type: item.entityType,
           id: item.entityId,
           ver: item.expectedVersion,
-          payload: item.payload,
+          payload: item.operation === 'upsert' ? serializeWebdavPayload(item.entityType, item.payload) : item.payload,
         }
-        if (item.entityType === 'document' && item.operation === 'upsert') {
-          const external = externalizeDocument(item.payload, objects)
+        const privateItem = privacy[outgoing.indexOf(item)] === true
+        if (!privateItem && ['document', 'revision'].includes(item.entityType) && item.operation === 'upsert') {
+          const external = externalizeDocument(entry.payload, objects)
           entry.payload = external.payload
           entry.hash = external.hash
         }
@@ -414,52 +465,47 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
           const content = await repository.getAssetContent(item.entityId)
           if (!content) throw new Error(`附件 ${item.entityId} 缺少本地内容，已阻止不完整同步`)
           const bytes = new Uint8Array(await content.arrayBuffer())
-          const hash = await sha256Bytes(bytes)
-          objects.push({ hash, data: bytes })
+          const data = privateItem ? encoder.encode(JSON.stringify(await cipher.encrypt(`asset-bytes:${item.entityId}`, bytes))) : bytes
+          const hash = await sha256Bytes(data)
+          objects.push({ hash, data })
           entry.hash = hash
-          entry.payload = { ...item.payload, objectHash: hash, byteSize: bytes.byteLength }
+          entry.payload = { ...entry.payload, objectHash: hash, checksum: await sha256Bytes(bytes), byteSize: bytes.byteLength }
+        }
+        if (privateItem) {
+          entry.payload = await cipher.encryptPayload(item.entityType, item.entityId, entry.payload, item.operation, item.expectedVersion)
+          // Whole encrypted envelopes may be externalized, never plaintext.
+          const encrypted = externalizeDocument(entry.payload, objects)
+          entry.payload = encrypted.payload
+          // Asset bytes use their own encrypted object; its reference is in
+          // the encrypted metadata. Keep hash available for upload batching.
+          if (encrypted.hash) {
+            if (entry.hash) entry.payload = { ...entry.payload, $assetObject: entry.hash }
+            entry.hash = encrypted.hash
+          }
         }
         entries.push(entry)
       }
       // Each IPC push shares one deadline. Bound object requests AND bytes,
       // but combine small metadata records to avoid rewriting the whole v4
       // journal once per 25 tags/steps. A single oversized item stands alone.
-      const objectsByHash = new Map(objects.map((object) => [object.hash, object]))
-      for (let offset = 0; offset < entries.length;) {
+      for (const { offset, batch, batchObjects, objectBytes, journalBytes } of uploadBatches(entries, objects)) {
         throwIfAborted(syncSignal)
-        const batch: WebdavPushEntry[] = []
-        const hashes = new Set<string>()
-        let objectBytes = 0
-        let journalBytes = 0
-        for (const entry of entries.slice(offset)) {
-          const newHash = entry.hash && !hashes.has(entry.hash) ? entry.hash : undefined
-          const bytes = newHash ? (objectsByHash.get(newHash)?.data.byteLength ?? 0) : 0
-          const rowBytes = new TextEncoder().encode(JSON.stringify(entry)).byteLength + 1
-          if (batch.length && (batch.length >= WEBDAV_BATCH_MAX_ENTRIES
-            || hashes.size + (newHash ? 1 : 0) > WEBDAV_UPLOAD_BATCH_SIZE
-            || objectBytes + bytes > WEBDAV_UPLOAD_BATCH_BYTES
-            || journalBytes + rowBytes > WEBDAV_BATCH_JOURNAL_BYTES)) break
-          batch.push(entry)
-          if (newHash) hashes.add(newHash)
-          objectBytes += bytes
-          journalBytes += rowBytes
-        }
         onProgress?.(`正在上传本机内容 ${offset + 1}–${offset + batch.length} / ${entries.length}`)
-        const batchObjects = [...hashes].map((hash) => objectsByHash.get(hash)!).filter(Boolean)
         const pushed = await transport.push(connection, deviceId, batch, batchObjects, syncSignal)
         throwIfAborted(syncSignal)
-        if (pushed.count !== batch.length || !Number.isSafeInteger(pushed.firstSeq) || pushed.firstSeq < 1) throw new Error('远端上传确认不完整，待同步内容已保留')
-        await repository.acknowledgeSync(workspaceId, pending.slice(offset, offset + batch.length).map((item) => ({
+        assertUploadConfirmation(pushed, batch.length)
+        const acknowledged = pending.slice(offset, offset + batch.length).map((item) => ({
           operation_id: item.id,
           entity_type: item.entityType,
           entity_id: item.entityId,
           version: item.expectedVersion + 1,
-        })), undefined, true)
+        }))
+        if (connection.syncPassword) await repository.acknowledgeSync(workspaceId, acknowledged, undefined, true, true)
+        else await repository.acknowledgeSync(workspaceId, acknowledged, undefined, true)
         const nextSeqs = loadWebdavKnownSeqs(settings)
         nextSeqs[deviceId] = Math.max(nextSeqs[deviceId] ?? 0, pushed.firstSeq + pushed.count - 1)
         saveWebdavKnownSeqs(settings, nextSeqs)
         recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'upload-batch', status: 'success', message: `已上传 ${offset + batch.length} / ${entries.length} 条；${batchObjects.length} 个对象，${objectBytes} 字节；新增日志 ${journalBytes} 字节` })
-        offset += batch.length
       }
 
       if (entries.length) {
@@ -484,96 +530,88 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
   })
 }
 
-/** Build a full v4 snapshot from the local bundle for first publication. */
-function bundleToEntries(bundle: NotebookDataBundle, deviceId: string): Array<{ type: string; id: string; ver: number; payload: Record<string, unknown> }> {
-  const entries: Array<{ type: string; id: string; ver: number; payload: Record<string, unknown> }> = []
-  const push = (type: string, id: string, payload: Record<string, unknown>) => entries.push({ type, id, ver: 0, payload })
-  const privateNotebookIds = new Set(bundle.notebooks.filter((notebook) => notebook.locked).map((notebook) => notebook.id))
-  const privateSectionIds = new Set(bundle.sections.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id))
-  const privatePageIds = new Set(bundle.pages.filter((page) => page.locked || Boolean(page.sectionId && privateSectionIds.has(page.sectionId))).map((page) => page.id))
-  for (const notebook of bundle.notebooks.filter((item) => !privateNotebookIds.has(item.id))) push('notebook', notebook.id, {
-    id: notebook.id, workspaceId: notebook.workspaceId, name: notebook.name, sortOrder: notebook.sortOrder, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt,
-  })
-  for (const section of bundle.sections.filter((item) => !privateSectionIds.has(item.id))) push('section', section.id, {
-    id: section.id, notebookId: section.notebookId, name: section.name, sortOrder: section.sortOrder, createdAt: section.createdAt, updatedAt: section.updatedAt,
-  })
-  for (const page of bundle.pages.filter((item) => !privatePageIds.has(item.id))) push('page', page.id, {
-    id: page.id, workspaceId: page.workspaceId, kind: page.kind === 'task' ? 'task' : 'document', title: page.title, preview: page.preview,
-    favorite: page.favorite, createdAt: page.createdAt, updatedAt: page.updatedAt, syncStatus: 'synced',
-  })
-  for (const document of bundle.documents.filter((item) => !privatePageIds.has(item.pageId))) push('document', document.pageId, {
-    pageId: document.pageId, schemaVersion: document.schemaVersion, tiptapJson: document.tiptapJson ?? { type: 'doc', content: [] }, updatedAt: document.updatedAt,
-  })
-  for (const tag of bundle.tags) push('tag', tag.id, {
-    id: tag.id, workspaceId: tag.workspaceId, name: tag.name, color: tag.color, createdAt: tag.createdAt, updatedAt: tag.updatedAt,
-  })
-  for (const pageTag of bundle.pageTags.filter((item) => !privatePageIds.has(item.pageId))) push('page_tag', `${pageTag.pageId}:${pageTag.tagId}`, { pageId: pageTag.pageId, tagId: pageTag.tagId })
-  for (const step of bundle.taskSteps.filter((item) => !privatePageIds.has(item.pageId))) push('task_step', step.id, {
-    id: step.id, pageId: step.pageId, text: step.text, checked: step.checked, sortOrder: step.sortOrder, createdAt: step.createdAt,
-  })
-  for (const asset of bundle.assets.filter((item) => !privatePageIds.has(item.pageId))) push('asset', asset.id, {
-    id: asset.id, pageId: asset.pageId, kind: asset.kind, filename: asset.filename, mimeType: asset.mimeType,
-    createdAt: asset.createdAt, byteSize: asset.byteSize, objectHash: asset.checksum,
-  })
-  for (const link of bundle.pageLinks.filter((item) => !privatePageIds.has(item.sourcePageId) && !privatePageIds.has(item.targetPageId))) push('page_link', link.id, {
-    id: link.id, workspaceId: link.workspaceId, sourcePageId: link.sourcePageId, targetPageId: link.targetPageId, kind: link.kind, createdAt: link.createdAt,
-  })
-  for (const position of bundle.readingPositions.filter((item) => !privatePageIds.has(item.pageId))) push('reading_position', position.id, {
-    id: position.id, pageId: position.pageId, anchorUtf16Offset: position.anchorUtf16Offset, viewportOffsetFraction: position.viewportOffsetFraction,
-    updatedAt: position.updatedAt, deviceId: position.deviceId || deviceId,
-  })
-  for (const revision of bundle.revisions.filter((item) => !privatePageIds.has(item.pageId))) push('revision', revision.id, {
-    ...revision,
-    document: { ...revision.document, yjsState: undefined },
-  })
-  return entries
-}
-
 /**
  * One-time migration: merge the legacy SSH repository into the local store,
  * then publish the full local state as a v4 snapshot to WebDAV.
  */
 export async function migrateSshToWebdav(repository: DexieNotebookRepository, workspaceId: string): Promise<{ published: number }> {
-  const settings = loadWebdavSettings()
-  const appPassword = await getWebdavAppPassword()
-  if (!settings.baseUrl || !settings.username || !appPassword) throw new Error('请先完整填写并保存坚果云 WebDAV 设置')
-  if (!window.notebookDesktop) throw new Error('从 SSH 迁移仅在 Electron 桌面版中提供')
-  const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
-  const deviceId = legacyDeviceId()
+  return withDeadline('SSH 到 WebDAV 迁移', undefined, WEBDAV_SYNC_TIMEOUT_MS, async (signal) => {
+    const settings = loadWebdavSettings()
+    const appPassword = await getWebdavAppPassword()
+    if (!settings.baseUrl || !settings.username || !appPassword) throw new Error('请先完整填写并保存坚果云 WebDAV 设置')
+    if (!window.notebookDesktop) throw new Error('从 SSH 迁移仅在 Electron 桌面版中提供')
+    const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
+    const deviceId = legacyDeviceId()
+    const transport = boundedTransport(webdavTransport(), signal)
+    throwIfAborted(signal)
 
-  // 1. Merge the latest SSH state into the local store first, so the snapshot
-  // below includes every note that lives on the SSH server. Errors propagate
-  // as exceptions and abort the migration.
-  await synchronizeLegacySsh(repository, workspaceId, true)
+    // 1. Merge the latest SSH state into the local store first, so the snapshot
+    // below includes every note that lives on the SSH server. Errors propagate
+    // as exceptions and abort the migration.
+    const source = await synchronizeLegacySsh(repository, workspaceId, true)
+    throwIfAborted(signal)
+    if (source.state === 'offline') throw new Error('请先完整填写并保存旧 SSH/SFTP 设置，迁移尚未开始')
+    if (source.state === 'conflict') throw new Error('旧 SSH/SFTP 内容存在冲突，请先解决后再迁移')
 
-  // 2. Export the merged local bundle and turn it into a full v4 snapshot.
-  const bundle = await repository.exportData(workspaceId)
-  const entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }> = []
-  const objects: Array<{ hash: string; data: Uint8Array }> = []
-  for (const item of bundleToEntries(bundle, deviceId)) {
-    if (item.type === 'asset') {
-      const content = await repository.getAssetContent(item.id)
-      if (content) {
+    // Capture the bundle, pending operation ids and parent versions together.
+    // An edit made during upload must survive acknowledgement of this snapshot.
+    const captureSnapshot = async () => {
+      const pending = await repository.listOutbox(workspaceId, 0xffff_ffff)
+      const snapshot = buildWebdavSnapshot(await repository.exportData(workspaceId), deviceId)
+      const versions = repository.db ? await repository.db.syncVersions.bulkGet(snapshot.map(item => `${workspaceId}:${item.type}:${item.id}`)) : []
+      snapshot.forEach((item, index) => { item.ver += versions[index]?.version ?? 0 })
+      return { snapshot, pending }
+    }
+    const { snapshot, pending } = repository.db
+      ? await repository.db.transaction('r', repository.db.tables, captureSnapshot)
+      : await captureSnapshot()
+    const pendingByEntity = new Map(pending.map(item => [`${item.entityType}:${item.entityId}`, item]))
+    const lastByEntity = new Map(snapshot.map(item => [`${item.type}:${item.id}`, item]))
+
+    // 2. Prepare every content object before publishing any journal entries.
+    const entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }> = []
+    const objects: Array<{ hash: string; data: Uint8Array }> = []
+    for (const item of snapshot) {
+      throwIfAborted(signal)
+      if (item.type === 'asset' && item.op === 'upsert') {
+        const content = await repository.getAssetContent(item.id)
+        if (!content) throw new Error(`附件 ${item.id} 缺少本地内容，已阻止不完整迁移`)
         const bytes = new Uint8Array(await content.arrayBuffer())
         const hash = await sha256Bytes(bytes)
         objects.push({ hash, data: bytes })
         item.payload = { ...item.payload, objectHash: hash, byteSize: bytes.byteLength }
+        entries.push({ ts: new Date().toISOString(), ...item, hash })
+        continue
       }
-      entries.push({ ts: new Date().toISOString(), op: 'upsert', ...item, hash: (item.payload as { objectHash?: string }).objectHash })
-      continue
+      if (item.type === 'document' && item.op === 'upsert') {
+        const external = externalizeDocument(item.payload, objects)
+        entries.push({ ts: new Date().toISOString(), ...item, payload: external.payload, hash: external.hash })
+        continue
+      }
+      entries.push({ ts: new Date().toISOString(), ...item })
     }
-    if (item.type === 'document') {
-      const external = externalizeDocument(item.payload, objects)
-      entries.push({ ts: new Date().toISOString(), op: 'upsert', ...item, payload: external.payload, hash: external.hash })
-      continue
-    }
-    entries.push({ ts: new Date().toISOString(), op: 'upsert', ...item })
-  }
 
-  // 3. Publish the snapshot and advance this device's read cursor past it.
-  const pushed = await webdavTransport().push(connection, deviceId, entries, objects)
-  const knownSeqs = loadWebdavKnownSeqs(settings)
-  knownSeqs[deviceId] = Math.max(knownSeqs[deviceId] ?? 0, pushed.firstSeq + pushed.count - 1)
-  saveWebdavKnownSeqs(settings, knownSeqs)
-  return { published: entries.length }
+    // 3. Persist each confirmed baseline before skipping our own journal. This
+    // also makes partial retries and the first post-migration edit successors
+    // of the published snapshot, instead of competing version-zero branches.
+    for (const { offset, batch, batchObjects } of uploadBatches(entries, objects)) {
+      throwIfAborted(signal)
+      const pushed = await transport.push(connection, deviceId, batch, batchObjects, signal)
+      throwIfAborted(signal)
+      assertUploadConfirmation(pushed, batch.length)
+      await repository.acknowledgeSync(workspaceId, snapshot.slice(offset, offset + batch.length).map(item => ({
+        operation_id: lastByEntity.get(`${item.type}:${item.id}`) === item
+          ? pendingByEntity.get(`${item.type}:${item.id}`)?.id ?? crypto.randomUUID()
+          : crypto.randomUUID(),
+        entity_type: item.type,
+        entity_id: item.id,
+        version: item.ver + 1,
+      })), undefined, true)
+      throwIfAborted(signal)
+      const knownSeqs = loadWebdavKnownSeqs(settings)
+      knownSeqs[deviceId] = Math.max(knownSeqs[deviceId] ?? 0, pushed.firstSeq + pushed.count - 1)
+      saveWebdavKnownSeqs(settings, knownSeqs)
+    }
+    return { published: entries.length }
+  })
 }

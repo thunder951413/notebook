@@ -7,6 +7,8 @@ export interface RemoteSyncChange {
   version: number
   operation: string
   payload: Record<string, unknown>
+  /** Set only by the transport after authenticated decryption. */
+  authenticatedPrivate?: true
 }
 
 export interface RemoteApplyResult {

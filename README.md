@@ -57,7 +57,7 @@ pnpm --filter @notebook/desktop dist
 
 Electron 数据目录与旧 SwiftData 数据库不兼容，旧数据必须通过导出包导入。不要把旧 `NotebookData` 或 `notebook.store` 直接设为 Electron 数据目录。具体见 [数据迁移说明](docs/DATA_MIGRATION_READINESS.md) 和 [SSH Markdown v3](docs/SSH_MARKDOWN_SYNC_V3.md)。
 
-隐私笔记本提供应用内访问控制。当前 WebDAV 会在页面从公开转为私密时撤回已发布实体，随后把私密正文、附件、历史和关系严格保留在本机。旧 SSH 迁移兼容路径仍会加密私密正文，但私密附件不会上传。
+隐私笔记本提供应用内访问控制。配置两端相同的隐私同步密钥后，WebDAV 将私密笔记本、正文、附件字节、历史和关系使用 AES-256-GCM 加密同步。密钥由系统凭据存储保存，网盘只接收密文；未配置密钥时私密内容仍保留在本机。错误密钥或损坏密文不会覆盖本机内容或推进同步位置。旧 SSH 迁移兼容路径仍会加密私密正文，但私密附件不会上传。
 
 ## 桌面发行
 

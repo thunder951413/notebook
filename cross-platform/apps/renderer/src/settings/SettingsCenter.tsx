@@ -363,7 +363,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const keepLocalAndSync = async () => {
     if (savingSync || checkingServer || syncState === 'syncing') return
-    if (!await requestConfirm({ title: '以本机内容解决同步冲突？', description: '请先导出完整备份。本机已有内容将覆盖远端对应记录，远端独有内容仍会保留并下载；隐私笔记不会上传。此选择仅用于本次恢复，之后仍使用正常双向同步。', confirmLabel: '保留本机并同步' })) return
+    if (!await requestConfirm({ title: '以本机内容解决同步冲突？', description: '请先导出完整备份。本机已有内容将覆盖远端对应记录，远端独有内容仍会保留并下载；配置隐私同步密钥后，私密内容以密文上传。此选择仅用于本次恢复，之后仍使用正常双向同步。', confirmLabel: '保留本机并同步' })) return
     setSavingSync(true)
     setSyncMessage(undefined)
     setSyncMessageIsError(false)
@@ -620,7 +620,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                     <label><span>应用密码</span><Input type="password" value={webdavAppPassword} onChange={(_, data) => setWebdavAppPassword(data.value)} placeholder={storedWebdavAppPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '坚果云安全选项生成的应用密码'} aria-label="WebDAV 应用密码" /></label>
                   </div>
                   <label><span>远端同步目录</span><Input value={webdavSettings.remotePath} onChange={(_, data) => setWebdavSettings((current) => ({ ...current, remotePath: data.value }))} placeholder="notebook_backup" aria-label="远端同步目录" /></label>
-                  <label><span>同步密码（预留）</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '供后续跨端隐私加密协议使用；当前隐私笔记不上传'} aria-label="同步密码" /></label>
+                  <label><span>隐私同步密钥</span><Input type="password" value={webdavSyncPassword} onChange={(_, data) => setWebdavSyncPassword(data.value)} placeholder={storedWebdavSyncPassword ? (desktop ? '已由操作系统加密保存；留空保持不变' : '已保存在当前标签会话；留空保持不变') : '与 Android 使用相同密钥，加密同步私密笔记、附件和历史'} aria-label="同步密码" /></label>
                 <div className="sync-action-panel">
                   <div className="sync-action-heading"><strong>连接与同步</strong><span>先检测连接；日常多设备同步只使用 WebDAV。</span></div>
                   <div className="sync-primary-actions">

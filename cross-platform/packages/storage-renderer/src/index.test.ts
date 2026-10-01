@@ -478,6 +478,16 @@ test('retracts previously published page data before keeping private edits local
   ])
   await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 1, operation: 'upsert', payload: { ...value, title: 'Old public copy', syncStatus: 'synced' } }], 1)
   expect(await repository.getPage(value.id)).toMatchObject({ title: 'Still private', locked: true })
+
+  // Once encrypted publication is enabled, the retraction acknowledgement
+  // durably queues the latest private data beyond the acknowledged parent.
+  await repository.acknowledgeSync('workspace-a', retractions.map((item) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: 2 })), undefined, true, true)
+  const republished = await repository.listOutbox('workspace-a')
+  expect(republished.find(item => item.entityType === 'page')).toMatchObject({ operation: 'upsert', expectedVersion: 2, payload: { title: 'Still private', locked: true } })
+  expect(republished.find(item => item.entityType === 'document')).toMatchObject({ operation: 'upsert', expectedVersion: 2, payload: { markdown: 'private' } })
+  expect(republished.find(item => item.entityType === 'asset')).toMatchObject({ operation: 'upsert', expectedVersion: 2, entityId: asset.id })
+  expect(await Promise.all(republished.filter(item => ['page', 'document', 'asset'].includes(item.entityType)).map(item => repository.isPrivateSyncItem(item)))).toEqual([true, true, true])
+  expect((await repository.getPage(value.id))?.syncStatus).toBe('pending')
 })
 
 test('applies remote asset metadata bytes and cursor atomically', async () => {

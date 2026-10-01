@@ -385,7 +385,7 @@ describe('webdav transport', () => {
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.head.json`)
   })
 
-  test('bounds revision history while retaining current state and tombstones', async () => {
+  test('preserves complete retained history while compacting current state and tombstones', async () => {
     const deviceA = '00000000-0000-4000-8000-0000000000e3'
     const revisions = Array.from({ length: 300 }, (_, index) => ({
       ts: `2026-08-07T00:00:${String(index % 60).padStart(2, '0')}.000Z`, op: 'upsert' as const, type: 'revision', id: `revision-${index}`, ver: 0, payload: { body: 'x'.repeat(10_000) },
@@ -398,8 +398,8 @@ describe('webdav transport', () => {
     const journal = entries.get(`/dav/notebook_backup/journal/${deviceA}.jsonl`)!.data!.toString().trim().split('\n').map((line) => JSON.parse(line) as { seq: number; op: string; type: string; id: string })
     const history = journal.filter((entry) => entry.type === 'revision')
     expect(journal.find((entry) => entry.type === 'page' && entry.id === 'page-1')).toMatchObject({ op: 'delete', seq: 2 })
-    expect(history.length).toBeLessThan(256) // the 2 MiB byte ring is tighter than the 256-entry ring here.
-    expect(Math.min(...history.map((entry) => entry.seq))).toBeGreaterThan(3)
+    expect(history).toHaveLength(300) // transport preserves every retained revision
+    expect(Math.min(...history.map((entry) => entry.seq))).toBe(3)
     const head = JSON.parse(entries.get(`/dav/notebook_backup/journal/${deviceA}.head.json`)!.data!.toString()) as { stateEntries: number; historyEntries: number }
     expect(head).toMatchObject({ stateEntries: 1, historyEntries: history.length })
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)

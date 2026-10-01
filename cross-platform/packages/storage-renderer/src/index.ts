@@ -430,13 +430,14 @@ export class DexieNotebookRepository implements NotebookRepository {
   async hasPendingSyncChanges(workspaceId: string) { return Boolean(await this.db.syncOutbox.where('workspaceId').equals(workspaceId).first()) }
   getSyncCursor(workspaceId: string) { return this.db.syncCursors.get(workspaceId).then((value) => value?.cursor ?? 0) }
 
-  /** Until the shared encrypted journal envelope ships, private entities are
-   * deliberately local-only instead of being published as plaintext. */
+  /** Private entities use encrypted publication when a sync key is configured;
+   * otherwise the transport keeps them local. */
   async isPrivateSyncItem(item: SyncOutboxItem): Promise<boolean> {
     // A privacy retraction is deliberately public: it deletes the previous
-    // remote representation before later private edits become local-only.
+    // remote representation before later private edits are encrypted.
     if (item.payload.privacyRetraction === true) return false
     if (item.payload.locked === true) return true
+    if (item.entityType === 'page_link' && typeof item.payload.targetPageId === 'string' && await this.isPrivatePage(item.payload.targetPageId)) return true
     if (item.entityType === 'notebook') return Boolean((await this.db.notebooks.get(item.entityId))?.locked)
     if (item.entityType === 'section') {
       const section = await this.db.sections.get(item.entityId)
@@ -469,9 +470,11 @@ export class DexieNotebookRepository implements NotebookRepository {
     })
   }
 
-  async acknowledgeSync(workspaceId: string, applied: Array<{ operation_id: string; entity_type: string; entity_id: string; version: number }>, cursor?: number, webdavParentVersion = false) {
-    await this.db.transaction('rw', this.db.syncOutbox, this.db.syncVersions, this.db.syncCursors, this.db.pages, async () => {
+  async acknowledgeSync(workspaceId: string, applied: Array<{ operation_id: string; entity_type: string; entity_id: string; version: number }>, cursor?: number, webdavParentVersion = false, republishPrivacyRetractions = false) {
+    const tables = republishPrivacyRetractions ? this.db.tables : [this.db.syncOutbox, this.db.syncVersions, this.db.syncCursors, this.db.pages]
+    await this.db.transaction('rw', tables, async () => {
       for (const item of applied) {
+        const retraction = republishPrivacyRetractions ? await this.db.syncOutbox.get(item.operation_id) : undefined
         await this.db.syncOutbox.delete(item.operation_id)
         await this.db.syncVersions.put({
           id: this.versionId(workspaceId, item.entity_type, item.entity_id),
@@ -486,6 +489,16 @@ export class DexieNotebookRepository implements NotebookRepository {
           await this.db.syncOutbox.update(newer.id, { expectedVersion: item.version })
         }
         if (item.entity_type === 'page') await this.db.pages.update(item.entity_id, { syncStatus: newer ? 'pending' : 'synced' })
+        // An encrypted library must publish the current private state after
+        // retracting its old public representation. Queue it in this same
+        // transaction so a crash cannot strand edits made during retraction.
+        if (retraction?.payload.privacyRetraction === true) {
+          const current = await this.currentRemoteEntity({ cursor: 0, entityType: item.entity_type, entityId: item.entity_id, version: item.version, operation: 'upsert', payload: {} })
+          if (current) {
+            await this.enqueueChange(workspaceId, item.entity_type, item.entity_id, 'upsert', current)
+            if (item.entity_type === 'page') await this.db.pages.update(item.entity_id, { syncStatus: 'pending' })
+          }
+        }
       }
       if (cursor !== undefined) await this.db.syncCursors.put({ workspaceId, cursor })
     })
@@ -618,7 +631,7 @@ export class DexieNotebookRepository implements NotebookRepository {
         for (const pageId of pageIds) {
           if (await this.isPrivatePage(pageId)) { privatePage = true; break }
         }
-        if (privatePage) continue
+        if (privatePage && !change.authenticatedPrivate) continue
         const pendingExact = await this.db.syncOutbox.where('[entityType+entityId]').equals([change.entityType, change.entityId]).and((item) => item.workspaceId === workspaceId).first()
         const pendingPage = change.entityType === 'document'
           ? await this.db.syncOutbox.where('[entityType+entityId]').equals(['page', change.entityId]).and((item) => item.workspaceId === workspaceId).first()
@@ -664,7 +677,12 @@ export class DexieNotebookRepository implements NotebookRepository {
           && localVersion !== undefined
           && localVersion.webdavParentVersion !== true
           && change.version === localVersion.version + 1
-        if (webdavParentVersion && localVersion && change.version !== localVersion.version && !compatibleLegacyAdvance) {
+        // Compacted journals retain old peer snapshots alongside successors.
+        // A clean replica consumes ancestors and may jump across remote-only
+        // versions. Equal-parent siblings still require conflict resolution.
+        if (webdavParentVersion && localVersion && !pending && change.version + 1 < localVersion.version) continue
+        const compactedAdvance = webdavParentVersion && !pending && localVersion !== undefined && change.version > localVersion.version
+        if (webdavParentVersion && localVersion && change.version !== localVersion.version && !compatibleLegacyAdvance && !compactedAdvance) {
           // Older clients stored a received journal's parent version rather
           // than its resulting version. An identical stale entry is harmless;
           // any different payload is a real concurrent update and must never

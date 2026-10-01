@@ -1,6 +1,6 @@
 {
   "name": "@notebook/desktop",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "AI-native, offline-first cross-platform notebook",
   "author": {
     "name": "Notebook contributors",

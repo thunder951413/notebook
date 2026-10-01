@@ -57,8 +57,8 @@ const MAX_LOG_BYTES = 100 * 1024 * 1024
 const MAX_OBJECT_BYTES = 100 * 1024 * 1024
 const MAX_ENTRIES = 100_000
 const MAX_HEAD_BYTES = 64 * 1024
-const MAX_REVISION_ENTRIES = 256
-const MAX_REVISION_BYTES = 2 * 1024 * 1024
+const MAX_REVISION_ENTRIES = MAX_ENTRIES
+const MAX_REVISION_BYTES = MAX_LOG_BYTES
 const DEVICE_ID_PATTERN = /^[0-9a-f-]{36}$/i
 
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8')
