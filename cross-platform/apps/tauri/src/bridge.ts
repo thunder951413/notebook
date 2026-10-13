@@ -143,6 +143,7 @@ const api: Desktop = Object.freeze({
       minSeq: minSeq ?? null,
     }),
     cancel: (requestId: string) => call<void>('webdav_cancel', { requestId }),
+    recentRequestCount: () => call<number>('webdav_recent_requests'),
   },
   events: {
     onQuickCapture: (callback: () => void) => onQuickCapture(() => callback()),

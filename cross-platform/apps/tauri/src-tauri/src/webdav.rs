@@ -283,6 +283,28 @@ fn dirname(path: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// Request accounting: 坚果云 limits requests per 30 minutes across devices,
+// so the renderer keeps automatic syncs inside this device's share.
+
+const REQUEST_WINDOW: Duration = Duration::from_secs(30 * 60);
+static REQUEST_TIMES: LazyLock<Mutex<std::collections::VecDeque<Instant>>> = LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+
+fn record_request() {
+    let now = Instant::now();
+    let mut times = REQUEST_TIMES.lock().unwrap();
+    times.push_back(now);
+    while times.front().is_some_and(|first| now.duration_since(*first) > REQUEST_WINDOW) {
+        times.pop_front();
+    }
+}
+
+/// WebDAV requests sent in the last 30 minutes.
+pub fn recent_request_count() -> usize {
+    let now = Instant::now();
+    REQUEST_TIMES.lock().unwrap().iter().filter(|time| now.duration_since(**time) <= REQUEST_WINDOW).count()
+}
+
+// ---------------------------------------------------------------------------
 // Minimal WebDAV client
 
 pub struct DavItem {
@@ -320,6 +342,7 @@ impl Dav {
     }
 
     async fn send(&self, method: Method, url: String, depth: Option<&str>, body: Option<Vec<u8>>, content_type: Option<&str>) -> DavResult<reqwest::Response> {
+        record_request();
         let mut request = self
             .http
             .request(method, url)

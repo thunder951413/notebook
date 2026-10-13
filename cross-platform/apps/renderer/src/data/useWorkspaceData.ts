@@ -19,7 +19,7 @@ import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageS
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
-import { AUTO_SYNC_DEBOUNCE_MS, VISIBLE_REMOTE_POLL_MS, createAutomaticSyncPolicy, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
+import { MIN_AUTO_SYNC_INTERVAL_MS, VISIBLE_REMOTE_POLL_MS, createAutomaticSyncPolicy, createDeferredRun, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 // A fresh install opens on the bundled sample workspace so the first screen has
@@ -212,6 +212,8 @@ export function useWorkspaceData() {
   const automaticSyncPolicy = useRef(createAutomaticSyncPolicy())
   const syncRetryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const syncScheduler = useRef<ReturnType<typeof createQuietSyncScheduler> | undefined>(undefined)
+  const deferredSync = useRef<ReturnType<typeof createDeferredRun> | undefined>(undefined)
+  const deferredSyncReason = useRef<AutomaticSyncReason>('boundary')
   const privateNotebookIds = useMemo(() => new Set(notebookRecords.filter((notebook) => notebook.locked).map((notebook) => notebook.id)), [notebookRecords])
   const privateSectionIds = useMemo(() => new Set(sectionRecords.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id)), [privateNotebookIds, sectionRecords])
 
@@ -318,9 +320,20 @@ export function useWorkspaceData() {
       // its actionable state visible until the user explicitly retries or
       // chooses a winner, instead of repeatedly downloading the same prefix.
       if (!options?.force && settledSyncState.current === 'conflict') return false
-      if (!options?.force && !automaticSyncPolicy.current.shouldRun(
-        options?.reason ?? 'foreground', await repository.hasPendingSyncChanges(WORKSPACE_ID),
-      )) return false
+      if (!options?.force) {
+        const reason = options?.reason ?? 'foreground'
+        const recentRequests = await window.notebookDesktop?.webdav.recentRequestCount?.().catch(() => undefined)
+        const decision = automaticSyncPolicy.current.decide(reason, await repository.hasPendingSyncChanges(WORKSPACE_ID), Date.now(), recentRequests)
+        if (!decision.run) {
+          if (decision.retryInMs !== undefined) {
+            deferredSyncReason.current = reason
+            deferredSync.current?.schedule(decision.retryInMs)
+          }
+          if (decision.heldBy === 'budget') recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'request-budget', status: 'info', message: `30 分钟内已发出 ${recentRequests} 个请求，自动同步推迟` })
+          return false
+        }
+        automaticSyncPolicy.current.started()
+      }
       if (options?.signal?.aborted) return false
       syncScheduler.current?.cancel()
       if (syncRetryTimer.current !== undefined) clearTimeout(syncRetryTimer.current)
@@ -367,7 +380,7 @@ export function useWorkspaceData() {
         // an in-flight request storm.
         if (result.state === 'synced') await schedulePendingSyncBatch(
           () => repository.hasPendingSyncChanges(WORKSPACE_ID),
-          () => syncScheduler.current?.request(),
+          () => { deferredSyncReason.current = 'boundary'; deferredSync.current?.schedule(MIN_AUTO_SYNC_INTERVAL_MS) },
         )
         const retryCount = 'retryCount' in result ? result.retryCount : 0
         recordDiagnosticEvent({
@@ -425,16 +438,26 @@ export function useWorkspaceData() {
   // Every durable outbox append gets one quiet-period sync. Draft
   // and scroll-local writes do not enter this path until explicitly flushed.
   useEffect(() => {
-    const scheduler = createQuietSyncScheduler(() => { void syncNow({ reason: 'changes' }) }, AUTO_SYNC_DEBOUNCE_MS)
+    const scheduler = createQuietSyncScheduler(() => { void syncNow({ reason: 'changes' }) })
     syncScheduler.current = scheduler
+    const deferred = createDeferredRun(() => { void syncNow({ reason: deferredSyncReason.current }) })
+    deferredSync.current = deferred
     return () => {
       scheduler.cancel()
+      deferred.cancel()
+      if (deferredSync.current === deferred) deferredSync.current = undefined
       if (syncRetryTimer.current !== undefined) clearTimeout(syncRetryTimer.current)
       if (syncScheduler.current === scheduler) syncScheduler.current = undefined
     }
   }, [syncNow])
 
   const requestSyncSoon = useCallback(() => { syncScheduler.current?.request() }, [])
+  /** Leaving a note is a natural moment to upload its edits (paced by the policy). */
+  const requestBoundarySync = useCallback(() => {
+    // A moment later, so the closing editor's final save is in the outbox.
+    deferredSyncReason.current = 'boundary'
+    deferredSync.current?.schedule(1_500)
+  }, [])
 
   useEffect(() => {
     const onOutboxAppend = () => { requestSyncSoon() }
@@ -944,7 +967,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {

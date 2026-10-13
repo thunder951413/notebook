@@ -519,6 +519,11 @@ async fn webdav_push(app: AppHandle, settings: webdav::Connection, device_id: St
 }
 
 #[tauri::command]
+fn webdav_recent_requests() -> usize {
+    webdav::recent_request_count()
+}
+
+#[tauri::command]
 fn webdav_cancel(state: State<'_, AppState>, request_id: String) -> CommandResult<()> {
     check_request_id(&request_id)?;
     if let Some(token) = state.webdav_requests.lock().unwrap().get(&request_id) {
@@ -813,6 +818,7 @@ pub fn run() {
             webdav_object_get,
             webdav_push,
             webdav_cancel,
+            webdav_recent_requests,
             ai_complete,
             ai_cancel,
             ai_key_set,

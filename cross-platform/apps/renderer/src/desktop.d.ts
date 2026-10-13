@@ -95,6 +95,8 @@ declare global {
         objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string, requestId: string): Promise<Uint8Array>
         push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string, minSeq?: number): Promise<{ firstSeq: number; count: number }>
         cancel(requestId: string): Promise<void>
+        /** WebDAV requests this app sent in the last 30 minutes (Tauri shell). */
+        recentRequestCount?(): Promise<number>
       }
       events: {
         onQuickCapture(callback: () => void): () => void
