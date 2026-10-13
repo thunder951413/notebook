@@ -26,9 +26,35 @@ function extensions(references = true) {
 const markdownManager = new MarkdownManager({ extensions: extensions() })
 const legacyMarkdownManager = new MarkdownManager({ extensions: extensions(false) })
 
+const LIST_ITEM_TYPES = new Set(['listItem', 'taskItem'])
+
+/**
+ * Markdown such as "- [ ] " (an empty task, e.g. from the daily-note
+ * template) parses to a list item without children. ProseMirror's schema
+ * requires a paragraph there, and the Markdown serializer reads the first
+ * child unconditionally, so an empty item crashed serialization. Give every
+ * empty list item an empty paragraph and drop null/undefined children. The
+ * input is never mutated; untouched subtrees are returned as-is.
+ */
+export function repairDocumentStructure<T>(document: T): T {
+  const visit = (node: unknown): unknown => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return node
+    const value = node as { type?: unknown; content?: unknown }
+    const content = Array.isArray(value.content) ? value.content as unknown[] : undefined
+    let next = content
+    if (content) {
+      const repaired = content.filter((child) => child !== null && child !== undefined).map(visit)
+      if (repaired.length !== content.length || repaired.some((child, index) => child !== content[index])) next = repaired
+    }
+    if (typeof value.type === 'string' && LIST_ITEM_TYPES.has(value.type) && !next?.length) return { ...value, content: [{ type: 'paragraph' }] }
+    return next === content ? node : { ...value, content: next }
+  }
+  return visit(document) as T
+}
+
 export function markdownToTiptap(markdown: string) {
   try {
-    return markdownManager.parse(markdown) as Record<string, unknown>
+    return repairDocumentStructure(markdownManager.parse(markdown) as Record<string, unknown>)
   } catch (error) {
     // Raw HTML is outside Notebook Next's canonical GFM subset. Some migrated
     // engineering notes contain tag-like fragments (for example C/C++ types)
@@ -37,7 +63,7 @@ export function markdownToTiptap(markdown: string) {
     // whole page impossible to open. Notebook's own group boundary comments
     // remain structural syntax and are never escaped here.
     if (!(error instanceof Error) || !/parse HTML in markdown|call stack/i.test(error.message)) throw error
-    return markdownManager.parse(escapeUnsupportedRawHtml(markdown)) as Record<string, unknown>
+    return repairDocumentStructure(markdownManager.parse(escapeUnsupportedRawHtml(markdown)) as Record<string, unknown>)
   }
 }
 
@@ -56,7 +82,7 @@ function escapeUnsupportedRawHtml(markdown: string) {
 }
 
 export function tiptapToMarkdown(document: Record<string, unknown>) {
-  return markdownManager.serialize(document as JSONContent)
+  return markdownManager.serialize(repairDocumentStructure(document) as JSONContent)
 }
 
 type LegacyMark = { type?: string; attrs?: Record<string, unknown> }
@@ -171,7 +197,7 @@ export function legacyTiptapToCanonicalMarkdown(document: Record<string, unknown
     }
     return normalized.includes('\n') ? hardBreakParagraphs(normalized) : [{ ...node, content: normalized ? [{ type: 'text', text: normalized }] : undefined }]
   })
-  return legacyMarkdownManager.serialize({ type: 'doc', content } as JSONContent)
+  return legacyMarkdownManager.serialize(repairDocumentStructure({ type: 'doc', content }) as JSONContent)
 }
 
 export function migrateLegacyPageDocument(document: PageDocument): PageDocument {

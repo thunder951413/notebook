@@ -376,3 +376,12 @@ describe('official Tiptap Markdown round trip', () => {
     expect(pasted).not.toMatch(/style=|class=|font-family|font-size|color=|face=|size=|target=|\sid=/)
   })
 })
+
+describe('empty list items (daily-note template)', () => {
+  test('serialize without crashing the app', () => {
+    const document = { type: 'doc', content: [{ type: 'taskList', content: [{ type: 'taskItem', attrs: { checked: false }, content: [] }] }] }
+    expect(() => documentToMarkdown(document)).not.toThrow()
+    const parsed = markdownToDocument('## 今日重点\n\n- [ ] \n')
+    expect(() => documentToMarkdown(parsed)).not.toThrow()
+  })
+})

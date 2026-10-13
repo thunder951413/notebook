@@ -24,7 +24,7 @@ import DOMPurify from 'dompurify'
 // KaTeX ships every family in woff2/woff/ttf triplicates (~1.1 MB of fonts).
 // Chromium only ever requests woff2, so reference just those @font-face rules.
 import './katex.woff2.css'
-import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, type NotebookReferenceTarget } from '@notebook/sync-contract'
+import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, repairDocumentStructure, type NotebookReferenceTarget } from '@notebook/sync-contract'
 import { openReferencedTarget, resolveNotebookReference, subscribeToReferenceRuntime } from './referenceRuntime'
 import { findReferencedFragment, referenceDynamicLabel } from './referenceContent'
 
@@ -141,7 +141,7 @@ function notebookImage(loadAsset?: AssetLoader) {
           selectImage()
         }
         const startResize = (event: PointerEvent) => {
-          if (event.button !== 0) return
+          if (!editor.isEditable || event.button !== 0) return
           event.preventDefault()
           event.stopPropagation()
           selectImage()
@@ -171,7 +171,7 @@ function notebookImage(loadAsset?: AssetLoader) {
             const width = resizeWidth ?? Math.round(host.getBoundingClientRect().width)
             resizeWidth = undefined
             stopResize = undefined
-            if (typeof position === 'number' && width >= 120) {
+            if (editor.isEditable && typeof position === 'number' && width >= 120) {
               editor.chain().setNodeSelection(position).updateAttributes('image', { width, height: null }).run()
             }
           }
@@ -426,11 +426,11 @@ function getCanonicalMarkdownManager() {
 }
 
 export function markdownToDocument(markdown: string) {
-  return getCanonicalMarkdownManager().parse(markdown) as Record<string, unknown>
+  return repairDocumentStructure(getCanonicalMarkdownManager().parse(markdown) as Record<string, unknown>)
 }
 
 export function documentToMarkdown(document: Record<string, unknown>) {
-  return getCanonicalMarkdownManager().serialize(document as JSONContent)
+  return getCanonicalMarkdownManager().serialize(repairDocumentStructure(document) as JSONContent)
 }
 
 export function documentToHtml(document: Record<string, unknown>) {

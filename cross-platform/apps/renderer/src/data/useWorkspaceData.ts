@@ -11,7 +11,7 @@ import { legacyDeviceId, loadSyncBackend } from '../sync/legacySshSettings'
 import { synchronizeWebdav } from '../sync/webdavSync'
 import { describeSyncError, recordSyncSuccess } from '../sync/syncErrors'
 import { showToast } from '../components/toast'
-import { normalizeReferenceTargetIds } from '@notebook/sync-contract'
+import { normalizeReferenceTargetIds, repairDocumentStructure } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
 import { formatUpdatedLabel } from '../updatedLabel'
@@ -104,10 +104,12 @@ function editorCacheVersion(document: PageDocument, assets: Asset[]) {
 }
 
 async function editorDocumentFromStorage(document: PageDocument, assets: Asset[]) {
-  if (document.markdown === undefined || !isEmptyEditorCache(document.tiptapJson)) return document.tiptapJson
+  // Stored documents and editor caches written before the empty-list-item
+  // repair may still contain list items without children.
+  if (document.markdown === undefined || !isEmptyEditorCache(document.tiptapJson)) return repairDocumentStructure(document.tiptapJson)
   const version = editorCacheVersion(document, assets)
   const cached = await repository.getEditorCache(document.pageId, version)
-  if (cached) return cached
+  if (cached) return repairDocumentStructure(cached)
   const parsed = await parseMarkdownForEditor(document.markdown, assets)
   void repository.saveEditorCache(document.pageId, version, parsed)
   return parsed
