@@ -354,18 +354,39 @@ describe('webdav transport', () => {
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)
   })
 
-  test('rejects journals that disagree with their committed head bytes or hash', async () => {
+  test('exposes only the committed range of a journal that disagrees with its marker, without blocking other devices', async () => {
     const deviceA = '00000000-0000-4000-8000-0000000000e2'
     const body = JSON.stringify({ seq: 1, ts: 't', op: 'upsert', type: 'page', id: 'checked', ver: 0, payload: {} }) + '\n'
+      + JSON.stringify({ seq: 2, ts: 't', op: 'upsert', type: 'page', id: 'uncommitted', ver: 0, payload: {} }) + '\n'
     const baseHead = {
       version: 1, deviceId: deviceA, lastSeq: 1, journalBytes: Buffer.byteLength(body),
       journalSha256: createHash('sha256').update(body, 'utf8').digest('hex'), updatedAt: '2026-08-07T00:00:00.000Z', stateEntries: 1, historyEntries: 0,
     }
     entries.set(`/dav/notebook_backup/journal/${deviceA}.jsonl`, { data: Buffer.from(body) })
     entries.set(`/dav/notebook_backup/journal/${deviceA}.head.json`, { data: Buffer.from(JSON.stringify({ ...baseHead, journalBytes: baseHead.journalBytes + 1 })) })
-    await expect(pullWebdavJournals(connection, {})).rejects.toThrow('提交标记不一致')
+    let pulled = await pullWebdavJournals(connection, {})
+    expect(pulled.entries.filter((entry) => entry.deviceId === deviceA).map((entry) => entry.id)).toEqual(['checked'])
+    expect(pulled.warnings?.some((warning) => warning.includes(deviceA))).toBe(true)
     entries.set(`/dav/notebook_backup/journal/${deviceA}.head.json`, { data: Buffer.from(JSON.stringify({ ...baseHead, journalSha256: '0'.repeat(64) })) })
-    await expect(pullWebdavJournals(connection, {})).rejects.toThrow('提交标记不一致')
+    pulled = await pullWebdavJournals(connection, {})
+    expect(pulled.entries.filter((entry) => entry.deviceId === deviceA).map((entry) => entry.id)).toEqual(['checked'])
+    entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)
+    entries.delete(`/dav/notebook_backup/journal/${deviceA}.head.json`)
+  })
+
+  test('re-reads a journal whose sequence went backwards and never restarts its own sequence', async () => {
+    const deviceA = '00000000-0000-4000-8000-0000000000e9'
+    // The repository was emptied: the device publishes again with its old floor.
+    const first = await appendWebdavJournal(connection, deviceA, [{ ts: 't1', op: 'upsert', type: 'page', id: 'after-reset', ver: 0, payload: {} }], undefined, 40)
+    expect(first.firstSeq).toBe(41)
+    entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)
+    entries.delete(`/dav/notebook_backup/journal/${deviceA}.head.json`)
+    // An old client restarted at 1 while a reader still remembers 40.
+    await appendWebdavJournal(connection, deviceA, [{ ts: 't2', op: 'upsert', type: 'page', id: 'restarted', ver: 0, payload: {} }])
+    const pulled = await pullWebdavJournals(connection, { [deviceA]: 40 })
+    expect(pulled.resetDevices).toEqual([deviceA])
+    expect(pulled.entries.filter((entry) => entry.deviceId === deviceA).map((entry) => entry.id)).toEqual(['restarted'])
+    expect(pulled.devices).toContain(deviceA)
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.head.json`)
   })
@@ -425,10 +446,9 @@ describe('webdav transport', () => {
 
   test('ignores invalid journal filenames and surfaces directory-list failures', async () => {
     entries.set('/dav/notebook_backup/journal/not-a-device.jsonl', { data: Buffer.from('{not json}\n') })
-    await expect(pullWebdavJournals(connection, {
-      '00000000-0000-4000-8000-000000000001': 3,
-      '00000000-0000-4000-8000-000000000002': 1,
-    })).resolves.toMatchObject({ entries: [] })
+    const current: Record<string, number> = {}
+    for (const entry of (await pullWebdavJournals(connection, {})).entries) current[entry.deviceId] = Math.max(current[entry.deviceId] ?? 0, entry.seq)
+    await expect(pullWebdavJournals(connection, current)).resolves.toMatchObject({ entries: [] })
     entries.delete('/dav/notebook_backup/journal/not-a-device.jsonl')
 
     propfindFailureStatus = 401

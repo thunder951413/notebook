@@ -16,6 +16,7 @@ import { buildAutomationHandoffText } from '../automation/handoff'
 import { AutomationWorkspaceReview } from '../automation/AutomationWorkspaceReview'
 import type { NotebookSummary, PageSummary } from '../model'
 import { AIProviderSettingsPanel } from './AIProviderSettings'
+import { lastSyncSuccess, relativeTime } from '../sync/syncErrors'
 
 type SettingsPage = 'general' | 'data' | 'services' | 'automation'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
@@ -55,6 +56,12 @@ interface SettingsCenterProps {
   onMigrateFromSsh: () => Promise<{ published: number }>
   onApplyAutomationProposal: (proposalId: string) => Promise<void>
   onRejectAutomationProposal: (proposalId: string) => Promise<void>
+  /** Self-service repair tools for WebDAV synchronization. */
+  syncRepair?: {
+    status: () => Promise<{ pending: number; conflictCopies: number }>
+    resetReadPositions: () => Promise<void>
+    republishAll: () => Promise<number>
+  }
 }
 
 const syncLabels: Record<SyncState, string> = {
@@ -96,7 +103,7 @@ function trapDialogKey(event: KeyboardEvent, container: HTMLElement, onClose: ()
   }
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, syncProgress, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, syncProgress, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal, syncRepair }: SettingsCenterProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const qrDialogRef = useRef<HTMLElement>(null)
@@ -358,6 +365,41 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
       recordDiagnosticEvent({ level: 'error', category: 'settings', action: 'automatic-sync', status: 'failed', message: error instanceof Error ? error.message : '无法保存设置' })
     } finally {
       setSavingAutoSync(false)
+    }
+  }
+
+  const [repairStatus, setRepairStatus] = useState<{ pending: number; conflictCopies: number }>()
+  const [repairing, setRepairing] = useState(false)
+  useEffect(() => {
+    if (page !== 'services' || !syncRepair) return
+    let cancelled = false
+    void syncRepair.status().then((status) => { if (!cancelled) setRepairStatus(status) }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [page, syncRepair, syncState])
+
+  const runRepair = async (kind: 'reread' | 'republish') => {
+    if (!syncRepair || repairing || savingSync || syncState === 'syncing') return
+    const confirmed = kind === 'reread'
+      ? await requestConfirm({ title: '重新读取全部云端记录？', description: '会忽略本机记住的读取位置，从头核对坚果云上所有设备的记录。已有内容不会被删除或重复，适合“别的设备的修改迟迟不出现”时使用。记录多时会多花一些流量。', confirmLabel: '重新读取并同步' })
+      : await requestConfirm({ title: '重新上传本机全部内容？', description: '会把本机所有笔记、附件和设置重新排队上传，作为当前版本的后续版本。其他设备会自动合并，不会产生重复笔记。适合云端目录被清空、或新设备缺少部分笔记时使用。', confirmLabel: '重新上传并同步' })
+    if (!confirmed) return
+    setRepairing(true)
+    setSyncMessage(undefined)
+    setSyncMessageIsError(false)
+    try {
+      if (kind === 'reread') await syncRepair.resetReadPositions()
+      const queued = kind === 'republish' ? await syncRepair.republishAll() : 0
+      const succeeded = await onSyncNow('bidirectional')
+      setSyncMessage(succeeded
+        ? kind === 'reread' ? '已重新核对全部云端记录，同步完成。' : `已重新上传 ${queued} 条记录${(await syncRepair.status()).pending ? '；剩余内容会分批继续上传' : ''}。`
+        : '修复已开始，但本次同步没有完成；内容已排队保留，请查看上方错误后重试。')
+      setSyncMessageIsError(!succeeded)
+      setRepairStatus(await syncRepair.status())
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '修复失败')
+      setSyncMessageIsError(true)
+    } finally {
+      setRepairing(false)
     }
   }
 
@@ -631,7 +673,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                 </div>
                 {syncState === 'syncing' && syncProgress && <div className="sync-settings-result" role="status">{syncProgress}</div>}
                 <div className="sync-utility-actions">
-                  <Button disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void keepLocalAndSync()}>以本机为准解决冲突</Button>
+                  {syncState === 'conflict' && <Button disabled={savingSync || checkingServer} onClick={() => void keepLocalAndSync()}>以本机为准解决冲突</Button>}
                   {storedWebdavSyncPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavSyncPassword()}>清除已保存同步密码</Button>}
                   {storedWebdavAppPassword && <Button appearance="subtle" disabled={savingSync || checkingServer || syncState === 'syncing'} onClick={() => void removeWebdavAppPassword()}>清除已保存应用密码</Button>}
                 </div>
@@ -643,9 +685,22 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                   </div>
                 </details>}
                 {(syncMessage || syncError) && <div className={`sync-settings-result ${(syncMessage ? syncMessageIsError : Boolean(syncError)) ? 'error' : ''}`} role="status">{syncMessage ?? syncError}</div>}
-              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。修改停止 60 秒后合并同步，持续编辑最多等待 5 分钟；失焦和退出仅在有待上传内容时同步。回到窗口时最多每 2 分钟检查一次远端，无定时轮询。失败后逐步延长重试间隔，手动同步可立即重试。阅读位置只在失焦或退出时发布，页面切换不会联网。</Text>
+              <Text size={200}>坚果云需先在网页版“安全选项”中生成应用密码。修改停止 30 秒后合并同步，持续编辑最多等待 3 分钟；切换到其他应用或退出时会立即同步待上传内容。回到窗口时最多每 2 分钟检查一次云端，另外每 10 分钟后台检查一次。失败后逐步延长重试间隔，手动同步可立即重试。</Text>
               </div>
             </SettingsSection>
+            {syncRepair && <SettingsSection title="同步状态与修复" description="多台设备同时修改同一篇笔记时，同步不会中断：本机版本保留，另一版本另存为“冲突副本”笔记，可对比后删除。">
+              <dl className="settings-service-list sync-health-list">
+                <dt>当前状态</dt><dd>{syncLabels[syncState]}{syncState === 'error' && syncError ? ` · ${syncError}` : ''}</dd>
+                <dt>上次成功同步</dt><dd>{relativeTime(lastSyncSuccess())}</dd>
+                <dt>等待上传</dt><dd>{repairStatus ? `${repairStatus.pending} 条变更` : '…'}</dd>
+                <dt>冲突副本</dt><dd>{repairStatus ? (repairStatus.conflictCopies ? `${repairStatus.conflictCopies} 篇（标题含“冲突副本”）` : '无') : '…'}</dd>
+              </dl>
+              <div className="settings-action-grid">
+                <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void runRepair('reread')}>{repairing ? '正在修复…' : '重新读取全部云端记录'}</Button>
+                <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void runRepair('republish')}>重新上传本机全部内容</Button>
+              </div>
+              <Text size={200}>别的设备的修改没出现：选“重新读取”。云端目录被清空或新设备缺笔记：选“重新上传”。两者都不会删除任何内容，可以放心重复执行。仍有问题时，在“数据与备份 → 诊断日志”导出日志。</Text>
+            </SettingsSection>}
             <SettingsSection title="其他服务" description="AI 与实时协作可以独立部署；未配置时不影响本地笔记和数据同步。">
               <dl className="settings-service-list"><dt>AI 服务</dt><dd>{aiService ?? '本机 127.0.0.1:8787'}</dd><dt>协作服务</dt><dd>{collaborationService ?? '未配置 · Yjs 离线模式'}</dd></dl>
             </SettingsSection>

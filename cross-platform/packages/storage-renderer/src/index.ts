@@ -607,12 +607,92 @@ export class DexieNotebookRepository implements NotebookRepository {
     for (const item of new Map([...sourceLinks, ...targetLinks].map((link) => [link.id, link])).values()) await this.queuePrivacyRetractionIfPublished(workspaceId, 'page_link', item.id)
   }
 
-  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false, keepLocal = false): Promise<RemoteApplyResult> {
+  /** WebDAV per-device read positions (stored next to the generic cursor so they commit with applied data). */
+  async getWebdavSeqs(key: string): Promise<Record<string, number> | undefined> {
+    return (await this.db.syncCursors.get(`webdav:${key}`))?.seqs
+  }
+
+  async saveWebdavSeqs(key: string, seqs: Record<string, number>): Promise<void> {
+    await this.db.syncCursors.put({ workspaceId: `webdav:${key}`, cursor: 0, seqs })
+  }
+
+  /**
+   * Preserve the other device's body as a new page next to the original. The
+   * copy is an ordinary pending page, so every device receives it and nothing
+   * is lost even when nobody looks at the conflict right away.
+   */
+  private async createConflictCopy(workspaceId: string, pageId: string, remote: Record<string, unknown>): Promise<string> {
+    const source = await this.db.pages.get(pageId)
+    const now = new Date().toISOString()
+    const copyId = crypto.randomUUID()
+    const markdown = typeof remote.markdown === 'string' ? remote.markdown : legacyTiptapToCanonicalMarkdown(remote.tiptapJson as Record<string, unknown>)
+    const assets = source ? await this.db.assets.where('pageId').equals(pageId).toArray() : []
+    const referenced = assets.filter((asset) => markdown.includes(`notebook-asset:${asset.id}`))
+    const assetIds = new Map(referenced.map((asset) => [asset.id, crypto.randomUUID()]))
+    const date = new Date()
+    const stamp = `${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+    const firstLine = markdown.split('\n').map((line) => line.replace(/^#+\s*/, '').trim()).find(Boolean)
+    const baseTitle = source?.title?.trim() || firstLine?.slice(0, 60) || '未命名笔记'
+    const page: Page = {
+      ...(source ?? { workspaceId, kind: 'document' as const, favorite: false }),
+      id: copyId,
+      workspaceId,
+      title: `${baseTitle}（冲突副本 ${stamp}）`,
+      preview: markdown.replace(/[#>*_`~[\]()!-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160),
+      sortOrder: (source?.sortOrder ?? 0) + 0.5,
+      treeUpdatedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: undefined,
+      legacyVersion: undefined,
+      legacyMetadata: undefined,
+      syncStatus: 'pending',
+    }
+    const document: PageDocument = {
+      ...(remote as unknown as PageDocument),
+      pageId: copyId,
+      schemaVersion: Math.max(3, Number(remote.schemaVersion) || 3),
+      markdown: remapAssetReferences(markdown, assetIds) as string,
+      tiptapJson: markdownToEditorCache(remapAssetReferences(markdown, assetIds) as string) as Record<string, unknown>,
+      yjsState: undefined,
+      updatedAt: now,
+    }
+    await this.savePage(page, document)
+    for (const asset of referenced) {
+      const id = assetIds.get(asset.id)!
+      const copied: Asset = { ...asset, id, pageId: copyId, parentAssetId: undefined, createdAt: now }
+      const content = await this.getAssetContent(asset.id)
+      if (content) await this.saveAsset(copied, content)
+    }
+    return copyId
+  }
+
+  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false, keepLocal = false, options: { autoResolve?: boolean; webdavSeqs?: { key: string; seqs: Record<string, number> } } = {}): Promise<RemoteApplyResult> {
     if (keepLocal && !webdavParentVersion) throw new Error('Local conflict recovery is only supported for WebDAV')
+    const autoResolve = options.autoResolve === true && webdavParentVersion && !keepLocal
     return this.db.transaction('rw', this.db.tables, async () => {
       const previousCursor = await this.getSyncCursor(workspaceId)
       let appliedCursor = cursor
       const conflicts: RemoteApplyResult['conflicts'] = []
+      const resolved: NonNullable<RemoteApplyResult['resolved']> = []
+      /**
+       * Concurrent edits never stop synchronization. Local content stays the
+       * visible version and is republished as the successor of the remote
+       * branch; a differing remote body becomes a separate conflict copy.
+       */
+      const settleConflict = async (change: RemoteSyncChange, payload: Record<string, unknown> | undefined, current: Record<string, unknown> | undefined, pending: SyncOutboxItem | undefined, localVersion: { version: number } | undefined, pageIds: string[]) => {
+        const version = Math.max(localVersion?.version ?? 0, pending?.expectedVersion ?? 0, change.version + 1)
+        await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version, webdavParentVersion: true })
+        if (pending) await this.db.syncOutbox.update(pending.id, { expectedVersion: version })
+        let copyPageId: string | undefined
+        if (change.entityType === 'document' && change.operation === 'upsert' && payload) {
+          const remoteMarkdown = typeof payload.markdown === 'string' ? payload.markdown : legacyTiptapToCanonicalMarkdown(payload.tiptapJson as Record<string, unknown>)
+          const localMarkdown = current ? (typeof current.markdown === 'string' ? current.markdown : legacyTiptapToCanonicalMarkdown(current.tiptapJson as Record<string, unknown>)) : undefined
+          if (remoteMarkdown.trim() && remoteMarkdown.trim() !== localMarkdown?.trim()) copyPageId = await this.createConflictCopy(workspaceId, change.entityId, payload)
+        }
+        if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).and((page) => page.syncStatus === 'conflict').modify({ syncStatus: 'pending' })
+        resolved.push({ entityType: change.entityType, entityId: change.entityId, pageIds, ...(copyPageId ? { copyPageId } : {}) })
+      }
       for (const change of changes) {
         const supportedEntityTypes = new Set(['notebook', 'section', 'page', 'document', 'tag', 'task_step', 'asset', 'page_link', 'reading_position', 'revision', 'page_tag'])
         if (!supportedEntityTypes.has(change.entityType) || !Number.isSafeInteger(change.version) || change.version < 0 || !['upsert', 'delete'].includes(change.operation)) {
@@ -633,12 +713,19 @@ export class DexieNotebookRepository implements NotebookRepository {
         }
         if (privatePage && !change.authenticatedPrivate) continue
         const pendingExact = await this.db.syncOutbox.where('[entityType+entityId]').equals([change.entityType, change.entityId]).and((item) => item.workspaceId === workspaceId).first()
-        const pendingPage = change.entityType === 'document'
+        // A metadata-only local edit does not compete with a remote body.
+        const pendingPage = change.entityType === 'document' && !autoResolve
           ? await this.db.syncOutbox.where('[entityType+entityId]').equals(['page', change.entityId]).and((item) => item.workspaceId === workspaceId).first()
           : undefined
         const pending = pendingExact ?? pendingPage
         const current = await this.currentRemoteEntity(change)
         const localVersion = await this.db.syncVersions.get(this.versionId(workspaceId, change.entityType, change.entityId))
+        // Our own journal only replays work this device already has. A lost
+        // read cursor must never turn that replay into a conflict.
+        if (change.ownDevice && !keepLocal && (pendingExact || (localVersion && localVersion.version >= change.version + 1))) continue
+        // With local edits queued, an entry older than the accepted baseline is
+        // an ancestor that this device has already moved past.
+        if (autoResolve && pendingExact && localVersion && change.version + 1 < localVersion.version) continue
         // Explicit, one-shot user choice, never the automatic merge policy.
         // Keep the current record (not a stale outbox payload), and publish it
         // as a successor of every observed remote branch. Queue + baseline +
@@ -664,6 +751,9 @@ export class DexieNotebookRepository implements NotebookRepository {
         if (equivalentPending) {
           await this.db.syncOutbox.delete(pending.id)
           if (change.entityType === 'page') await this.db.pages.update(change.entityId, { syncStatus: 'synced' })
+        } else if (pending && autoResolve) {
+          await settleConflict(change, payload, current, pending, localVersion, pageIds)
+          continue
         } else if (pending) {
           if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
           conflicts.push({ entityType: change.entityType, entityId: change.entityId, pageIds })
@@ -711,6 +801,10 @@ export class DexieNotebookRepository implements NotebookRepository {
             // This document was previously flagged only because its imported
             // rich-text representation differed from the migrated Markdown.
             if (legacyDocumentSnapshot) await this.db.pages.update(change.entityId, { syncStatus: 'synced' })
+            continue
+          }
+          if (autoResolve) {
+            await settleConflict(change, payload, current, undefined, localVersion, pageIds)
             continue
           }
           if (pageIds.length) await this.db.pages.where('id').anyOf(pageIds).modify({ syncStatus: 'conflict' })
@@ -762,7 +856,8 @@ export class DexieNotebookRepository implements NotebookRepository {
         })
       }
       await this.db.syncCursors.put({ workspaceId, cursor: appliedCursor })
-      return { cursor: appliedCursor, conflicts }
+      if (options.webdavSeqs && !conflicts.length) await this.db.syncCursors.put({ workspaceId: `webdav:${options.webdavSeqs.key}`, cursor: 0, seqs: options.webdavSeqs.seqs })
+      return { cursor: appliedCursor, conflicts, ...(resolved.length ? { resolved } : {}) }
     })
       .then((result) => {
         this.searchIndex.invalidate(workspaceId)

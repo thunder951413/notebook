@@ -9,6 +9,8 @@ import { DEFAULT_WORKSPACE_ID, loadSyncSettings } from '../sync/syncSettings'
 import { synchronizeLegacySsh, type LegacySyncMode } from '../sync/legacySshSync'
 import { legacyDeviceId, loadSyncBackend } from '../sync/legacySshSettings'
 import { synchronizeWebdav } from '../sync/webdavSync'
+import { describeSyncError, recordSyncSuccess } from '../sync/syncErrors'
+import { showToast } from '../components/toast'
 import { normalizeReferenceTargetIds } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
@@ -17,7 +19,7 @@ import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageS
 import { notebookRootSectionId, planNotebookPageRootMigration, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
 import { lockedForSection, planPagePrivacyNormalization } from './privacyPlacement'
-import { AUTO_SYNC_DEBOUNCE_MS, createAutomaticSyncPolicy, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
+import { AUTO_SYNC_DEBOUNCE_MS, VISIBLE_REMOTE_POLL_MS, createAutomaticSyncPolicy, createQuietSyncScheduler, createSyncStateFinalizer, schedulePendingSyncBatch, type AutomaticSyncReason, type SettledSyncState } from '../sync/syncLifecycle'
 
 export const WORKSPACE_ID = DEFAULT_WORKSPACE_ID
 // A fresh install opens on the bundled sample workspace so the first screen has
@@ -342,7 +344,16 @@ export function useWorkspaceData() {
           : await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         stateFinalizer.complete(result.state)
         if (result.state !== 'offline' && !('changed' in result && result.changed === false)) await reload()
-        if (result.state === 'synced') automaticSyncPolicy.current.succeeded()
+        if (result.state === 'synced') {
+          automaticSyncPolicy.current.succeeded()
+          recordSyncSuccess()
+        }
+        // Concurrent edits no longer stop synchronization; tell the user where
+        // the other version went instead of silently picking one.
+        const resolvedConflicts = 'resolved' in result ? result.resolved ?? [] : []
+        const copies = resolvedConflicts.filter((item) => item.copyPageId).length
+        if (copies) showToast(`${copies} 篇笔记在多台设备上同时被修改：已保留本机版本，另一版本另存为“冲突副本”笔记。`, { durationMs: 10_000 })
+        if ('republished' in result && result.republished) showToast('云端缺少本机的同步记录，已自动重新上传本机全部内容。', { durationMs: 8_000 })
         if (result.state === 'error') retryLater()
         // WebDAV acknowledges one bounded outbox batch at a time. Acking 200
         // items does not create another Dexie record, so schedule the next
@@ -367,7 +378,7 @@ export function useWorkspaceData() {
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
           const message = error instanceof Error ? error.message : '同步失败'
           stateFinalizer.complete('error')
-          setSyncError(message)
+          setSyncError(describeSyncError(message))
           retryLater()
           recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'run', status: 'failed', message, durationMs: performance.now() - startedAt })
         } else {
@@ -391,14 +402,19 @@ export function useWorkspaceData() {
       return operation
   }, [reload])
 
-  // Sync once at startup and whenever the network comes back. No periodic
-  // polling: durable outbox writes schedule their own quiet-period sync.
+  // Sync at startup, when the network comes back and on a slow visible poll.
+  // Durable outbox writes schedule their own quiet-period sync.
   useEffect(() => {
     const controller = new AbortController()
     const sync = () => { void syncNow({ signal: controller.signal, reason: 'online' }) }
     void syncNow({ signal: controller.signal, reason: 'startup' })
     window.addEventListener('online', sync)
-    return () => { controller.abort(); window.removeEventListener('online', sync) }
+    // Edits made on the phone should appear without clicking “sync”. A slow
+    // poll only while visible costs one small request when nothing changed.
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) void syncNow({ reason: 'foreground' })
+    }, VISIBLE_REMOTE_POLL_MS)
+    return () => { controller.abort(); window.removeEventListener('online', sync); window.clearInterval(poll) }
   }, [syncNow])
 
   // Every durable outbox append gets one quiet-period sync. Draft

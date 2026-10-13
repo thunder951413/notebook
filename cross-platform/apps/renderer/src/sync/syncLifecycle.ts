@@ -1,9 +1,11 @@
-export const AUTO_SYNC_DEBOUNCE_MS = 60_000
-export const AUTO_SYNC_MAX_WAIT_MS = 5 * 60_000
+export const AUTO_SYNC_DEBOUNCE_MS = 30_000
+export const AUTO_SYNC_MAX_WAIT_MS = 3 * 60_000
 export const REMOTE_CHECK_INTERVAL_MS = 2 * 60_000
+/** While the window is visible, look for other devices' edits this often (one small request when unchanged). */
+export const VISIBLE_REMOTE_POLL_MS = 10 * 60_000
 export type AutomaticSyncReason = 'startup' | 'online' | 'foreground' | 'background' | 'shutdown' | 'changes' | 'retry'
 
-/** No idle polling: only lifecycle events check for remote changes. */
+/** Lifecycle events plus a slow visible-window poll check for remote changes. */
 export function createAutomaticSyncPolicy() {
   let lastSuccess = -Infinity
   let retryAt = 0

@@ -41,6 +41,15 @@ export interface WebdavPullResult {
   /** New entries per device (seq > knownSeqs[deviceId]), ordered by seq. */
   entries: Array<WebdavJournalEntry & { deviceId: string }>
   fingerprint: string
+  /** Every device that currently has a journal in the repository. */
+  devices?: string[]
+  /**
+   * Devices whose remote sequence went backwards (journal deleted/recreated).
+   * Their entries were re-read from the start; the caller must reset cursors.
+   */
+  resetDevices?: string[]
+  /** Recoverable repository anomalies worth recording in diagnostics. */
+  warnings?: string[]
 }
 
 export interface WebdavTestResult {
@@ -311,8 +320,10 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     headCache.invalidate(cacheNamespace(settings))
   }
   const entries: Array<WebdavJournalEntry & { deviceId: string }> = []
+  const resetDevices: string[] = []
+  const warnings: string[] = []
   for (const deviceId of deviceIds) {
-    const known = knownSeqs[deviceId] ?? 0
+    let known = knownSeqs[deviceId] ?? 0
     let head: WebdavJournalHead | undefined
     if (devicesWithHeads.has(deviceId)) {
       try {
@@ -334,6 +345,14 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
         const status = (error as { status?: number })?.status
         if (status !== 404) throw error
       }
+      // A commit marker behind our cursor means the journal was deleted and
+      // recreated (manual cleanup, restored folder). Skipping it would hide
+      // every new record until it overtook the stale cursor, so re-read it.
+      if (head && head.lastSeq < known) {
+        resetDevices.push(deviceId)
+        warnings.push(`${deviceId} 的远端序号从 ${known} 回退到 ${head.lastSeq}，已重新读取`)
+        known = 0
+      }
       // The marker is the commit point: once its sequence is known, never
       // fetch the corresponding large journal merely to confirm that fact.
       if (head && known >= head.lastSeq) continue
@@ -351,15 +370,19 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     // 100 MB is only a recovery/abuse guard until v5 segments the log.
     if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
     const journal = parseJournal(text)
+    const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
+    if (!head && journalLastSeq < known) {
+      resetDevices.push(deviceId)
+      warnings.push(`${deviceId} 的远端日志序号从 ${known} 回退到 ${journalLastSeq}，已重新读取`)
+      known = 0
+    }
     if (head && (utf8Bytes(text) !== head.journalBytes || sha256(text) !== head.journalSha256)) {
-      // Old v4 writers do not update .head.json. Their uncommitted tail is
-      // deliberately invisible until Electron publishes a new marker; a
-      // mismatch without a newer tail is corruption, not a valid transition.
-      const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
-      const bytes = Buffer.from(text, 'utf8')
-      const committedPrefixMatches = bytes.byteLength >= head.journalBytes
-        && sha256(bytes.subarray(0, head.journalBytes)) === head.journalSha256
-      if (journalLastSeq <= head.lastSeq || !committedPrefixMatches) throw new Error(`远端日志 ${deviceId}.jsonl 与提交标记不一致`)
+      // The journal PUT succeeded but its marker PUT did not (or an old v4
+      // writer appended without a marker). Every row is still a complete JSON
+      // record, so only the committed sequence range is exposed. Blocking the
+      // whole repository here would stall every device until the writer came
+      // back online; its unacknowledged rows are republished by that writer.
+      warnings.push(`${deviceId} 的日志与提交标记不一致（日志序号 ${journalLastSeq}，标记 ${head.lastSeq}），仅读取已提交部分`)
     }
     for (const entry of journal) {
       if (entry.seq <= known || (head && entry.seq > head.lastSeq)) continue
@@ -367,7 +390,13 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     }
   }
   entries.sort((left, right) => left.deviceId === right.deviceId ? left.seq - right.seq : left.deviceId.localeCompare(right.deviceId))
-  return { entries, fingerprint: `${settings.baseUrl.trim()}|${settings.username.trim()}|${safeRemotePath(settings.remotePath)}` }
+  return {
+    entries,
+    fingerprint: `${settings.baseUrl.trim()}|${settings.username.trim()}|${safeRemotePath(settings.remotePath)}`,
+    devices: deviceIds,
+    ...(resetDevices.length ? { resetDevices } : {}),
+    ...(warnings.length ? { warnings } : {}),
+  }
 }
 
 export async function getWebdavObject(settings: WebdavConnection, hash: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -405,7 +434,7 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
  * whole file is written back. This is safe because only one device ever
  * writes a given journal file.
  */
-export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, signal?: AbortSignal): Promise<{ firstSeq: number; count: number }> {
+export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, signal?: AbortSignal, minSeq = 0): Promise<{ firstSeq: number; count: number }> {
   if (!DEVICE_ID_PATTERN.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
   const client = clientFor(settings)
   const root = safeRemotePath(settings.remotePath)
@@ -420,7 +449,10 @@ export async function appendWebdavJournal(settings: WebdavConnection, deviceId: 
     const status = (error as { status?: number })?.status
     if (status !== 404) throw error
   }
-  const firstSeq = (existing.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)) + 1
+  // Sequence numbers must never move backwards, even when the remote journal
+  // was deleted: other devices filter by their last consumed sequence.
+  const floor = Number.isSafeInteger(minSeq) && minSeq > 0 ? minSeq : 0
+  const firstSeq = Math.max(existing.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0), floor) + 1
   const journalEntries = [...existing, ...entries.map((entry, index) => ({ ...entry, seq: firstSeq + index }))]
   // v4 journals remain readable by old clients. Electron always writes their
   // compact current-state/history-ring projection to make normal sync cheap.

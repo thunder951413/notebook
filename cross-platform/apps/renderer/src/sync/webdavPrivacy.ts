@@ -9,7 +9,7 @@ function base64(bytes: Uint8Array): string {
   for (const byte of bytes) value += String.fromCharCode(byte)
   return btoa(value)
 }
-function bytes(value: string): Uint8Array {
+function fromBase64(value: string): Uint8Array {
   try { return Uint8Array.from(atob(value), character => character.charCodeAt(0)) }
   catch { throw new Error('隐私同步密文格式不正确') }
 }
@@ -38,7 +38,7 @@ export class WebdavPrivacyCipher {
     const envelope = payload[ENCRYPTED_MARKER] as Envelope | undefined
     if (!envelope || envelope.version !== 1 || envelope.algorithm !== 'AES-256-GCM' || envelope.kdf !== 'PBKDF2-SHA256' || envelope.iterations !== ITERATIONS
       || typeof envelope.salt !== 'string' || typeof envelope.iv !== 'string' || typeof envelope.ciphertext !== 'string') throw new Error('不支持的隐私同步密文格式')
-    const salt = bytes(envelope.salt), iv = bytes(envelope.iv), ciphertext = bytes(envelope.ciphertext)
+    const salt = fromBase64(envelope.salt), iv = fromBase64(envelope.iv), ciphertext = fromBase64(envelope.ciphertext)
     if (salt.length !== 16 || iv.length !== 12 || ciphertext.length < 16) throw new Error('隐私同步密文格式不正确')
     const key = await this.key(salt)
     try { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.slice().buffer, additionalData: encoder.encode(`notebook-webdav-private-v1\0${context}`), tagLength: 128 }, key, ciphertext.slice().buffer)) }

@@ -1186,3 +1186,60 @@ test('classifies private notebook entities and related page records as local-onl
   expect(await repository.listOutbox('workspace-a')).toEqual([])
   expect((await repository.getPage(privatePage.id))?.syncStatus).toBe('synced')
 })
+
+const syncedDocument = (pageId: string, markdown: string, updatedAt = '2026-01-02T00:00:00.000Z'): PageDocument => ({
+  pageId, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt,
+})
+
+test('auto-resolved WebDAV conflicts keep local content, copy the remote body and never stop the pull', async () => {
+  const repository = makeRepository()
+  const value = { ...page('busy-page', '会议记录'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, '共同的起点'))
+  await repository.db.syncVersions.bulkPut([
+    { id: `workspace-a:page:${value.id}`, version: 3, webdavParentVersion: true },
+    { id: `workspace-a:document:${value.id}`, version: 3, webdavParentVersion: true },
+  ])
+  // Local edit queued against parent 3.
+  await repository.savePage({ ...value, syncStatus: 'pending', updatedAt: '2026-01-03T00:00:00.000Z' }, syncedDocument(value.id, '本机写的内容', '2026-01-03T00:00:00.000Z'))
+  const other = page('other-page', '另一篇')
+  const result = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 1, entityType: 'document', entityId: value.id, version: 3, operation: 'upsert', payload: syncedDocument(value.id, '手机上写的内容') as unknown as Record<string, unknown> },
+    { cursor: 2, entityType: 'page', entityId: other.id, version: 0, operation: 'upsert', payload: other as unknown as Record<string, unknown> },
+  ], 2, undefined, true, false, { autoResolve: true, webdavSeqs: { key: 'repo', seqs: { 'peer-device': 2 } } })
+  expect(result.conflicts).toEqual([])
+  expect(result.cursor).toBe(2)
+  expect(result.resolved).toEqual([expect.objectContaining({ entityType: 'document', entityId: value.id, copyPageId: expect.any(String) })])
+  // Local body untouched and republished as the successor of the remote branch.
+  expect((await repository.getPageDocument(value.id))?.markdown).toBe('本机写的内容')
+  const queued = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'document' && item.entityId === value.id)
+  expect(queued?.expectedVersion).toBe(4)
+  expect((await repository.getPage(value.id))?.syncStatus).not.toBe('conflict')
+  // The other device's body survives as a visible, syncing copy next to it.
+  const copyId = result.resolved![0]!.copyPageId!
+  const copy = await repository.getPage(copyId)
+  expect(copy).toMatchObject({ title: expect.stringContaining('会议记录（冲突副本'), sectionId: value.sectionId, syncStatus: 'pending' })
+  expect((await repository.getPageDocument(copyId))?.markdown).toBe('手机上写的内容')
+  expect((await repository.listOutbox('workspace-a')).some((item) => item.entityType === 'document' && item.entityId === copyId)).toBe(true)
+  // Later records in the same pull were applied and cursors committed atomically.
+  expect(await repository.getPage(other.id)).toBeDefined()
+  expect(await repository.getWebdavSeqs('repo')).toEqual({ 'peer-device': 2 })
+})
+
+test('identical concurrent bodies resolve without a copy, and own-device replays are never conflicts', async () => {
+  const repository = makeRepository()
+  const value = { ...page('same-page', '同样'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, '起点'))
+  await repository.db.syncVersions.put({ id: `workspace-a:document:${value.id}`, version: 2, webdavParentVersion: true })
+  await repository.savePage({ ...value, syncStatus: 'pending', updatedAt: '2026-01-03T00:00:00.000Z' }, syncedDocument(value.id, '两边一样', '2026-01-03T00:00:00.000Z'))
+  const same = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 1, entityType: 'document', entityId: value.id, version: 2, operation: 'upsert', payload: syncedDocument(value.id, '两边一样\n') as unknown as Record<string, unknown> },
+  ], 1, undefined, true, false, { autoResolve: true })
+  expect(same.conflicts).toEqual([])
+  expect(same.resolved?.every((item) => !item.copyPageId) ?? true).toBe(true)
+  const pagesBefore = await repository.db.pages.count()
+  const replay = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 2, entityType: 'document', entityId: value.id, version: 1, operation: 'upsert', payload: syncedDocument(value.id, '本机很早以前的版本') as unknown as Record<string, unknown>, ownDevice: true },
+  ], 2, undefined, true, false, { autoResolve: true })
+  expect(replay).toEqual({ cursor: 2, conflicts: [] })
+  expect(await repository.db.pages.count()).toBe(pagesBefore)
+})

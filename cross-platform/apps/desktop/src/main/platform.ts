@@ -350,12 +350,12 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
     return diagnoseOperation({ category: 'sync', action: 'webdav-object-get', operationId: requestId, resource: { type: 'object', id: hash } },
       () => withWebdavDeadline(requestId, webdavRequests, (signal) => getWebdavObject(settings, hash, signal)))
   })
-  ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string) => {
+  ipcMain.handle('webdav:push', async (event, settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string, minSeq?: number) => {
     assertTrustedSender(event)
     return diagnoseOperation({ category: 'sync', action: 'webdav-push', operationId: requestId, summarize: (result) => `${result.count} entries · ${objects.length} objects` },
       () => withWebdavDeadline(requestId, webdavRequests, async (signal) => {
         for (const object of objects) await putWebdavObject(settings, object.hash, object.data, signal)
-        return appendWebdavJournal(settings, deviceId, entries, signal)
+        return appendWebdavJournal(settings, deviceId, entries, signal, typeof minSeq === 'number' ? minSeq : 0)
       }))
   })
   ipcMain.handle('webdav:cancel', (event, requestId: string) => {

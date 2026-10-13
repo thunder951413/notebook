@@ -4,17 +4,17 @@ import { AUTO_SYNC_MAX_WAIT_MS, createAutomaticSyncPolicy, createBackgroundSyncG
 afterEach(() => vi.useRealTimers())
 
 describe('sync lifecycle scheduling', () => {
-  test('bounds continuous editing by five minutes and resets the bound after cancel', () => {
+  test('bounds continuous editing by the maximum wait and resets the bound after cancel', () => {
     vi.useFakeTimers()
     const run = vi.fn()
     const scheduler = createQuietSyncScheduler(run)
     scheduler.request()
-    for (let elapsed = 0; elapsed < AUTO_SYNC_MAX_WAIT_MS - 30_000; elapsed += 30_000) {
-      vi.advanceTimersByTime(30_000)
+    for (let elapsed = 0; elapsed < AUTO_SYNC_MAX_WAIT_MS - 20_000; elapsed += 20_000) {
+      vi.advanceTimersByTime(20_000)
       scheduler.request()
     }
     expect(run).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(30_000)
+    vi.advanceTimersByTime(20_000)
     expect(run).toHaveBeenCalledTimes(1)
     scheduler.request()
     scheduler.cancel()

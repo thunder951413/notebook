@@ -9,11 +9,23 @@ export interface RemoteSyncChange {
   payload: Record<string, unknown>
   /** Set only by the transport after authenticated decryption. */
   authenticatedPrivate?: true
+  /** The record came from this device's own journal (a replay of local work). */
+  ownDevice?: true
+}
+
+export interface RemoteResolvedConflict {
+  entityType: string
+  entityId: string
+  pageIds: string[]
+  /** A new page holding the other device's body, when the bodies differed. */
+  copyPageId?: string
 }
 
 export interface RemoteApplyResult {
   cursor: number
   conflicts: Array<{ entityType: string; entityId: string; pageIds: string[] }>
+  /** Conflicts settled automatically: local content wins, the remote body is kept as a copy. */
+  resolved?: RemoteResolvedConflict[]
 }
 
 const recordSchema = z.record(z.string(), z.unknown())

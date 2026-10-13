@@ -41,7 +41,8 @@ import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
-import { migrateSshToWebdav } from './sync/webdavSync'
+import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions } from './sync/webdavSync'
+import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
 import { configureReferenceRuntime } from './editor/referenceRuntime'
@@ -122,6 +123,14 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     rejectAutomationProposal,
   } = useAutomationBridge(reloadWorkspace)
   const importInput = useRef<HTMLInputElement>(null)
+  const syncRepair = useMemo(() => ({
+    status: async () => ({
+      pending: await automationRepository.db.syncOutbox.where('workspaceId').equals(WORKSPACE_ID).count(),
+      conflictCopies: pages.filter((page) => page.title.includes('（冲突副本')).length,
+    }),
+    resetReadPositions: () => resetWebdavReadPositions(automationRepository),
+    republishAll: () => queueFullWebdavRepublish(automationRepository, WORKSPACE_ID),
+  }), [pages])
   const previousSyncState = useRef(syncState)
   const syncCompletionTimer = useRef<number | undefined>(undefined)
   const [showSyncCompleted, setShowSyncCompleted] = useState(false)
@@ -986,7 +995,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               />}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
-                  <span>{syncState === 'offline' ? '自动同步未启用或尚未配置，当前修改保存在本机。' : syncState === 'syncing' ? syncProgress ?? '正在与坚果云交换最新数据。' : syncState === 'synced' ? '本机与坚果云已完成最近一次同步。' : syncState === 'conflict' ? '同步版本存在冲突，自动重试已暂停。请先备份，再到同步设置选择处理方式。' : '最近一次同步没有完成。'}</span>
+                  <span>{syncState === 'offline' ? '自动同步未启用或尚未配置，当前修改保存在本机。' : syncState === 'syncing' ? syncProgress ?? '正在与坚果云交换最新数据。' : syncState === 'synced' ? `本机与坚果云已同步（${relativeTime(lastSyncSuccess())}）。` : syncState === 'conflict' ? '同步版本存在冲突，自动重试已暂停。请到同步设置选择处理方式。' : `最近一次同步没有完成，本机修改已安全保存，稍后会自动重试。上次成功：${relativeTime(lastSyncSuccess())}。`}</span>
                   {(syncState === 'error' || syncState === 'conflict') && <code>{syncError ?? (syncState === 'conflict' ? accessiblePages.filter((page) => page.syncStatus === 'conflict').map((page) => page.title).join('、') || '存在尚未处理的同步冲突。' : '没有提供更详细的错误信息。')}</code>}
                 </div>
                 <ActionMenuDivider />
@@ -1093,6 +1102,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onAccentColorChange={(color) => onAccentColorChange?.(color)}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}
         onMigrateFromSsh={async () => migrateSshToWebdav(automationRepository, WORKSPACE_ID)}
+        syncRepair={syncRepair}
         onImport={() => chooseImport(transferContext)}
         onExportPage={(format) => { void saveCurrentDocument(transferContext, format) }}
         onPrint={() => { setSettingsOpen(false); window.setTimeout(() => window.print(), 0) }}

@@ -145,7 +145,7 @@ describe('synchronizeWebdav', () => {
     webdav.pull.mockResolvedValueOnce({ entries: [remoteEntry()], fingerprint: 'fp' })
     await synchronizeWebdav(repo, workspaceId, undefined, undefined, 'push')
     expect(webdav.pull).toHaveBeenCalledWith(expect.any(Object), {}, expect.any(String))
-    expect(repo.applyRemoteChanges).toHaveBeenCalledWith(workspaceId, expect.any(Array), 1, expect.any(Map), true, true)
+    expect(repo.applyRemoteChanges).toHaveBeenCalledWith(workspaceId, expect.any(Array), 1, expect.any(Map), true, true, expect.objectContaining({ autoResolve: true }))
     ;(repo.hasPendingSyncChanges as ReturnType<typeof vi.fn>).mockResolvedValue(true)
     await synchronizeWebdav(repo, workspaceId, undefined, undefined, 'pull')
     expect(webdav.push).not.toHaveBeenCalled()
@@ -189,6 +189,23 @@ describe('synchronizeWebdav', () => {
       db.close()
       await db.delete()
     }
+  })
+
+  test('republishes the whole library when the repository lost this device journal, continuing its sequence', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    window.localStorage.setItem(`notebook-webdav-seqs-v1:${connection.baseUrl}|${connection.username}|${connection.remotePath}`, JSON.stringify({ [deviceId]: 5 }))
+    const { repo } = repository()
+    const queued: Array<{ entityType: string; entityId: string; operation: string; payload: Record<string, unknown> }> = []
+    ;(repo as unknown as { enqueueChange: unknown }).enqueueChange = vi.fn(async (_workspaceId: string, entityType: string, entityId: string, operation: string, payload: Record<string, unknown>) => { queued.push({ entityType, entityId, operation, payload }) })
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockImplementation(async () => queued.map((item, index) => ({ ...item, id: `op-${index}`, workspaceId, expectedVersion: 0, createdAt: timestamp })))
+    webdav.pull.mockResolvedValue({ entries: [], fingerprint: 'fp', devices: ['00000000-0000-4000-8000-0000000000aa'] } as never)
+    webdav.push.mockImplementation(async (_settings, _device, entries) => ({ firstSeq: 6, count: entries.length }))
+    const result = await synchronizeWebdav(repo, workspaceId)
+    expect(result.state).toBe('synced')
+    expect(result.republished).toBeGreaterThan(0)
+    expect(queued.map((item) => item.entityType)).toEqual(expect.arrayContaining(['notebook', 'page', 'document']))
+    expect((webdav.push.mock.calls[0] as unknown[] | undefined)?.[5]).toBe(5)
   })
 
   test('returns offline before the repository is configured', async () => {

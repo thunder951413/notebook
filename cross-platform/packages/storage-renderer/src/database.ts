@@ -32,7 +32,12 @@ export interface SyncOutboxItem {
   createdAt: string
 }
 
-export interface SyncCursor { workspaceId: string; cursor: number }
+export interface SyncCursor {
+  workspaceId: string
+  cursor: number
+  /** WebDAV per-device read positions, committed atomically with applied records. */
+  seqs?: Record<string, number>
+}
 export interface SyncVersion {
   id: string
   version: number
