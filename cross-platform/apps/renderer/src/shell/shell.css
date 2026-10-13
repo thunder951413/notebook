@@ -71,7 +71,7 @@ html[data-shell="tauri"] .fluent-root.theme-dark { --list: rgba(30, 29, 33, .52)
   grid-template-areas: "sidebar list content inspector";
   gap: 0;
   padding: 0;
-  overflow: hidden;
+  overflow: clip;
   color: var(--ink);
   background: var(--side);
   transition: grid-template-columns .22s var(--ease-out);
@@ -396,7 +396,10 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
   min-width: 0;
   min-height: 0;
   display: grid;
-  overflow: hidden;
+  /* clip, not hidden: a hidden overflow can still be scrolled sideways by
+     focus(), which slid the whole editor under the note list. */
+  overflow: clip;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   border-radius: 0;
   background: var(--paper);
@@ -419,7 +422,9 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
 .toolbar-leading .page-history-controls { padding: 0; border: 0; }
 .toolbar-back { display: flex; height: 30px; align-items: center; gap: 2px; padding: 0 10px 0 4px; border: 0; border-radius: 8px; color: var(--accent); background: transparent; font-size: 13px; cursor: pointer; }
 .toolbar-back:hover { background: var(--hover); }
-.workspace-grid.shell .breadcrumb { min-width: 0; flex: 1; color: var(--ink-3); }
+.workspace-grid.shell .breadcrumb { min-width: 0; flex: 1; overflow: hidden; color: var(--ink-3); }
+.workspace-grid.shell .breadcrumb-title-input.fui-Input { min-width: 60px; }
+.workspace-grid.shell .editor-toolbar { min-width: 0; overflow: clip; }
 .workspace-grid.shell .breadcrumb-title-input.fui-Input { font-size: 13.5px; }
 .workspace-grid.shell .editor-actions { flex: none; gap: 2px; }
 .workspace-grid.shell .page-utilities .fui-Button { min-width: 30px; height: 30px; border-radius: 8px; color: var(--ink-2); }
@@ -427,14 +432,14 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
 .vim-chip.enabled { border-color: transparent; color: #fff; background: var(--done); }
 .vim-chip.enabled.selected { background: var(--ink-2); }
 
-.workspace-grid.shell .document-surface { min-width: 0; min-height: 0; display: flex; overflow: hidden; flex-direction: column; background: var(--paper); }
+.workspace-grid.shell .document-surface { min-width: 0; min-height: 0; display: flex; overflow: clip; flex-direction: column; background: var(--paper); }
 .document-transition { display: flex; min-height: 0; flex: 1; flex-direction: column; animation: doc-in .2s var(--ease-out); }
 @keyframes doc-in { from { opacity: 0; transform: translateY(4px); } }
 @media (prefers-reduced-motion: reduce) { .document-transition { animation: none; } }
 .workspace-grid.shell .document-editor-content { width: min(760px, calc(100% - 64px)); padding-top: 28px; font-size: 16px; line-height: 1.7; }
 
 /* Inspector (outline / references) */
-.workspace-grid.shell .right-sidebar { grid-area: inspector; width: var(--ai-pane-width); min-width: 0; border-left: 1px solid var(--hairline); border-radius: 0; background: var(--paper); }
+.workspace-grid.shell .right-sidebar { grid-area: inspector; display: block; width: var(--ai-pane-width); min-width: 0; border-left: 1px solid var(--hairline); border-radius: 0; background: var(--paper); }
 .workspace-grid.shell .right-sidebar-panel { position: relative; height: 100%; overflow: hidden; }
 .layout-medium .right-sidebar, .layout-narrow .right-sidebar {
   position: fixed;

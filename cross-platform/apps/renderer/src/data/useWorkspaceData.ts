@@ -530,6 +530,16 @@ export function useWorkspaceData() {
       await enqueuePageMutation(pageId, async () => {
         const page = await repository.getPage(pageId)
         if (!page) return
+        // Opening a note can normalize the editor structure without changing
+        // its text. That is not an edit: keep the note's date and do not
+        // queue an upload.
+        const stored = await repository.getPageDocument(pageId)
+        if (stored?.markdown !== undefined && stored.markdown === document.markdown) {
+          const draft = await repository.db?.drafts.get(pageId)
+          if (draft && draft.document.updatedAt === updatedAt) await repository.db?.drafts.delete(pageId)
+          setDocuments((current) => current[pageId] === normalized ? current : ({ ...current, [pageId]: normalized }))
+          return
+        }
         await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
         await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
         setReferenceIndexRevision((current) => current + 1)
