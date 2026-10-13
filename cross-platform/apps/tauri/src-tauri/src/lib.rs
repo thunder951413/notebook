@@ -8,6 +8,7 @@
 mod ai;
 mod diagnostics;
 mod secrets;
+mod updater;
 mod webdav;
 
 use std::collections::HashMap;
@@ -47,6 +48,7 @@ pub struct AppState {
     quitting: AtomicBool,
     quit_in_progress: AtomicBool,
     zoom: Mutex<f64>,
+    updater: updater::Updater,
 }
 
 type CommandResult<T> = Result<T, String>;
@@ -518,6 +520,39 @@ async fn webdav_push(app: AppHandle, settings: webdav::Connection, device_id: St
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Updates
+
+#[tauri::command]
+fn update_state(state: State<'_, AppState>) -> updater::UpdateState {
+    state.updater.snapshot()
+}
+
+#[tauri::command]
+async fn update_check(app: AppHandle) -> updater::UpdateState {
+    updater::check(&app).await
+}
+
+#[tauri::command]
+async fn update_download(app: AppHandle) -> updater::UpdateState {
+    updater::download(&app).await
+}
+
+/// Swaps in the downloaded version after a normal, saving quit.
+#[tauri::command]
+fn update_install(app: AppHandle) -> CommandResult<bool> {
+    updater::prepare_install(&app)?;
+    record(&app, EventInput::new("info", "update", "install", "started"));
+    request_quit(&app);
+    Ok(true)
+}
+
+#[tauri::command]
+fn update_open_release(app: AppHandle) -> CommandResult<()> {
+    let url = app.state::<AppState>().updater.snapshot().release_url;
+    open_external(app, url)
+}
+
 #[tauri::command]
 fn webdav_recent_requests() -> usize {
     webdav::recent_request_count()
@@ -691,6 +726,10 @@ fn on_menu(app: &AppHandle, id: &str) {
         "check-updates" => {
             show_main(app);
             let _ = app.emit_to(MAIN, "notebook:update-center", ());
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                updater::check(&app).await;
+            });
         }
         "reload" => reload_renderer(app),
         "devtools" => {
@@ -747,6 +786,7 @@ pub fn run() {
                 quitting: AtomicBool::new(false),
                 quit_in_progress: AtomicBool::new(false),
                 zoom: Mutex::new(1.0),
+                updater: updater::Updater::new(version.clone()),
             });
             record(&handle, EventInput::new("info", "app", "started", "success").message(format!("Notebook {version} · Tauri {} · {} {}", tauri::VERSION, std::env::consts::OS, std::env::consts::ARCH)));
 
@@ -770,6 +810,8 @@ pub fn run() {
                     record(&handle, EventInput::new("warning", "app", "global-shortcut", "failed").message(error.to_string()));
                 }
             }
+
+            updater::start_background(handle.clone());
 
             // The window starts hidden and is shown once the renderer painted
             // (app_ready); this fallback covers a renderer that never reports.
@@ -819,6 +861,11 @@ pub fn run() {
             webdav_push,
             webdav_cancel,
             webdav_recent_requests,
+            update_state,
+            update_check,
+            update_download,
+            update_install,
+            update_open_release,
             ai_complete,
             ai_cancel,
             ai_key_set,

@@ -11,7 +11,6 @@ import { listen } from '@tauri-apps/api/event'
 type Desktop = NonNullable<Window['notebookDesktop']>
 type UpdateState = Awaited<ReturnType<Desktop['updates']['getState']>>
 
-const RELEASE_URL = 'https://github.com/thunder951413/notebook/releases'
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
@@ -52,25 +51,13 @@ void listen<string>('notebook:flush-request', ({ payload: requestId }) => {
   )
 })
 
-let appVersion = '3.0.0'
-void call<{ version: string }>('app_info').then((info) => { appVersion = info.version }).catch(() => undefined)
-
-function updateState(message?: string): UpdateState {
-  return {
-    status: 'idle',
-    currentVersion: appVersion,
-    releaseUrl: RELEASE_URL,
-    canAutoInstall: false,
-    ...(message ? { message } : {}),
-  }
-}
-
 const automationUnavailable = () => Promise.reject(new Error('新版桌面应用暂不提供本地 AI 接口'))
 const legacyUnavailable = () => Promise.reject(new Error('新版桌面应用不再支持旧版 SSH/SFTP 同步，请使用坚果云 WebDAV 同步'))
 
 const onQuickCapture = channel<null>('notebook:quick-capture')
 const onCommandPalette = channel<null>('notebook:command-palette')
 const onUpdateCenter = channel<null>('notebook:update-center')
+const onUpdateState = channel<UpdateState>('notebook:update-state')
 
 const api: Desktop = Object.freeze({
   platform: 'darwin',
@@ -96,13 +83,14 @@ const api: Desktop = Object.freeze({
     chooseDataRoot: () => Promise.reject(new Error('新版桌面应用的数据由系统统一管理，暂不支持更换数据目录')),
   },
   updates: {
-    getState: async () => updateState(),
-    check: async () => updateState('新版桌面应用暂未接入自动更新，可在发布页查看新版本'),
-    download: async () => updateState('新版桌面应用暂未接入自动更新'),
-    install: async () => false,
-    openReleasePage: () => call<void>('open_external', { url: RELEASE_URL }),
-    onStateChanged: () => () => undefined,
+    getState: () => call<UpdateState>('update_state'),
+    check: () => call<UpdateState>('update_check'),
+    download: () => call<UpdateState>('update_download'),
+    install: () => call<boolean>('update_install'),
+    openReleasePage: () => call<void>('update_open_release'),
+    onStateChanged: (callback: (state: UpdateState) => void) => onUpdateState(callback),
   },
+
   diagnostics: {
     record: (event) => call<void>('diagnostics_record', { event }),
     list: (limit?: number) => call<Awaited<ReturnType<Desktop['diagnostics']['list']>>>('diagnostics_list', { limit: limit ?? null }),

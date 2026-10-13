@@ -34,7 +34,7 @@ apps/tauri/
 - **数据位置**：笔记库在 `~/Library/WebKit/io.github.notebook.desktop`（WebKit IndexedDB）。新安装不放示例笔记，连接坚果云后自动恢复。
 - **Dock 角标**：显示已逾期 + 今天到期的待办数。
 
-暂未移植：自动更新（菜单“检查更新”打开发布页）、本地 AI 接口（automation）、旧版 SSH/SFTP 同步、菜单栏图标。全局快速记录 ⇧⌘N 可用。
+暂未移植：本地 AI 接口（automation）、旧版 SSH/SFTP 同步、菜单栏图标。全局快速记录 ⇧⌘N 可用。
 
 ## 新界面
 
@@ -47,6 +47,14 @@ apps/tauri/
 - 窗口变窄时像手机一样：边栏变成抽屉，再窄则列表和编辑区单栏切换，左上角返回。
 - 快捷键：⌘N 新建，⌘F 搜索，⌃⌘S 边栏，⌃⌘L 列表，⌘, 设置，⌘P 命令面板，列表中 ↑↓ / j k 切换，回车进入编辑，⌘⌫ 移到回收站（可撤销），F11 专注。
 
+## 自动更新
+
+- 发布：推送标签 `desktop-v<版本>`（或在 Actions 里手动运行 “Desktop (Tauri)” 并填写版本），`.github/workflows/desktop-tauri.yml` 在 macOS 上构建，发布 `Notebook-macos-arm64.zip` 和 `.sha256`。
+- 应用启动 20 秒后检查一次，之后每 6 小时检查；发现新版本自动下载并校验 SHA-256，下载完成后弹出“重启并更新”。设置 → 常规 里也能手动检查。
+- 仓库是私有的：需要在 设置 → 常规 → 更新 里填写一个有 repo 读取权限的 GitHub 令牌（存在钥匙串里）。
+- 应用没有 Apple 签名。应用内更新用自己的下载器（文件不带隔离标记），解压后执行 `xattr -cr`，退出后由一个小脚本替换 /Applications 里的 Notebook.app 并重新打开；替换失败会还原旧版本。
+- 手动下载安装：解压，拖到“应用程序”，执行 `xattr -cr /Applications/Notebook.app`。
+
 ## 构建与安装
 
 ```sh
@@ -54,7 +62,7 @@ cd cross-platform && pnpm install
 cd apps/tauri
 pnpm test:rust                                    # Rust 同步测试
 export APPLE_SIGNING_IDENTITY="Apple Development: …"   # 可选，见 security find-identity -v -p codesigning
-pnpm exec tauri build
+pnpm tauri:build
 cp -R src-tauri/target/release/bundle/macos/Notebook.app /Applications/
 ```
 

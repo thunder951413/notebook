@@ -518,6 +518,20 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     void createPage(target.sectionId).then(setActivePage)
   }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
+  // Updates download quietly in the background; offer the restart once ready.
+  useEffect(() => {
+    const updates = window.notebookDesktop?.updates
+    if (!updates) return
+    let announced = ''
+    return updates.onStateChanged((state) => {
+      if (state.status !== 'downloaded' || !state.availableVersion || announced === state.availableVersion) return
+      announced = state.availableVersion
+      showToast(`新版本 ${state.availableVersion} 已下载`, {
+        durationMs: 60_000,
+        action: { label: '重启并更新', run: () => { void updates.install().catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法安装更新', { kind: 'error' })) } },
+      })
+    })
+  }, [])
   useEffect(() => window.notebookDesktop?.events.onUpdateCenter?.(() => {
     setSettingsPage('general')
     setSettingsOpen(true)

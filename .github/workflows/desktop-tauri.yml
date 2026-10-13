@@ -1,0 +1,88 @@
+name: Desktop (Tauri)
+
+# Builds the macOS app (Apple Silicon) and publishes it as a GitHub Release.
+# Releases are unsigned (no Apple Developer ID). The in-app updater downloads
+# the zip itself, verifies the SHA-256, clears extended attributes and swaps
+# the bundle; a copy downloaded with a browser needs:
+#   xattr -cr /Applications/Notebook.app
+#
+# Release contract read by apps/tauri/src-tauri/src/updater.rs:
+#   tag     desktop-v<version>
+#   assets  Notebook-macos-arm64.zip, Notebook-macos-arm64.zip.sha256
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, for example 3.0.1 (tag desktop-v3.0.1 is created)'
+        required: true
+
+concurrency:
+  group: desktop-tauri-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.9.0 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: cross-platform/pnpm-lock.yaml }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: cross-platform/apps/tauri/src-tauri }
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="${{ inputs.version || github.ref_name }}"
+          version="${version#desktop-v}"
+          version="${version#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Invalid version: $version" >&2; exit 1; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=desktop-v$version" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        working-directory: cross-platform
+        run: pnpm install --frozen-lockfile
+      - name: Test
+        working-directory: cross-platform
+        run: |
+          pnpm --filter @notebook/renderer test
+          (cd apps/tauri && pnpm exec tsc --noEmit -p .)
+          (cd apps/tauri/src-tauri && cargo test)
+      - name: Build Notebook.app
+        working-directory: cross-platform/apps/tauri
+        run: pnpm exec tauri build --bundles app --config "{\"version\":\"$VERSION\"}"
+      - name: Package
+        shell: bash
+        run: |
+          bundle="cross-platform/apps/tauri/src-tauri/target/release/bundle/macos/Notebook.app"
+          version_in_bundle="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$bundle/Contents/Info.plist")"
+          if [ "$version_in_bundle" != "$VERSION" ]; then echo "Bundle version $version_in_bundle != $VERSION" >&2; exit 1; fi
+          ditto -c -k --keepParent "$bundle" Notebook-macos-arm64.zip
+          shasum -a 256 Notebook-macos-arm64.zip | awk '{print $1"  Notebook-macos-arm64.zip"}' > Notebook-macos-arm64.zip.sha256
+          cat Notebook-macos-arm64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notebook-macos-${{ env.VERSION }}
+          path: |
+            Notebook-macos-arm64.zip
+            Notebook-macos-arm64.zip.sha256
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\n首次手动安装：解压后把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。'
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes"
+          fi
+          gh release upload "$TAG" Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 --repo "$GITHUB_REPOSITORY" --clobber
