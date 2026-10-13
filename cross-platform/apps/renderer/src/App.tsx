@@ -195,6 +195,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [aiWorkspaceOpen, setAiWorkspaceOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(() => readLayout().navOpen ?? true)
   const [pagesOpen, setPagesOpen] = useState(() => readLayout().pagesOpen ?? true)
+  // 'tree': the user is navigating with the notebook tree, so the note list
+  // (which would repeat the same pages) steps aside. 'list': All notes,
+  // Pinned, To-dos, Trash, tags and search, where the list is the point.
+  const [browse, setBrowse] = useState<'tree' | 'list'>(() => readLayout().browse ?? 'list')
   const [focusMode, setFocusMode] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(360, Math.max(200, readLayout().sidebarWidth ?? 248)))
   const [listWidth, setListWidth] = useState(() => Math.min(480, Math.max(260, readLayout().listWidth ?? 320)))
@@ -466,8 +470,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return () => window.removeEventListener('hashchange', followHash)
   }, [])
   useEffect(() => {
-    globalThis.localStorage?.setItem(LAYOUT_KEY, JSON.stringify({ navOpen, pagesOpen, aiOpen, rightPanel, sidebarWidth, listWidth, aiWidth }))
-  }, [aiOpen, aiWidth, listWidth, navOpen, pagesOpen, rightPanel, sidebarWidth])
+    globalThis.localStorage?.setItem(LAYOUT_KEY, JSON.stringify({ navOpen, pagesOpen, aiOpen, rightPanel, sidebarWidth, listWidth, aiWidth, browse }))
+  }, [aiOpen, aiWidth, browse, listWidth, navOpen, pagesOpen, rightPanel, sidebarWidth])
   useEffect(() => {
     globalThis.localStorage?.setItem(VIM_MODE_KEY, vimEnabled ? 'true' : 'false')
   }, [vimEnabled])
@@ -928,6 +932,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     writeScope(next)
     setQuery('')
     setSearchAll(false)
+    setBrowse(next.kind === 'notebook' ? 'tree' : 'list')
     if (next.kind === 'notebook') {
       setActiveNotebook(next.id)
       setExpandedNotebook(next.id)
@@ -1060,17 +1065,22 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   const sidebarVisible = layout === 'wide' ? navOpen : drawerOpen
   const toggleSidebar = () => { if (layout === 'wide') setNavOpen((value) => !value); else setDrawerOpen((value) => !value) }
-  const listVisible = layout === 'narrow' ? stackView === 'list' : pagesOpen
+  const listVisible = layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list'
+  const showList = () => { setBrowse('list'); setPagesOpen(true) }
+  const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
+    setBrowse('tree')
+    activateTreePage(page, hasChildren, closeOnNarrow)
+  }, [activateTreePage])
 
   // Mac shortcuts: ⌘N new, ⌘F search, ⌃⌘S sidebar, ⌃⌘L note list, ⌘, settings.
   const shortcutRef = useRef({ create: () => {}, toggleSidebar: () => {}, toggleList: () => {}, search: () => {}, settings: () => {} })
   shortcutRef.current = {
     create: () => { void createInScope() },
     toggleSidebar,
-    toggleList: () => { if (layout === 'narrow') setStackView((view) => view === 'list' ? 'editor' : 'list'); else setPagesOpen((value) => !value) },
+    toggleList: () => { if (layout === 'narrow') setStackView((view) => view === 'list' ? 'editor' : 'list'); else if (listVisible) setPagesOpen(false); else showList() },
     search: () => {
       if (layout === 'narrow') setStackView('list')
-      else setPagesOpen(true)
+      else showList()
       requestAnimationFrame(() => { listSearchRef.current?.focus(); listSearchRef.current?.select() })
     },
     settings: () => { setSettingsPage('general'); setSettingsOpen(true) },
@@ -1126,7 +1136,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       /></Suspense> : <div className={`workspace-grid shell layout-${layout} ${sidebarVisible ? 'sidebar-open' : 'sidebar-closed'} ${listVisible ? 'list-open' : 'list-closed'} ${layout === 'narrow' ? `stack-${stackView}` : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--list-width': `${listWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
         {layout !== 'wide' && drawerOpen && <div className="drawer-scrim" onClick={() => setDrawerOpen(false)} />}
         <Sidebar
-          scope={listScope}
+          scope={layout !== 'narrow' && !listVisible ? { kind: 'notebook', id: '' } : listScope}
           onScope={chooseScope}
           counts={{ all: documentPages.length, favorites: favoriteCount, tasks: openTodoCount, taskBadge: digest.badge, taskOverdue: digest.overdue.length > 0, trash: accessibleTrashPages.length }}
           tags={tags}
@@ -1176,7 +1186,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                           expanded={expandedPageIds.has(page.id)}
                           dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
                           actions={rowActions}
-                          onActivate={activateTreePage}
+                          onActivate={onTreeActivate}
                           onToggleExpanded={togglePageExpanded}
                           onPrefetch={scheduleDocumentPrefetch}
                           onPrefetchStop={stopDocumentPrefetch}
@@ -1313,7 +1323,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             <div className="toolbar-leading" data-tauri-drag-region>
               {layout === 'narrow' && <button type="button" className="toolbar-back" onClick={() => setStackView('list')}><ChevronLeft20Regular /><span>{scopeTitle}</span></button>}
               {layout !== 'narrow' && !listVisible && !sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title="显示边栏（⌃⌘S）" onClick={toggleSidebar}><PanelLeft20Regular /></button>}
-              {layout !== 'narrow' && !listVisible && <button type="button" className="toolbar-icon-button" aria-label="显示笔记列表" title="显示笔记列表（⌃⌘L）" onClick={() => setPagesOpen(true)}><TextBulletListLtr20Regular /></button>}
+              {layout !== 'narrow' && !listVisible && <button type="button" className="toolbar-icon-button" aria-label="显示笔记列表" title="显示笔记列表（⌃⌘L）" onClick={showList}><TextBulletListLtr20Regular /></button>}
               {activeArea === 'notes' && hasActivePage && <>
               <div className="page-history-controls" role="group" aria-label="笔记浏览历史">
                 <Button appearance="subtle" size="small" icon={<ArrowLeft20Regular />} aria-label="后退到上一笔记" title="后退到上一笔记" disabled={!previousPageVisit} onClick={() => navigatePageHistory(-1)} />
@@ -1338,7 +1348,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                   <ActionMenuDivider />
                 </>}
                 <button onClick={() => setFocusMode(true)}>专注模式（F11）</button>
-                {layout !== 'narrow' && <button onClick={() => setPagesOpen((value) => !value)}>{listVisible ? '隐藏笔记列表' : '显示笔记列表'}（⌃⌘L）</button>}
+                {layout !== 'narrow' && <button onClick={() => { if (listVisible) setPagesOpen(false); else showList() }}>{listVisible ? '隐藏笔记列表' : '显示笔记列表'}（⌃⌘L）</button>}
                 <ActionMenuDivider />
                 <span className="action-menu-heading">外观</span>
                 <button className={themePreference === 'light' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('light')}>浅色</button>
