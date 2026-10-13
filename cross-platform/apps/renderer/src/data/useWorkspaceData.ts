@@ -167,6 +167,8 @@ const toPageSummary = (page: Page): PageSummary => ({
   title: page.title,
   preview: page.preview,
   updatedLabel: formatUpdatedLabel(page.updatedAt),
+  createdAt: page.createdAt,
+  updatedAt: page.updatedAt,
   tags: tagMap[page.id] ?? [],
   favorite: page.favorite,
   kind: page.kind,
@@ -179,10 +181,13 @@ const toPageSummary = (page: Page): PageSummary => ({
   syncStatus: page.syncStatus,
 })
 
+/** The desktop (Tauri) app starts empty and restores the real library from WebDAV. */
+const demoSeedAllowed = () => globalThis.document?.documentElement.dataset.shell !== 'tauri'
+
 export function useWorkspaceData() {
-  const [notebookRecords, setNotebookRecords] = useState<Notebook[]>(seedNotebooks)
-  const [sectionRecords, setSectionRecords] = useState<Section[]>(seedSections)
-  const [pageRecords, setPageRecords] = useState<Page[]>(seedPages)
+  const [notebookRecords, setNotebookRecords] = useState<Notebook[]>(() => demoSeedAllowed() ? seedNotebooks : [])
+  const [sectionRecords, setSectionRecords] = useState<Section[]>(() => demoSeedAllowed() ? seedSections : [])
+  const [pageRecords, setPageRecords] = useState<Page[]>(() => demoSeedAllowed() ? seedPages : [])
   const [trashRecords, setTrashRecords] = useState<Page[]>([])
   const [pageTags, setPageTags] = useState<Record<string, string[]>>(tagMap)
   const [documents, setDocuments] = useState<Record<string, Record<string, unknown>>>({})
@@ -267,7 +272,7 @@ export function useWorkspaceData() {
     let cancelled = false
     void (async () => {
       await repository.recoverDrafts()
-      if ((await repository.listNotebooks(WORKSPACE_ID)).length === 0 && await db.tombstones.count() === 0) {
+      if (demoSeedAllowed() && (await repository.listNotebooks(WORKSPACE_ID)).length === 0 && await db.tombstones.count() === 0) {
         await db.transaction('rw', db.notebooks, db.sections, db.pages, async () => {
           await db.notebooks.bulkPut(seedNotebooks)
           await db.sections.bulkPut(seedSections)

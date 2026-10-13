@@ -1,0 +1,24 @@
+{
+  "name": "@notebook/tauri",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite",
+    "build:web": "vite build",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "typecheck": "tsc --noEmit",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@notebook/renderer": "workspace:*",
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "7.0.2",
+    "vite": "7.3.6"
+  }
+}

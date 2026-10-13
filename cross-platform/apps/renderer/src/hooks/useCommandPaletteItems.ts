@@ -31,7 +31,7 @@ export interface CommandPaletteOptions {
   syncNow: (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode; scope?: { pageId: string } }) => Promise<boolean>
   chooseImport: () => void
   runExport: () => Promise<void>
-  trashPage: (pageId: string, alwaysConfirm?: boolean) => Promise<void>
+  trashPage: (pageId: string, alwaysConfirm?: boolean) => Promise<unknown>
   restorePage: (pageId: string) => Promise<unknown>
   purgePage: (pageId: string) => Promise<unknown>
   deleteNotebook: (notebookId: string) => Promise<unknown>

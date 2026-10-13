@@ -23,6 +23,8 @@ export interface PageNavigationOptions {
   setQuery: Dispatch<SetStateAction<string>>
   setPageHistory: Dispatch<SetStateAction<PageVisitHistory>>
   setExpandedPageIds: Dispatch<SetStateAction<Set<string>>>
+  /** Lets compact layouts close their drawer or switch to the editor. */
+  onPageActivated?: () => void
 }
 
 /**
@@ -100,9 +102,7 @@ export function usePageNavigation(options: PageNavigationOptions) {
     if (hasChildren) {
       current.setExpandedPageIds((currentIds) => currentIds.has(page.id) ? currentIds : new Set([...currentIds, page.id]))
     }
-    if (!window.matchMedia('(max-width: 1180px)').matches) return
-    current.setNavOpen(false)
-    current.setPagesOpen(false)
+    current.onPageActivated?.()
   }, [])
 
   return { selectArea, toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget }

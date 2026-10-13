@@ -25,6 +25,9 @@ export interface PageSummary {
   title: string
   preview: string
   updatedLabel: string
+  /** ISO timestamps for sorting and date sections (absent on synthetic rows). */
+  createdAt?: string
+  updatedAt?: string
   tags: string[]
   favorite?: boolean
   kind?: 'document' | 'task'

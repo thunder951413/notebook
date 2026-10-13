@@ -24,6 +24,8 @@ declare global {
       platform: string
       versions: Readonly<{ electron: string; chrome: string }>
       notifications: { show(title: string, body: string): Promise<boolean> }
+      /** Dock badge (Tauri shell); absent in Electron. */
+      badge?: { set(count: number): Promise<void> }
       external: { open(url: string): Promise<void> }
       inputSource: { useAbc(): Promise<boolean> }
       files: {

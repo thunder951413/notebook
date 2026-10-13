@@ -15,7 +15,7 @@ export const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 
 export type RightPanel = 'outline' | 'backlinks'
 export type ViewportPosition = { scrollTop?: number; fraction: number }
-export type SavedLayout = { navOpen?: boolean; pagesOpen?: boolean; aiOpen?: boolean; rightPanel?: RightPanel; notebookWidth?: number; pageWidth?: number; aiWidth?: number }
+export type SavedLayout = { navOpen?: boolean; pagesOpen?: boolean; aiOpen?: boolean; rightPanel?: RightPanel; notebookWidth?: number; pageWidth?: number; aiWidth?: number; sidebarWidth?: number; listWidth?: number }
 
 export function readLayout(): SavedLayout {
   try { return JSON.parse(globalThis.localStorage?.getItem(LAYOUT_KEY) ?? '{}') as SavedLayout } catch { return {} }
