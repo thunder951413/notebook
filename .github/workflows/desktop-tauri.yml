@@ -66,6 +66,10 @@ jobs:
           bundle="cross-platform/apps/tauri/src-tauri/target/release/bundle/macos/Notebook.app"
           version_in_bundle="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$bundle/Contents/Info.plist")"
           if [ "$version_in_bundle" != "$VERSION" ]; then echo "Bundle version $version_in_bundle != $VERSION" >&2; exit 1; fi
+          # No Developer ID: seal the bundle with an ad-hoc signature so macOS
+          # sees one consistent identity (the linker only signs the binary).
+          codesign --force --deep --sign - "$bundle"
+          codesign --verify --deep --strict "$bundle"
           ditto -c -k --keepParent "$bundle" Notebook-macos-arm64.zip
           shasum -a 256 Notebook-macos-arm64.zip | awk '{print $1"  Notebook-macos-arm64.zip"}' > Notebook-macos-arm64.zip.sha256
           cat Notebook-macos-arm64.zip.sha256
