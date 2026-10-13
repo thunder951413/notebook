@@ -361,7 +361,11 @@ export function useWorkspaceData() {
           ? await synchronizeWebdav(repository, WORKSPACE_ID, options?.signal, options?.scope, mode, setSyncProgress)
           : await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         stateFinalizer.complete(result.state)
-        if (result.state !== 'offline' && !('changed' in result && result.changed === false)) await reload()
+        if (result.state !== 'offline' && !('changed' in result && result.changed === false)) {
+          await reload()
+          const pages = repository.db?.pages
+          if (pages) void pages.filter((page) => !page.deletedAt).count().then((count) => recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'library', status: 'info', message: `pages ${count}` }), () => undefined)
+        }
         if (result.state === 'synced') {
           automaticSyncPolicy.current.succeeded()
           recordSyncSuccess()
@@ -398,6 +402,8 @@ export function useWorkspaceData() {
           stateFinalizer.complete('error')
           setSyncError(describeSyncError(message))
           retryLater()
+          // Pulls commit in batches; show whatever this run already restored.
+          void reload().catch(() => undefined)
           recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'run', status: 'failed', message, durationMs: performance.now() - startedAt })
         } else {
           recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'run', status: 'cancelled', durationMs: performance.now() - startedAt })

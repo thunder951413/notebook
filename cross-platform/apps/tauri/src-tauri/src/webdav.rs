@@ -341,7 +341,31 @@ impl Dav {
         format!("{}/{}{}", self.base, encoded.join("/"), if collection { "/" } else { "" })
     }
 
+    /// Sends one request. 坚果云 answers 503 (and some servers 429) when the
+    /// account's request quota is momentarily exhausted; those are retried a
+    /// few times with backoff, honouring Retry-After, so one throttled object
+    /// does not fail the whole sync.
     async fn send(&self, method: Method, url: String, depth: Option<&str>, body: Option<Vec<u8>>, content_type: Option<&str>) -> DavResult<reqwest::Response> {
+        const BACKOFF_SECS: [u64; 3] = [2, 6, 15];
+        let mut attempt = 0;
+        loop {
+            let response = self.send_once(method.clone(), url.clone(), depth, body.clone(), content_type).await?;
+            let status = response.status().as_u16();
+            if !(status == 429 || status == 503) || attempt >= BACKOFF_SECS.len() {
+                return Ok(response);
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let wait = retry_after.unwrap_or(BACKOFF_SECS[attempt]).clamp(1, 20);
+            attempt += 1;
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        }
+    }
+
+    async fn send_once(&self, method: Method, url: String, depth: Option<&str>, body: Option<Vec<u8>>, content_type: Option<&str>) -> DavResult<reqwest::Response> {
         record_request();
         let mut request = self
             .http

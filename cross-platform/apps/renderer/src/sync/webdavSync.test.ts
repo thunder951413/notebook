@@ -3,7 +3,7 @@ import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_TIMEOUT_MS } from './webdavSync'
+import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { synchronizeLegacySsh } from './legacySshSync'
 
@@ -214,7 +214,7 @@ describe('synchronizeWebdav', () => {
     await expect(synchronizeWebdav(repo, workspaceId)).resolves.toEqual({ state: 'offline', skipped: 0, conflicts: 0 })
   })
 
-  test('the whole-sync deadline settles even when credential IPC ignores cancellation', async () => {
+  test('the no-progress deadline settles even when credential IPC ignores cancellation', async () => {
     vi.useFakeTimers()
     try {
       const { webdav, secrets } = installDesktopMock()
@@ -223,8 +223,8 @@ describe('synchronizeWebdav', () => {
       let releaseSecret: (value: typeof appPassword) => void = () => undefined
       secrets.get.mockImplementationOnce(() => new Promise<typeof appPassword>((resolve) => { releaseSecret = resolve }))
       const run = synchronizeWebdav(repo, workspaceId)
-      const outcome = expect(run).rejects.toThrow('本次同步 超时（180 秒）')
-      await vi.advanceTimersByTimeAsync(WEBDAV_SYNC_TIMEOUT_MS)
+      const outcome = expect(run).rejects.toThrow('本次同步 超时（120 秒没有进展）')
+      await vi.advanceTimersByTimeAsync(WEBDAV_SYNC_IDLE_TIMEOUT_MS)
       await outcome
       releaseSecret(appPassword)
       await vi.advanceTimersByTimeAsync(0)
@@ -417,6 +417,54 @@ describe('synchronizeWebdav', () => {
     expect(changes[1]).toMatchObject({ cursor: 2, entityType: 'page', entityId: pageId, version: 1 })
     // Read cursors persisted per device so the same entries are not re-applied.
     expect(JSON.parse(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup') ?? '{}')).toEqual({ 'device-0001': 2 })
+  })
+
+  test('keeps applied batches when a long restore fails, so the next run continues instead of starting over', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const entries = Array.from({ length: 100 }, (_, index) => remoteEntry({ seq: index + 1, type: 'document', id: `doc-${index}`, hash: `hash-${index}`, payload: { $payloadObject: `hash-${index}` } }))
+    webdav.pull.mockImplementation((async (_settings: unknown, knownSeqs: Record<string, number>) => ({ entries: entries.filter((entry) => entry.seq > (knownSeqs[deviceId] ?? 0)), fingerprint: 'fp' })) as never)
+    webdav.objectGet.mockImplementation(async (_settings: unknown, hash: string) => {
+      if (hash === 'hash-90') throw new Error('503 Service Unavailable')
+      return new TextEncoder().encode(JSON.stringify({ pageId: hash, schemaVersion: 3, markdown: hash }))
+    })
+    const seqsKey = 'notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup'
+
+    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('503')
+    expect(calls.applyChanges.map((call) => call.changes.length)).toEqual([40, 40])
+    expect(JSON.parse(window.localStorage.getItem(seqsKey) ?? '{}')).toEqual({ [deviceId]: 80 })
+
+    webdav.objectGet.mockClear()
+    webdav.objectGet.mockImplementation(async (_settings: unknown, hash: string) => new TextEncoder().encode(JSON.stringify({ pageId: hash, schemaVersion: 3, markdown: hash })))
+    expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('synced')
+    expect(webdav.objectGet).toHaveBeenCalledTimes(20)
+    expect(JSON.parse(window.localStorage.getItem(seqsKey) ?? '{}')).toEqual({ [deviceId]: 100 })
+  })
+
+  test('downloads only the newest version of an entity within one device journal', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    webdav.pull.mockResolvedValue({
+      entries: [
+        remoteEntry({ seq: 1, type: 'document', id: pageId, ver: 0, hash: 'v0', payload: { $payloadObject: 'v0' } }),
+        remoteEntry({ seq: 2, type: 'document', id: pageId, ver: 1, hash: 'v1', payload: { $payloadObject: 'v1' } }),
+        remoteEntry({ seq: 3, type: 'page', id: pageId, ver: 0 }),
+        remoteEntry({ seq: 4, type: 'document', id: pageId, ver: 2, hash: 'v2', payload: { $payloadObject: 'v2' } }),
+      ],
+      fingerprint: 'fp',
+    })
+    webdav.objectGet.mockImplementation(async (_settings: unknown, hash: string) => new TextEncoder().encode(JSON.stringify({ pageId, schemaVersion: 3, markdown: hash })))
+
+    expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('synced')
+    expect(webdav.objectGet).toHaveBeenCalledTimes(1)
+    expect(webdav.objectGet).toHaveBeenCalledWith(connection, 'v2', expect.any(String))
+    expect(calls.applyChanges[0]!.changes).toMatchObject([
+      { entityType: 'page', entityId: pageId, version: 0 },
+      { entityType: 'document', entityId: pageId, version: 2, payload: { markdown: 'v2' } },
+    ])
+    expect(JSON.parse(window.localStorage.getItem('notebook-webdav-seqs-v1:https://dav.jianguoyun.com/dav/|jianguoyun|notebook_backup') ?? '{}')).toEqual({ [deviceId]: 4 })
   })
 
   test('materializes the full document payload marker used by new clients', async () => {
