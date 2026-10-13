@@ -5,6 +5,7 @@ import { App } from './App'
 import { accentCssVariables, loadAccentColor, notebookFluentTheme, saveAccentColor, type AccentColor } from './appearance/accent'
 import { loadThemePreference, resolveTheme, type ThemePreference } from './appearance/theme'
 import { flushPendingEdits } from './data/flushCoordinator'
+import { recordDiagnosticEvent } from './diagnostics/diagnostics'
 import './styles.css'
 
 document.documentElement.dataset.platform = /Mac/i.test(navigator.platform)
@@ -22,6 +23,16 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error?: Erro
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('Notebook renderer failed', error, info.componentStack)
+    // Keep only bundle file names with line:column so the frames can be
+    // mapped back to source; the error text itself may contain note content.
+    const frames = (text: string | null | undefined) => (text ?? '').split('\n')
+      .map((line) => line.replace(/\S*\/(assets\/[^\s/)]+)/g, '$1').trim())
+      .filter(Boolean)
+    recordDiagnosticEvent({
+      level: 'error', category: 'app', action: 'render-crash', status: 'failed',
+      errorType: error.name,
+      stack: [...frames(error.stack).slice(0, 3), ...frames(info.componentStack).slice(0, 2)],
+    })
   }
 
   render() {

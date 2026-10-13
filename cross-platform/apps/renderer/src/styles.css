@@ -302,6 +302,8 @@ html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixe
 }
 .app-error-fallback h1, .app-error-fallback p { margin: 0; }
 .app-error-fallback p { color: #756d79; }
+:root[data-theme="dark"] .app-error-fallback { color: #ece6ef; }
+:root[data-theme="dark"] .app-error-fallback p, :root[data-theme="dark"] .app-error-fallback details { color: #b3aab8; }
 .app-error-fallback details { max-width: 100%; }
 .app-error-fallback pre { max-width: 100%; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .app-error-fallback button { padding: 8px 14px; border: 0; border-radius: 7px; color: white; background: var(--accent); cursor: pointer; }

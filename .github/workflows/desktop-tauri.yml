@@ -73,6 +73,8 @@ jobs:
           ditto -c -k --keepParent "$bundle" Notebook-macos-arm64.zip
           shasum -a 256 Notebook-macos-arm64.zip | awk '{print $1"  Notebook-macos-arm64.zip"}' > Notebook-macos-arm64.zip.sha256
           cat Notebook-macos-arm64.zip.sha256
+          # Source maps for mapping crash stacks in the diagnostics log.
+          (cd cross-platform/apps/tauri/dist-maps && zip -q -r "$GITHUB_WORKSPACE/Notebook-sourcemaps.zip" .)
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,4 +84,4 @@ jobs:
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes"
           fi
-          gh release upload "$TAG" Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 Notebook-sourcemaps.zip --repo "$GITHUB_REPOSITORY" --clobber
