@@ -37,6 +37,7 @@ import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
 import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions } from './sync/webdavSync'
+import { applyLegacyImport } from './sync/legacyImport'
 import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
@@ -48,7 +49,7 @@ import { referenceTargetElement } from './editor/referenceContent'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
 import { emptyPageVisitHistory, pageVisitTarget, recordPageVisit } from './pageVisitHistory'
-import { installRendererDiagnostics } from './diagnostics/diagnostics'
+import { installRendererDiagnostics, recordDiagnosticEvent } from './diagnostics/diagnostics'
 import { registerAfterFlushHandler, registerFlushHandler } from './data/flushCoordinator'
 import { createBackgroundSyncGate } from './sync/syncLifecycle'
 import { useAutomationBridge } from './automation/automationBridge'
@@ -518,6 +519,23 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     void createPage(target.sectionId).then(setActivePage)
   }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
+  // Moving from the old desktop app: take over its sync settings once and
+  // restore the library from WebDAV right away.
+  const syncNowRef = useRef(syncNow)
+  syncNowRef.current = syncNow
+  useEffect(() => {
+    let cancelled = false
+    void applyLegacyImport().then(async (imported) => {
+      if (!imported || cancelled) return
+      showToast('已从旧版导入坚果云设置，正在恢复笔记…', { durationMs: 8_000 })
+      const synced = await syncNowRef.current({ force: true })
+      const restoredCount = await automationRepository.db.pages.filter((page) => !page.deletedAt).count()
+      recordDiagnosticEvent({ level: synced ? 'info' : 'warning', category: 'migration', action: 'restored', status: synced ? 'success' : 'failed', message: `pages ${restoredCount}` })
+      showToast(synced ? `恢复完成：${restoredCount} 篇笔记和待办` : '设置已导入，但这次同步没有完成，稍后会自动重试', { kind: synced ? 'info' : 'error', durationMs: 10_000 })
+    }).catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法导入旧版设置', { kind: 'error' }))
+    return () => { cancelled = true }
+  }, [])
+
   // Updates download quietly in the background; offer the restart once ready.
   useEffect(() => {
     const updates = window.notebookDesktop?.updates

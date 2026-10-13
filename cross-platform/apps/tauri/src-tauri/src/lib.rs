@@ -553,6 +553,18 @@ fn update_open_release(app: AppHandle) -> CommandResult<()> {
     open_external(app, url)
 }
 
+/// One-time hand-over from the Electron app: a 0600 JSON file written by the
+/// migration script. It is read once and deleted immediately.
+#[tauri::command]
+fn legacy_import_take(app: AppHandle) -> Option<serde_json::Value> {
+    let path = app.path().app_data_dir().ok()?.join("legacy-import.json");
+    let text = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    let value: serde_json::Value = serde_json::from_str(&text?).ok()?;
+    record(&app, EventInput::new("info", "migration", "legacy-import", "success"));
+    Some(value)
+}
+
 #[tauri::command]
 fn webdav_recent_requests() -> usize {
     webdav::recent_request_count()
@@ -861,6 +873,7 @@ pub fn run() {
             webdav_push,
             webdav_cancel,
             webdav_recent_requests,
+            legacy_import_take,
             update_state,
             update_check,
             update_download,

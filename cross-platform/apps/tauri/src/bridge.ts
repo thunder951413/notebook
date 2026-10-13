@@ -10,6 +10,7 @@ import { listen } from '@tauri-apps/api/event'
 
 type Desktop = NonNullable<Window['notebookDesktop']>
 type UpdateState = Awaited<ReturnType<Desktop['updates']['getState']>>
+type LegacyImport = NonNullable<Awaited<ReturnType<NonNullable<Desktop['legacy']>['take']>>>
 
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -64,6 +65,7 @@ const api: Desktop = Object.freeze({
   versions: Object.freeze({ electron: '', chrome: '' }),
   notifications: { show: (title: string, body: string) => call<boolean>('notify', { title, body }) },
   badge: { set: (count: number) => call<void>('set_badge', { count: Math.max(0, Math.round(count)) }) },
+  legacy: { take: async () => (await call<LegacyImport | null>('legacy_import_take')) ?? undefined },
   external: { open: (url: string) => call<void>('open_external', { url }) },
   inputSource: { useAbc: () => call<boolean>('input_source_use_abc') },
   files: {

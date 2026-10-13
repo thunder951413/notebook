@@ -26,6 +26,8 @@ declare global {
       notifications: { show(title: string, body: string): Promise<boolean> }
       /** Dock badge (Tauri shell); absent in Electron. */
       badge?: { set(count: number): Promise<void> }
+      /** One-time settings hand-over from the old Electron app (Tauri shell). */
+      legacy?: { take(): Promise<{ webdav?: { baseUrl: string; username: string; remotePath: string }; appPassword?: string; syncPassword?: string; githubToken?: string } | undefined> }
       external: { open(url: string): Promise<void> }
       inputSource: { useAbc(): Promise<boolean> }
       files: {
