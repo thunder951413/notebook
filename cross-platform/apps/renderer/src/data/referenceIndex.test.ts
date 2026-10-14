@@ -27,3 +27,13 @@ describe('derived backlink index', () => {
     expect(links).toHaveLength(1)
   })
 })
+
+describe('title links in the derived index', () => {
+  test('resolves [[title]] once per target and skips unresolved and self links', () => {
+    const titles: Record<string, string> = { 会议记录: 'meeting', 产品愿景: 'source' }
+    const links = pageLinksFromMarkdown('source', '见 [[会议记录]]，再见 [[会议记录|会议]]、[[不存在]] 和 [[产品愿景]]。', 'now', (title) => titles[title])
+    expect(links).toHaveLength(1)
+    expect(links[0]).toMatchObject({ id: 'markdown-title-link:source:meeting', sourcePageId: 'source', targetPageId: 'meeting', kind: 'link' })
+    expect(links[0]!.excerpt).toContain('[[会议记录]]')
+  })
+})

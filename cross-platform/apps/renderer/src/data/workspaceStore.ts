@@ -5,6 +5,7 @@ import { DEFAULT_WORKSPACE_ID } from '../sync/syncSettings'
 import { repairDocumentStructure } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
 import { pageLinksFromMarkdown } from './referenceIndex'
+import { wikiTitleResolver } from './wikiLinkMaintenance'
 import { planNotebookPageRootMigration } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
 import { planPagePrivacyNormalization } from './privacyPlacement'
@@ -110,11 +111,12 @@ export async function editorDocumentFromStorage(document: PageDocument, assets: 
 
 export async function rebuildReferenceIndex() {
   const pages = await repository.listPages({ workspaceId: WORKSPACE_ID, includeDeleted: false, limit: 10_000 })
+  const resolveTitle = wikiTitleResolver(pages.items)
   for (const page of pages.items) {
     const document = await repository.getPageDocument(page.id)
     if (!document) continue
     const markdown = document.markdown ?? documentToMarkdown(document.tiptapJson)
-    await repository.replaceDerivedPageLinks(page.id, pageLinksFromMarkdown(page.id, markdown, document.updatedAt))
+    await repository.replaceDerivedPageLinks(page.id, pageLinksFromMarkdown(page.id, markdown, document.updatedAt, resolveTitle))
   }
 }
 

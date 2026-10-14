@@ -131,6 +131,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [activeSection, setActiveSection] = useState(STARTUP_SECTION_ID)
   const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? STARTUP_PAGE_ID)
   const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
+  const activePageRef = useRef(activePage)
+  activePageRef.current = activePage
 
   useEffect(() => installRendererDiagnostics(), [])
   const showSyncCompleted = useSyncCompletedFlash(syncState)
@@ -658,8 +660,26 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         setActiveSection(page.sectionId)
         if (notebook) { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id) }
       },
+      createPageForTitle: async (title) => {
+        // A link to a note that does not exist yet: create it next to the
+        // note that links to it and open it.
+        const source = accessiblePages.find((candidate) => candidate.id === activePageRef.current)
+        const sectionId = source?.kind !== 'task' && source?.sectionId ? source.sectionId : findQuickCaptureTarget(notebooks)?.sectionId
+        if (!sectionId) { showToast('请先创建一个笔记本', { kind: 'error' }); return }
+        try {
+          const pageId = await createPage(sectionId, 'document', undefined, title)
+          const notebook = notebooks.find((candidate) => candidate.sections.some((section) => section.id === sectionId))
+          setActiveArea('notes')
+          setActiveSection(sectionId)
+          setActivePage(pageId)
+          if (notebook) { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id) }
+          showToast(`已创建笔记“${title}”`)
+        } catch (error) {
+          showToast(error instanceof Error ? error.message : '无法创建笔记', { kind: 'error' })
+        }
+      },
     })
-  }, [accessiblePages, documents, loadDocument, notebooks, pages])
+  }, [accessiblePages, createPage, documents, loadDocument, notebooks, pages])
 
   const activateNotebook = (notebookId: string) => {
     const notebook = notebooks.find((candidate) => candidate.id === notebookId)

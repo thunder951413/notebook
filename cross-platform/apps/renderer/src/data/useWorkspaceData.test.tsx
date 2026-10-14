@@ -125,3 +125,41 @@ test('joins automatic events during a sync, skips warm idle triggers, and does n
     window.localStorage.removeItem('notebook-sync-backend-v1')
   }
 })
+
+test('renaming a page rewrites [[title]] links to it and title links show up as backlinks', async () => {
+  const { result } = await renderLoadedWorkspace()
+  const { markdownToDocument } = await import('../editor/extensions')
+  const { WORKSPACE_ID } = await import('./useWorkspaceData')
+  let target = ''
+  let source = ''
+  await act(async () => {
+    target = await result.current.createPage('product', 'document', undefined, '链接目标笔记')
+    source = await result.current.createPage('product', 'document', undefined, '来源笔记')
+  })
+  // The source links to the target by title (stored as plain GFM text).
+  await act(async () => {
+    await result.current.saveDocument(source, markdownToDocument('参考 [[链接目标笔记]] 与 [[链接目标笔记|别名]]。'))
+  })
+  const backlinks = await result.current.loadBacklinks(target)
+  expect(backlinks.map((link) => link.sourcePageId)).toEqual([source])
+  expect(backlinks[0]!.excerpt).toContain('[[链接目标笔记]]')
+
+  await act(async () => {
+    await result.current.updatePage(target, { title: '改名后的笔记' })
+  })
+  const stored = await automationRepository.getPageDocument(source)
+  expect(stored?.markdown).toContain('参考 [[改名后的笔记]] 与 [[改名后的笔记|别名]]。')
+  expect(result.current.documents[source] && JSON.stringify(result.current.documents[source])).toContain('改名后的笔记')
+  expect((await result.current.loadBacklinks(target)).map((link) => link.sourcePageId)).toEqual([source])
+  const outbox = await automationRepository.listOutbox(WORKSPACE_ID, 1000)
+  expect(outbox.some((item) => item.entityType === 'document' && item.entityId === source)).toBe(true)
+})
+
+test('a title link to a missing note can create it with that title', async () => {
+  const { result } = await renderLoadedWorkspace()
+  let created = ''
+  await act(async () => {
+    created = await result.current.createPage('product', 'document', undefined, '新的想法')
+  })
+  expect(result.current.pages.find((page) => page.id === created)?.title).toBe('新的想法')
+})

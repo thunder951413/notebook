@@ -5,9 +5,11 @@ import { decodeImport, encodeExport, type ImportFile } from './transfer'
 import { documentToMarkdown, htmlToDocument, markdownToDocument } from '../editor/extensions'
 import type { NotebookSummary } from '../model'
 import { legacyDeviceId } from '../sync/legacySshSettings'
-import { normalizeReferenceTargetIds } from '@notebook/sync-contract'
+import { normalizeReferenceTargetIds, renameWikiLinks } from '@notebook/sync-contract'
 import { decodeImportedText, importedTitle, plainTextToMarkdown, stripRepeatedTitle, TEXT_IMPORT_MAX_BYTES, textImportKind, type TextImportSkip } from './textImport'
 import { pageLinksFromMarkdown } from './referenceIndex'
+import { findTitleBacklinks, planWikiLinkRename, wikiTitleResolver } from './wikiLinkMaintenance'
+import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
@@ -106,9 +108,9 @@ export function useWorkspaceData() {
       }
       if (!cancelled) await reload()
       if (!cancelled) recordDiagnosticEvent({ level: 'info', category: 'workspace', action: 'loaded', status: 'success' })
-      if (!cancelled && globalThis.localStorage?.getItem(REFERENCE_INDEX_VERSION_KEY) !== '1') {
+      if (!cancelled && globalThis.localStorage?.getItem(REFERENCE_INDEX_VERSION_KEY) !== '2') {
         await rebuildReferenceIndex()
-        globalThis.localStorage?.setItem(REFERENCE_INDEX_VERSION_KEY, '1')
+        globalThis.localStorage?.setItem(REFERENCE_INDEX_VERSION_KEY, '2')
       }
     })()
     return () => { cancelled = true }
@@ -182,7 +184,7 @@ export function useWorkspaceData() {
           return
         }
         await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
-        await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt))
+        await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt, wikiTitleResolver(pageRecordsRef.current)))
         setReferenceIndexRevision((current) => current + 1)
         setDocuments((current) => ({ ...current, [pageId]: normalized }))
         if (Date.now() - lastDocumentSaveDiagnosticAt > 30_000) {
@@ -208,7 +210,16 @@ export function useWorkspaceData() {
     }
   }, [])
 
-  const loadBacklinks = useCallback((pageId: string) => repository.listBacklinks(pageId), [])
+  const loadBacklinks = useCallback(async (pageId: string) => {
+    const indexed = await repository.listBacklinks(pageId)
+    const target = pageRecordsRef.current.find((page) => page.id === pageId)
+    if (!target) return indexed
+    // Title links to a page created after the linking note was saved are not
+    // in the stored index yet; find them by title.
+    const byTitle = await findTitleBacklinks(repository, target, pageRecordsRef.current, (page) => Boolean(page.locked) || privateSectionIds.has(page.sectionId ?? ''))
+    const known = new Set(indexed.map((link) => link.id))
+    return [...indexed, ...byTitle.filter((link) => !known.has(link.id))]
+  }, [privateSectionIds])
   const loadUnlinkedMentions = useCallback(async (pageId: string, signal?: AbortSignal) => {
     const target = pageRecords.find((page) => page.id === pageId)
     const title = target?.title.trim()
@@ -245,11 +256,11 @@ export function useWorkspaceData() {
     return mentions
   }, [pageRecords, privateSectionIds])
 
-  const createPage = useCallback(async (sectionId: string, kind: Page['kind'] = 'document', parentPageId?: string) => {
+  const createPage = useCallback(async (sectionId: string, kind: Page['kind'] = 'document', parentPageId?: string, title?: string) => {
     const now = new Date().toISOString()
     const siblings = pageRecords.filter((item) => item.sectionId === sectionId && item.parentPageId === parentPageId && !item.deletedAt)
     const sortOrder = Math.max(0, ...siblings.map((item) => item.sortOrder ?? 0)) + 1000
-    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, kind, title: kind === 'task' ? '新任务' : '无标题页面', preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
+    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, kind, title: title?.trim() || (kind === 'task' ? '新任务' : '无标题页面'), preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
     const tiptapJson = emptyEditorDocument()
     const document: PageDocument = { pageId: page.id, schemaVersion: 3, markdown: '', tiptapJson, updatedAt: now }
     // Create the page and its canonical empty body together. Updating the local
@@ -331,8 +342,36 @@ export function useWorkspaceData() {
     return id
   }, [reload])
 
+  /** Keeps `[[old title]]` links pointing at a renamed page. */
+  const updateTitleLinksAfterRename = useCallback(async (oldTitle: string, newTitle: string, pagesAfterRename: Page[]) => {
+    const plan = await planWikiLinkRename(repository, oldTitle, newTitle, pagesAfterRename)
+    let updatedPages = 0
+    for (const item of plan) {
+      await enqueuePageMutation(item.page.id, async () => {
+        const current = await repository.getPage(item.page.id)
+        const stored = await repository.getPageDocument(item.page.id)
+        if (!current || stored?.markdown === undefined) return
+        // Rewrite the stored body: it may have changed since the scan.
+        const fresh = renameWikiLinks(stored.markdown, oldTitle, newTitle)
+        if (!fresh.count) return
+        const updatedAt = new Date().toISOString()
+        const tiptapJson = normalizeReferenceTargetIds(markdownToDocument(fresh.markdown))
+        await repository.savePage({ ...current, updatedAt, syncStatus: 'pending' }, { pageId: current.id, schemaVersion: 3, markdown: fresh.markdown, tiptapJson, updatedAt })
+        await repository.replaceDerivedPageLinks(current.id, pageLinksFromMarkdown(current.id, fresh.markdown, updatedAt, wikiTitleResolver(pagesAfterRename)))
+        setPageRecords((records) => records.map((page) => page.id === current.id ? { ...page, updatedAt, syncStatus: 'pending' } : page))
+        if (loadedDocumentIds.current.has(current.id)) setDocuments((loaded) => ({ ...loaded, [current.id]: tiptapJson }))
+        updatedPages += 1
+      })
+    }
+    if (updatedPages) {
+      setReferenceIndexRevision((current) => current + 1)
+      showToast(`已更新 ${updatedPages} 篇笔记中指向“${newTitle}”的链接`)
+    }
+    return updatedPages
+  }, [])
+
   const updatePage = useCallback(async (pageId: string, patch: Partial<Page>) => {
-    await enqueuePageMutation(pageId, async () => {
+    const renamed = await enqueuePageMutation(pageId, async () => {
       const page = await repository.getPage(pageId)
       if (!page) throw new Error(`Page not found: ${pageId}`)
       if (Object.prototype.hasOwnProperty.call(patch, 'icon') && patch.icon !== page.icon) {
@@ -357,8 +396,10 @@ export function useWorkspaceData() {
       setPageRecords((current) => replaceById(current, saved))
       if (renamedSection) setSectionRecords((current) => replaceById(current, renamedSection))
       setReferenceIndexRevision((current) => current + 1)
+      return typeof patch.title === 'string' && page.title !== saved.title ? { from: page.title, to: saved.title, saved } : undefined
     })
-  }, [])
+    if (renamed) await updateTitleLinksAfterRename(renamed.from, renamed.to, replaceById(pageRecordsRef.current, renamed.saved))
+  }, [updateTitleLinksAfterRename])
 
   const { movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot } = usePageTreeMoves({ notebookRecords, sectionRecords, pageRecords, reload })
 
@@ -412,7 +453,7 @@ export function useWorkspaceData() {
         const id = crypto.randomUUID()
         const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId: target.sectionId, parentPageId: target.parentPageId, sortOrder, treeUpdatedAt: now, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', ...(locked ? { locked: true } : {}) }
         await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson: documentJson, updatedAt: now })
-        await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now))
+        await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now, wikiTitleResolver(pageRecordsRef.current)))
         createdIds.push(id)
         sortOrder += 1000
       } catch (error) {
