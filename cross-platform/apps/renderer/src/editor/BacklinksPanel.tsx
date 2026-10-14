@@ -76,7 +76,7 @@ export function BacklinksSidebar({
       {!loading && links.map((link) => {
         const page = pages.find((candidate) => candidate.id === link.sourcePageId)
         if (!page) return null
-        return <button key={link.id} onClick={() => openPage(page.id)}><Document20Regular /><span><strong>{page.title}</strong><small>{link.kind === 'embed' ? '嵌入了当前内容' : '链接到当前页面'}{link.excerpt ? ` · ${link.excerpt.replace(':', ' ')}` : ''}</small></span></button>
+        return <button key={link.id} onClick={() => openPage(page.id)}><Document20Regular /><span><strong>{page.title}</strong><small>{link.kind === 'embed' ? '嵌入了当前内容' : '链接到当前页面'}{link.excerpt ? ` · ${link.id.startsWith('markdown-title-link:') ? link.excerpt : link.excerpt.replace(':', ' ')}` : ''}</small></span></button>
       })}
       {!loading && !mentionsLoaded && <div className="backlinks-scan-action"><Button size="small" appearance="subtle" disabled={mentionsLoading} onClick={() => void scanMentions()}>{mentionsLoading ? '正在分批查找…' : '查找未链接提及'}</Button><small>仅在需要时扫描正文，避免大型笔记库阻塞界面。</small></div>}
       {!loading && mentionsLoaded && mentions.length === 0 && <p className="right-panel-empty">没有发现未链接的标题提及。</p>}

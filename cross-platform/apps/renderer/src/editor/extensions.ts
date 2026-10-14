@@ -24,8 +24,8 @@ import DOMPurify from 'dompurify'
 // KaTeX ships every family in woff2/woff/ttf triplicates (~1.1 MB of fonts).
 // Chromium only ever requests woff2, so reference just those @font-face rules.
 import './katex.woff2.css'
-import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, repairDocumentStructure, type NotebookReferenceTarget } from '@notebook/sync-contract'
-import { openReferencedTarget, resolveNotebookReference, subscribeToReferenceRuntime } from './referenceRuntime'
+import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, repairDocumentStructure, WikiLinkNode, type NotebookReferenceTarget } from '@notebook/sync-contract'
+import { openReferencedTarget, openWikiLink, resolveNotebookReference, resolveWikiLink, subscribeToReferenceRuntime, WIKI_LINK_LISTENER_KEY } from './referenceRuntime'
 import { findReferencedFragment, referenceDynamicLabel } from './referenceContent'
 
 export type AssetLoader = (assetId: string) => Promise<Blob | undefined>
@@ -395,7 +395,45 @@ function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
       }
     },
   })
-  return [BlockGroup, embed, BlockAnchor, link]
+  // `[[标题]]`: resolved by title on every library change. A link to a page
+  // that does not exist is shown as such; clicking it creates the page.
+  const wikiLink = WikiLinkNode.extend({
+    addNodeView() {
+      return ({ node }) => {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'wiki-link-node'
+        button.contentEditable = 'false'
+        let currentNode = node
+        const render = () => {
+          const title = String(currentNode.attrs.title ?? '')
+          const alias = typeof currentNode.attrs.alias === 'string' ? currentNode.attrs.alias.trim() : ''
+          const resolved = resolveWikiLink(title)
+          button.textContent = alias || title
+          button.dataset.status = resolved.status
+          button.dataset.title = title
+          button.title = resolved.status === 'ready' ? `打开“${resolved.title}”`
+            : resolved.status === 'missing' ? `还没有“${title}”这篇笔记，点击创建`
+              : resolved.title
+          button.setAttribute('aria-label', resolved.status === 'missing' ? `创建笔记“${title}”` : `打开笔记“${title}”`)
+        }
+        const unsubscribe = subscribeToReferenceRuntime(WIKI_LINK_LISTENER_KEY, render)
+        button.addEventListener('click', () => openWikiLink(String(currentNode.attrs.title ?? '')))
+        render()
+        return {
+          dom: button,
+          update: (updated) => {
+            if (updated.type.name !== 'wikiLink') return false
+            currentNode = updated
+            render()
+            return true
+          },
+          destroy: unsubscribe,
+        }
+      }
+    },
+  })
+  return [BlockGroup, embed, BlockAnchor, link, wikiLink]
 }
 
 export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader, currentPageId?: string) {

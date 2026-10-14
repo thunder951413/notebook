@@ -1805,3 +1805,33 @@ body.resizing-panel .workspace-grid { transition: none; }
   .document-surface:has(> .document-editor), .document-editor { display: block; }
   .document-editor-content { width: 100%; padding: 0; color: black; }
 }
+
+/* Title links [[标题]] and their completion menu. */
+.wiki-link-node {
+  display: inline; margin: 0 1px; padding: 0 3px;
+  border: 0; border-radius: 4px; color: var(--accent-strong); background: transparent; font: inherit;
+  line-height: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.wiki-link-node::before { content: "[["; opacity: .35; font-size: .85em; }
+.wiki-link-node::after { content: "]]"; opacity: .35; font-size: .85em; }
+.wiki-link-node:hover { background: var(--accent-soft); text-decoration-color: currentColor; }
+.wiki-link-node[data-status="missing"] { color: #8a6d3b; text-decoration-style: dashed; text-decoration-color: color-mix(in srgb, #c08a2c 70%, transparent); }
+.wiki-link-node[data-status="missing"]:hover { background: color-mix(in srgb, #f3c46b 22%, transparent); }
+.wiki-link-node[data-status="locked"] { color: #756d78; text-decoration: none; }
+.wiki-suggest-menu {
+  position: fixed; z-index: 40; display: grid; width: 280px; max-height: 320px; overflow: auto; padding: 6px;
+  border: 1px solid var(--line, #e3dfe6); border-radius: 10px; background: var(--surface, #fff);
+  box-shadow: 0 12px 32px rgba(36, 24, 48, .18);
+}
+.wiki-suggest-menu > strong { padding: 4px 8px 6px; color: var(--text-secondary, #6b6370); font-size: 12px; font-weight: 600; }
+.wiki-suggest-menu button {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 7px 8px;
+  border: 0; border-radius: 6px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer;
+}
+.wiki-suggest-menu button span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.wiki-suggest-menu button small { flex: none; color: var(--text-secondary, #6b6370); font-size: 11px; }
+.wiki-suggest-menu button.selected, .wiki-suggest-menu button:hover { background: var(--accent-soft); }
+@media (prefers-color-scheme: dark) {
+  .wiki-link-node[data-status="missing"] { color: #e0b766; }
+}

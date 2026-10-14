@@ -12,6 +12,9 @@ import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from
 import { registerFlushHandler } from '../data/flushCoordinator'
 import { createTrailingDebounce, type TrailingDebounce } from './saveScheduler'
 import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail } from './referenceCommands'
+import { isLinkableTitle } from '@notebook/sync-contract'
+import { suggestWikiLinkPages } from './referenceRuntime'
+import { findWikiTrigger, wikiSuggestions, type WikiSuggestion, type WikiTrigger } from './wikiLinkSuggest'
 import { OUTLINE_JUMP_EVENT } from './outlineEvents'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
 
@@ -205,6 +208,11 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [slashMenu, setSlashMenu] = useState<{ left: number; top: number }>()
+  // `[[` title-link completion: trigger range, popup position and selection.
+  const [wikiSuggest, setWikiSuggest] = useState<WikiTrigger & { left: number; top: number; items: WikiSuggestion[]; index: number }>()
+  const wikiSuggestRef = useRef(wikiSuggest)
+  wikiSuggestRef.current = wikiSuggest
+  const dismissedWikiTrigger = useRef<number | undefined>(undefined)
   const [largeDocument, setLargeDocument] = useState(false)
   onChangeRef.current = onChange
   onDraftRef.current = onDraft
@@ -260,6 +268,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     onCreate: ({ editor: currentEditor }) => {
       setLargeDocument(isLargeEditorDocument(currentEditor))
     },
+    onSelectionUpdate: ({ editor: currentEditor }) => { updateWikiSuggest(currentEditor) },
     onUpdate: ({ editor: currentEditor }) => {
       setLargeDocument((current) => {
         const next = isLargeEditorDocument(currentEditor)
@@ -270,6 +279,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       latestJson.current = currentEditor.getJSON()
       draftScheduler.current?.call()
       commitScheduler.current?.call()
+      updateWikiSuggest(currentEditor)
     },
     editorProps: {
       attributes: {
@@ -346,13 +356,34 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         } else if (text !== '/') {
           setSlashMenu(undefined)
         }
-        if (text !== '[' || from < 1 || view.state.doc.textBetween(from - 1, from, '') !== '[') return false
-        view.dispatch(view.state.tr.delete(from - 1, from))
-        openReferencePicker()
-        return true
+        // `[[` starts a title link; completion follows the typed text.
+        return false
       },
       handleKeyDown: (view, event) => {
         if (!view.editable) return false
+        const suggest = wikiSuggestRef.current
+        if (suggest && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            const step = event.key === 'ArrowDown' ? 1 : -1
+            setWikiSuggest({ ...suggest, index: (suggest.index + step + suggest.items.length) % suggest.items.length })
+            return true
+          }
+          if (event.key === 'Enter' || event.key === 'Tab') {
+            const item = suggest.items[suggest.index]
+            if (item) {
+              event.preventDefault()
+              applyWikiSuggestion(item)
+              return true
+            }
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            dismissedWikiTrigger.current = suggest.from
+            setWikiSuggest(undefined)
+            return true
+          }
+        }
         if (!vimEnabledRef.current || event.metaKey || event.altKey) return false
         if (vimModeRef.current === 'insert' && suppressedVimTransitionText.current) {
           if (suppressedVimTransitionText.current === event.key.toLocaleLowerCase()) {
@@ -479,6 +510,8 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       },
     },
   }, [session.document, session.provider, loadAsset, pageId, saveAsset])
+  const editorRef = useRef(editor)
+  editorRef.current = editor
 
   useEffect(() => {
     editor?.setEditable(!session.readOnly, false)
@@ -697,6 +730,47 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     changeVimMode('normal')
   }
 
+  function updateWikiSuggest(currentEditor: Editor) {
+    const trigger = currentEditor.isEditable ? findWikiTrigger(currentEditor.state) : undefined
+    if (!trigger || dismissedWikiTrigger.current === trigger.from) {
+      if (!trigger) dismissedWikiTrigger.current = undefined
+      if (wikiSuggestRef.current) setWikiSuggest(undefined)
+      return
+    }
+    const items = wikiSuggestions(trigger.query, suggestWikiLinkPages(trigger.query), pageId)
+    let left = 24
+    let top = 140
+    try {
+      const coordinates = currentEditor.view.coordsAtPos(trigger.to)
+      left = Math.min(coordinates.left, window.innerWidth - 300)
+      top = Math.min(coordinates.bottom + 6, window.innerHeight - 320)
+    } catch {
+      // Detached views (tests, collapsed panes) keep the default position.
+    }
+    const previous = wikiSuggestRef.current
+    const index = previous && previous.from === trigger.from ? Math.min(previous.index, items.length - 1) : 0
+    setWikiSuggest({ ...trigger, left, top, items, index })
+  }
+
+  function applyWikiSuggestion(item: WikiSuggestion) {
+    const suggest = wikiSuggestRef.current
+    const current = editorRef.current
+    if (!current || !suggest) return
+    const range = { from: suggest.from, to: suggest.to }
+    setWikiSuggest(undefined)
+    if (item.kind === 'advanced') {
+      current.chain().focus().deleteRange(range).run()
+      openReferencePicker()
+      return
+    }
+    const title = item.kind === 'page' ? item.page.title.trim() : item.title
+    const node = item.kind === 'page' && !isLinkableTitle(title)
+      // Titles containing [ ] | cannot be written as [[title]]; link by id.
+      ? { type: 'notebookLink', attrs: { pageId: item.page.id, targetKind: 'page', targetId: null, alias: title } }
+      : { type: 'wikiLink', attrs: { title, alias: null } }
+    current.chain().focus().insertContentAt(range, [node, { type: 'text', text: ' ' }]).run()
+  }
+
   const runSlashCommand = (command: 'paragraph' | 'h1' | 'h2' | 'h3' | 'bullet' | 'task' | 'quote' | 'code' | 'link') => {
     if (!editor?.isEditable) return
     const from = Math.max(0, editor.state.selection.from - 1)
@@ -749,6 +823,21 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         ['code', '代码块', '``` 代码'],
         ['link', '双链或嵌入', '链接页面、段落或连续内容'],
       ] as const).map(([id, title, hint]) => <button type="button" role="menuitem" key={id} onMouseDown={(event) => { event.preventDefault(); runSlashCommand(id) }}><span>{title}</span><small>{hint}</small></button>)}
+    </div>}
+    {wikiSuggest && <div className="wiki-suggest-menu" role="listbox" aria-label="链接到笔记" style={{ left: wikiSuggest.left, top: wikiSuggest.top }}>
+      <strong>{wikiSuggest.query ? `链接到“${wikiSuggest.query}”` : '链接到笔记'}</strong>
+      {wikiSuggest.items.map((item, index) => <button
+        type="button"
+        role="option"
+        aria-selected={index === wikiSuggest.index}
+        key={item.kind === 'page' ? item.page.id : item.kind}
+        className={index === wikiSuggest.index ? 'selected' : undefined}
+        onMouseDown={(event) => { event.preventDefault(); applyWikiSuggestion(item) }}
+      >
+        {item.kind === 'page' && <><span>{item.page.title}</span><small>{item.page.kind === 'task' ? '待办' : '笔记'}</small></>}
+        {item.kind === 'create' && <><span>新建笔记“{item.title}”</span><small>插入链接，点击链接即可创建</small></>}
+        {item.kind === 'advanced' && <><span>段落、标题或嵌入…</span><small>引用页面中的一部分</small></>}
+      </button>)}
     </div>}
     {vimEnabled && searchOpen && <form className="vim-search" role="search" onSubmit={(event) => { event.preventDefault(); findNext() }}>
       <span>/</span><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false); editor?.commands.focus() } }} aria-label="Vim 搜索" />

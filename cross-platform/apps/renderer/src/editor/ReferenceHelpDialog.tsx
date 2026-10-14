@@ -42,12 +42,13 @@ export function ReferenceHelpDialog({ onClose }: ReferenceHelpDialogProps) {
         <div>
           <span className="reference-help-eyebrow">双向链接</span>
           <h2>把笔记连接成自己的知识网络</h2>
-          <p>在正文中输入 <kbd>[[</kbd>，或点击顶部的“双链”按钮，即可开始。</p>
+          <p>在正文中输入 <kbd>[[</kbd> 和笔记标题，从补全中选择即可链接（写作 <code>[[笔记标题]]</code>）；需要引用段落或嵌入内容时，点击顶部的“双链”按钮。</p>
         </div>
         <Button appearance="subtle" onClick={onClose}>关闭</Button>
       </header>
 
       <ol className="reference-help-steps">
+        <li><strong>标题链接</strong><span>输入 [[ 后按标题补全；链接到还不存在的笔记时，点击链接即可创建。笔记改名后，指向它的链接自动更新。</span></li>
         <li><strong>选择目标笔记</strong><span>可以搜索标题和正文，隐私笔记需先解锁。</span></li>
         <li><strong>选择引用范围</strong><span>链接整篇、单个内容块，或勾选相邻内容组成连续引用。</span></li>
         <li><strong>选择显示方式</strong><span>使用普通链接，或把原文内容直接嵌入当前笔记。</span></li>

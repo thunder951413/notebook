@@ -1,5 +1,5 @@
 import type { PageSummary } from '../model'
-import type { NotebookReferenceTarget } from '@notebook/sync-contract'
+import { normalizeWikiTitle, type NotebookReferenceTarget } from '@notebook/sync-contract'
 
 export interface ResolvedNotebookReference {
   status: 'ready' | 'missing' | 'locked'
@@ -14,7 +14,18 @@ interface ReferenceRuntimeState {
   documents: Record<string, Record<string, unknown>>
   loadDocument?: (pageId: string) => Promise<Record<string, unknown> | undefined>
   openPage?: (target: NotebookReferenceTarget) => void
+  /** Creates a page for a `[[title]]` link that points nowhere and opens it. */
+  createPageForTitle?: (title: string) => Promise<void> | void
 }
+
+export interface ResolvedWikiLink {
+  status: 'ready' | 'missing' | 'locked'
+  pageId?: string
+  title: string
+}
+
+/** Listener key for title links; every library change re-resolves them. */
+export const WIKI_LINK_LISTENER_KEY = 'wiki-links'
 
 let state: ReferenceRuntimeState = {
   pages: [],
@@ -72,4 +83,41 @@ export async function resolveNotebookReference(target: NotebookReferenceTarget, 
 
 export function openReferencedTarget(target: NotebookReferenceTarget) {
   state.openPage?.(target)
+}
+
+/**
+ * Resolves `[[title]]` against the library: normalized title match, notes
+ * before to-dos, then the most recently updated page.
+ */
+export function resolveWikiLink(title: string): ResolvedWikiLink {
+  const key = normalizeWikiTitle(title)
+  const matches = state.pages.filter((page) => normalizeWikiTitle(page.title) === key)
+  if (!key || !matches.length) return { status: 'missing', title }
+  const accessible = matches.filter((page) => state.accessiblePageIds.has(page.id))
+  if (!accessible.length) return { status: 'locked', title: '隐私内容已锁定' }
+  const [best] = [...accessible].sort((left, right) => Number(left.kind === 'task') - Number(right.kind === 'task')
+    || (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
+  return { status: 'ready', pageId: best!.id, title: best!.title }
+}
+
+/** Follows a title link; a link to a page that does not exist creates it. */
+export function openWikiLink(title: string) {
+  const resolved = resolveWikiLink(title)
+  if (resolved.status === 'ready' && resolved.pageId) state.openPage?.({ pageId: resolved.pageId, kind: 'page' })
+  else if (resolved.status === 'missing') void state.createPageForTitle?.(title.trim())
+}
+
+/** Pages offered while typing `[[…`, best matches first. */
+export function suggestWikiLinkPages(query: string, limit = 8): PageSummary[] {
+  const key = normalizeWikiTitle(query)
+  const candidates = state.pages.filter((page) => state.accessiblePageIds.has(page.id) && page.title.trim())
+  if (!key) return [...candidates].sort((left, right) => (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '')).slice(0, limit)
+  const scored: Array<[number, PageSummary]> = []
+  for (const page of candidates) {
+    const title = normalizeWikiTitle(page.title)
+    const position = title.indexOf(key)
+    if (position < 0) continue
+    scored.push([(title === key ? 0 : position === 0 ? 1 : 2) * 1000 + Math.min(title.length, 999), page])
+  }
+  return scored.sort((left, right) => left[0] - right[0]).slice(0, limit).map(([, page]) => page)
 }
