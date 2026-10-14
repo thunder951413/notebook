@@ -21,6 +21,7 @@ export interface PageTreeRowActions {
   promoteToRoot: (page: PageSummary, variant: 'navigation' | 'pages') => void
   requestMove: (page: PageSummary) => void
   trashPage: (page: PageSummary) => void
+  importInto?: (page: PageSummary) => void
 }
 
 export interface PageTreeRowProps {
@@ -57,6 +58,7 @@ function PageTreeRowImpl({ page, depth, hasChildren, childCount, variant, select
     <button onClick={() => actions.updatePageProps(page, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
     {(!page.notebookRoot || variant === 'pages') && <button onClick={() => actions.duplicatePage(page)}>创建副本</button>}
     {page.parentPageId && <button onClick={() => actions.promoteToRoot(page, variant)}>提升为顶层页面</button>}
+    {actions.importInto && <button onClick={() => actions.importInto?.(page)}>导入文件到此页面下…</button>}
     <button onClick={() => actions.requestMove(page)}>{variant === 'navigation' ? '移动到…' : '移动到其他分区…'}</button>
     <ActionMenuDivider />
     <button className="destructive-menu-item" onClick={() => actions.trashPage(page)}>移到回收站</button>

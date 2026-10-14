@@ -2,6 +2,9 @@ import { base64ToBytes, bytesToBase64, type ImportFile } from './transfer'
 import { documentToHtml, documentToMarkdown } from '../editor/extensions'
 import { encryptBackup } from '../crypto/encryptedBackup'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
+import { textImportKind } from './textImport'
+
+const isBackupFile = (name: string) => /\.(json|zip|nbx)$/i.test(name)
 
 export interface FileTransferContext {
   activeSectionId: string
@@ -11,6 +14,8 @@ export interface FileTransferContext {
   exportWorkspace: () => Promise<Uint8Array>
   onMessage: (message: string | undefined) => void
   onEncryptedImportRequest: (request: { file: ImportFile; rest: ImportFile[] }) => void
+  /** Loose Markdown / text / HTML files: ask where to put them. */
+  onTextImportRequest?: (files: ImportFile[]) => void
   /** Hidden file input used when the desktop bridge is unavailable. */
   browserFileInput: { current: HTMLInputElement | null }
 }
@@ -31,6 +36,10 @@ export async function runImport(context: FileTransferContext, files: ImportFile[
     if (encryptedIndex >= 0) {
       const file = files[encryptedIndex]!
       context.onEncryptedImportRequest({ file, rest: files.filter((_, index) => index !== encryptedIndex) })
+      return
+    }
+    if (context.onTextImportRequest && files.length && files.every((file) => textImportKind(file.name) || !isBackupFile(file.name))) {
+      context.onTextImportRequest(files)
       return
     }
     const count = await context.importFiles(files, context.activeSectionId)

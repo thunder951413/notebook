@@ -58,6 +58,9 @@ import { ToastHost, showToast } from './components/toast'
 import { CreateItemDialog } from './components/CreateItemDialog'
 import { EmptyParentPageHint } from './components/EmptyParentPageHint'
 import { ModePlaceholder } from './components/ModePlaceholder'
+import { ImportDialog, type ImportTarget } from './components/ImportDialog'
+import { AssistantView } from './ai-assistant/AssistantView'
+import { emptyScope, type AssistantScope } from './ai/assistant'
 import { MovePageDialog } from './components/MovePageDialog'
 import { PageIconPicker } from './components/PageIconPicker'
 import { PageTreeRow, type PageTreeDropTarget, type PageTreeRowActions } from './components/PageTreeRow'
@@ -130,7 +133,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -198,6 +201,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   // (which would repeat the same pages) steps aside. 'list': All notes,
   // Pinned, To-dos, Trash, tags and search, where the list is the point.
   const [browse, setBrowse] = useState<'tree' | 'list'>(() => readLayout().browse ?? 'list')
+  // AI assistant replaces the editor while open; `key` remounts it for a new scope.
+  const [assistant, setAssistant] = useState<{ key: number; scope?: AssistantScope }>()
+  const openAssistant = (scope?: AssistantScope) => { setAssistant({ key: Date.now(), scope }); setStackView('editor') }
   const [focusMode, setFocusMode] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(360, Math.max(200, readLayout().sidebarWidth ?? 248)))
   const [listWidth, setListWidth] = useState(() => Math.min(480, Math.max(260, readLayout().listWidth ?? 320)))
@@ -666,7 +672,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     },
     requestMove: (page) => setMovePageRequest(page),
     trashPage: (page) => { void trashPage(page.id, true) },
+    importInto: (page) => { pendingImportTarget.current = { sectionId: page.sectionId, parentPageId: page.id }; chooseImport(transferContextRef.current!) },
   }
+  const pendingImportTarget = useRef<ImportTarget | undefined>(undefined)
+  const [textImport, setTextImport] = useState<{ files: ImportFile[]; target?: ImportTarget }>()
   const rowActionsRef = useRef<PageTreeRowActions | undefined>(undefined)
   if (!rowActionsRef.current) {
     rowActionsRef.current = {
@@ -678,6 +687,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       promoteToRoot: (page, variant) => latestRowHandlersRef.current?.promoteToRoot(page, variant),
       requestMove: (page) => latestRowHandlersRef.current?.requestMove(page),
       trashPage: (page) => latestRowHandlersRef.current?.trashPage(page),
+      importInto: (page) => latestRowHandlersRef.current?.importInto?.(page),
     }
   }
   const rowActions = rowActionsRef.current
@@ -689,6 +699,15 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     await saveDocument(pageId, markdownToDocument(markdown))
     setActiveArea('notes')
     setActivePage(pageId)
+  }
+
+  const createNoteFromAssistant = async (title: string, markdown: string) => {
+    const sectionId = currentSection?.id ?? notebooks.find((notebook) => !notebook.locked)?.sections[0]?.id
+    if (!sectionId) throw new Error('还没有笔记本')
+    const pageId = await createPage(sectionId)
+    await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
+    await saveDocument(pageId, markdownToDocument(markdown))
+    return pageId
   }
 
   const openDailyNote = async () => {
@@ -736,8 +755,15 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     exportWorkspace,
     onMessage: setTransferMessage,
     onEncryptedImportRequest: setEncryptedImportRequest,
+    onTextImportRequest: (files) => {
+      const target = pendingImportTarget.current ?? (hasActivePage && activeArea === 'notes' ? { sectionId: currentPage.sectionId, parentPageId: currentPage.parentPageId } : activeSection ? { sectionId: activeSection } : undefined)
+      pendingImportTarget.current = undefined
+      setTextImport({ files, target })
+    },
     browserFileInput: importInput,
-  }), [activeSection, currentPage.id, currentPage.title, documents, exportWorkspace, importFiles, importInput])
+  }), [activeArea, activeSection, currentPage.id, currentPage.parentPageId, currentPage.sectionId, currentPage.title, documents, exportWorkspace, hasActivePage, importFiles, importInput])
+  const transferContextRef = useRef<FileTransferContext | undefined>(undefined)
+  transferContextRef.current = transferContext
 
   const palette = useCommandPaletteItems({
     syncState,
@@ -931,6 +957,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     writeScope(next)
     setQuery('')
     setSearchAll(false)
+    setAssistant(undefined)
     setBrowse(next.kind === 'notebook' ? 'tree' : 'list')
     if (next.kind === 'notebook') {
       setActiveNotebook(next.id)
@@ -1067,10 +1094,11 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   // Notebooks work like drives: pick one, and its pages fill the tree below,
   // starting at the left edge instead of being indented under the notebook.
   const activeDrive = notebooks.find((notebook) => notebook.id === expandedNotebook && (!notebook.locked || privacyUnlocked))
-  const listVisible = layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list'
+  const listVisible = !assistant && (layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list')
   const showList = () => { setBrowse('list'); setPagesOpen(true) }
   const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
     setBrowse('tree')
+    setAssistant(undefined)
     // Leaving To-dos or Trash: the list (when shown again) should list notes.
     setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
     activateTreePage(page, hasChildren, closeOnNarrow)
@@ -1137,7 +1165,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onCreateAgentProposal={createAutomationAgentProposal}
         onApplyProposal={applyAutomationProposal}
         onRejectProposal={rejectAutomationProposal}
-      /></Suspense> : <div className={`workspace-grid shell layout-${layout} ${sidebarVisible ? 'sidebar-open' : 'sidebar-closed'} ${listVisible ? 'list-open' : 'list-closed'} ${layout === 'narrow' ? `stack-${stackView}` : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--list-width': `${listWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
+      /></Suspense> : <div className={`workspace-grid shell layout-${layout} ${sidebarVisible ? 'sidebar-open' : 'sidebar-closed'} ${listVisible ? 'list-open' : 'list-closed'} ${layout === 'narrow' ? `stack-${stackView}` : ''} ${assistant ? 'assistant-open' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--list-width': `${listWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
         {layout !== 'wide' && drawerOpen && <div className="drawer-scrim" onClick={() => setDrawerOpen(false)} />}
         <Sidebar
           scope={layout !== 'narrow' && !listVisible ? { kind: 'notebook', id: '' } : listScope}
@@ -1148,6 +1176,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           onSettings={() => { setSettingsPage('general'); setSettingsOpen(true) }}
           onHide={toggleSidebar}
           onNewNotebook={() => setCreateRequest('notebook')}
+          assistantOpen={Boolean(assistant)}
+          onAssistant={() => { if (layout !== 'wide') setDrawerOpen(false); openAssistant() }}
           notebooks={<div className="sidebar-tree" role="tree" aria-label="笔记本" onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setPageDropTarget(undefined) }}>
               {notebooks.map((notebook) => {
                 const expanded = expandedNotebook === notebook.id && (!notebook.locked || privacyUnlocked)
@@ -1163,7 +1193,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                       {notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen16Regular /> : <LockClosed16Regular />}</span>}
                       {(!notebook.locked || privacyUnlocked) && <span className="sidebar-count">{notebookCounts.get(notebook.id) ?? 0}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button><ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button>{notebook.sections[0] && <button onClick={() => { pendingImportTarget.current = { sectionId: notebook.sections[0]!.id }; chooseImport(transferContext) }}>导入 Markdown / 文本…</button>}<ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
                       if (!(await requestConfirm({ title: `删除笔记本“${notebook.name}”？`, description: '将删除其中全部页面、任务、附件和历史版本，此操作无法撤销。', confirmLabel: '删除笔记本', destructive: true }))) return
                       try {
                         await deleteNotebook(notebook.id)
@@ -1323,7 +1353,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           {layout !== 'narrow' && listVisible && <PanelResizer label="调整笔记列表宽度" value={listWidth} min={260} max={480} onChange={setListWidth} resetValue={320} />}
         </section>
 
-        <main className="content-pane">
+        {assistant ? <main className="content-pane assistant-pane"><AssistantView
+          key={assistant.key}
+          pages={accessiblePages}
+          notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)}
+          tags={tags}
+          initialScope={assistant.scope}
+          loadMarkdown={async (pageId) => { const document = await loadDocument(pageId); return document ? documentToMarkdown(document) : undefined }}
+          loadDocument={loadDocument}
+          openPage={(pageId) => { setAssistant(undefined); setBrowse('tree'); openRecentPage(pageId) }}
+          createNote={createNoteFromAssistant}
+          openAISettings={() => { setSettingsPage('services'); setSettingsOpen(true) }}
+        /></main> : <main className="content-pane">
           <div className="editor-toolbar" data-tauri-drag-region>
             <div className="toolbar-leading" data-tauri-drag-region>
               {layout === 'narrow' && <button type="button" className="toolbar-back" onClick={() => setStackView('list')}><ChevronLeft20Regular /><span>{scopeTitle}</span></button>}
@@ -1345,7 +1386,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 <button type="button" className="toolbar-icon-button" aria-label="插入双链" title="插入双链" onClick={() => setReferencePickerOpen(true)}><Link20Regular /></button>
                 <button type="button" className={`vim-chip ${vimEnabled ? 'enabled' : ''} ${vimEnabled && vimCommandMode ? 'selected' : ''}`} aria-pressed={vimEnabled} title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑，点击关闭 Vim' : 'Vim INSERT：Esc 返回普通模式，点击关闭 Vim' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</button>
               </>}
-              <button type="button" className="toolbar-icon-button" aria-label="AI" title="AI 工作区" onClick={() => setAiWorkspaceOpen(true)}><Bot20Regular /></button>
+              <button type="button" className="toolbar-icon-button" aria-label="AI" title="用 AI 处理这篇笔记（含子笔记）" onClick={() => openAssistant({ ...emptyScope(), pageIds: [currentPage.id] })}><Bot20Regular /></button>
               <ActionMenu label="更多操作" trigger={<button type="button" className="toolbar-icon-button" aria-label="更多操作" title="更多操作"><MoreHorizontal20Regular /></button>}>
                 {activeArea === 'notes' && hasActivePage && <>
                   <button onClick={() => void updatePage(currentPage.id, { favorite: !currentPage.favorite })}>{currentPage.favorite ? '取消置顶' : '置顶'}</button>
@@ -1411,9 +1452,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             </>}
             </div>}
           </section>
-        </main>
+        </main>}
 
-        {aiOpen && activeArea === 'notes' && hasActivePage && <aside className="right-sidebar open" aria-label="大纲与引用">
+        {!assistant && aiOpen && activeArea === 'notes' && hasActivePage && <aside className="right-sidebar open" aria-label="大纲与引用">
           <div className="right-sidebar-panel">
             <PanelResizer label="调整右侧面板宽度" value={aiWidth} min={240} max={460} onChange={setAiWidth} resetValue={280} side="left" />
             {rightPanel === 'outline' && <Suspense fallback={null}><OutlineSidebar document={documents[currentPage.id]} /></Suspense>}
@@ -1480,6 +1521,19 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         await renameNotebook(renameRequest.id, name)
         setRenameRequest(undefined)
       }} />}
+      {textImport && <ImportDialog
+        files={textImport.files}
+        pages={accessiblePages}
+        notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)}
+        initialTarget={textImport.target}
+        onClose={() => setTextImport(undefined)}
+        onImport={async (files, target) => {
+          const outcome = await importTextFiles(files, target)
+          if (target.parentPageId) setExpandedPageIds((current) => current.has(target.parentPageId!) ? current : new Set([...current, target.parentPageId!]))
+          if (outcome.createdIds[0]) openRecentPage(outcome.createdIds[0])
+          return outcome
+        }}
+      />}
       {movePageRequest && <MovePageDialog page={movePageRequest} pages={accessiblePages.filter((page) => page.kind !== 'task')} notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)} onClose={() => setMovePageRequest(undefined)} onMove={async (targetPageId, position) => {
         const target = accessiblePages.find((page) => page.id === targetPageId)
         if (!target) throw new Error('目标页面不存在')

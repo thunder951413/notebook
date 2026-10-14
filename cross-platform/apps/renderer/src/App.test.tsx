@@ -30,10 +30,10 @@ test('three panes: sidebar collections, note list and editor', async () => {
 
   const editorActions = container.querySelector('.editor-actions') as HTMLElement
   fireEvent.click(within(editorActions).getByRole('button', { name: 'AI' }))
-  // The AI workspace is loaded on demand, so its panel appears asynchronously.
-  expect(await screen.findByRole('region', { name: 'Notebook AI 校订台' })).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: /问笔记库/ })).toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: '返回笔记' }))
+  // The note's AI button opens the assistant scoped to this note.
+  const noteAssistant = await screen.findByRole('region', { name: 'AI 助手' })
+  expect(within(noteAssistant).getByRole('button', { name: /范围：/ })).toHaveTextContent('篇')
+  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
   expect(screen.getByRole('button', { name: '版本' })).toBeInTheDocument()
   expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
 
@@ -307,6 +307,16 @@ test('three panes: sidebar collections, note list and editor', async () => {
   expect(screen.getByLabelText('页面标题')).toBeInTheDocument()
   fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
   expect(container.querySelector('.workspace-grid')).toHaveClass('list-open')
+
+  // AI assistant: opens in place of the editor; merging needs no AI service.
+  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /AI 助手/ }))
+  const assistantView = screen.getByRole('region', { name: 'AI 助手' })
+  expect(container.querySelector('.workspace-grid')).toHaveClass('list-closed')
+  fireEvent.click(within(assistantView).getByRole('tab', { name: '合并' }))
+  fireEvent.click(within(assistantView).getByRole('button', { name: '合并' }))
+  expect(await within(assistantView).findByText(/篇 · 约/)).toBeInTheDocument()
+  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
+  expect(screen.queryByRole('region', { name: 'AI 助手' })).not.toBeInTheDocument()
 
   fireEvent.click(within(container.querySelector('.editor-actions') as HTMLElement).getByRole('button', { name: '大纲' }))
   expect(screen.queryByRole('region', { name: '页面大纲' })).not.toBeInTheDocument()

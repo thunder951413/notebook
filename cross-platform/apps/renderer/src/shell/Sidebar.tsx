@@ -6,6 +6,7 @@ import {
   DocumentMultiple20Regular,
   NumberSymbol16Regular,
   PanelLeft20Regular,
+  Sparkle20Regular,
   Pin20Regular,
   Settings20Regular,
 } from '@fluentui/react-icons'
@@ -71,13 +72,15 @@ export interface SidebarProps {
   onHide: () => void
   onNewNotebook: () => void
   resizer?: ReactNode
+  assistantOpen?: boolean
+  onAssistant?: () => void
 }
 
 /**
  * Source list in the frosted window material (Apple Notes / Mail): smart
  * collections, notebooks with their page trees, tags, and the sync state.
  */
-export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, settingsRef, onSettings, onHide, onNewNotebook, resizer }: SidebarProps) {
+export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, settingsRef, onSettings, onHide, onNewNotebook, resizer, assistantOpen = false, onAssistant }: SidebarProps) {
   const [allTags, setAllTags] = useState(false)
   const shownTags = allTags ? tags : tags.slice(0, 8)
   return <nav className="app-sidebar" aria-label="导航">
@@ -86,10 +89,11 @@ export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, s
     </div>
     <div className="sidebar-scroll">
       <div className="sidebar-group" role="group" aria-label="笔记">
-        <SidebarItem icon={<DocumentMultiple20Regular />} label="全部笔记" count={counts.all} selected={scope.kind === 'all'} onClick={() => onScope({ kind: 'all' })} />
-        <SidebarItem icon={<Pin20Regular />} label="置顶" count={counts.favorites} selected={scope.kind === 'favorites'} onClick={() => onScope({ kind: 'favorites' })} />
-        <SidebarItem icon={<CheckmarkCircle20Regular />} label="待办" count={counts.tasks} badge={counts.taskBadge} badgeTone={counts.taskOverdue ? 'alert' : 'normal'} selected={scope.kind === 'tasks'} onClick={() => onScope({ kind: 'tasks' })} />
-        <SidebarItem icon={<Delete20Regular />} label="回收站" count={counts.trash || undefined} selected={scope.kind === 'trash'} onClick={() => onScope({ kind: 'trash' })} />
+        <SidebarItem icon={<DocumentMultiple20Regular />} label="全部笔记" count={counts.all} selected={!assistantOpen && scope.kind === 'all'} onClick={() => onScope({ kind: 'all' })} />
+        <SidebarItem icon={<Pin20Regular />} label="置顶" count={counts.favorites} selected={!assistantOpen && scope.kind === 'favorites'} onClick={() => onScope({ kind: 'favorites' })} />
+        <SidebarItem icon={<CheckmarkCircle20Regular />} label="待办" count={counts.tasks} badge={counts.taskBadge} badgeTone={counts.taskOverdue ? 'alert' : 'normal'} selected={!assistantOpen && scope.kind === 'tasks'} onClick={() => onScope({ kind: 'tasks' })} />
+        <SidebarItem icon={<Delete20Regular />} label="回收站" count={counts.trash || undefined} selected={!assistantOpen && scope.kind === 'trash'} onClick={() => onScope({ kind: 'trash' })} />
+        {onAssistant && <SidebarItem icon={<Sparkle20Regular />} label="AI 助手" selected={assistantOpen} onClick={onAssistant} />}
       </div>
       <div className="sidebar-group" role="group" aria-label="笔记本">
         <div className="sidebar-group-title"><span>笔记本</span><button type="button" className="sidebar-group-action" aria-label="新建笔记本" title="新建笔记本" onClick={onNewNotebook}><Add16Regular /></button></div>

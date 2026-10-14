@@ -13,6 +13,7 @@ import { describeSyncError, recordSyncSuccess } from '../sync/syncErrors'
 import { showToast } from '../components/toast'
 import { normalizeReferenceTargetIds, repairDocumentStructure } from '@notebook/sync-contract'
 import { parseMarkdownForEditor } from './markdownParser'
+import { decodeImportedText, importedTitle, plainTextToMarkdown, stripRepeatedTitle, TEXT_IMPORT_MAX_BYTES, textImportKind, type TextImportSkip } from './textImport'
 import { pageLinksFromMarkdown } from './referenceIndex'
 import { formatUpdatedLabel } from '../updatedLabel'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
@@ -884,6 +885,43 @@ export function useWorkspaceData() {
     return imported
   }, [pageRecords, reload])
 
+  /**
+   * Imports loose Markdown / plain-text / HTML files as notes under a chosen
+   * place in the tree (a notebook's top level, or inside a page). Files that
+   * cannot be imported are reported instead of failing the whole batch.
+   */
+  const importTextFiles = useCallback(async (files: ImportFile[], target: { sectionId: string; parentPageId?: string }) => {
+    const skipped: TextImportSkip[] = []
+    const createdIds: string[] = []
+    const siblings = pageRecordsRef.current.filter((page) => page.sectionId === target.sectionId && page.parentPageId === target.parentPageId && !page.deletedAt)
+    let sortOrder = Math.max(0, ...siblings.map((page) => page.sortOrder ?? 0)) + 1000
+    const locked = privateSectionIds.has(target.sectionId) || Boolean(target.parentPageId && pageRecordsRef.current.find((page) => page.id === target.parentPageId)?.locked)
+    for (const file of files) {
+      const kind = textImportKind(file.name)
+      if (!kind) { skipped.push({ name: file.name, reason: '不支持的格式' }); continue }
+      if (file.data.byteLength > TEXT_IMPORT_MAX_BYTES) { skipped.push({ name: file.name, reason: '超过 5 MB' }); continue }
+      const source = decodeImportedText(file.data)
+      if (!source.trim()) { skipped.push({ name: file.name, reason: '空文件' }); continue }
+      try {
+        const title = importedTitle(file.name, source, kind)
+        const documentJson = kind === 'html' ? htmlToDocument(source) : markdownToDocument(kind === 'text' ? plainTextToMarkdown(source) : stripRepeatedTitle(source, title))
+        const markdown = documentToMarkdown(documentJson)
+        const now = new Date().toISOString()
+        const id = crypto.randomUUID()
+        const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId: target.sectionId, parentPageId: target.parentPageId, sortOrder, treeUpdatedAt: now, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', ...(locked ? { locked: true } : {}) }
+        await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson: documentJson, updatedAt: now })
+        await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now))
+        createdIds.push(id)
+        sortOrder += 1000
+      } catch (error) {
+        skipped.push({ name: file.name, reason: error instanceof Error ? error.message.slice(0, 60) : '无法解析' })
+      }
+    }
+    if (createdIds.length) await reload()
+    recordDiagnosticEvent({ level: skipped.length ? 'warning' : 'info', category: 'data', action: 'import', status: 'success', message: `${createdIds.length} 个页面，跳过 ${skipped.length} 个` })
+    return { createdIds, skipped }
+  }, [privateSectionIds, reload])
+
   const exportWorkspace = useCallback(async () => {
     const startedAt = performance.now()
     const bundle = await repository.exportData(WORKSPACE_ID)
@@ -985,7 +1023,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 function treePageIds(records: Page[], rootId: string) {
