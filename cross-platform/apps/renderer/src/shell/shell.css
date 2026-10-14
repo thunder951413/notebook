@@ -722,3 +722,7 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
   .compare { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
   .compare-groups { max-height: 160px; border-right: 0; border-bottom: 1px solid var(--hairline); }
 }
+.assistant-picker-modes { display: flex; flex: none; padding: 2px; border-radius: 8px; background: var(--selected-quiet); }
+.assistant-picker-bar .assistant-picker-modes button { height: 24px; padding: 0 9px; border-radius: 6px; font-size: 12px; }
+.assistant-picker-bar .assistant-picker-modes button.selected { color: var(--ink); background: var(--paper); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); font-weight: 600; }
+.assistant-picker-hint { padding: 6px 8px; color: var(--ink-3); font-size: 12px; }

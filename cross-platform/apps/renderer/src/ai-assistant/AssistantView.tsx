@@ -409,6 +409,8 @@ function ScopePicker({ scope, pages, notebooks, tags, onChange, onDone }: {
   onDone(): void
 }) {
   const [filter, setFilter] = useState('')
+  // Notes and tags are two ways of picking; a note in either counts.
+  const [mode, setMode] = useState<'notes' | 'tags'>(() => scope.tagNames.length && !scope.pageIds.length && !scope.notebookIds.length ? 'tags' : 'notes')
   const toggle = (key: 'notebookIds' | 'pageIds' | 'tagNames', value: string) => {
     const list = scope[key]
     onChange({ ...scope, extraPageIds: [], [key]: list.includes(value) ? list.filter((item) => item !== value) : [...list, value] })
@@ -425,11 +427,19 @@ function ScopePicker({ scope, pages, notebooks, tags, onChange, onDone }: {
   const query = filter.trim().toLowerCase()
   return <div className="assistant-picker" role="group" aria-label="选择范围">
     <div className="assistant-picker-bar">
-      <input type="search" value={filter} placeholder="筛选笔记" aria-label="筛选笔记" onChange={(event) => setFilter(event.currentTarget.value)} />
+      <div className="assistant-picker-modes" role="tablist" aria-label="选择方式">
+        <button type="button" role="tab" aria-selected={mode === 'notes'} className={mode === 'notes' ? 'selected' : undefined} onClick={() => setMode('notes')}>按笔记{scope.notebookIds.length + scope.pageIds.length ? `（${scope.notebookIds.length + scope.pageIds.length}）` : ''}</button>
+        <button type="button" role="tab" aria-selected={mode === 'tags'} className={mode === 'tags' ? 'selected' : undefined} onClick={() => setMode('tags')}>按标签{scope.tagNames.length ? `（${scope.tagNames.length}）` : ''}</button>
+      </div>
+      <input type="search" value={filter} placeholder={mode === 'tags' ? '筛选标签' : '筛选笔记'} aria-label={mode === 'tags' ? '筛选标签' : '筛选笔记'} onChange={(event) => setFilter(event.currentTarget.value)} />
       <button type="button" onClick={() => onChange(emptyScope())}>全部笔记</button>
       <button type="button" className="primary" onClick={onDone}>完成</button>
     </div>
-    <div className="assistant-picker-tree">
+    {mode === 'tags' ? <div className="assistant-picker-tree">
+      <div className="assistant-picker-hint">带任一勾选标签的笔记都会用上；也可以同时按笔记勾选。</div>
+      {tags.filter((tag) => !query || tag.name.toLowerCase().includes(query)).map((tag) => <label key={tag.name} className="assistant-picker-row"><input type="checkbox" checked={scope.tagNames.includes(tag.name)} onChange={() => toggle('tagNames', tag.name)} /><span>#{tag.name}</span><small>{tag.count} 篇</small></label>)}
+      {!tags.length && <div className="assistant-picker-hint">还没有标签。</div>}
+    </div> : <div className="assistant-picker-tree">
       {notebooks.filter((notebook) => !notebook.locked).map((notebook) => {
         const notebookPicked = scope.notebookIds.includes(notebook.id)
         const rows = notebook.sections.flatMap((section) => {
@@ -447,11 +457,7 @@ function ScopePicker({ scope, pages, notebooks, tags, onChange, onDone }: {
           })}
         </div>
       })}
-      {tags.length > 0 && <div className="assistant-picker-notebook">
-        <div className="assistant-picker-row notebook"><span>标签</span></div>
-        {tags.map((tag) => <label key={tag.name} className="assistant-picker-row" style={{ paddingLeft: 8 }}><input type="checkbox" checked={scope.tagNames.includes(tag.name)} onChange={() => toggle('tagNames', tag.name)} /><span>#{tag.name}</span><small>{tag.count}</small></label>)}
-      </div>}
-    </div>
+    </div>}
   </div>
 }
 
