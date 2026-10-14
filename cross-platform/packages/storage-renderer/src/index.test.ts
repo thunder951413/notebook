@@ -1269,3 +1269,12 @@ test('Chinese words are segmented for search beyond bigrams', async () => {
   expect(tokens).toContain('中华')
   expect(tokens.some((token) => [...token].length > 2 && token !== '中华人民共和国成立')).toBe(true)
 })
+
+test('titles containing the query rank above body-only matches', async () => {
+  const repository = makeRepository()
+  const body = { ...page('body-only', '周报'), updatedAt: '2026-03-01T00:00:00.000Z' }
+  const titled = { ...page('titled', '旧版本数据迁移'), updatedAt: '2026-01-01T00:00:00.000Z' }
+  await repository.savePage(body, { pageId: body.id, schemaVersion: 3, markdown: '本周完成了数据迁移演练', tiptapJson: { type: 'doc', content: [] }, updatedAt: body.updatedAt })
+  await repository.savePage(titled, { pageId: titled.id, schemaVersion: 3, markdown: '', tiptapJson: { type: 'doc', content: [] }, updatedAt: titled.updatedAt })
+  expect((await repository.searchWorkspaceHits('workspace-a', '数据迁移')).map((hit) => hit.page.id)).toEqual(['titled', 'body-only'])
+})

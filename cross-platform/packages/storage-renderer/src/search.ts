@@ -138,7 +138,9 @@ export async function searchWorkspaceWith(db: NotebookRendererDatabase, searchIn
     .sort((left, right) => {
       const leftTitle = left.title.normalize('NFKC').toLocaleLowerCase()
       const rightTitle = right.title.normalize('NFKC').toLocaleLowerCase()
-      return Number(rightTitle === normalizedQuery) - Number(leftTitle === normalizedQuery) || right.updatedAt.localeCompare(left.updatedAt)
+      // Exact title, then titles containing the query, then body-only matches.
+      const rank = (title: string) => title === normalizedQuery ? 2 : title.includes(normalizedQuery) ? 1 : 0
+      return rank(rightTitle) - rank(leftTitle) || right.updatedAt.localeCompare(left.updatedAt)
     })
     .map((page) => page.id)
   const strictIds = index.search(query, { prefix: true, fuzzy: 0.15, combineWith: 'AND' }).map((result) => String(result.id))
