@@ -348,3 +348,17 @@ test('the more menu switches light/dark/system appearance', () => {
   fireEvent.click(dark)
   expect(onThemePreferenceChange).toHaveBeenCalledWith('dark')
 })
+
+test('⌘⇧F opens full-text search and the note list offers it while searching', async () => {
+  Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: query.includes('1301px'), media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }) })
+  render(<FluentProvider theme={webLightTheme}><App /></FluentProvider>)
+  await screen.findByLabelText('页面正文')
+  fireEvent.keyDown(window, { key: 'f', metaKey: true, shiftKey: true })
+  expect(await screen.findByRole('dialog', { name: '全文搜索' })).toBeInTheDocument()
+  fireEvent.keyDown(screen.getByRole('textbox', { name: '全文搜索' }), { key: 'Escape' })
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '全文搜索' })).not.toBeInTheDocument())
+  fireEvent.change(screen.getByRole('textbox', { name: '搜索' }), { target: { value: '迁移' } })
+  fireEvent.click(await screen.findByRole('button', { name: /在正文中搜索“迁移”/ }))
+  expect(await screen.findByRole('dialog', { name: '全文搜索' })).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: '全文搜索' })).toHaveValue('迁移')
+}, 30_000)

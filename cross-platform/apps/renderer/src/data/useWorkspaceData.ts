@@ -494,6 +494,11 @@ export function useWorkspaceData() {
     const visible = includeLocked ? results : results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))
     return limit == null ? visible : visible.slice(0, limit)
   }, [privateSectionIds])
+  /** Full-text hits with excerpts; private notes only when unlocked. */
+  const searchWorkspaceHits = useCallback(async (query: string, includeLocked = false) => {
+    const hits = await repository.searchWorkspaceHits(WORKSPACE_ID, query, 60)
+    return (includeLocked ? hits : hits.filter(({ page }) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))).slice(0, 40)
+  }, [privateSectionIds])
   const searchWorkspaceCandidates = useCallback(async (query: string, limit = 50) => {
     const results = await repository.searchWorkspaceCandidates(WORKSPACE_ID, query, limit)
     return results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? '')).slice(0, limit)
@@ -566,7 +571,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
 }
 
 

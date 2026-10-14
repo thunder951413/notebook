@@ -35,6 +35,7 @@ import { useShellShortcuts } from './hooks/useShellShortcuts'
 import { useNoteListBrowse } from './hooks/useNoteListBrowse'
 import { useLifecycleSync } from './hooks/useLifecycleSync'
 import { useDesktopMigrationAndUpdates } from './hooks/useDesktopMigrationAndUpdates'
+import { FullTextSearch, OPEN_FULL_TEXT_SEARCH_EVENT, findInDocument, openFullTextSearch } from './search/FullTextSearch'
 import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
@@ -107,7 +108,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -171,6 +172,13 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     requestAnimationFrame(() => settingsTriggerRef.current?.focus())
   }, [])
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  // Full-text search panel: undefined when closed, else its initial query.
+  const [fullTextQuery, setFullTextQuery] = useState<string>()
+  useEffect(() => {
+    const open = (event: Event) => setFullTextQuery(String((event as CustomEvent<string>).detail ?? ''))
+    window.addEventListener(OPEN_FULL_TEXT_SEARCH_EVENT, open)
+    return () => window.removeEventListener(OPEN_FULL_TEXT_SEARCH_EVENT, open)
+  }, [])
   const [dataRoot, setDataRoot] = useState<{ path: string; source: 'default' | 'environment' | 'command-line' | 'saved' }>()
   const [createRequest, setCreateRequest] = useState<'notebook' | 'rootPage'>()
   const [renameRequest, setRenameRequest] = useState<{ kind: 'notebook'; id: string; name: string }>()
@@ -179,6 +187,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [encryptedExportOpen, setEncryptedExportOpen] = useState(false)
   const [encryptedImportRequest, setEncryptedImportRequest] = useState<{ file: ImportFile; rest: ImportFile[] }>()
   const [privacyUnlocked, setPrivacyUnlocked] = useState(false)
+  const searchHits = useCallback((text: string) => searchWorkspaceHits(text, privacyUnlocked), [privacyUnlocked, searchWorkspaceHits])
   const [privacyConfigured, setPrivacyConfigured] = useState(() => hasPrivacyLock())
   const [privacyPrompt, setPrivacyPrompt] = useState<{ mode: 'setup' | 'unlock'; notebookId?: string }>()
   const [referencePickerOpen, setReferencePickerOpen] = useState(false)
@@ -905,6 +914,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       requestAnimationFrame(() => { listSearchRef.current?.focus(); listSearchRef.current?.select() })
     },
     settings: () => { setSettingsPage('general'); setSettingsOpen(true) },
+    fullTextSearch: () => setFullTextQuery((current) => current ?? (query.trim() || '')),
   })
 
   const syncDot = syncState === 'syncing' ? 'syncing' : syncState === 'error' ? 'error' : syncState === 'conflict' ? 'conflict' : syncState === 'offline' ? 'offline' : 'synced'
@@ -1070,6 +1080,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             <button type="button" role="radio" aria-checked={!searchAll} className={!searchAll ? 'selected' : undefined} onClick={() => setSearchAll(false)}>仅{scopeTitle}</button>
             <button type="button" role="radio" aria-checked={searchAll} className={searchAll ? 'selected' : undefined} onClick={() => setSearchAll(true)}>全部笔记</button>
           </div>}
+          {searching && <button type="button" className="search-full-text" onClick={() => openFullTextSearch(query.trim())}><Search16Regular aria-hidden="true" />在正文中搜索“{query.trim()}”<kbd>⌘⇧F</kbd></button>}
           {!searching && (listScope.kind === 'all' || listScope.kind === 'tasks') && <DueBanner
             items={bannerItems}
             now={nowMs}
@@ -1266,6 +1277,19 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onChooseDataRoot={window.notebookDesktop ? () => { void window.notebookDesktop?.storage.chooseDataRoot().catch((error: unknown) => setTransferMessage(error instanceof Error ? error.message : '数据目录更改失败')) } : undefined}
         onPrivacyAction={() => { if (privacyUnlocked) lockPrivacy(); else { setSettingsOpen(false); requestPrivacyAccess() } }}
       /></Suspense>}
+      {fullTextQuery !== undefined && <FullTextSearch
+        initialQuery={fullTextQuery}
+        search={searchHits}
+        notebookName={(sectionId) => notebookBySection.get(sectionId)?.name ?? ''}
+        onClose={() => setFullTextQuery(undefined)}
+        onOpen={(hit) => {
+          setFullTextQuery(undefined)
+          if (hit.page.kind === 'task') { setActiveArea('tasks'); setActivePage(hit.page.id) }
+          else openRecentPage(hit.page.id)
+          if (layout === 'narrow') setStackView('editor')
+          findInDocument({ pageId: hit.page.id, terms: hit.terms })
+        }}
+      />}
       <Suspense fallback={null}><CommandPalette
         open={commandPaletteOpen}
         items={paletteItems}

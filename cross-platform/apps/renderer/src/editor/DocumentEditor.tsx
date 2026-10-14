@@ -15,6 +15,8 @@ import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail
 import { isLinkableTitle } from '@notebook/sync-contract'
 import { suggestWikiLinkPages } from './referenceRuntime'
 import { findWikiTrigger, wikiSuggestions, type WikiSuggestion, type WikiTrigger } from './wikiLinkSuggest'
+import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
+import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } from '../search/FullTextSearch'
 import { OUTLINE_JUMP_EVENT } from './outlineEvents'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
 
@@ -257,6 +259,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     extensions: [
       ...createContentExtensions(collaborative, loadAsset, pageId),
       VimBlockCursor,
+      SearchHighlight,
       Placeholder.configure({ placeholder: '开始记录，或输入 / 插入内容…' }),
       ...(collaborative ? [Collaboration.configure({ document: session.document })] : []),
       ...(session.provider ? [CollaborationCaret.configure({
@@ -627,6 +630,23 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }, [])
 
   useEffect(() => registerFlushHandler(() => commitNow()), [])
+
+  // Full-text search: highlight the hit's terms once this note is shown.
+  useEffect(() => {
+    if (!editor) return
+    const reveal = (detail: FindInDocumentDetail | undefined) => {
+      if (!detail || detail.pageId !== pageId || editor.isDestroyed) return
+      const transaction = highlightSearchTerms(editor.state, detail.terms)
+      if (transaction) editor.view.dispatch(transaction)
+    }
+    const frame = window.requestAnimationFrame(() => reveal(takePendingFind(pageId)))
+    const onFind = (event: Event) => {
+      const detail = (event as CustomEvent<FindInDocumentDetail>).detail
+      if (detail?.pageId === pageId) window.requestAnimationFrame(() => reveal(takePendingFind(pageId)))
+    }
+    window.addEventListener(FIND_IN_DOCUMENT_EVENT, onFind)
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener(FIND_IN_DOCUMENT_EVENT, onFind) }
+  }, [editor, pageId])
 
   useEffect(() => {
     if (!editor) return
