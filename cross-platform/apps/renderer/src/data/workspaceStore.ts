@@ -130,6 +130,22 @@ export function enqueuePageMutation<T>(pageId: string, mutation: () => Promise<T
 }
 
 
+/**
+ * Pages restored with `rootId`: the root and the descendants that went to the
+ * trash together with it (same deletion time). Pages deleted earlier on their
+ * own stay in the trash instead of coming back as stray notes.
+ */
+export function restoreBatchIds(trash: Page[], rootId: string) {
+  const byId = new Map(trash.map((page) => [page.id, page]))
+  const batch = byId.get(rootId)?.deletedAt
+  const included = new Set<string>()
+  for (const id of treePageIds(trash, rootId)) {
+    const page = byId.get(id)
+    if (id === rootId || (page && included.has(page.parentPageId ?? '') && (!batch || page.deletedAt === batch))) included.add(id)
+  }
+  return [...included]
+}
+
 export function treePageIds(records: Page[], rootId: string) {
   const result: string[] = []
   const queue = [rootId]

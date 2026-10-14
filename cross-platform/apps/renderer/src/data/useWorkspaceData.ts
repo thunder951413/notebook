@@ -13,7 +13,7 @@ import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
-import { treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, isEmptyEditorCache, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
+import { restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, isEmptyEditorCache, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
 import { seedNotebooks, seedSections, seedPages, tagMap, toPageSummary, demoSeedAllowed } from './workspaceSeed'
 import { useWorkspaceSync } from './useWorkspaceSync'
 import { usePageTreeMoves } from './usePageTreeMoves'
@@ -519,7 +519,7 @@ export function useWorkspaceData() {
     setReferenceIndexRevision((current) => current + 1)
   }, [])
   const restorePage = useCallback(async (pageId: string) => {
-    const ids = new Set(treePageIds(trashRecordsRef.current, pageId))
+    const ids = new Set(restoreBatchIds(trashRecordsRef.current, pageId))
     for (const id of ids) await repository.restorePage(id)
     recordDiagnosticEvent({ level: 'info', category: 'page', action: 'restore', status: 'success', message: `${ids.size} 个页面` })
     const restored: Page[] = []
