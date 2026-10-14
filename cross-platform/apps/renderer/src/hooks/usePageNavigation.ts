@@ -92,6 +92,10 @@ export function usePageNavigation(options: PageNavigationOptions) {
 
   const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean, _closeOnNarrow: 'navigation' | 'pages') => {
     const current = optionsRef.current
+    // A page from the notebook tree is a note, even when To-dos or Trash was
+    // the last thing selected; otherwise the editor kept showing the To-dos
+    // placeholder ("选择一项待办").
+    current.setActiveArea('notes')
     current.setActivePage(page.id)
     current.setActiveSection(page.sectionId)
     const owner = current.notebooks.find((notebook) => notebook.sections.some((section) => section.id === page.sectionId))

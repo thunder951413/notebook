@@ -1071,6 +1071,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const showList = () => { setBrowse('list'); setPagesOpen(true) }
   const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
     setBrowse('tree')
+    // Leaving To-dos or Trash: the list (when shown again) should list notes.
+    setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
     activateTreePage(page, hasChildren, closeOnNarrow)
   }, [activateTreePage])
 

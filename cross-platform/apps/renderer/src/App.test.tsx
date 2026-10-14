@@ -298,9 +298,13 @@ test('three panes: sidebar collections, note list and editor', async () => {
   expect(within(screen.getByRole('region', { name: '笔记列表' })).getByRole('heading', { name: '全部笔记' })).toBeInTheDocument()
 
   // Opening a page from the notebook tree hides the (duplicate) note list;
-  // choosing All notes brings it back.
+  // choosing All notes brings it back. Coming from To-dos, the tree page
+  // opens as a note rather than the To-dos placeholder.
+  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /待办/ }))
   fireEvent.click(container.querySelector('.sidebar-page-tree [role="treeitem"]') as HTMLElement)
   expect(container.querySelector('.workspace-grid')).toHaveClass('list-closed')
+  expect(screen.queryByText('选择一项待办')).not.toBeInTheDocument()
+  expect(screen.getByLabelText('页面标题')).toBeInTheDocument()
   fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
   expect(container.querySelector('.workspace-grid')).toHaveClass('list-open')
 
