@@ -53,7 +53,7 @@ adb logcat -b crash -d -v threadtime > notebook-phone-crash.txt
 
 同时导出浏览器与服务器两份日志。浏览器发送的 `X-Request-Id` 与服务器记录的 `operationId` 一致，可以从本机保存失败追到对应的 HTTP 状态、耗时和错误位置。断网请求只会留在浏览器日志中；服务器收到请求后才会有对应记录。
 
-服务器文件为 `DATA_DIR/diagnostics/events.jsonl` 及 `.1`—`.3`。服务器登录启用时，诊断导出沿用登录权限。详见 [网页说明](../sub/README.md)。
+服务器文件为 `DATA_DIR/diagnostics/events.jsonl` 及 `.1`—`.3`。服务器登录启用时，诊断导出沿用登录权限。网页端已迁出为独立仓库 `notebook-sub`（与本仓库同级的 `tools/notebook-sub`），详见该仓库的 README。
 
 ## 开发与验收
 
