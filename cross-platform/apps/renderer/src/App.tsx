@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Button,
   Input,
@@ -27,6 +27,14 @@ import {
   TextBulletListSquare20Regular,
 } from '@fluentui/react-icons'
 import type { PageSummary } from './model'
+import { AIWorkspace, AttachmentPanel, BacklinksSidebar, CommandPalette, OutlineSidebar, ReferenceHelpDialog, ReferencePicker, SettingsCenter, TaskDetail, VersionHistory } from './app/lazyPanels'
+import { layoutForWidth, readPreference, writePreference, type ShellLayout } from './shell/preferences'
+import { useSyncCompletedFlash } from './hooks/useSyncCompletedFlash'
+import { useReadingPositions } from './hooks/useReadingPositions'
+import { useShellShortcuts } from './hooks/useShellShortcuts'
+import { useNoteListBrowse } from './hooks/useNoteListBrowse'
+import { useLifecycleSync } from './hooks/useLifecycleSync'
+import { useDesktopMigrationAndUpdates } from './hooks/useDesktopMigrationAndUpdates'
 import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
@@ -36,7 +44,6 @@ import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
 import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions } from './sync/webdavSync'
-import { applyLegacyImport } from './sync/legacyImport'
 import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
@@ -48,9 +55,7 @@ import { referenceTargetElement } from './editor/referenceContent'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
 import { emptyPageVisitHistory, pageVisitTarget, recordPageVisit } from './pageVisitHistory'
-import { installRendererDiagnostics, recordDiagnosticEvent } from './diagnostics/diagnostics'
-import { registerAfterFlushHandler, registerFlushHandler } from './data/flushCoordinator'
-import { createBackgroundSyncGate } from './sync/syncLifecycle'
+import { installRendererDiagnostics } from './diagnostics/diagnostics'
 import { useAutomationBridge } from './automation/automationBridge'
 import { BackupPasswordDialog } from './components/BackupPasswordDialog'
 import { ConfirmDialogHost, requestConfirm } from './components/confirmDialog'
@@ -67,8 +72,8 @@ import { PageTreeRow, type PageTreeDropTarget, type PageTreeRowActions } from '.
 import { PanelResizer } from './components/PanelResizer'
 import { Sidebar, readScope, writeScope, type ListScope } from './shell/Sidebar'
 import { VirtualNoteList, type ListDensity, type NoteMenuItem } from './shell/NoteList'
-import { DueBanner, useDueBannerState } from './shell/DueBanner'
-import { buildSections, createdTime, isEmptyQuery, isOpenTodo, listOrderLabels, loadPinyin, pageMatches, parseSearchQuery, pinyinReady, rankSearchHits, tagCounts, todoDigest, updatedTime, type ListOrder, type ListSection } from './shell/browse'
+import { DueBanner } from './shell/DueBanner'
+import { listOrderLabels, loadPinyin, pinyinReady, type ListOrder } from './shell/browse'
 import './shell/shell.css'
 import { PrivacyPasswordDialog } from './components/PrivacyPasswordDialog'
 import { RenameItemDialog } from './components/RenameItemDialog'
@@ -83,46 +88,15 @@ import {
   VIM_MODE_KEY,
   readExpandedPageIds,
   readLayout,
-  readLocalReadingPositions,
   readRecentPageIds,
   readVimEnabled,
-  writeLocalReadingPositions,
   type RightPanel,
-  type ViewportPosition,
 } from './persistence/localLayout'
 
-// Panels that are only visible when opened are loaded on demand so the initial
-// render stays lean. The editor, tree rows and rail stay on the critical path.
-const TaskDetail = lazy(() => import('./tasks/TaskDetail').then((module) => ({ default: module.TaskDetail })))
-const AttachmentPanel = lazy(() => import('./assets/AttachmentPanel').then((module) => ({ default: module.AttachmentPanel })))
-const VersionHistory = lazy(() => import('./history/VersionHistory').then((module) => ({ default: module.VersionHistory })))
-const SettingsCenter = lazy(() => import('./settings/SettingsCenter').then((module) => ({ default: module.SettingsCenter })))
-const CommandPalette = lazy(() => import('./CommandPalette').then((module) => ({ default: module.CommandPalette })))
-const ReferencePicker = lazy(() => import('./editor/ReferencePicker').then((module) => ({ default: module.ReferencePicker })))
-const BacklinksSidebar = lazy(() => import('./editor/BacklinksPanel').then((module) => ({ default: module.BacklinksSidebar })))
-const OutlineSidebar = lazy(() => import('./editor/OutlinePanel').then((module) => ({ default: module.OutlineSidebar })))
-const ReferenceHelpDialog = lazy(() => import('./editor/ReferenceHelpDialog').then((module) => ({ default: module.ReferenceHelpDialog })))
-const AIWorkspace = lazy(() => import('./ai-workspace/AIWorkspace').then((module) => ({ default: module.AIWorkspace })))
 
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
 const emptyPageList: PageSummary[] = []
 
-type ShellLayout = 'wide' | 'medium' | 'narrow'
-/** wide: docked sidebar; medium: sidebar drawer; narrow: list and editor stack like a phone. */
-const layoutForWidth = (width: number): ShellLayout => width < 760 ? 'narrow' : width < 1100 ? 'medium' : 'wide'
-
-function readPreference<T extends string>(key: string, fallback: T, allowed: readonly T[]): T {
-  try {
-    const value = globalThis.localStorage?.getItem(key) as T | null
-    return value && allowed.includes(value) ? value : fallback
-  } catch {
-    return fallback
-  }
-}
-
-function writePreference(key: string, value: string) {
-  try { globalThis.localStorage?.setItem(key, value) } catch { /* storage unavailable */ }
-}
 
 export interface AppProps {
   theme?: 'light' | 'dark'
@@ -150,14 +124,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     resetReadPositions: () => resetWebdavReadPositions(automationRepository),
     republishAll: () => queueFullWebdavRepublish(automationRepository, WORKSPACE_ID),
   }), [pages])
-  const previousSyncState = useRef(syncState)
-  const syncCompletionTimer = useRef<number | undefined>(undefined)
-  const [showSyncCompleted, setShowSyncCompleted] = useState(false)
-  const readingPositionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const dirtyReadingPositionIds = useRef(new Set<string>())
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const readingPositions = useRef(new Map<string, ViewportPosition>(Object.entries(readLocalReadingPositions())))
-  const [loadedReadingPosition, setLoadedReadingPosition] = useState<{ pageId: string; position: ViewportPosition }>()
   const [activeArea, setActiveArea] = useState('notes')
   const [activeNotebook, setActiveNotebook] = useState(STARTUP_NOTEBOOK_ID)
   const [expandedNotebook, setExpandedNotebook] = useState<string | undefined>(STARTUP_NOTEBOOK_ID)
@@ -166,26 +133,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
 
   useEffect(() => installRendererDiagnostics(), [])
-  useEffect(() => {
-    const previous = previousSyncState.current
-    previousSyncState.current = syncState
-    if (syncCompletionTimer.current) {
-      window.clearTimeout(syncCompletionTimer.current)
-      syncCompletionTimer.current = undefined
-    }
-    if (previous === 'syncing' && syncState === 'synced') {
-      setShowSyncCompleted(true)
-      syncCompletionTimer.current = window.setTimeout(() => {
-        setShowSyncCompleted(false)
-        syncCompletionTimer.current = undefined
-      }, 2_000)
-    } else if (syncState !== 'synced') {
-      setShowSyncCompleted(false)
-    }
-    return () => {
-      if (syncCompletionTimer.current) window.clearTimeout(syncCompletionTimer.current)
-    }
-  }, [syncState])
+  const showSyncCompleted = useSyncCompletedFlash(syncState)
   const [recentPageIds, setRecentPageIds] = useState<string[]>(() => readRecentPageIds())
   const [vimEnabled, setVimEnabled] = useState(readVimEnabled)
   const [vimCommandMode, setVimCommandMode] = useState(readVimEnabled)
@@ -349,90 +297,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     void loadDocument(currentPage.id)
   }, [currentPage.id, hasCurrentPage, loadDocument])
   useEffect(() => () => clearTimeout(documentPrefetchTimer.current), [])
-  useEffect(() => {
-    clearTimeout(readingPositionTimer.current)
-    if (activeArea !== 'notes' || !hasCurrentPage) {
-      setLoadedReadingPosition(undefined)
-      return
-    }
-    const pageId = currentPage.id
-    const savedPositions = readingPositions.current
-    let cancelled = false
-    const local = savedPositions.get(pageId)
-    setLoadedReadingPosition(local ? { pageId, position: local } : undefined)
-    if (!local) void loadReadingPosition(pageId).then((position) => {
-      if (cancelled || !position) return
-      const restored = { fraction: position.viewportOffsetFraction }
-      savedPositions.delete(pageId)
-      savedPositions.set(pageId, restored)
-      setLoadedReadingPosition({ pageId, position: restored })
-    })
-    return () => {
-      cancelled = true
-      clearTimeout(readingPositionTimer.current)
-      const position = savedPositions.get(pageId)
-      if (!position) return
-      writeLocalReadingPositions(savedPositions)
-    }
-  }, [activeArea, currentPage.id, hasCurrentPage, loadReadingPosition])
+  const { loadedReadingPosition, flushDirtyReadingPositions, recordViewportPosition } = useReadingPositions({ activeArea, pageId: currentPage.id, hasCurrentPage, loadReadingPosition, saveReadingPosition })
 
-  const flushDirtyReadingPositions = useCallback(async () => {
-    clearTimeout(readingPositionTimer.current)
-    writeLocalReadingPositions(readingPositions.current)
-    const dirtyIds = [...dirtyReadingPositionIds.current]
-    if (!dirtyIds.length) return
-    dirtyReadingPositionIds.current.clear()
-    try {
-      await Promise.all(dirtyIds.map(async (pageId) => {
-        const position = readingPositions.current.get(pageId)
-        if (position) await saveReadingPosition(pageId, position.fraction)
-      }))
-    } catch (error) {
-      for (const pageId of dirtyIds) dirtyReadingPositionIds.current.add(pageId)
-      throw error
-    }
-  }, [saveReadingPosition])
-
-  useEffect(() => registerFlushHandler(flushDirtyReadingPositions), [flushDirtyReadingPositions])
-
-  useEffect(() => registerAfterFlushHandler(async () => {
-    // Quitting must not strand a durable outbox behind an unbounded network
-    // request. A timeout leaves the outbox intact for the next launch.
-    let timer: number | undefined
-    try {
-      await Promise.race([
-        syncNow({ reason: 'shutdown' }),
-        new Promise<void>((resolve) => { timer = window.setTimeout(resolve, 4_000) }),
-      ])
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-    }
-  }), [syncNow])
-
-  const backgroundSyncGate = useMemo(() => createBackgroundSyncGate(async () => {
-    await flushDirtyReadingPositions()
-    await syncNow({ reason: 'background' })
-  }), [flushDirtyReadingPositions, syncNow])
-
-  useEffect(() => {
-    const onFocus = () => {
-      backgroundSyncGate.foreground()
-      void syncNow({ reason: 'foreground' })
-    }
-    const onBlur = () => { backgroundSyncGate.background() }
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') backgroundSyncGate.background()
-      else onFocus()
-    }
-    window.addEventListener('focus', onFocus)
-    window.addEventListener('blur', onBlur)
-    document.addEventListener('visibilitychange', onVisibilityChange)
-    return () => {
-      window.removeEventListener('focus', onFocus)
-      window.removeEventListener('blur', onBlur)
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-    }
-  }, [backgroundSyncGate, syncNow])
+  useLifecycleSync(syncNow, flushDirtyReadingPositions)
   useEffect(() => {
     if (activeArea !== 'notes' || !hasCurrentPage || currentPage.kind === 'task') return
     setRecentPageIds((current) => {
@@ -528,41 +395,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     void createPage(target.sectionId).then(setActivePage)
   }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
-  // Moving from the old desktop app: take over its sync settings once and
-  // restore the library from WebDAV right away.
-  const syncNowRef = useRef(syncNow)
-  syncNowRef.current = syncNow
-  useEffect(() => {
-    let cancelled = false
-    void applyLegacyImport().then(async (imported) => {
-      if (!imported || cancelled) return
-      showToast('已从旧版导入坚果云设置，正在恢复笔记…', { durationMs: 8_000 })
-      const synced = await syncNowRef.current({ force: true })
-      const restoredCount = await automationRepository.db.pages.filter((page) => !page.deletedAt).count()
-      recordDiagnosticEvent({ level: synced ? 'info' : 'warning', category: 'migration', action: 'restored', status: synced ? 'success' : 'failed', message: `pages ${restoredCount}` })
-      showToast(synced ? `恢复完成：${restoredCount} 篇笔记和待办` : '设置已导入，但这次同步没有完成，稍后会自动重试', { kind: synced ? 'info' : 'error', durationMs: 10_000 })
-    }).catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法导入旧版设置', { kind: 'error' }))
-    return () => { cancelled = true }
-  }, [])
-
-  // Updates download quietly in the background; offer the restart once ready.
-  useEffect(() => {
-    const updates = window.notebookDesktop?.updates
-    if (!updates) return
-    let announced = ''
-    return updates.onStateChanged((state) => {
-      if (state.status !== 'downloaded' || !state.availableVersion || announced === state.availableVersion) return
-      announced = state.availableVersion
-      showToast(`新版本 ${state.availableVersion} 已下载`, {
-        durationMs: 60_000,
-        action: { label: '重启并更新', run: () => { void updates.install().catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法安装更新', { kind: 'error' })) } },
-      })
-    })
-  }, [])
-  useEffect(() => window.notebookDesktop?.events.onUpdateCenter?.(() => {
-    setSettingsPage('general')
-    setSettingsOpen(true)
-  }), [])
+  useDesktopMigrationAndUpdates(syncNow, () => { setSettingsPage('general'); setSettingsOpen(true) })
 
   const documentsRef = useRef(documents)
   documentsRef.current = documents
@@ -883,71 +716,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return () => { cancelled = true }
   }, [query])
 
-  const notebookBySection = useMemo(() => {
-    const map = new Map<string, (typeof notebooks)[number]>()
-    for (const notebook of notebooks) for (const section of notebook.sections) map.set(section.id, notebook)
-    return map
-  }, [notebooks])
-  const notebookName = useCallback((page: PageSummary) => notebookBySection.get(page.sectionId)?.name ?? '', [notebookBySection])
-  const browseContext = useMemo(() => ({ notebookName }), [notebookName])
-  const documentPages = useMemo(() => accessiblePages.filter((page) => page.kind !== 'task'), [accessiblePages])
-  const taskPages = useMemo(() => accessiblePages.filter((page) => page.kind === 'task'), [accessiblePages])
-  const scopeNotebook = scope.kind === 'notebook' ? notebooks.find((notebook) => notebook.id === scope.id && (!notebook.locked || privacyUnlocked)) : undefined
-  const listScope = useMemo<ListScope>(() => scope.kind === 'notebook' && !scopeNotebook ? { kind: 'all' } : scope, [scope, scopeNotebook])
-  const scopedPages = useMemo(() => {
-    switch (listScope.kind) {
-      case 'favorites': return documentPages.filter((page) => page.favorite)
-      case 'tasks': return taskPages
-      case 'trash': return accessibleTrashPages
-      case 'notebook': return documentPages.filter((page) => notebookBySection.get(page.sectionId)?.id === listScope.id)
-      case 'tag': return documentPages.filter((page) => page.tags.includes(listScope.name))
-      default: return documentPages
-    }
-  }, [accessibleTrashPages, documentPages, listScope, notebookBySection, taskPages])
-  const parsedQuery = useMemo(() => parseSearchQuery(query), [query])
-  const searching = !isEmptyQuery(parsedQuery)
-  const listOrder: ListOrder = listScope.kind === 'tasks' ? tasksOrder : notesOrder === 'due' ? 'updated' : notesOrder
-  const listSections = useMemo<ListSection[]>(() => {
-    void pinyinVersion // recompute once the pinyin dictionary has loaded
-    if (searching) {
-      const everything = [...documentPages, ...taskPages]
-      const base = listScope.kind === 'trash' ? accessibleTrashPages : searchAll || listScope.kind === 'all' ? everything : scopedPages
-      const hits = rankSearchHits(base.filter((page) => pageMatches(page, parsedQuery, browseContext)), parsedQuery, browseContext)
-      return hits.length ? [{ key: 'search', label: `找到 ${hits.length} 项`, pages: hits }] : []
-    }
-    const pin = listScope.kind === 'all' || listScope.kind === 'notebook' || listScope.kind === 'tag'
-    return buildSections(scopedPages, listOrder, { pinFavorites: pin, grouped, now: nowMs })
-  }, [accessibleTrashPages, browseContext, documentPages, grouped, listOrder, listScope.kind, nowMs, parsedQuery, pinyinVersion, scopedPages, searchAll, searching, taskPages])
-  const listPages = useMemo(() => listSections.flatMap((section) => section.pages), [listSections])
-  const listTerms = useMemo(() => parsedQuery.terms, [parsedQuery])
-  const listTimeOf = useCallback((page: PageSummary) => listOrder === 'created' ? createdTime(page) : updatedTime(page), [listOrder])
-  const tags = useMemo(() => tagCounts(documentPages), [documentPages])
-  const digest = useMemo(() => todoDigest(taskPages, nowMs), [nowMs, taskPages])
-  const banner = useDueBannerState(nowMs)
-  const bannerItems = useMemo(() => digest.attention.filter((page) => !banner.hidden(page)), [banner, digest.attention])
-  // Dock badge: actionable todos only (overdue + due today).
-  useEffect(() => { void window.notebookDesktop?.badge?.set(digest.badge).catch(() => undefined) }, [digest.badge])
-
-  const scopeTitle = listScope.kind === 'all' ? '全部笔记'
-    : listScope.kind === 'favorites' ? '置顶'
-    : listScope.kind === 'tasks' ? '待办'
-    : listScope.kind === 'trash' ? '回收站'
-    : listScope.kind === 'notebook' ? `${scopeNotebook?.emoji ? `${scopeNotebook.emoji} ` : ''}${scopeNotebook?.name ?? '笔记本'}`
-    : `#${listScope.name}`
-  const openTodoCount = useMemo(() => taskPages.filter(isOpenTodo).length, [taskPages])
-  const favoriteCount = useMemo(() => documentPages.filter((page) => page.favorite).length, [documentPages])
-  const notebookCounts = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const page of documentPages) {
-      const notebookId = notebookBySection.get(page.sectionId)?.id
-      if (notebookId) counts.set(notebookId, (counts.get(notebookId) ?? 0) + 1)
-    }
-    return counts
-  }, [documentPages, notebookBySection])
-  const scopeSubtitle = searching ? `${listPages.length} 项结果`
-    : listScope.kind === 'tasks' ? `${openTodoCount} 项未完成`
-    : listScope.kind === 'trash' ? `${scopedPages.length} 项`
-    : `${scopedPages.length} 篇`
+  const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
 
   const focusEditor = () => requestAnimationFrame(() => requestAnimationFrame(() => {
     document.querySelector<HTMLElement>('.document-editor-content')?.focus({ preventScroll: true })
@@ -1106,8 +875,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   }, [activateTreePage])
 
   // Mac shortcuts: ⌘N new, ⌘F search, ⌃⌘S sidebar, ⌃⌘L note list, ⌘, settings.
-  const shortcutRef = useRef({ create: () => {}, toggleSidebar: () => {}, toggleList: () => {}, search: () => {}, settings: () => {} })
-  shortcutRef.current = {
+  useShellShortcuts({
     create: () => { void createInScope() },
     toggleSidebar,
     toggleList: () => { if (layout === 'narrow') setStackView((view) => view === 'list' ? 'editor' : 'list'); else if (listVisible) setPagesOpen(false); else showList() },
@@ -1117,21 +885,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       requestAnimationFrame(() => { listSearchRef.current?.focus(); listSearchRef.current?.select() })
     },
     settings: () => { setSettingsPage('general'); setSettingsOpen(true) },
-  }
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey) return
-      const key = event.key.toLowerCase()
-      const inEditor = event.target instanceof Element && Boolean(event.target.closest('.document-editor-content'))
-      if (key === 'n' && !event.shiftKey && !event.ctrlKey) { event.preventDefault(); shortcutRef.current.create() }
-      else if (key === 'f' && !event.shiftKey && !event.ctrlKey && !inEditor) { event.preventDefault(); shortcutRef.current.search() }
-      else if (key === 's' && event.ctrlKey) { event.preventDefault(); shortcutRef.current.toggleSidebar() }
-      else if (key === 'l' && event.ctrlKey) { event.preventDefault(); shortcutRef.current.toggleList() }
-      else if (key === ',') { event.preventDefault(); shortcutRef.current.settings() }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  })
 
   const syncDot = syncState === 'syncing' ? 'syncing' : syncState === 'error' ? 'error' : syncState === 'conflict' ? 'conflict' : syncState === 'offline' ? 'offline' : 'synced'
   const syncText = syncState === 'syncing' ? (syncProgress ?? '正在同步…')
@@ -1439,16 +1193,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               vimEnabled={vimEnabled}
               onVimCommandModeChange={setVimCommandMode}
               viewportPosition={loadedReadingPosition?.pageId === currentPage.id ? loadedReadingPosition.position : undefined}
-              onViewportChange={(position) => {
-                const pageId = currentPage.id
-                readingPositions.current.delete(pageId)
-                readingPositions.current.set(pageId, position)
-                dirtyReadingPositionIds.current.add(pageId)
-                clearTimeout(readingPositionTimer.current)
-                readingPositionTimer.current = setTimeout(() => {
-                  writeLocalReadingPositions(readingPositions.current)
-                }, 350)
-              }}
+              onViewportChange={(position) => recordViewportPosition(currentPage.id, position)}
               />
             </>}
             </div>}
