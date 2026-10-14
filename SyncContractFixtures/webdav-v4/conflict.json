@@ -1,0 +1,41 @@
+{
+  "description": "Applying a peer's document record (WebDAV parent-version semantics, automatic resolution). The local replica holds `baseline.markdown` accepted at `baseline.version` (the version a successor must name as its parent), optionally with an unsynced local edit. A remote record names its parent in `ver`. Concurrent edits never stop sync: local content stays, a differing remote body becomes a conflict copy, and the local edit is republished as the successor (`republishedVersion`). Identical bodies (ignoring surrounding whitespace) resolve without a copy, ancestors are ignored and replays of this device's own journal are never conflicts.",
+  "pageTitle": "会议记录",
+  "scenarios": [
+    {
+      "name": "concurrent edit keeps local content and copies the remote body",
+      "baseline": { "markdown": "共同的起点", "version": 3 },
+      "localEdit": "本机写的内容",
+      "remote": { "ver": 3, "markdown": "手机上写的内容", "ownDevice": false },
+      "expected": { "markdown": "本机写的内容", "conflictCopy": "手机上写的内容", "republishedVersion": 4 }
+    },
+    {
+      "name": "identical concurrent bodies resolve without a copy",
+      "baseline": { "markdown": "起点", "version": 2 },
+      "localEdit": "两边一样",
+      "remote": { "ver": 2, "markdown": "两边一样\n", "ownDevice": false },
+      "expected": { "markdown": "两边一样", "conflictCopy": null }
+    },
+    {
+      "name": "clean replica applies the successor",
+      "baseline": { "markdown": "旧的正文", "version": 2 },
+      "localEdit": null,
+      "remote": { "ver": 2, "markdown": "新的正文", "ownDevice": false },
+      "expected": { "markdown": "新的正文", "conflictCopy": null }
+    },
+    {
+      "name": "stale ancestor from a compacted journal is ignored",
+      "baseline": { "markdown": "当前正文", "version": 5 },
+      "localEdit": null,
+      "remote": { "ver": 1, "markdown": "很早的版本", "ownDevice": false },
+      "expected": { "markdown": "当前正文", "conflictCopy": null }
+    },
+    {
+      "name": "own journal replay never conflicts with a pending edit",
+      "baseline": { "markdown": "起点", "version": 2 },
+      "localEdit": "本机正在编辑",
+      "remote": { "ver": 1, "markdown": "本机很早以前的版本", "ownDevice": true },
+      "expected": { "markdown": "本机正在编辑", "conflictCopy": null }
+    }
+  ]
+}

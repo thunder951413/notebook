@@ -1,0 +1,39 @@
+{
+  "description": "Pulled records from several devices are applied grouped by device id (ascending, code point order) and by seq within a device.",
+  "entries": [
+    {
+      "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+      "seq": 2
+    },
+    {
+      "deviceId": "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa",
+      "seq": 7
+    },
+    {
+      "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+      "seq": 1
+    },
+    {
+      "deviceId": "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa",
+      "seq": 3
+    }
+  ],
+  "expected": [
+    {
+      "deviceId": "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa",
+      "seq": 3
+    },
+    {
+      "deviceId": "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa",
+      "seq": 7
+    },
+    {
+      "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+      "seq": 1
+    },
+    {
+      "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+      "seq": 2
+    }
+  ]
+}

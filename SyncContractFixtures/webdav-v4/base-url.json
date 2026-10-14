@@ -1,0 +1,48 @@
+{
+  "description": "WebDAV base URL: HTTPS anywhere. The desktop shells also accept plain HTTP for loopback hosts (local test servers); cases marked \"loopback\" are rejected by Android release builds, which require HTTPS everywhere.",
+  "cases": [
+    {
+      "input": "https://dav.jianguoyun.com/dav/",
+      "ok": true
+    },
+    {
+      "input": "  https://dav.jianguoyun.com/dav  ",
+      "ok": true
+    },
+    {
+      "input": "http://localhost:8080/dav",
+      "ok": true,
+      "loopback": true
+    },
+    {
+      "input": "http://127.0.0.1/dav/",
+      "ok": true,
+      "loopback": true
+    },
+    {
+      "input": "http://[::1]:9000/",
+      "ok": true,
+      "loopback": true
+    },
+    {
+      "input": "http://dav.jianguoyun.com/dav/",
+      "ok": false
+    },
+    {
+      "input": "http://192.168.1.2/dav/",
+      "ok": false
+    },
+    {
+      "input": "ftp://dav.example.com/",
+      "ok": false
+    },
+    {
+      "input": "not a url",
+      "ok": false
+    },
+    {
+      "input": "",
+      "ok": false
+    }
+  ]
+}

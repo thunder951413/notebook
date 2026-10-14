@@ -1,0 +1,127 @@
+{
+  "description": "Which records of a peer journal a reader exposes, given its read cursor (known) and the optional commit marker. 1) marker below cursor => reset cursor to 0. 2) marker at or below cursor => journal is not fetched. 3) no marker and journal below cursor => reset. 4) visible = seq > cursor and seq <= marker.lastSeq. 5) a marker whose bytes/hash differ from the body is reported (mismatch) but its committed prefix is still exposed.",
+  "journal": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n{\"seq\":4,\"ts\":\"2026-10-01T00:00:04.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p4\",\"ver\":0,\"payload\":{\"id\":\"p4\"}}\n{\"seq\":5,\"ts\":\"2026-10-01T00:00:05.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p5\",\"ver\":0,\"payload\":{\"id\":\"p5\"}}\n",
+  "cases": [
+    {
+      "name": "legacy journal without marker, fresh reader",
+      "known": 0,
+      "head": null,
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "reset": false,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "legacy journal, cursor in the middle",
+      "known": 3,
+      "head": null,
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          4,
+          5
+        ],
+        "reset": false,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "legacy journal shrank below cursor",
+      "known": 9,
+      "head": null,
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "reset": true,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "marker up to date: no journal download",
+      "known": 5,
+      "head": {
+        "lastSeq": 5,
+        "journalBytes": 550,
+        "journalSha256": "db41049b19553e3ba5b30fc4b969ba53ff00894be16d789b00a74415dc55bb21"
+      },
+      "expected": {
+        "fetch": false,
+        "seqs": [],
+        "reset": false,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "marker ahead of cursor",
+      "known": 2,
+      "head": {
+        "lastSeq": 5,
+        "journalBytes": 550,
+        "journalSha256": "db41049b19553e3ba5b30fc4b969ba53ff00894be16d789b00a74415dc55bb21"
+      },
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          3,
+          4,
+          5
+        ],
+        "reset": false,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "marker behind cursor resets and re-reads",
+      "known": 8,
+      "head": {
+        "lastSeq": 5,
+        "journalBytes": 550,
+        "journalSha256": "db41049b19553e3ba5b30fc4b969ba53ff00894be16d789b00a74415dc55bb21"
+      },
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "reset": true,
+        "mismatch": false
+      }
+    },
+    {
+      "name": "journal written but marker PUT failed: only committed prefix",
+      "known": 1,
+      "head": {
+        "lastSeq": 3,
+        "journalBytes": 551,
+        "journalSha256": "d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"
+      },
+      "expected": {
+        "fetch": true,
+        "seqs": [
+          2,
+          3
+        ],
+        "reset": false,
+        "mismatch": true
+      }
+    }
+  ]
+}

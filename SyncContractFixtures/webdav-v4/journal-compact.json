@@ -1,0 +1,236 @@
+{
+  "description": "Compaction keeps the newest record per type:id (by seq) for state and a newest-first ring of revision records; the result is ordered by seq and original seq values are preserved.",
+  "cases": [
+    {
+      "name": "latest record per entity wins and seq order is kept",
+      "entries": [
+        {
+          "seq": 1,
+          "ts": "2026-10-01T00:00:01.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "a",
+          "ver": 0,
+          "payload": {
+            "id": "a"
+          }
+        },
+        {
+          "seq": 2,
+          "ts": "2026-10-01T00:00:02.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "b",
+          "ver": 0,
+          "payload": {
+            "id": "b"
+          }
+        },
+        {
+          "seq": 3,
+          "ts": "2026-10-01T00:00:03.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "a",
+          "ver": 1,
+          "payload": {
+            "id": "a"
+          }
+        },
+        {
+          "seq": 4,
+          "ts": "2026-10-01T00:00:04.000Z",
+          "op": "upsert",
+          "type": "document",
+          "id": "a",
+          "ver": 0,
+          "payload": {
+            "id": "a"
+          }
+        },
+        {
+          "seq": 5,
+          "ts": "2026-10-01T00:00:05.000Z",
+          "op": "delete",
+          "type": "page",
+          "id": "b",
+          "ver": 0,
+          "payload": {
+            "id": "b"
+          }
+        }
+      ],
+      "expectedSeqs": [
+        3,
+        4,
+        5
+      ],
+      "stateEntries": 3,
+      "historyEntries": 0
+    },
+    {
+      "name": "same id with different types are separate entities",
+      "entries": [
+        {
+          "seq": 1,
+          "ts": "2026-10-01T00:00:01.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "x",
+          "ver": 0,
+          "payload": {
+            "id": "x"
+          }
+        },
+        {
+          "seq": 2,
+          "ts": "2026-10-01T00:00:02.000Z",
+          "op": "upsert",
+          "type": "document",
+          "id": "x",
+          "ver": 0,
+          "payload": {
+            "id": "x"
+          }
+        },
+        {
+          "seq": 3,
+          "ts": "2026-10-01T00:00:03.000Z",
+          "op": "upsert",
+          "type": "reading_position",
+          "id": "x",
+          "ver": 0,
+          "payload": {
+            "id": "x"
+          }
+        }
+      ],
+      "expectedSeqs": [
+        1,
+        2,
+        3
+      ],
+      "stateEntries": 3,
+      "historyEntries": 0
+    },
+    {
+      "name": "revisions are history, not state",
+      "entries": [
+        {
+          "seq": 1,
+          "ts": "2026-10-01T00:00:01.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "a",
+          "ver": 0,
+          "payload": {
+            "id": "a"
+          }
+        },
+        {
+          "seq": 2,
+          "ts": "2026-10-01T00:00:02.000Z",
+          "op": "upsert",
+          "type": "revision",
+          "id": "r1",
+          "ver": 0,
+          "payload": {
+            "id": "r1"
+          }
+        },
+        {
+          "seq": 3,
+          "ts": "2026-10-01T00:00:03.000Z",
+          "op": "upsert",
+          "type": "revision",
+          "id": "r2",
+          "ver": 0,
+          "payload": {
+            "id": "r2"
+          }
+        },
+        {
+          "seq": 4,
+          "ts": "2026-10-01T00:00:04.000Z",
+          "op": "upsert",
+          "type": "revision",
+          "id": "r1",
+          "ver": 1,
+          "payload": {
+            "id": "r1"
+          }
+        },
+        {
+          "seq": 5,
+          "ts": "2026-10-01T00:00:05.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "a",
+          "ver": 1,
+          "payload": {
+            "id": "a"
+          }
+        }
+      ],
+      "expectedSeqs": [
+        3,
+        4,
+        5
+      ],
+      "stateEntries": 1,
+      "historyEntries": 2
+    },
+    {
+      "name": "out of order input is sorted by seq",
+      "entries": [
+        {
+          "seq": 7,
+          "ts": "2026-10-01T00:00:07.000Z",
+          "op": "upsert",
+          "type": "tag",
+          "id": "t",
+          "ver": 0,
+          "payload": {
+            "id": "t"
+          }
+        },
+        {
+          "seq": 2,
+          "ts": "2026-10-01T00:00:02.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "p",
+          "ver": 0,
+          "payload": {
+            "id": "p"
+          }
+        },
+        {
+          "seq": 5,
+          "ts": "2026-10-01T00:00:05.000Z",
+          "op": "upsert",
+          "type": "page",
+          "id": "q",
+          "ver": 0,
+          "payload": {
+            "id": "q"
+          }
+        }
+      ],
+      "expectedSeqs": [
+        2,
+        5,
+        7
+      ],
+      "stateEntries": 3,
+      "historyEntries": 0
+    },
+    {
+      "name": "empty journal",
+      "entries": [],
+      "expectedSeqs": [],
+      "stateEntries": 0,
+      "historyEntries": 0
+    }
+  ]
+}

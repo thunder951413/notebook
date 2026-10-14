@@ -1,0 +1,159 @@
+{
+  "description": "Encrypted notebook payloads: {\"$encrypted\": {version 1, AES-256-GCM, PBKDF2-SHA256, 310000 iterations, base64 salt(16) iv(12) ciphertext+tag}}. The key is PBKDF2(secret UTF-8, salt); additional data is \"notebook-webdav-private-v1\\u0000\" + context, where context is \"<type>:<id>:<op>:<ver>\". Encrypting with the given salt and iv must reproduce the envelope byte for byte.",
+  "secret": "fixture-sync-secret ✓",
+  "cases": [
+    {
+      "name": "document payload",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 3,
+      "plaintext": "{\"id\":\"p1\",\"title\":\"私密笔记\",\"markdown\":\"# 隐私\\n\\n内容 ✓\"}",
+      "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+      "iv": "oKGio6Slpqeoqaqr",
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "asset payload",
+      "type": "asset",
+      "id": "asset-1",
+      "op": "upsert",
+      "ver": 0,
+      "plaintext": "{\"id\":\"asset-1\",\"filename\":\"secret.png\"}",
+      "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+      "iv": "EBESExQVFhcYGRob",
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "EBESExQVFhcYGRob",
+          "ciphertext": "ubY2uDn5gV5GopZSAwAAJCIf2SMKn0ipIJJ26fORaA0sFeQdL8IEtb+QN8CN0hMIvq14TM/e8wQ="
+        }
+      }
+    }
+  ],
+  "rejects": [
+    {
+      "name": "context bound: other version",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 4,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "context bound: other entity",
+      "type": "document",
+      "id": "p2",
+      "op": "upsert",
+      "ver": 3,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "tampered ciphertext",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 3,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WNWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "wrong secret",
+      "secret": "another secret",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 3,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "unsupported iteration count",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 3,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 1000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "oKGio6Slpqeoqaqr",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    },
+    {
+      "name": "short iv",
+      "type": "document",
+      "id": "p1",
+      "op": "upsert",
+      "ver": 3,
+      "envelope": {
+        "$encrypted": {
+          "version": 1,
+          "algorithm": "AES-256-GCM",
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "AQIDBAUGBwgJCgsMDQ4PEA==",
+          "iv": "AAAA",
+          "ciphertext": "WdWaxY/7+QiA2Eg1kScZlVPXE5kGM2ODt737OnceUInUwa9k9EjImbnlj4FqRJJho8DAYRIM2cGqRfM5Ywzyv3l3ekZLP+5V58KZAr9MXA8sB3M0fuI="
+        }
+      }
+    }
+  ]
+}

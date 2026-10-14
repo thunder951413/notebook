@@ -1,0 +1,77 @@
+{
+  "description": "Repository path relative to the WebDAV root. Trim, map backslashes to slashes, drop empty and \".\" segments; reject absolute paths, control characters, any \"..\" segment and an empty result.",
+  "cases": [
+    {
+      "input": "notebook_backup",
+      "expected": "notebook_backup"
+    },
+    {
+      "input": "  notebook_backup  ",
+      "expected": "notebook_backup"
+    },
+    {
+      "input": "notebook_backup/",
+      "expected": "notebook_backup"
+    },
+    {
+      "input": "apps\\notebook",
+      "expected": "apps/notebook"
+    },
+    {
+      "input": "./apps//notebook/.",
+      "expected": "apps/notebook"
+    },
+    {
+      "input": "笔记/备份 2026",
+      "expected": "笔记/备份 2026"
+    },
+    {
+      "input": "",
+      "error": true
+    },
+    {
+      "input": "   ",
+      "error": true
+    },
+    {
+      "input": ".",
+      "error": true
+    },
+    {
+      "input": "./",
+      "error": true
+    },
+    {
+      "input": "/absolute",
+      "error": true
+    },
+    {
+      "input": "\\absolute",
+      "error": true
+    },
+    {
+      "input": "..",
+      "error": true
+    },
+    {
+      "input": "../outside",
+      "error": true
+    },
+    {
+      "input": "a/../b",
+      "error": true
+    },
+    {
+      "input": "a/b/..",
+      "error": true
+    },
+    {
+      "input": "a\u0000b",
+      "error": true
+    },
+    {
+      "input": "a\nb",
+      "error": true
+    }
+  ]
+}

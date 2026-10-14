@@ -1,0 +1,21 @@
+{
+  "description": "Repository layout under the normalized remote path.",
+  "cases": [
+    {
+      "root": "notebook_backup",
+      "deviceId": "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa",
+      "hash": "33c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656",
+      "journalPath": "notebook_backup/journal/0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.jsonl",
+      "headPath": "notebook_backup/journal/0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.head.json",
+      "objectPath": "notebook_backup/objects/33/33c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656"
+    },
+    {
+      "root": "apps/notebook",
+      "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+      "hash": "00c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656",
+      "journalPath": "apps/notebook/journal/0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb.jsonl",
+      "headPath": "apps/notebook/journal/0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb.head.json",
+      "objectPath": "apps/notebook/objects/00/00c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "description": "PROPFIND Depth:1 multistatus bodies reduced to child base names (percent-decoded, trailing slash removed). Namespace prefixes vary between servers.",
+  "cases": [
+    {
+      "name": "坚果云 style d: prefix",
+      "text": "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/dav/notebook/journal/</d:href><d:propstat><d:prop><d:getetag>\"e-22\"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/dav/notebook/journal/0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.jsonl</d:href><d:propstat><d:prop><d:getetag>\"e-64\"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/dav/notebook/journal/0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.head.json</d:href><d:propstat><d:prop><d:getetag>\"e-68\"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>",
+      "names": [
+        "journal",
+        "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.jsonl",
+        "0a0a0a0a-1111-4111-8111-aaaaaaaaaaaa.head.json"
+      ]
+    },
+    {
+      "name": "D: prefix with percent-encoded unicode and absolute URL",
+      "text": "<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>https://dav.example.com/dav/%E7%AC%94%E8%AE%B0/</D:href></D:response><D:response><D:href>https://dav.example.com/dav/%E7%AC%94%E8%AE%B0/a%20b.txt</D:href></D:response></D:multistatus>",
+      "names": [
+        "笔记",
+        "a b.txt"
+      ]
+    }
+  ]
+}

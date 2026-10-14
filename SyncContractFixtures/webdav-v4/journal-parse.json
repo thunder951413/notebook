@@ -1,0 +1,112 @@
+{
+  "description": "Journal body: one JSON object per line. Blank lines and surrounding whitespace (including CRLF) are ignored. Each record needs a non-negative integer seq, op upsert|delete, non-empty string type and id, and an object payload; ver defaults to 0. Any malformed record rejects the whole journal.",
+  "cases": [
+    {
+      "name": "empty body",
+      "text": "",
+      "expected": []
+    },
+    {
+      "name": "trailing newline and blank lines",
+      "text": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"document\",\"id\":\"p1\",\"ver\":3,\"payload\":{\"id\":\"p1\"}}\n",
+      "expected": [
+        {
+          "seq": 1,
+          "op": "upsert",
+          "type": "page",
+          "id": "p1",
+          "ver": 0
+        },
+        {
+          "seq": 2,
+          "op": "upsert",
+          "type": "document",
+          "id": "p1",
+          "ver": 3
+        }
+      ]
+    },
+    {
+      "name": "CRLF line endings",
+      "text": "{\"seq\":5,\"ts\":\"2026-10-01T00:00:05.000Z\",\"op\":\"delete\",\"type\":\"tag\",\"id\":\"t1\",\"ver\":0,\"payload\":{\"id\":\"t1\"}}\r\n{\"seq\":6,\"ts\":\"2026-10-01T00:00:06.000Z\",\"op\":\"upsert\",\"type\":\"tag\",\"id\":\"t2\",\"ver\":0,\"payload\":{\"id\":\"t2\"}}\r\n",
+      "expected": [
+        {
+          "seq": 5,
+          "op": "delete",
+          "type": "tag",
+          "id": "t1",
+          "ver": 0
+        },
+        {
+          "seq": 6,
+          "op": "upsert",
+          "type": "tag",
+          "id": "t2",
+          "ver": 0
+        }
+      ]
+    },
+    {
+      "name": "missing ver defaults to zero and hash is kept",
+      "text": "{\"seq\":9,\"ts\":\"x\",\"op\":\"upsert\",\"type\":\"document\",\"id\":\"p9\",\"hash\":\"33c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656\",\"payload\":{\"$object\":\"33c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656\"}}",
+      "expected": [
+        {
+          "seq": 9,
+          "op": "upsert",
+          "type": "document",
+          "id": "p9",
+          "ver": 0,
+          "hash": "33c257f6fe0568dd777b47f99b7387468a51e5bac980f06d44e4193d5fda3656"
+        }
+      ]
+    },
+    {
+      "name": "unicode payload",
+      "text": "{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\",\"title\":\"中文标题 ✓\"}}",
+      "expected": [
+        {
+          "seq": 3,
+          "op": "upsert",
+          "type": "page",
+          "id": "p3",
+          "ver": 0
+        }
+      ]
+    },
+    {
+      "name": "malformed JSON line",
+      "text": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\": 2, \"op\": ",
+      "error": true
+    },
+    {
+      "name": "array instead of object",
+      "text": "[1,2,3]\n",
+      "error": true
+    },
+    {
+      "name": "unknown operation",
+      "text": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"patch\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n",
+      "error": true
+    },
+    {
+      "name": "missing payload",
+      "text": "{\"seq\":1,\"ts\":\"x\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0}\n",
+      "error": true
+    },
+    {
+      "name": "empty id",
+      "text": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"\",\"ver\":0,\"payload\":{\"id\":\"\"}}\n",
+      "error": true
+    },
+    {
+      "name": "negative seq",
+      "text": "{\"seq\":-1,\"ts\":\"2026-10-01T00:00:-1.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n",
+      "error": true
+    },
+    {
+      "name": "string seq",
+      "text": "{\"seq\":\"1\",\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n",
+      "error": true
+    }
+  ]
+}
