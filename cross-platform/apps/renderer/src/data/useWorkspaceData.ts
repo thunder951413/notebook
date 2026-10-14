@@ -74,6 +74,9 @@ export function useWorkspaceData() {
     const livePages = loadedPages.filter((page) => !page.deletedAt)
     setPageRecords(livePages)
     setTrashRecords(loadedPages.filter((page) => page.deletedAt))
+    // Callers that chain several mutations (AI organizing) read the mirror
+    // before React has re-rendered.
+    pageRecordsRef.current = livePages
     const tags = await repository.listTags(WORKSPACE_ID)
     const names = new Map(tags.map((tag) => [tag.id, tag.name]))
     const associations = await Promise.all(livePages.map(async (page) => [page.id, (await repository.listPageTags(page.id)).flatMap((item) => names.get(item.tagId) ?? [])] as const))
@@ -553,6 +556,17 @@ export function useWorkspaceData() {
   }, [])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
+  /** The stored modification time (for "changed since the plan was made" checks). */
+  const getPageUpdatedAt = useCallback(async (pageId: string) => {
+    const page = await repository.getPage(pageId)
+    return page && !page.deletedAt ? page.updatedAt : undefined
+  }, [])
+  /** Sets a page's tags by name, creating tags that do not exist yet. */
+  const setPageTagNames = useCallback(async (pageId: string, names: string[]) => {
+    const tags = await repository.ensureTags(WORKSPACE_ID, names)
+    await repository.savePageTags(pageId, tags.map((tag) => tag.id))
+    setPageTags((current) => ({ ...current, [pageId]: tags.map((tag) => tag.name) }))
+  }, [])
   const resetRevisionHistory = useCallback(async () => {
     const result = await repository.resetRevisionHistory(WORKSPACE_ID)
     await reload()
@@ -571,7 +585,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition }
+  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
 }
 
 

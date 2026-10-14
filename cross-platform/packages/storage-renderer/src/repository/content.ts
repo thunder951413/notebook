@@ -186,6 +186,24 @@ export class ContentRepository extends RepositoryCore {
       await this.enqueueChange(page.workspaceId, 'reading_position', position.id, 'upsert', { ...position })
     })
   }
+  /** Tags by name, creating (and publishing) the ones that do not exist yet. */
+  async ensureTags(workspaceId: UUID, names: string[], now = new Date().toISOString()): Promise<Tag[]> {
+    const wanted = [...new Set(names.map((name) => name.trim()).filter(Boolean))]
+    const result: Tag[] = []
+    await this.db.transaction('rw', [this.db.tags, this.db.syncOutbox, this.db.syncVersions], async () => {
+      const existing = (await this.db.tags.where('workspaceId').equals(workspaceId).toArray()).filter((tag) => !tag.deletedAt)
+      for (const name of wanted) {
+        const found = existing.find((tag) => tag.name === name)
+        if (found) { result.push(found); continue }
+        const tag: Tag = { id: crypto.randomUUID(), workspaceId, name, color: 'gray', createdAt: now, updatedAt: now }
+        await this.db.tags.put(tag)
+        await this.enqueueChange(workspaceId, 'tag', tag.id, 'upsert', { ...tag })
+        result.push(tag)
+      }
+    })
+    return result
+  }
+
   async savePageTags(pageId: UUID, tagIds: UUID[]) {
     const next = [...new Set(tagIds)].map((tagId) => ({ pageId, tagId }))
     await this.db.transaction('rw', this.db.tables, async () => {

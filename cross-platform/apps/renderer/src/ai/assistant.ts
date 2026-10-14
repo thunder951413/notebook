@@ -68,7 +68,8 @@ export function pagePath(page: PageSummary, pages: PageSummary[], notebooks: Not
   const parts: string[] = []
   let cursor = page.parentPageId ? byId.get(page.parentPageId) : undefined
   for (let guard = 0; cursor && guard < 32; guard += 1) {
-    parts.unshift(cursor.title || '无标题页面')
+    // A notebook's hidden root page is the notebook itself.
+    if (!cursor.notebookRoot) parts.unshift(cursor.title || '无标题页面')
     cursor = cursor.parentPageId ? byId.get(cursor.parentPageId) : undefined
   }
   const notebook = notebooks.find((item) => item.sections.some((section) => section.id === page.sectionId))

@@ -31,8 +31,13 @@ import {
   type ExportItem,
 } from '../ai/assistant'
 import { retrieveNotebookLibrary } from '../ai/libraryRetrieval'
+import { completeAI } from '../ai/completion'
+import type { PlanGroup } from '../ai/organize'
+import type { ApplyOutcome } from '../ai/organizeApply'
+import { OrganizePanel } from './OrganizePanel'
+import { RewritePanel } from './RewritePanel'
 
-type Tab = 'ask' | 'generate' | 'search' | 'merge'
+type Tab = 'ask' | 'generate' | 'search' | 'merge' | 'organize' | 'rewrite'
 type Message = { id: string; role: 'user' | 'assistant'; content: string; sources?: ContextSource[]; failed?: boolean; task?: AssistantTask }
 type SearchHit = { page: PageSummary; path: string; reason: string }
 
@@ -46,6 +51,8 @@ export interface AssistantViewProps {
   openPage(pageId: string): void
   createNote(title: string, markdown: string, target?: { sectionId: string; parentPageId?: string }): Promise<string>
   openAISettings(): void
+  /** Applies an accepted organizing/rewriting plan to the workspace. */
+  applyPlan(groups: PlanGroup[], onProgress: (done: number, total: number) => void): Promise<ApplyOutcome>
 }
 
 const SCOPE_KEY = 'notebook-assistant-scope-v1'
@@ -59,21 +66,7 @@ function readSavedScope(): AssistantScope | undefined {
   }
 }
 
-async function complete(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, signal: AbortSignal) {
-  const provider = readAIProviderSettings()
-  const ai = window.notebookDesktop?.ai
-  if (!provider.enabled || !ai) throw new Error('AI_NOT_CONFIGURED')
-  const requestId = crypto.randomUUID()
-  const cancel = () => { void ai.cancel(requestId) }
-  signal.addEventListener('abort', cancel, { once: true })
-  try {
-    const result = await ai.complete({ requestId, provider: provider.provider, baseUrl: provider.baseUrl, model: provider.model, messages })
-    signal.throwIfAborted()
-    return result.content
-  } finally {
-    signal.removeEventListener('abort', cancel)
-  }
-}
+const complete = completeAI
 
 function renderMarkdown(markdown: string) {
   try {
@@ -99,13 +92,16 @@ function formatCount(characters: number) {
  * then ask questions, generate summaries, search by meaning, or merge the
  * notes into one Markdown document to copy, save or send to the AI.
  */
-export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdown, loadDocument, openPage, createNote, openAISettings }: AssistantViewProps) {
+export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdown, loadDocument, openPage, createNote, openAISettings, applyPlan }: AssistantViewProps) {
   const [scope, setScope] = useState<AssistantScope>(() => initialScope ?? readSavedScope() ?? emptyScope())
   useEffect(() => { try { localStorage.setItem(SCOPE_KEY, JSON.stringify(scope)) } catch { /* storage unavailable */ } }, [scope])
   const allNotes = useMemo(() => pages.filter((page) => page.kind !== 'task' && !page.locked), [pages])
   const scopedPages = useMemo(() => scopeIsEmpty(scope) ? allNotes : resolveScope(scope, pages, notebooks), [allNotes, notebooks, pages, scope])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [tab, setTab] = useState<Tab>('ask')
+  // Organize/rewrite results are expensive: keep the panels alive across tab switches.
+  const [visited, setVisited] = useState<Set<Tab>>(() => new Set())
+  useEffect(() => { if ((tab === 'organize' || tab === 'rewrite') && !visited.has(tab)) setVisited(new Set([...visited, tab])) }, [tab, visited])
   // Export: pick answers, then turn them into one new note.
   const [exporting, setExporting] = useState(false)
   const [picked, setPicked] = useState<Set<string>>(() => new Set())
@@ -272,6 +268,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
     }
   }
   const mergedText = merged ? mergedMarkdown(merged, label) : ''
+  const planProps = { scopedPages, pages, notebooks, scopeLabel: label, loadMarkdown, applyPlan, openPage, onNeedsSetup: () => setNeedsSetup(true) }
 
   return <section className="assistant" aria-label="AI 助手">
     <header className="assistant-header" data-tauri-drag-region>
@@ -290,7 +287,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
     </header>
     {pickerOpen && <ScopePicker scope={scope} pages={pages} notebooks={notebooks} tags={tags} onChange={setScope} onDone={() => setPickerOpen(false)} />}
     <div className="assistant-tabs" role="tablist" aria-label="AI 功能">
-      {([['ask', '问答'], ['generate', '生成'], ['search', '搜索'], ['merge', '合并']] as const).map(([id, name]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setNotice(undefined) }}>{name}</button>)}
+      {([['ask', '问答'], ['generate', '生成'], ['search', '搜索'], ['merge', '合并'], ['organize', '整理'], ['rewrite', '改写']] as const).map(([id, name]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setNotice(undefined) }}>{name}</button>)}
     </div>
     {needsSetup && <div className="assistant-setup" role="note">
       <strong>还没有配置 AI</strong>
@@ -358,6 +355,13 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
       </>}
     </div>}
 
+    {(tab === 'organize' || visited.has('organize')) && <div className="assistant-plan" hidden={tab !== 'organize'}>
+      <OrganizePanel {...planProps} />
+    </div>}
+    {(tab === 'rewrite' || visited.has('rewrite')) && <div className="assistant-plan" hidden={tab !== 'rewrite'}>
+      <RewritePanel {...planProps} />
+    </div>}
+
     {exporting && <div className="assistant-export-bar">
       <span>已选 {picked.size} 条回复</span>
       <button type="button" onClick={() => setPicked(new Set(messages.filter((message) => message.role === 'assistant' && !message.failed).map((message) => message.id)))}>全选</button>
@@ -377,7 +381,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
         openPage(pageId)
       }}
     />}
-    {tab !== 'merge' && !exporting && <form className="assistant-composer" onSubmit={(event) => { event.preventDefault(); if (tab === 'search') void search(input); else if (input.trim()) void run(tab === 'ask' ? 'ask' : 'custom', input.trim()) }}>
+    {(tab === 'ask' || tab === 'generate' || tab === 'search') && !exporting && <form className="assistant-composer" onSubmit={(event) => { event.preventDefault(); if (tab === 'search') void search(input); else if (input.trim()) void run(tab === 'ask' ? 'ask' : 'custom', input.trim()) }}>
       {tab === 'search' && <Search20Regular className="assistant-composer-icon" />}
       <textarea
         aria-label={tab === 'ask' ? '问题' : tab === 'search' ? '要找的内容' : '要求'}

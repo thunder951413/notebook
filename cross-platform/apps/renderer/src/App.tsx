@@ -66,6 +66,7 @@ import { EmptyParentPageHint } from './components/EmptyParentPageHint'
 import { ModePlaceholder } from './components/ModePlaceholder'
 import { ImportDialog, type ImportTarget } from './components/ImportDialog'
 import { AssistantView } from './ai-assistant/AssistantView'
+import { applyPlan, type PlanApi } from './ai/organizeApply'
 import { emptyScope, type AssistantScope } from './ai/assistant'
 import { MovePageDialog } from './components/MovePageDialog'
 import { PageIconPicker } from './components/PageIconPicker'
@@ -108,7 +109,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition } = useWorkspaceData()
+  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -554,6 +555,31 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     await saveDocument(pageId, markdownToDocument(markdown))
     return pageId
   }
+
+  // Applying an AI plan chains many mutations; always call the latest
+  // workspace functions (each step reloads the records the next one reads).
+  const planOps = useRef({ createPage, updatePage, saveDocument, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames })
+  planOps.current = { createPage, updatePage, saveDocument, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames }
+  const planApi = useMemo<PlanApi>(() => {
+    const preview = (markdown: string) => markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180)
+    return {
+      pageUpdatedAt: (pageId) => planOps.current.getPageUpdatedAt(pageId),
+      async createPage(title, markdown, sectionId, parentPageId) {
+        const pageId = await planOps.current.createPage(sectionId, 'document', parentPageId)
+        await planOps.current.updatePage(pageId, { title, preview: preview(markdown) })
+        await planOps.current.saveDocument(pageId, markdownToDocument(markdown))
+        return pageId
+      },
+      async updatePage(pageId, change) {
+        await planOps.current.updatePage(pageId, { ...(change.title !== undefined ? { title: change.title } : {}), ...(change.markdown !== undefined ? { preview: preview(change.markdown) } : {}) })
+        if (change.markdown !== undefined) await planOps.current.saveDocument(pageId, markdownToDocument(change.markdown))
+      },
+      movePage: (pageId, sectionId, parentPageId, sortOrder) => planOps.current.movePageInTree(pageId, sectionId, parentPageId, sortOrder),
+      setTags: (pageId, tags) => planOps.current.setPageTagNames(pageId, tags),
+      trash: (pageId) => planOps.current.moveToTrash(pageId),
+      snapshot: async (pageId) => { await planOps.current.createManualRevision(pageId) },
+    }
+  }, [])
 
   const openDailyNote = async () => {
     const now = new Date()
@@ -1150,6 +1176,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           openPage={(pageId) => { setAssistant(undefined); setBrowse('tree'); openRecentPage(pageId) }}
           createNote={createNoteFromAssistant}
           openAISettings={() => { setSettingsPage('services'); setSettingsOpen(true) }}
+          applyPlan={async (groups, onProgress) => {
+            try { return await applyPlan(groups, planApi, onProgress) } finally { await reloadWorkspace() }
+          }}
         /></main> : <main className="content-pane">
           <div className="editor-toolbar" data-tauri-drag-region>
             <div className="toolbar-leading" data-tauri-drag-region>
