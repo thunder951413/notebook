@@ -9,7 +9,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "typecheck": "tsc --noEmit",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test": "vitest run"
   },
   "dependencies": {
     "@notebook/renderer": "workspace:*",
@@ -18,7 +19,9 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-react": "5.2.0",
+    "jsdom": "28.1.0",
     "typescript": "7.0.2",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
   }
 }
