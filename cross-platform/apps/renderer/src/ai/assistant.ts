@@ -66,13 +66,13 @@ export function resolveScope(scope: AssistantScope, pages: PageSummary[], notebo
 export function pagePath(page: PageSummary, pages: PageSummary[], notebooks: NotebookSummary[]): string {
   const byId = new Map(pages.map((item) => [item.id, item]))
   const parts: string[] = []
+  const notebook = notebooks.find((item) => item.sections.some((section) => section.id === page.sectionId))
   let cursor = page.parentPageId ? byId.get(page.parentPageId) : undefined
   for (let guard = 0; cursor && guard < 32; guard += 1) {
-    // A notebook's hidden root page is the notebook itself.
-    if (!cursor.notebookRoot) parts.unshift(cursor.title || '无标题页面')
+    // A top-level page named like its notebook would only repeat the name.
+    if (!(cursor.notebookRoot && cursor.title.trim() === notebook?.name.trim())) parts.unshift(cursor.title || '无标题页面')
     cursor = cursor.parentPageId ? byId.get(cursor.parentPageId) : undefined
   }
-  const notebook = notebooks.find((item) => item.sections.some((section) => section.id === page.sectionId))
   if (notebook) parts.unshift(notebook.name)
   return parts.join(' / ')
 }

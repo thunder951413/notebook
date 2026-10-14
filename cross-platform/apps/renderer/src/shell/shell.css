@@ -726,3 +726,53 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
 .assistant-picker-bar .assistant-picker-modes button { height: 24px; padding: 0 9px; border-radius: 6px; font-size: 12px; }
 .assistant-picker-bar .assistant-picker-modes button.selected { color: var(--ink); background: var(--paper); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); font-weight: 600; }
 .assistant-picker-hint { padding: 6px 8px; color: var(--ink-3); font-size: 12px; }
+
+/* AI 收纳 */
+.settings-dialog.inbox-dialog { display: flex; width: min(720px, 100%); max-height: min(760px, calc(100dvh - 48px)); flex-direction: column; gap: 10px; padding: 18px 20px; overflow: hidden; outline: 0; }
+.inbox-dialog.dragging { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent), var(--shadow-overlay); }
+.inbox-dialog > .inbox-head { display: flex; flex: none; align-items: center; gap: 12px; }
+.inbox-head h2 { font-size: 16px; }
+.inbox-shortcut { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; color: var(--ink-3); font-size: 12px; }
+.inbox-shortcut button { display: inline-flex; height: 26px; align-items: center; gap: 6px; padding: 0 8px; border: 0; border-radius: 7px; color: var(--ink-2); background: transparent; font-size: 12px; cursor: pointer; }
+.inbox-shortcut button:hover { background: var(--hover); }
+.inbox-shortcut button.recording { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); outline: 0; animation: assistant-pulse 1.4s ease-in-out infinite; }
+.inbox-shortcut kbd { padding: 1px 6px; border: 1px solid var(--hairline-strong); border-radius: 5px; color: var(--ink); background: var(--paper); font: 600 12px/18px var(--font-ui); }
+.inbox-shortcut-error { flex-basis: 100%; color: var(--overdue); text-align: right; }
+.inbox-dialog > .inbox-drop { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 140px; padding: 16px; border: 1.5px dashed var(--hairline-strong); border-radius: 14px; color: var(--ink-2); font-size: 13.5px; text-align: center; }
+.inbox-dialog > .inbox-drop.compact { min-height: 0; flex-direction: row; justify-content: space-between; padding: 8px 10px 8px 14px; font-size: 12.5px; }
+.inbox-dialog.dragging > .inbox-drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.inbox-drop > div { display: flex; gap: 6px; }
+.inbox-drop button, .inbox-toolbar button, .inbox-outcome button { display: inline-flex; height: 28px; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: 8px; color: var(--ink); background: var(--paper); font-size: 12.5px; cursor: pointer; }
+.inbox-drop button:hover, .inbox-toolbar button:hover:not(:disabled) { background: var(--hover); }
+.inbox-drop svg { width: 16px; height: 16px; }
+.inbox-dialog > .inbox-toolbar { display: flex; flex: none; align-items: center; gap: 8px; color: var(--ink-3); font-size: 12.5px; }
+.inbox-toolbar input { min-width: 0; height: 30px; flex: 1; padding: 0 10px; border: 1px solid var(--hairline-strong); border-radius: 8px; outline: 0; color: var(--ink); background: transparent; font: inherit; font-size: 13px; }
+.inbox-toolbar input:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.inbox-toolbar span button { margin-left: 6px; }
+.inbox-status { flex: none; margin: 0; font-size: 12.5px; }
+.inbox-status.error { color: var(--overdue); }
+.inbox-list { min-height: 0; flex: 1; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.inbox-list > li { display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; border-top: 1px solid var(--hairline); }
+.inbox-list > li:first-child { border-top: 0; }
+.inbox-list > li.excluded .inbox-item { opacity: .45; }
+.inbox-list > li > input { margin-top: 8px; accent-color: var(--accent); }
+.inbox-item { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+.inbox-item-head { display: flex; align-items: center; gap: 6px; }
+.inbox-kind { flex: none; color: var(--ink-3); }
+.inbox-title { min-width: 0; height: 28px; flex: 1; padding: 0 6px; border: 1px solid transparent; border-radius: 6px; outline: 0; color: var(--ink); background: transparent; font: 600 14px/1 var(--font-ui); }
+.inbox-title:hover { border-color: var(--hairline); }
+.inbox-title:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.inbox-remove { display: grid; width: 24px; height: 24px; flex: none; place-items: center; border: 0; border-radius: 6px; color: var(--ink-3); background: transparent; cursor: pointer; }
+.inbox-remove:hover { color: var(--ink); background: var(--hover); }
+.inbox-item-meta { display: flex; min-width: 0; gap: 8px; padding-left: 28px; color: var(--ink-3); font-size: 11.5px; }
+.inbox-source { flex: none; }
+.inbox-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-item-fields { display: flex; gap: 6px; padding-left: 28px; }
+.inbox-item-fields select { min-width: 0; height: 28px; flex: 3; padding: 0 6px; border: 1px solid var(--hairline-strong); border-radius: 7px; color: var(--ink); background: var(--paper); font-size: 12.5px; }
+.inbox-tags { min-width: 0; height: 28px; flex: 2; padding: 0 8px; border: 1px solid var(--hairline-strong); border-radius: 7px; outline: 0; color: var(--ink); background: transparent; font-size: 12.5px; }
+.inbox-reason { padding-left: 28px; color: var(--ink-3); font-size: 11.5px; }
+.inbox-dialog > .inbox-outcome { display: flex; flex: none; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--done) 9%, transparent); font-size: 13px; }
+.inbox-outcome ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.inbox-outcome li.failed { color: var(--overdue); }
+.inbox-dialog > .inbox-foot { display: flex; flex: none; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--hairline); color: var(--ink-3); font-size: 12.5px; }
+.inbox-foot > span { min-width: 0; flex: 1; }

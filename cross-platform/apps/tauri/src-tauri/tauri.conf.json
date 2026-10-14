@@ -53,6 +53,14 @@
     "copyright": "Notebook contributors",
     "shortDescription": "离线优先的笔记应用",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.png"],
+    "fileAssociations": [
+      {
+        "ext": ["md", "markdown", "txt", "text", "html", "htm", "pdf", "doc", "docx", "rtf", "csv", "png", "jpg", "jpeg", "gif", "webp", "heic"],
+        "name": "Document",
+        "description": "放进 Notebook，由 AI 归档",
+        "role": "Viewer"
+      }
+    ],
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

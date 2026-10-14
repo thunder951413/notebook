@@ -241,13 +241,14 @@ export interface PlanContext {
 export function placementLabel(context: PlanContext, sectionId: string, parentPageId?: string): string {
   const notebook = context.notebooks.find((item) => item.sections.some((section) => section.id === sectionId))?.name ?? ''
   const parent = parentPageId ? context.pages.find((page) => page.id === parentPageId) : undefined
-  if (!parent || parent.notebookRoot) return notebook
+  if (!parent || (parent.notebookRoot && parent.title.trim() === notebook.trim())) return notebook
   return `${pagePath(parent, context.pages, context.notebooks)} / ${parent.title || '无标题'}`
 }
 
 /** A category: a folder page where these notes already mostly live, with the notes moved in. */
 export function categoryGroup(category: CategorySuggestion, notes: OrganizeNote[], context: PlanContext): PlanGroup | undefined {
-  const members = category.notes.map((index) => notes.find((note) => note.index === index)).filter((note): note is OrganizeNote => Boolean(note))
+  // Top-level pages stay where they are: they each own the notebook's sync bucket.
+  const members = category.notes.map((index) => notes.find((note) => note.index === index)).filter((note): note is OrganizeNote => Boolean(note) && !note!.page.notebookRoot)
   if (!members.length) return undefined
   const placement = commonPlacement(members.map((note) => note.page))
   const existing = context.pages.find((page) => page.sectionId === placement.sectionId && page.parentPageId === placement.parentPageId && page.title.trim() === category.name.trim() && page.kind !== 'task')
@@ -292,7 +293,8 @@ export function tagGroup(suggestion: TagSuggestion, notes: OrganizeNote[], conte
 /** Merge: one new note where the first source lived; children move under it; sources go to the trash. */
 export function mergeGroup(suggestion: MergeSuggestion, notes: OrganizeNote[], mergedMarkdown: string, context: PlanContext): PlanGroup | undefined {
   const sources = suggestion.notes.map((index) => notes.find((note) => note.index === index)).filter((note): note is OrganizeNote => Boolean(note))
-  if (sources.length < 2) return undefined
+  // Merging trashes the sources; top-level pages are never trashed by a plan.
+  if (sources.length < 2 || sources.some((note) => note.page.notebookRoot)) return undefined
   const first = sources[0]!.page
   const ref = context.newId()
   const sourceIds = new Set(sources.map((note) => note.page.id))

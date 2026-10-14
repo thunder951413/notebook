@@ -67,6 +67,9 @@ import { ModePlaceholder } from './components/ModePlaceholder'
 import { ImportDialog, type ImportTarget } from './components/ImportDialog'
 import { AssistantView } from './ai-assistant/AssistantView'
 import { applyPlan, type PlanApi } from './ai/organizeApply'
+import { InboxDialog, type InboxFiling, type InboxOutcome } from './ai-assistant/InboxDialog'
+import { useInbox } from './ai-assistant/useInbox'
+import { entryBody } from './ai/inbox'
 import { emptyScope, type AssistantScope } from './ai/assistant'
 import { MovePageDialog } from './components/MovePageDialog'
 import { PageIconPicker } from './components/PageIconPicker'
@@ -558,8 +561,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   // Applying an AI plan chains many mutations; always call the latest
   // workspace functions (each step reloads the records the next one reads).
-  const planOps = useRef({ createPage, updatePage, saveDocument, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames })
-  planOps.current = { createPage, updatePage, saveDocument, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames }
+  const planOps = useRef({ createPage, createSection, updatePage, saveDocument, saveAsset, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames })
+  planOps.current = { createPage, createSection, updatePage, saveDocument, saveAsset, movePageInTree, moveToTrash, createManualRevision, getPageUpdatedAt, setPageTagNames }
   const planApi = useMemo<PlanApi>(() => {
     const preview = (markdown: string) => markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180)
     return {
@@ -580,6 +583,58 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       snapshot: async (pageId) => { await planOps.current.createManualRevision(pageId) },
     }
   }, [])
+
+  // AI 收纳: global shortcut / Dock / dropped files → notes placed by the AI.
+  const inbox = useInbox((html) => documentToMarkdown(htmlToDocument(html)))
+  const fileInbox = async (items: InboxFiling[], onProgress: (done: number, total: number) => void): Promise<InboxOutcome> => {
+    const ops = planOps.current
+    const outcome: InboxOutcome = { created: [], failed: [] }
+    const folders = new Map<string, { sectionId: string; parentPageId: string }>()
+    const preview = (markdown: string) => markdown.replace(/!?\[([^\]]*)\]\(notebook-asset:[^)]*\)/g, '$1').replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180)
+    /** A new page at a location: a top-level page of a notebook, or a child of a note. */
+    const place = async (title: string, location: { sectionId: string; parentPageId?: string; notebookId?: string }) => {
+      if (location.notebookId && !location.parentPageId) {
+        const created = await ops.createSection(location.notebookId, title)
+        return { pageId: created.pageId, sectionId: created.sectionId }
+      }
+      const pageId = await ops.createPage(location.sectionId, 'document', location.parentPageId)
+      await ops.updatePage(pageId, { title })
+      return { pageId, sectionId: location.sectionId }
+    }
+    for (const [index, item] of items.entries()) {
+      try {
+        let target: { sectionId: string; parentPageId?: string; notebookId?: string } = item.location
+        if (item.newFolder) {
+          const key = `${item.location.key}|${item.newFolder}`
+          const existing = folders.get(key) ?? (() => {
+            const found = accessiblePages.find((page) => page.kind !== 'task' && page.title.trim() === item.newFolder && (item.location.parentPageId ? page.parentPageId === item.location.parentPageId : page.notebookRoot && notebooks.find((notebook) => notebook.id === item.location.notebookId)?.sections.some((section) => section.id === page.sectionId)))
+            return found ? { sectionId: found.sectionId, parentPageId: found.id } : undefined
+          })()
+          let folder: { sectionId: string; parentPageId: string }
+          if (existing) folder = existing
+          else {
+            const created = await place(item.newFolder, item.location)
+            folder = { sectionId: created.sectionId, parentPageId: created.pageId }
+          }
+          folders.set(key, folder)
+          target = folder
+        }
+        const { pageId } = await place(item.title, target)
+        const asset = item.entry.attachment ? await ops.saveAsset(pageId, new File([item.entry.attachment.data as BlobPart], item.entry.attachment.name, { type: item.entry.attachment.mimeType })) : undefined
+        const body = entryBody(item.entry, asset?.id)
+        await ops.updatePage(pageId, { preview: preview(body) })
+        await ops.saveDocument(pageId, markdownToDocument(body))
+        if (item.tags.length) await ops.setPageTagNames(pageId, item.tags)
+        if (target.parentPageId) setExpandedPageIds((current) => current.has(target.parentPageId!) ? current : new Set([...current, target.parentPageId!]))
+        outcome.created.push({ entryId: item.entry.id, pageId })
+      } catch (error) {
+        outcome.failed.push({ entryId: item.entry.id, message: error instanceof Error ? error.message : '保存失败' })
+      }
+      onProgress(index + 1, items.length)
+    }
+    await reloadWorkspace()
+    return outcome
+  }
 
   const openDailyNote = async () => {
     const now = new Date()
@@ -1340,6 +1395,20 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         await renameNotebook(renameRequest.id, name)
         setRenameRequest(undefined)
       }} />}
+      {inbox.entries && <InboxDialog
+        entries={inbox.entries}
+        onEntriesChange={inbox.setEntries}
+        pages={accessiblePages}
+        notebooks={notebooks.filter((notebook) => !notebook.locked || privacyUnlocked)}
+        tags={tags.map((tag) => tag.name)}
+        htmlToMarkdown={(html) => documentToMarkdown(htmlToDocument(html))}
+        onReadClipboard={window.notebookDesktop?.clipboard.snapshot ? inbox.readClipboardNow : undefined}
+        onPickFiles={() => void inbox.pickFiles()}
+        onFile={fileInbox}
+        onOpenPage={(pageId) => { inbox.close(); setAssistant(undefined); setBrowse('tree'); openRecentPage(pageId) }}
+        onClose={inbox.close}
+        openAISettings={() => { setSettingsPage('services'); setSettingsOpen(true) }}
+      />}
       {textImport && <ImportDialog
         files={textImport.files}
         pages={accessiblePages}

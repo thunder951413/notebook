@@ -50,6 +50,10 @@ pub struct AppState {
     quit_in_progress: AtomicBool,
     zoom: Mutex<f64>,
     updater: updater::Updater,
+    /// The user's global shortcut for the AI inbox (None = not bound).
+    inbox_shortcut: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>>,
+    /// Files opened with Notebook (Dock icon, Finder "Open With") not yet taken by the renderer.
+    inbox_pending: Mutex<Vec<std::path::PathBuf>>,
 }
 
 pub(crate) type CommandResult<T> = Result<T, String>;
@@ -290,6 +294,138 @@ fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// AI inbox: a global shortcut and the Dock icon both open a drop window in
+// the renderer, which reads files handed to the app here.
+
+fn quick_capture_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN)
+}
+
+/// `source`: "shortcut" and "menu" also read the clipboard; "open" only takes opened files.
+fn open_inbox(app: &AppHandle, source: &str) {
+    show_main(app);
+    let _ = app.emit_to(MAIN, "notebook:inbox", source);
+}
+
+/// Binds (or with `None` unbinds) the inbox shortcut, e.g. "Control+Alt+KeyN".
+#[tauri::command]
+fn inbox_shortcut_set(app: AppHandle, state: State<'_, AppState>, accelerator: Option<String>) -> CommandResult<()> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    let next = match accelerator.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Some(value.parse::<Shortcut>().map_err(|error| format!("无法识别这个快捷键：{error}"))?),
+        None => None,
+    };
+    let mut current = state.inbox_shortcut.lock().unwrap();
+    if *current == next {
+        return Ok(());
+    }
+    let shortcuts = app.global_shortcut();
+    if let Some(next) = next {
+        if next == quick_capture_shortcut() {
+            return Err("这个快捷键已经用于快速记录（⇧⌘N）".into());
+        }
+        shortcuts.register(next).map_err(|error| format!("快捷键无法注册，可能已被其他应用占用：{error}"))?;
+    }
+    if let Some(previous) = *current {
+        let _ = shortcuts.unregister(previous);
+    }
+    *current = next;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn notebook_pasteboard_file_paths() -> *mut std::os::raw::c_char;
+    fn notebook_pasteboard_string(kind: *const std::os::raw::c_char) -> *mut std::os::raw::c_char;
+    fn notebook_pasteboard_change_count() -> std::os::raw::c_long;
+    fn notebook_free_string(value: *mut std::os::raw::c_char);
+}
+
+#[cfg(target_os = "macos")]
+fn take_c_string(pointer: *mut std::os::raw::c_char) -> Option<String> {
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: the pointer comes from strdup in native/pasteboard.m and is freed exactly once here.
+    let value = unsafe { std::ffi::CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
+    unsafe { notebook_free_string(pointer) };
+    Some(value)
+}
+
+fn read_paths(paths: Vec<std::path::PathBuf>) -> (Vec<PickedFile>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && (meta.len() as usize) <= MAX_FILE_BYTES => match std::fs::read(&path) {
+                Ok(data) => files.push(PickedFile { name, data_base64: base64::engine::general_purpose::STANDARD.encode(data) }),
+                Err(error) => skipped.push(format!("{name}: {error}")),
+            },
+            Ok(meta) if meta.is_file() => skipped.push(format!("{name}: 超过 100 MB")),
+            Ok(_) => skipped.push(format!("{name}: 是文件夹")),
+            Err(error) => skipped.push(format!("{name}: {error}")),
+        }
+    }
+    (files, skipped)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardSnapshot {
+    /// Changes whenever anything is copied; lets the renderer skip what it already took.
+    change_count: i64,
+    files: Vec<PickedFile>,
+    /// Folders and unreadable files among the copied items.
+    skipped: Vec<String>,
+    image: Option<ClipboardImage>,
+    html: Option<String>,
+    text: Option<String>,
+}
+
+/// What is copied right now: Finder files, an image, HTML and/or text.
+#[tauri::command]
+async fn clipboard_snapshot(app: AppHandle) -> CommandResult<ClipboardSnapshot> {
+    #[cfg(target_os = "macos")]
+    let (change_count, paths, html, text) = tauri::async_runtime::spawn_blocking(|| unsafe {
+        let paths = take_c_string(notebook_pasteboard_file_paths()).map(|value| value.lines().map(std::path::PathBuf::from).collect::<Vec<_>>()).unwrap_or_default();
+        let html = take_c_string(notebook_pasteboard_string(c"public.html".as_ptr()));
+        let text = take_c_string(notebook_pasteboard_string(c"public.utf8-plain-text".as_ptr()));
+        (notebook_pasteboard_change_count() as i64, paths, html, text)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let (change_count, paths, html, text): (i64, Vec<std::path::PathBuf>, Option<String>, Option<String>) = (0, Vec::new(), None, app.clipboard().read_text().ok());
+    let (files, skipped) = if paths.is_empty() { (Vec::new(), Vec::new()) } else { tauri::async_runtime::spawn_blocking(move || read_paths(paths)).await.map_err(|e| e.to_string())? };
+    // Copied files also put their names on the pasteboard as text; the files are what matters.
+    let copied_files = !files.is_empty() || !skipped.is_empty();
+    let image = if copied_files { None } else { clipboard_read_image(app.clone()) };
+    Ok(ClipboardSnapshot {
+        change_count,
+        files,
+        skipped,
+        image,
+        html: if copied_files { None } else { html.filter(|value| !value.trim().is_empty() && value.len() <= MAX_FILE_BYTES) },
+        text: if copied_files { None } else { text.filter(|value| !value.trim().is_empty() && value.len() <= MAX_FILE_BYTES) },
+    })
+}
+
+/// Files opened with the app since the last call (read once, then forgotten).
+#[tauri::command]
+async fn inbox_take(app: AppHandle) -> CommandResult<Vec<PickedFile>> {
+    let paths: Vec<std::path::PathBuf> = std::mem::take(&mut *app.state::<AppState>().inbox_pending.lock().unwrap());
+    let read = tauri::async_runtime::spawn_blocking(move || read_paths(paths))
+    .await
+    .map_err(|e| e.to_string())?;
+    if !read.1.is_empty() {
+        record(&app, EventInput::new("warning", "data", "inbox-open", "failed").message(read.1.join("; ")));
+    }
+    Ok(read.0)
 }
 
 #[tauri::command]
@@ -670,6 +806,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &MenuItem::with_id(app, "quick-capture", "快速记录（⇧⌘N）", true, None::<&str>)?,
+            &MenuItem::with_id(app, "inbox", "AI 收纳文件…", true, None::<&str>)?,
             &separator()?,
             &MenuItem::with_id(app, "close-window", "关闭窗口", true, Some("CmdOrCtrl+W"))?,
         ],
@@ -721,6 +858,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         app,
         &[
             &MenuItem::with_id(app, "quick-capture", "快速记录", true, None::<&str>)?,
+            &MenuItem::with_id(app, "inbox", "AI 收纳剪贴板…", true, None::<&str>)?,
             &MenuItem::with_id(app, "open-main", "打开 Notebook", true, None::<&str>)?,
             &MenuItem::with_id(app, "check-updates", "检查更新…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -763,6 +901,7 @@ fn on_menu(app: &AppHandle, id: &str) {
             show_main(app);
             let _ = app.emit_to(MAIN, "notebook:quick-capture", ());
         }
+        "inbox" => open_inbox(app, "menu"),
         "command-palette" => {
             show_main(app);
             let _ = app.emit_to(MAIN, "notebook:command-palette", ());
@@ -832,6 +971,8 @@ pub fn run() {
                 quit_in_progress: AtomicBool::new(false),
                 zoom: Mutex::new(1.0),
                 updater: updater::Updater::new(version.clone()),
+                inbox_shortcut: Mutex::new(None),
+                inbox_pending: Mutex::new(Vec::new()),
             });
             record(&handle, EventInput::new("info", "app", "started", "success").message(format!("Notebook {version} · Tauri {} · {} {}", tauri::VERSION, std::env::consts::OS, std::env::consts::ARCH)));
 
@@ -840,13 +981,18 @@ pub fn run() {
 
             // Global quick capture, as in the Electron app.
             {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-                let capture = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN);
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                let capture = quick_capture_shortcut();
                 handle.plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
-                            if event.state() == ShortcutState::Pressed && *shortcut == capture {
+                            if event.state() != ShortcutState::Pressed {
+                                return;
+                            }
+                            if *shortcut == capture {
                                 on_menu(app, "quick-capture");
+                            } else if *app.state::<AppState>().inbox_shortcut.lock().unwrap() == Some(*shortcut) {
+                                open_inbox(app, "shortcut");
                             }
                         })
                         .build(),
@@ -923,6 +1069,9 @@ pub fn run() {
             automation::automation_configure,
             automation::automation_regenerate_token,
             automation::automation_respond,
+            inbox_shortcut_set,
+            inbox_take,
+            clipboard_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Notebook");
@@ -933,6 +1082,15 @@ pub fn run() {
             if code.is_none() && !app.state::<AppState>().quitting.load(Ordering::SeqCst) {
                 api.prevent_exit();
                 request_quit(app);
+            }
+        }
+        // Files dropped on the Dock icon or opened with Notebook go to the AI inbox.
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        RunEvent::Opened { urls } => {
+            let paths: Vec<_> = urls.iter().filter_map(|url| url.to_file_path().ok()).collect();
+            if !paths.is_empty() {
+                app.state::<AppState>().inbox_pending.lock().unwrap().extend(paths);
+                open_inbox(app, "open");
             }
         }
         #[cfg(target_os = "macos")]

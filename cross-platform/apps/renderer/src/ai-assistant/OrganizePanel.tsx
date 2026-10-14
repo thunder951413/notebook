@@ -36,9 +36,9 @@ export interface PlanPanelProps {
   onNeedsSetup(): void
 }
 
-/** Notes that can be reorganized: no tasks, private notes or notebook roots. */
+/** Notes that can be reorganized: no tasks or private notes. (Top-level pages are tagged, rewritten or split, never moved or merged.) */
 export function organizablePages(pages: PageSummary[]) {
-  return pages.filter((page) => page.kind !== 'task' && !page.locked && !page.notebookRoot)
+  return pages.filter((page) => page.kind !== 'task' && !page.locked)
 }
 
 export async function loadOrganizeNotes(scoped: PageSummary[], pages: PageSummary[], notebooks: NotebookSummary[], loadMarkdown: (pageId: string) => Promise<string | undefined>, signal: AbortSignal): Promise<OrganizeNote[]> {

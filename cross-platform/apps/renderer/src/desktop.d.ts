@@ -26,6 +26,12 @@ declare global {
       notifications: { show(title: string, body: string): Promise<boolean> }
       /** Dock badge (Tauri shell); absent in Electron. */
       badge?: { set(count: number): Promise<void> }
+      /** AI inbox (Tauri shell): files opened with the app, and its global shortcut. */
+      inbox?: {
+        take(): Promise<Array<{ name: string; dataBase64: string }>>
+        /** e.g. "Control+Alt+KeyN"; null unbinds. Rejects when the system refuses it. */
+        setShortcut(accelerator: string | null): Promise<void>
+      }
       /** One-time settings hand-over from the old Electron app (Tauri shell). */
       legacy?: { take(): Promise<{ webdav?: { baseUrl: string; username: string; remotePath: string }; appPassword?: string; syncPassword?: string; githubToken?: string } | undefined> }
       external: { open(url: string): Promise<void> }
@@ -36,6 +42,15 @@ declare global {
       }
       clipboard: {
         readImage(): Promise<{ name: string; mimeType: string; dataBase64: string } | undefined>
+        /** Everything copied right now: Finder files, image, HTML, text (Tauri shell). */
+        snapshot?(): Promise<{
+          changeCount: number
+          files: Array<{ name: string; dataBase64: string }>
+          skipped: string[]
+          image?: { name: string; mimeType: string; dataBase64: string } | null
+          html?: string | null
+          text?: string | null
+        }>
       }
       secrets: {
         set(key: string, value: string): Promise<void>
@@ -104,6 +119,8 @@ declare global {
         onQuickCapture(callback: () => void): () => void
         onCommandPalette(callback: () => void): () => void
         onUpdateCenter(callback: () => void): () => void
+        /** Global shortcut, menu item or files opened with the app (Tauri shell). */
+        onInbox?(callback: (source: 'shortcut' | 'menu' | 'open') => void): () => void
         onFlushRequested(callback: () => void | Promise<void>): () => void
       }
     }

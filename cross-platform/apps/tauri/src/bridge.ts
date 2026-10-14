@@ -59,6 +59,7 @@ const legacyUnavailable = () => Promise.reject(new Error('新版桌面应用不�
 const onQuickCapture = channel<null>('notebook:quick-capture')
 const onCommandPalette = channel<null>('notebook:command-palette')
 const onUpdateCenter = channel<null>('notebook:update-center')
+const onInbox = channel<'shortcut' | 'menu' | 'open'>('notebook:inbox')
 const onUpdateState = channel<UpdateState>('notebook:update-state')
 const onAutomationRequest = channel<AutomationRequest>('notebook:automation-request')
 
@@ -74,8 +75,13 @@ const api: Desktop = Object.freeze({
     pickOpen: () => call<Array<{ name: string; dataBase64: string }>>('files_pick_open'),
     pickSave: (suggestedName: string, dataBase64: string) => call<boolean>('files_pick_save', { suggestedName, dataBase64 }),
   },
+  inbox: {
+    take: () => call<Array<{ name: string; dataBase64: string }>>('inbox_take'),
+    setShortcut: (accelerator: string | null) => call<void>('inbox_shortcut_set', { accelerator }),
+  },
   clipboard: {
     readImage: async () => (await call<{ name: string; mimeType: string; dataBase64: string } | null>('clipboard_read_image')) ?? undefined,
+    snapshot: () => call<NonNullable<Awaited<ReturnType<NonNullable<Desktop['clipboard']['snapshot']>>>>>('clipboard_snapshot'),
   },
   secrets: {
     set: (key: string, value: string) => call<void>('secrets_set', { key, value }),
@@ -141,6 +147,7 @@ const api: Desktop = Object.freeze({
     onQuickCapture: (callback: () => void) => onQuickCapture(() => callback()),
     onCommandPalette: (callback: () => void) => onCommandPalette(() => callback()),
     onUpdateCenter: (callback: () => void) => onUpdateCenter(() => callback()),
+    onInbox: (callback: (source: 'shortcut' | 'menu' | 'open') => void) => onInbox((source) => callback(source)),
     onFlushRequested: (callback: () => void | Promise<void>) => {
       flushCallbacks.add(callback)
       return () => { flushCallbacks.delete(callback) }
