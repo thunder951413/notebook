@@ -2449,11 +2449,10 @@ dependencies = [
  "chrono",
  "hex",
  "keyring",
- "percent-encoding",
+ "notebook-sync",
  "png 0.17.16",
  "regex",
  "reqwest 0.12.28",
- "roxmltree",
  "serde",
  "serde_json",
  "sha2",
@@ -2466,13 +2465,31 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
- "tiny_http",
  "tokio",
  "tokio-util",
  "url",
  "uuid",
 ]
 
+
+[[package]]
+name = "notebook-sync"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "percent-encoding",
+ "regex",
+ "reqwest 0.12.28",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tiny_http",
+ "tokio",
+ "url",
+]
 [[package]]
 name = "notify-rust"
 version = "4.18.2"

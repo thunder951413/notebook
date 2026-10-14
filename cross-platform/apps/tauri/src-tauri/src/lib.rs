@@ -9,7 +9,7 @@ mod ai;
 mod diagnostics;
 mod secrets;
 mod updater;
-mod webdav;
+use notebook_sync::webdav;
 
 use std::collections::HashMap;
 use std::future::Future;

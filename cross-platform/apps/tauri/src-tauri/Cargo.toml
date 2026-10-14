@@ -22,6 +22,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
+notebook-sync = { path = "../../../crates/notebook-sync" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 reqwest = { version = "0.12", features = ["json"] }
@@ -30,17 +31,12 @@ tokio-util = "0.7"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-roxmltree = "0.20"
 regex = "1"
 url = "2"
-percent-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 png = "0.17"
 keyring = { version = "3", features = ["apple-native"] }
-
-[dev-dependencies]
-tiny_http = "0.12"
 
 [profile.release]
 codegen-units = 1

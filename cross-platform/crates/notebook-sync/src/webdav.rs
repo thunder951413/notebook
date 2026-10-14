@@ -135,15 +135,15 @@ pub struct PushResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct JournalHead {
-    version: u64,
-    device_id: String,
-    last_seq: u64,
-    journal_bytes: u64,
-    journal_sha256: String,
-    updated_at: String,
-    state_entries: u64,
-    history_entries: u64,
+pub struct JournalHead {
+    pub version: u64,
+    pub device_id: String,
+    pub last_seq: u64,
+    pub journal_bytes: u64,
+    pub journal_sha256: String,
+    pub updated_at: String,
+    pub state_entries: u64,
+    pub history_entries: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-fn entry_seq(entry: &Entry) -> u64 {
+pub fn entry_seq(entry: &Entry) -> u64 {
     match entry.get("seq") {
         Some(value) => value.as_u64().or_else(|| value.as_f64().filter(|v| *v >= 0.0).map(|v| v as u64)).unwrap_or(0),
         None => 0,
@@ -213,21 +213,20 @@ fn invalidate_all(namespace: &str) {
     HEADS.lock().unwrap().invalidate(namespace);
 }
 
+/// Repository path relative to the WebDAV root (fixture: `remote-path.json`).
+/// Empty and `.` segments are dropped; `..`, absolute paths and control
+/// characters are rejected outright rather than resolved.
 pub fn safe_remote_path(value: &str) -> DavResult<String> {
     let unsafe_path = || DavError::new(format!("远端同步目录不安全：{value}"));
     let normalized = value.trim().replace('\\', "/");
-    if normalized.starts_with('/') || normalized.contains('\0') {
+    if normalized.starts_with('/') || normalized.chars().any(char::is_control) {
         return Err(unsafe_path());
     }
     let mut parts: Vec<&str> = Vec::new();
     for segment in normalized.split('/') {
         match segment {
             "" | "." => continue,
-            ".." => {
-                if parts.pop().is_none() {
-                    return Err(unsafe_path());
-                }
-            }
+            ".." => return Err(unsafe_path()),
             other => parts.push(other),
         }
     }
@@ -269,13 +268,13 @@ fn strong_etag(value: Option<&str>) -> Option<String> {
 
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
 
-fn journal_path(root: &str, device: &str) -> String {
+pub fn journal_path(root: &str, device: &str) -> String {
     format!("{root}/journal/{device}.jsonl")
 }
-fn journal_head_path(root: &str, device: &str) -> String {
+pub fn journal_head_path(root: &str, device: &str) -> String {
     format!("{root}/journal/{device}.head.json")
 }
-fn object_path(root: &str, hash: &str) -> String {
+pub fn object_path(root: &str, hash: &str) -> String {
     format!("{root}/objects/{}/{hash}", &hash[..2])
 }
 fn dirname(path: &str) -> &str {
@@ -513,29 +512,50 @@ async fn put_with_directory(dav: &Dav, connection: &Connection, path: &str, data
 // ---------------------------------------------------------------------------
 // Journal format
 
-/// Parse a journal file body into entries, tolerating a trailing newline.
-fn parse_journal(text: &str, device: &str) -> DavResult<Vec<Entry>> {
+/// Parse a journal file body into entries, tolerating blank lines and CRLF
+/// (fixture: `journal-parse.json`). Every record must carry a non-negative
+/// integer `seq`, `op` upsert|delete, non-empty `type`/`id` and an object
+/// `payload`; one malformed record rejects the whole journal.
+pub fn parse_journal(text: &str, device: &str) -> DavResult<Vec<Entry>> {
     let mut entries = Vec::new();
     for (index, line) in text.split('\n').enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let entry: Entry = serde_json::from_str(trimmed).map_err(|error| DavError::new(format!("远端日志 {device}.jsonl 第 {} 行格式不正确：{error}", index + 1)))?;
+        let invalid = |detail: &str| DavError::new(format!("远端日志 {device}.jsonl 第 {} 行格式不正确：{detail}", index + 1));
+        let entry: Entry = serde_json::from_str(trimmed).map_err(|error| invalid(&error.to_string()))?;
+        if !entry.get("seq").is_some_and(|value| value.as_u64().is_some_and(|seq| seq <= 9_007_199_254_740_991)) {
+            return Err(invalid("seq"));
+        }
+        if !matches!(entry.get("op").and_then(Value::as_str), Some("upsert" | "delete")) {
+            return Err(invalid("op"));
+        }
+        for key in ["type", "id"] {
+            if !entry.get(key).and_then(Value::as_str).is_some_and(|value| !value.is_empty()) {
+                return Err(invalid(key));
+            }
+        }
+        if !entry.get("payload").is_some_and(Value::is_object) {
+            return Err(invalid("payload"));
+        }
+        if entry.get("ver").is_some_and(|value| !value.is_null() && value.as_u64().is_none()) {
+            return Err(invalid("ver"));
+        }
         entries.push(entry);
     }
     Ok(entries)
 }
 
-struct Compacted {
-    entries: Vec<Entry>,
-    state_entries: usize,
-    history_entries: usize,
+pub struct Compacted {
+    pub entries: Vec<Entry>,
+    pub state_entries: usize,
+    pub history_entries: usize,
 }
 
 /// Keep only the latest record per entity, preserving original seq values, so
 /// other devices' per-device read cursors stay valid after the file shrinks.
-fn compact_journal(entries: Vec<Entry>) -> Compacted {
+pub fn compact_journal(entries: Vec<Entry>) -> Compacted {
     let mut state: HashMap<String, Entry> = HashMap::new();
     let mut revisions: HashMap<String, Entry> = HashMap::new();
     for entry in entries {
@@ -569,7 +589,7 @@ fn compact_journal(entries: Vec<Entry>) -> Compacted {
     Compacted { entries: all, state_entries, history_entries }
 }
 
-fn build_head(device: &str, body: &str, entries: &[Entry], state_entries: usize, history_entries: usize) -> JournalHead {
+pub fn build_head(device: &str, body: &str, entries: &[Entry], state_entries: usize, history_entries: usize) -> JournalHead {
     JournalHead {
         version: 1,
         device_id: device.to_string(),
@@ -582,7 +602,7 @@ fn build_head(device: &str, body: &str, entries: &[Entry], state_entries: usize,
     }
 }
 
-fn parse_head(text: &str, device: &str) -> DavResult<JournalHead> {
+pub fn parse_head(text: &str, device: &str) -> DavResult<JournalHead> {
     if text.len() > MAX_HEAD_BYTES {
         return Err(DavError::new(format!("远端日志 {device}.head.json 超过 64 KiB 上限")));
     }
@@ -605,6 +625,61 @@ fn parse_head(text: &str, device: &str) -> DavResult<JournalHead> {
         return Err(invalid());
     }
     Ok(head)
+}
+
+/// What a reader exposes from one peer journal (fixture: `committed-view.json`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommittedView {
+    /// Cursor after a detected reset (0) or the unchanged cursor.
+    pub known: u64,
+    /// The journal moved behind the cursor; the caller must reset it.
+    pub reset: bool,
+    /// The commit marker does not describe these exact bytes.
+    pub mismatch: bool,
+    /// Sequence numbers to expose, in journal order.
+    pub seqs: Vec<u64>,
+}
+
+/// Before downloading a journal: returns the effective cursor, whether it was
+/// reset by the marker, and whether the journal must be fetched at all.
+pub fn plan_journal_read(head: Option<&JournalHead>, known: u64) -> (u64, bool, bool) {
+    match head {
+        Some(head) if head.last_seq < known => (0, true, true),
+        Some(head) => (known, false, known < head.last_seq),
+        None => (known, false, true),
+    }
+}
+
+/// Selects the committed, unread records of a downloaded journal.
+pub fn committed_view(journal: &[Entry], text: &str, head: Option<&JournalHead>, known: u64) -> CommittedView {
+    let journal_last_seq = journal.iter().map(entry_seq).max().unwrap_or(0);
+    let (mut known, mut reset) = (known, false);
+    if head.is_none() && journal_last_seq < known {
+        known = 0;
+        reset = true;
+    }
+    let mismatch = head.is_some_and(|head| text.len() as u64 != head.journal_bytes || !sha256_hex(text.as_bytes()).eq_ignore_ascii_case(&head.journal_sha256));
+    let seqs = journal
+        .iter()
+        .map(entry_seq)
+        .filter(|seq| *seq > known && head.is_none_or(|head| *seq <= head.last_seq))
+        .collect();
+    CommittedView { known, reset, mismatch, seqs }
+}
+
+/// Pulled records are applied per device (code point order), then by seq
+/// (fixture: `pull-order.json`).
+pub fn sort_pulled_entries(entries: &mut [Entry]) {
+    entries.sort_by(|left, right| {
+        let left_device = text_field(left, "deviceId");
+        let right_device = text_field(right, "deviceId");
+        left_device.cmp(&right_device).then_with(|| entry_seq(left).cmp(&entry_seq(right)))
+    });
+}
+
+/// Child base names of a PROPFIND multistatus body (fixture: `propfind-listing.json`).
+pub fn listing_names(text: &str) -> DavResult<Vec<String>> {
+    Ok(parse_multistatus(text)?.into_iter().map(|item| item.name).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -687,20 +762,19 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
                     Err(error) => return Err(error),
                 },
             }
-            // A marker behind our cursor means the journal was deleted and
-            // recreated; skipping it would hide every new record, so re-read.
-            if let Some(head) = &head {
-                if head.last_seq < known {
-                    reset_devices.push(device.clone());
-                    warnings.push(format!("{device} 的远端序号从 {known} 回退到 {}，已重新读取", head.last_seq));
-                    known = 0;
-                }
-                // The marker is the commit point: never fetch the large journal
-                // merely to confirm a sequence we already consumed.
-                if known >= head.last_seq {
-                    continue;
-                }
-            }
+        }
+        // A marker behind our cursor means the journal was deleted and
+        // recreated; skipping it would hide every new record, so re-read. The
+        // marker is the commit point: never fetch the large journal merely to
+        // confirm a sequence we already consumed.
+        let (planned_known, marker_reset, fetch) = plan_journal_read(head.as_ref(), known);
+        if marker_reset {
+            reset_devices.push(device.clone());
+            warnings.push(format!("{device} 的远端序号从 {known} 回退到 {}，已重新读取", head.as_ref().map_or(0, |head| head.last_seq)));
+        }
+        known = planned_known;
+        if !fetch {
+            continue;
         }
         let text = match dav.get_text(&journal_path(&root, device), MAX_LOG_BYTES + 1).await {
             Ok((text, _)) => text,
@@ -712,32 +786,26 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
         }
         let journal = parse_journal(&text, device)?;
         let journal_last_seq = journal.iter().map(entry_seq).max().unwrap_or(0);
-        if head.is_none() && journal_last_seq < known {
+        let view = committed_view(&journal, &text, head.as_ref(), known);
+        if view.reset {
             reset_devices.push(device.clone());
             warnings.push(format!("{device} 的远端日志序号从 {known} 回退到 {journal_last_seq}，已重新读取"));
-            known = 0;
         }
-        if let Some(head) = &head {
-            if text.len() as u64 != head.journal_bytes || sha256_hex(text.as_bytes()) != head.journal_sha256 {
-                // The journal PUT succeeded but its marker PUT did not. Every row
-                // is still a complete record, so only the committed range is used.
-                warnings.push(format!("{device} 的日志与提交标记不一致（日志序号 {journal_last_seq}，标记 {}），仅读取已提交部分", head.last_seq));
-            }
+        if view.mismatch {
+            // The journal PUT succeeded but its marker PUT did not. Every row
+            // is still a complete record, so only the committed range is used.
+            warnings.push(format!("{device} 的日志与提交标记不一致（日志序号 {journal_last_seq}，标记 {}），仅读取已提交部分", head.as_ref().map_or(0, |head| head.last_seq)));
         }
+        let visible: HashSet<u64> = view.seqs.into_iter().collect();
         for mut entry in journal {
-            let seq = entry_seq(&entry);
-            if seq <= known || head.as_ref().is_some_and(|head| seq > head.last_seq) {
+            if !visible.contains(&entry_seq(&entry)) {
                 continue;
             }
             entry.insert("deviceId".to_string(), Value::String(device.clone()));
             entries.push(entry);
         }
     }
-    entries.sort_by(|left, right| {
-        let left_device = text_field(left, "deviceId");
-        let right_device = text_field(right, "deviceId");
-        left_device.cmp(&right_device).then_with(|| entry_seq(left).cmp(&entry_seq(right)))
-    });
+    sort_pulled_entries(&mut entries);
     Ok(PullResult {
         entries,
         fingerprint: format!("{}|{}|{}", connection.base_url.trim(), connection.username.trim(), root),
