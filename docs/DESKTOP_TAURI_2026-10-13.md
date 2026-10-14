@@ -8,7 +8,7 @@
 | 主进程内存 | 约 66 MB（另有 3 个辅助进程） | 约 33 MB（界面由系统 WebKit 承载） |
 | 毛玻璃 | CSS 模拟 | 系统原生 vibrancy + CSS 玻璃 |
 
-界面代码（`apps/renderer`）两个外壳共用；Electron 版仍可构建，作为后备保留。
+界面代码（`apps/renderer`）两个外壳共用。**Tauri 是桌面主壳；Electron 版已废弃（2026-10-14 起进入淘汰期）**：只修严重问题、不再加功能，CI 默认产物改为 Tauri，Electron 只在手动触发或 `v*` 标签时打包。代码暂时保留以便回退。
 
 ## 结构
 
@@ -18,8 +18,9 @@ apps/tauri/
   src/bridge.ts              用 Tauri 命令实现 window.notebookDesktop（与 Electron preload 同一接口）
   src-tauri/
     src/lib.rs               窗口、菜单、快捷键、安全退出、所有命令
-    src/webdav.rs            WebDAV v4 日志协议（逐行移植自 apps/desktop/src/main/webdav.ts）
-    src/webdav/tests.rs      17 项测试，跑在内存 WebDAV 服务器上
+    src/automation.rs        本地 AI 自动化接口的 Tauri 接线（事件转发、钥匙串令牌）
+crates/notebook-sync/        WebDAV v4 日志协议（与 Tauri 无关，任何平台可测）+ 共享 fixtures runner
+crates/notebook-automation/  本地自动化 HTTP 接口（127.0.0.1 + Bearer Token），移植自 Electron automationServer.ts
     src/secrets.rs           钥匙串：所有凭据存在一个条目里（JSON）
     src/diagnostics.rs       诊断日志 ~/Library/Logs/io.github.notebook.desktop/
     src/ai.rs                AI 请求代理（API Key 不进入网页进程）
@@ -34,7 +35,24 @@ apps/tauri/
 - **数据位置**：笔记库在 `~/Library/WebKit/io.github.notebook.desktop`（WebKit IndexedDB）。新安装不放示例笔记，连接坚果云后自动恢复。
 - **Dock 角标**：显示已逾期 + 今天到期的待办数。
 
-暂未移植：本地 AI 接口（automation）、旧版 SSH/SFTP 同步、菜单栏图标。全局快速记录 ⇧⌘N 可用。
+## 与 Electron 版的功能对照（2026-10-14）
+
+| 功能 | Electron | Tauri | 说明 |
+| --- | --- | --- | --- |
+| 坚果云 WebDAV 同步 | ✓ | ✓ | 协议由 `SyncContractFixtures/webdav-v4` 三端共测 |
+| 安全退出 / 保存握手 / 草稿 | ✓ | ✓ | |
+| 钥匙串凭据、AI Key 隔离 | ✓ | ✓ | |
+| 诊断日志、导出 | ✓ | ✓ | |
+| 自动更新 | ✓ | ✓ | Tauri 用自带下载器 + SHA-256 |
+| Dock 角标、通知、全局快速记录 ⇧⌘N | ✓ | ✓ | |
+| Vim 模式切换 ABC 输入法 | ✓ | ✓ | |
+| 本地 AI 自动化接口（`/v1/pages`、`/v1/proposals`） | ✓ | ✓（本次补齐） | 同一路由、令牌、错误码；令牌存钥匙串，配置在 `automation-api.v1.json` |
+| 菜单栏图标（快速记录 / 打开 / 检查更新 / 退出） | ✓ | ✓（本次补齐） | |
+| Windows / Linux 安装包 | ✓ | ✗ | Tauri 版目前只发布 macOS arm64；跨平台是删除 Electron 的前提 |
+| 更换数据目录 | ✓ | ✗（不计划） | 数据在 WebKit IndexedDB，由系统管理 |
+| 旧版 SSH/SFTP 同步 | ✓ | ✗（不计划） | 只用于旧仓库迁移；需要时临时用 Electron 版导入后改用 WebDAV |
+
+全局快速记录 ⇧⌘N 可用。
 
 ## 新界面
 

@@ -55,7 +55,9 @@ jobs:
         working-directory: cross-platform
         run: |
           pnpm --filter @notebook/renderer test
-          (cd apps/tauri && pnpm exec tsc --noEmit -p .)
+          (cd apps/tauri && pnpm exec tsc --noEmit -p . && pnpm test)
+          cargo test --manifest-path crates/notebook-sync/Cargo.toml
+          cargo test --manifest-path crates/notebook-automation/Cargo.toml
           (cd apps/tauri/src-tauri && cargo test)
       - name: Build Notebook.app
         working-directory: cross-platform/apps/tauri
