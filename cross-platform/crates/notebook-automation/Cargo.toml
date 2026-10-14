@@ -1,0 +1,17 @@
+[package]
+name = "notebook-automation"
+version = "0.1.0"
+description = "Local automation API (loopback HTTP, bearer token) that forwards requests to the Notebook renderer; no Tauri dependency."
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tiny_http = "0.12"
+base64 = "0.22"
+getrandom = "0.2"
+url = "2"
+percent-encoding = "2"
+uuid = { version = "1", features = ["v4"] }

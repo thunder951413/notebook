@@ -10,6 +10,8 @@ import { listen } from '@tauri-apps/api/event'
 
 type Desktop = NonNullable<Window['notebookDesktop']>
 type UpdateState = Awaited<ReturnType<Desktop['updates']['getState']>>
+type AutomationState = Awaited<ReturnType<Desktop['automation']['getState']>>
+type AutomationRequest = Parameters<Parameters<Desktop['automation']['onRequest']>[0]>[0]
 type LegacyImport = NonNullable<Awaited<ReturnType<NonNullable<Desktop['legacy']>['take']>>>
 
 
@@ -52,13 +54,13 @@ void listen<string>('notebook:flush-request', ({ payload: requestId }) => {
   )
 })
 
-const automationUnavailable = () => Promise.reject(new Error('新版桌面应用暂不提供本地 AI 接口'))
 const legacyUnavailable = () => Promise.reject(new Error('新版桌面应用不再支持旧版 SSH/SFTP 同步，请使用坚果云 WebDAV 同步'))
 
 const onQuickCapture = channel<null>('notebook:quick-capture')
 const onCommandPalette = channel<null>('notebook:command-palette')
 const onUpdateCenter = channel<null>('notebook:update-center')
 const onUpdateState = channel<UpdateState>('notebook:update-state')
+const onAutomationRequest = channel<AutomationRequest>('notebook:automation-request')
 
 const api: Desktop = Object.freeze({
   platform: 'darwin',
@@ -100,11 +102,11 @@ const api: Desktop = Object.freeze({
     reveal: () => call<void>('diagnostics_reveal'),
   },
   automation: {
-    getState: async () => ({ enabled: false, port: 0, baseUrl: '', rendererReady: true }),
-    configure: automationUnavailable,
-    regenerateToken: automationUnavailable,
-    onRequest: () => () => undefined,
-    respond: () => undefined,
+    getState: () => call<AutomationState>('automation_state'),
+    configure: (enabled: boolean, port: number) => call<AutomationState>('automation_configure', { enabled, port }),
+    regenerateToken: () => call<AutomationState>('automation_regenerate_token'),
+    onRequest: (callback) => onAutomationRequest(callback),
+    respond: (response) => { void call<void>('automation_respond', { response }).catch(() => undefined) },
   },
   ai: {
     complete: (request) => call<Awaited<ReturnType<Desktop['ai']['complete']>>>('ai_complete', { request }),

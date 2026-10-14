@@ -2449,6 +2449,7 @@ dependencies = [
  "chrono",
  "hex",
  "keyring",
+ "notebook-automation",
  "notebook-sync",
  "png 0.17.16",
  "regex",
@@ -2471,6 +2472,19 @@ dependencies = [
  "uuid",
 ]
 
+[[package]]
+name = "notebook-automation"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tiny_http",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "notebook-sync"
@@ -2486,10 +2500,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tiny_http",
  "tokio",
  "url",
 ]
+
 [[package]]
 name = "notify-rust"
 version = "4.18.2"

@@ -6,6 +6,7 @@
 //! that always lets the renderer save pending edits first.
 
 mod ai;
+mod automation;
 mod diagnostics;
 mod secrets;
 mod updater;
@@ -33,7 +34,7 @@ use diagnostics::{Diagnostics, EventInput};
 use secrets::Secrets;
 
 const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
-const MAIN: &str = "main";
+pub(crate) const MAIN: &str = "main";
 
 static REQUEST_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^[0-9a-f-]{36}$").unwrap());
 
@@ -51,13 +52,13 @@ pub struct AppState {
     updater: updater::Updater,
 }
 
-type CommandResult<T> = Result<T, String>;
+pub(crate) type CommandResult<T> = Result<T, String>;
 
-fn record(app: &AppHandle, event: EventInput) {
+pub(crate) fn record(app: &AppHandle, event: EventInput) {
     app.state::<AppState>().diagnostics.record(event);
 }
 
-fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+pub(crate) fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window(MAIN)
 }
 
@@ -137,6 +138,7 @@ fn request_quit(app: &AppHandle) {
         }
         record(&app, EventInput::new("info", "app", "stopped", "success"));
         app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+        automation::stop(&app);
         app.exit(0);
     });
 }
@@ -352,7 +354,7 @@ fn guard_secret_key(key: &str) -> CommandResult<()> {
     Ok(())
 }
 
-async fn blocking<T: Send + 'static>(app: &AppHandle, job: impl FnOnce(&AppState) -> CommandResult<T> + Send + 'static) -> CommandResult<T> {
+pub(crate) async fn blocking<T: Send + 'static>(app: &AppHandle, job: impl FnOnce(&AppState) -> CommandResult<T> + Send + 'static) -> CommandResult<T> {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || job(app.state::<AppState>().inner())).await.map_err(|e| e.to_string())?
 }
@@ -711,6 +713,35 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
 }
 
+/// Menu bar icon (as in the Electron app): quick capture, open, check for
+/// updates, quit. Menu events go through the global `on_menu` handler.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "quick-capture", "快速记录", true, None::<&str>)?,
+            &MenuItem::with_id(app, "open-main", "打开 Notebook", true, None::<&str>)?,
+            &MenuItem::with_id(app, "check-updates", "检查更新…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
+        ],
+    )?;
+    TrayIconBuilder::with_id("notebook-tray")
+        .icon(tauri::image::Image::from_bytes(include_bytes!("../../../renderer/public/notebook-trayTemplate@2x.png"))?)
+        .icon_as_template(true)
+        .tooltip("Notebook")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn set_zoom(app: &AppHandle, change: Option<f64>) {
     let state = app.state::<AppState>();
     let mut zoom = state.zoom.lock().unwrap();
@@ -726,6 +757,7 @@ fn set_zoom(app: &AppHandle, change: Option<f64>) {
 fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "quit" => request_quit(app),
+        "open-main" => show_main(app),
         "close-window" => hide_after_flush(app),
         "quick-capture" => {
             show_main(app);
@@ -787,6 +819,7 @@ pub fn run() {
                 .timeout(Duration::from_secs(120))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
+            app.manage(automation::Automation::default());
             app.manage(AppState {
                 http,
                 ai_http,
@@ -824,6 +857,8 @@ pub fn run() {
             }
 
             updater::start_background(handle.clone());
+            automation::initialize(&handle);
+            build_tray(&handle)?;
 
             // The window starts hidden and is shown once the renderer painted
             // (app_ready); this fallback covers a renderer that never reports.
@@ -884,6 +919,10 @@ pub fn run() {
             ai_key_set,
             ai_key_has,
             ai_key_delete,
+            automation::automation_state,
+            automation::automation_configure,
+            automation::automation_regenerate_token,
+            automation::automation_respond,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Notebook");
