@@ -15,7 +15,8 @@ test('three panes: sidebar collections, note list and editor', async () => {
   expect(await screen.findByLabelText('页面正文')).toBeInTheDocument()
   expect(screen.getByLabelText('页面标题')).toHaveValue('Notebook Next 产品愿景')
   expect(screen.getByRole('complementary', { name: '大纲与引用' })).toBeInTheDocument()
-  expect(screen.getByRole('region', { name: '页面大纲' })).toBeInTheDocument()
+  // The outline panel is lazily loaded.
+  expect(await screen.findByRole('region', { name: '页面大纲' })).toBeInTheDocument()
   expect(container.querySelector('.app-rail')).not.toBeInTheDocument()
 
   // Search: several words must all match; Escape clears.
@@ -321,7 +322,8 @@ test('three panes: sidebar collections, note list and editor', async () => {
   fireEvent.click(within(container.querySelector('.editor-actions') as HTMLElement).getByRole('button', { name: '大纲' }))
   expect(screen.queryByRole('region', { name: '页面大纲' })).not.toBeInTheDocument()
   fireEvent.click(within(container.querySelector('.editor-actions') as HTMLElement).getByRole('button', { name: '大纲' }))
-  expect(screen.getByRole('region', { name: '页面大纲' })).toBeInTheDocument()
+  // The outline panel is lazily loaded.
+  expect(await screen.findByRole('region', { name: '页面大纲' })).toBeInTheDocument()
 
   fireEvent.keyDown(window, { key: 'F11' })
   expect(container.querySelector('.app-shell')).toHaveClass('focus-mode')
