@@ -25,14 +25,23 @@ cross-platform/**/*.egg-info/
 *.xcuserstate
 xcuserdata/
 
-# Local files
+# Local files (any directory)
 .DS_Store
+._*
+default.profraw
 .vscode/
 .launchpad.json
 ctl
 
 # Local build artifacts and verification logs
 output/
+cross-platform/crates/*/target/
+
+# Local helpers that drive builds on this machine
+.agent-runner/
+
+# The web service moved to its own repository (../notebook-sub).
+/sub/
 
 # Android is maintained as a separate repository.
 notebook_android/
