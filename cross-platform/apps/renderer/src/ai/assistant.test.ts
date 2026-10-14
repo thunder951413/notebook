@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import type { NotebookSummary, PageSummary } from '../model'
-import { citedSources, emptyScope, mergedMarkdown, numberedContext, pagePath, parseSearchResults, resolveScope, scopeLabel, shiftHeadings } from './assistant'
+import { citedSources, emptyScope, exportMarkdown, exportTitle, mergedMarkdown, numberedContext, pagePath, parseSearchResults, resolveScope, scopeLabel, shiftHeadings } from './assistant'
 
 const page = (id: string, title: string, extra: Partial<PageSummary> = {}): PageSummary => ({ id, sectionId: 's1', title, preview: '', updatedLabel: '', tags: [], kind: 'document', ...extra })
 const notebooks: NotebookSummary[] = [
@@ -54,5 +54,15 @@ describe('merging and prompts', () => {
     expect(citedSources('见 [2] 和 [1][2]，以及 [10]')).toEqual([1, 2, 10])
     expect(parseSearchResults('结果：{"results":[{"index":3,"reason":"讲编译"},{"index":"x"}]}')).toEqual([{ index: 3, reason: '讲编译' }])
     expect(parseSearchResults('无法解析')).toEqual([])
+  })
+})
+
+describe('export', () => {
+  test('one section per answer with note links', () => {
+    expect(exportMarkdown([
+      { question: 'uboot 怎么编译？', answer: '先配置再编译 [1]', sources: [{ index: 1, pageId: 'a1', title: 'uboot|说明]', path: '工作' }] },
+      { question: '总结要点', answer: '要点', sources: [] },
+    ])).toBe('## uboot 怎么编译？\n\n先配置再编译 [1]\n\n来源：\n- [1] [[page:a1|uboot 说明\\]]]\n\n---\n\n## 总结要点\n\n要点\n')
+    expect(exportTitle([{ question: 'uboot 怎么编译？', answer: '', sources: [] }])).toBe('AI：uboot 怎么编译？')
   })
 })

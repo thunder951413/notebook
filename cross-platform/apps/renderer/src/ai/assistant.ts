@@ -213,3 +213,24 @@ export function scopeLabel(scope: AssistantScope, pages: PageSummary[], notebook
   if (!names.length) return '未选择'
   return names.length > 3 ? `${names.slice(0, 3).join('、')} 等 ${names.length} 项` : names.join('、')
 }
+
+export interface ExportItem { question: string; answer: string; sources: ContextSource[] }
+
+/**
+ * A note built from selected answers: one section per answer, headed by its
+ * question; sources become note links ([[page:id|title]]).
+ */
+export function exportMarkdown(items: ExportItem[]): string {
+  return `${items.map((item) => {
+    const heading = item.question.split('\n').find((line) => line.trim())?.trim().slice(0, 80) ?? 'AI 回答'
+    const sources = item.sources.length
+      ? `\n\n来源：\n${item.sources.map((source) => `- [${source.index}] [[page:${source.pageId}|${source.title.replaceAll(']', '\\]').replaceAll('|', ' ')}]]`).join('\n')}`
+      : ''
+    return `## ${heading}\n\n${item.answer.trim()}${sources}`
+  }).join('\n\n---\n\n')}\n`
+}
+
+export function exportTitle(items: ExportItem[]): string {
+  const first = items[0]?.question.split('\n').find((line) => line.trim())?.trim().slice(0, 40)
+  return first ? `AI：${first}` : 'AI 回答'
+}

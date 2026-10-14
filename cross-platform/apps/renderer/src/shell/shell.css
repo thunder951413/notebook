@@ -594,3 +594,15 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
 .assistant-send { display: grid; width: 32px; height: 32px; flex: none; place-items: center; border: 0; border-radius: 50%; color: #fff; background: var(--accent); cursor: pointer; }
 .assistant-send:disabled { opacity: .35; cursor: default; }
 .assistant-notice { position: absolute; bottom: 76px; left: 50%; padding: 6px 12px; border-radius: 14px; color: #fff; background: rgba(30, 28, 34, .86); font-size: 12.5px; transform: translateX(-50%); pointer-events: none; }
+.assistant-export { display: inline-flex; height: 30px; align-items: center; gap: 5px; margin-left: auto; padding: 0 10px; border: 0; border-radius: 15px; color: var(--ink-2); background: transparent; font-size: 12.5px; cursor: pointer; }
+.assistant-export + .assistant-scope { margin-left: 0; }
+.assistant-export:hover, .assistant-export.active { color: var(--ink); background: var(--hover); }
+.assistant-export svg { width: 16px; height: 16px; }
+.assistant-message.selectable { margin-left: -10px; padding: 8px 10px; border: 1px solid transparent; border-radius: 12px; cursor: pointer; }
+.assistant-message.selectable.picked { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.assistant-pick { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--ink-2); font-size: 12.5px; cursor: pointer; }
+.assistant-pick input { accent-color: var(--accent); }
+.assistant-export-bar { display: flex; flex: none; align-items: center; gap: 10px; margin: 0 max(16px, calc((100% - 760px) / 2)) 14px; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: 14px; background: var(--paper); font-size: 13px; }
+.assistant-export-bar span { flex: 1; }
+.assistant-export-bar button:not(.fui-Button) { height: 28px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--ink-2); background: transparent; cursor: pointer; }
+.assistant-export-bar button:not(.fui-Button):hover { background: var(--hover); }

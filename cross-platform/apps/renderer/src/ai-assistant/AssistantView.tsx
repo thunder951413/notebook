@@ -26,6 +26,9 @@ import {
   type AssistantTask,
   type ContextSource,
   type MergedNote,
+  exportMarkdown,
+  exportTitle,
+  type ExportItem,
 } from '../ai/assistant'
 import { retrieveNotebookLibrary } from '../ai/libraryRetrieval'
 
@@ -41,7 +44,7 @@ export interface AssistantViewProps {
   loadMarkdown(pageId: string): Promise<string | undefined>
   loadDocument(pageId: string): Promise<Record<string, unknown> | undefined>
   openPage(pageId: string): void
-  createNote(title: string, markdown: string): Promise<string>
+  createNote(title: string, markdown: string, target?: { sectionId: string; parentPageId?: string }): Promise<string>
   openAISettings(): void
 }
 
@@ -103,6 +106,10 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
   const scopedPages = useMemo(() => scopeIsEmpty(scope) ? allNotes : resolveScope(scope, pages, notebooks), [allNotes, notebooks, pages, scope])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [tab, setTab] = useState<Tab>('ask')
+  // Export: pick answers, then turn them into one new note.
+  const [exporting, setExporting] = useState(false)
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const [exportOpen, setExportOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState<string>()
@@ -269,6 +276,12 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
   return <section className="assistant" aria-label="AI 助手">
     <header className="assistant-header" data-tauri-drag-region>
       <div className="assistant-title" data-tauri-drag-region><Sparkle20Regular /><h2>AI 助手</h2></div>
+      {(tab === 'ask' || tab === 'generate') && messages.some((message) => message.role === 'assistant' && !message.failed) && <button type="button" className={`assistant-export ${exporting ? 'active' : ''}`} onClick={() => {
+        if (exporting) { setExporting(false); setPicked(new Set()); return }
+        const last = [...messages].reverse().find((message) => message.role === 'assistant' && !message.failed)
+        setPicked(new Set(last ? [last.id] : []))
+        setExporting(true)
+      }}><DocumentAdd20Regular />{exporting ? '取消导出' : '导出'}</button>}
       <button type="button" className={`assistant-scope ${pickerOpen ? 'open' : ''}`} aria-expanded={pickerOpen} onClick={() => setPickerOpen((value) => !value)}>
         <Filter20Regular />
         <span className="assistant-scope-label">范围：{label}</span>
@@ -292,7 +305,8 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
           : <><strong>基于选中的笔记生成内容</strong><span>选择下面的一种，或者直接写你的要求。</span></>}
         {!configured && <Button size="small" onClick={openAISettings}>配置 AI</Button>}
       </div>}
-      {messages.map((message) => <article key={message.id} className={`assistant-message ${message.role} ${message.failed ? 'failed' : ''}`}>
+      {messages.map((message) => <article key={message.id} className={`assistant-message ${message.role} ${message.failed ? 'failed' : ''} ${exporting && message.role === 'assistant' && !message.failed ? 'selectable' : ''} ${picked.has(message.id) ? 'picked' : ''}`}>
+        {exporting && message.role === 'assistant' && !message.failed && <label className="assistant-pick"><input type="checkbox" checked={picked.has(message.id)} onChange={() => setPicked((current) => { const next = new Set(current); if (next.has(message.id)) next.delete(message.id); else next.add(message.id); return next })} />选择这条回复</label>}
         {message.role === 'user'
           ? <p>{message.content}</p>
           : <>
@@ -300,7 +314,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
             {!!message.sources?.length && <ol className="assistant-sources" aria-label="来源">
               {message.sources.map((source) => <li key={source.index}><button type="button" onClick={() => openPage(source.pageId)}><span className="assistant-cite">{source.index}</span>{source.title}<small>{source.path}</small></button></li>)}
             </ol>}
-            {!message.failed && <div className="assistant-message-actions">
+            {!message.failed && !exporting && <div className="assistant-message-actions">
               <button type="button" onClick={() => void copy(message.content)}><Copy20Regular />复制</button>
               <button type="button" onClick={() => void saveAsNote(messages[messages.indexOf(message) - 1]?.content ?? 'AI 回答', message.content)}><DocumentAdd20Regular />存为笔记</button>
             </div>}
@@ -344,7 +358,26 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
       </>}
     </div>}
 
-    {tab !== 'merge' && <form className="assistant-composer" onSubmit={(event) => { event.preventDefault(); if (tab === 'search') void search(input); else if (input.trim()) void run(tab === 'ask' ? 'ask' : 'custom', input.trim()) }}>
+    {exporting && <div className="assistant-export-bar">
+      <span>已选 {picked.size} 条回复</span>
+      <button type="button" onClick={() => setPicked(new Set(messages.filter((message) => message.role === 'assistant' && !message.failed).map((message) => message.id)))}>全选</button>
+      <Button appearance="primary" size="small" disabled={!picked.size} onClick={() => setExportOpen(true)}>生成笔记</Button>
+    </div>}
+    {exportOpen && <ExportNoteDialog
+      items={messages.flatMap((message, index) => message.role === 'assistant' && picked.has(message.id) ? [{ question: messages[index - 1]?.content ?? 'AI 回答', answer: message.content, sources: message.sources ?? [] }] : [])}
+      pages={pages}
+      notebooks={notebooks}
+      defaultSectionId={scopedPages[0]?.sectionId}
+      onClose={() => setExportOpen(false)}
+      onSave={async (title, markdown, target) => {
+        const pageId = await createNote(title, markdown, target)
+        setExportOpen(false)
+        setExporting(false)
+        setPicked(new Set())
+        openPage(pageId)
+      }}
+    />}
+    {tab !== 'merge' && !exporting && <form className="assistant-composer" onSubmit={(event) => { event.preventDefault(); if (tab === 'search') void search(input); else if (input.trim()) void run(tab === 'ask' ? 'ask' : 'custom', input.trim()) }}>
       {tab === 'search' && <Search20Regular className="assistant-composer-icon" />}
       <textarea
         aria-label={tab === 'ask' ? '问题' : tab === 'search' ? '要找的内容' : '要求'}
@@ -415,5 +448,43 @@ function ScopePicker({ scope, pages, notebooks, tags, onChange, onDone }: {
         {tags.map((tag) => <label key={tag.name} className="assistant-picker-row" style={{ paddingLeft: 8 }}><input type="checkbox" checked={scope.tagNames.includes(tag.name)} onChange={() => toggle('tagNames', tag.name)} /><span>#{tag.name}</span><small>{tag.count}</small></label>)}
       </div>}
     </div>
+  </div>
+}
+
+/** Title and place for a note built from selected answers. */
+function ExportNoteDialog({ items, pages, notebooks, defaultSectionId, onClose, onSave }: {
+  items: ExportItem[]
+  pages: PageSummary[]
+  notebooks: NotebookSummary[]
+  defaultSectionId?: string
+  onClose(): void
+  onSave(title: string, markdown: string, target: { sectionId: string; parentPageId?: string }): Promise<void>
+}) {
+  const targets = useMemo(() => notebooks.filter((notebook) => !notebook.locked).flatMap((notebook) => notebook.sections.flatMap((section) => {
+    const sectionPages = pages.filter((page) => page.sectionId === section.id && page.kind !== 'task' && !page.locked)
+    return [
+      { key: `section:${section.id}`, target: { sectionId: section.id }, label: `${notebook.name}（顶层）` },
+      ...flattenPageTree(sectionPages, new Set(sectionPages.map((page) => page.id))).map(({ page, depth }) => ({ key: `page:${page.id}`, target: { sectionId: section.id, parentPageId: page.id }, label: `${notebook.name} / ${'\u00a0\u00a0'.repeat(depth)}${page.title || '无标题页面'}` })),
+    ]
+  })), [notebooks, pages])
+  const [title, setTitle] = useState(() => exportTitle(items))
+  const [targetKey, setTargetKey] = useState(() => targets.find((item) => item.key === `section:${defaultSectionId}`)?.key ?? targets[0]?.key ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const save = async () => {
+    const target = targets.find((item) => item.key === targetKey)?.target
+    if (!target || busy) return
+    setBusy(true)
+    try { await onSave(title.trim() || 'AI 回答', exportMarkdown(items), target) } catch (cause) { setError(cause instanceof Error ? cause.message : '无法生成笔记'); setBusy(false) }
+  }
+  return <div className="settings-backdrop" role="presentation">
+    <section className="settings-dialog create-item-dialog" role="dialog" aria-label="生成笔记">
+      <div><h2>把 {items.length} 条回复生成笔记</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div>
+      <label className="dialog-field"><span>标题</span><input aria-label="标题" value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
+      <label className="dialog-field"><span>放到</span><select aria-label="放到" value={targetKey} onChange={(event) => setTargetKey(event.currentTarget.value)}>{targets.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
+      <p className="settings-note">每条回复以对应的问题为小标题，末尾附上来源笔记的链接。</p>
+      {error && <p role="alert">{error}</p>}
+      <Button appearance="primary" disabled={!targetKey || busy} onClick={() => void save()}>{busy ? '正在生成…' : '生成并打开'}</Button>
+    </section>
   </div>
 }

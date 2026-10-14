@@ -701,10 +701,11 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setActivePage(pageId)
   }
 
-  const createNoteFromAssistant = async (title: string, markdown: string) => {
-    const sectionId = currentSection?.id ?? notebooks.find((notebook) => !notebook.locked)?.sections[0]?.id
+  const createNoteFromAssistant = async (title: string, markdown: string, target?: { sectionId: string; parentPageId?: string }) => {
+    const sectionId = target?.sectionId ?? currentSection?.id ?? notebooks.find((notebook) => !notebook.locked)?.sections[0]?.id
     if (!sectionId) throw new Error('还没有笔记本')
-    const pageId = await createPage(sectionId)
+    const pageId = await createPage(sectionId, 'document', target?.parentPageId)
+    if (target?.parentPageId) setExpandedPageIds((current) => current.has(target.parentPageId!) ? current : new Set([...current, target.parentPageId!]))
     await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
     await saveDocument(pageId, markdownToDocument(markdown))
     return pageId
