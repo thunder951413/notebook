@@ -1,3 +1,4 @@
+import { extractText } from '../util'
 import type {
   Notebook,
   Page,
@@ -248,7 +249,7 @@ export class ContentRepository extends RepositoryCore {
         await this.retractPublicPageForPrivacy(page.workspaceId, page.id)
       }
     })
-    this.searchIndex.invalidate(page.workspaceId)
+    this.searchIndex.upsert(page, document ? document.markdown ?? extractText(document.tiptapJson) : undefined)
   }
 
   async stageDraft(document: PageDocument): Promise<void> {

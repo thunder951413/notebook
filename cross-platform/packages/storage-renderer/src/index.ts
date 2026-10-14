@@ -1,12 +1,13 @@
 import type { AutomationProposal, NotebookRepository, Page, PageDocument, UUID, Tombstone, PageRevision } from '@notebook/domain'
 import { legacyTiptapToCanonicalMarkdown } from '@notebook/sync-contract'
-import { searchWorkspaceCandidatesWith, searchWorkspaceWith } from './search'
+import { searchWorkspaceCandidatesWith, searchWorkspaceHitsWith, searchWorkspaceWith } from './search'
 import { TransferRepository } from './repository/transfer'
 
 export type { RemoteSyncChange, RemoteApplyResult } from './remotePayload'
 export type { SyncOutboxItem } from './database'
 export { NotebookRendererDatabase, MAX_AUTOSAVE_REVISIONS_PER_PAGE, MAX_EDITOR_CACHE_BYTES, MAX_PINNED_REVISIONS_PER_PAGE, MAX_REVISIONS_PER_PAGE } from './database'
 export { preserveChangesSinceSnapshot } from './rebase'
+export { markdownToPlainText, matchedTerms, searchQueryTerms, searchSnippet, searchTokenize, type SearchHit } from './search'
 
 /**
  * The renderer's IndexedDB repository. Responsibilities are layered in
@@ -105,5 +106,10 @@ export class DexieNotebookRepository extends TransferRepository implements Noteb
    */
   async searchWorkspaceCandidates(workspaceId: UUID, query: string, limit = 200): Promise<Page[]> {
     return searchWorkspaceCandidatesWith(this.db, this.searchIndex, workspaceId, query, limit)
+  }
+
+  /** Full-text hits with excerpts for the search panel (title, preview and body). */
+  async searchWorkspaceHits(workspaceId: UUID, query: string, limit = 30) {
+    return searchWorkspaceHitsWith(this.db, this.searchIndex, workspaceId, query, limit)
   }
 }

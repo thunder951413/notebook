@@ -7,12 +7,25 @@ export const SEARCH_INDEX_CHUNK_SIZE = 24
 const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 export const normalizeSearch = (value: string) => value.trim().toLocaleLowerCase()
+// Dictionary-based word segmentation (ICU, the jieba-like segmenter built
+// into WebKit and V8) when available. Overlapping CJK bigrams keep recall for
+// words the dictionary splits differently.
+const wordSegmenter = typeof Intl !== 'undefined' && 'Segmenter' in Intl
+  ? new Intl.Segmenter('zh', { granularity: 'word' })
+  : undefined
+const CJK_RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu
+
 export const searchTokenize = (value: string) => {
   const normalized = value.normalize('NFKC').toLocaleLowerCase()
   const words = normalized.match(/[\p{L}\p{N}_-]+/gu) ?? []
-  const cjk = [...normalized.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu)].flatMap((match) => {
+  const cjk = [...normalized.matchAll(CJK_RUN)].flatMap((match) => {
     const characters = [...match[0]]
-    return characters.length === 1 ? characters : characters.slice(0, -1).map((character, index) => character + characters[index + 1])
+    const bigrams = characters.length === 1 ? characters : characters.slice(0, -1).map((character, index) => character + characters[index + 1])
+    if (!wordSegmenter || characters.length < 3) return bigrams
+    const segmented = [...wordSegmenter.segment(match[0])]
+      .filter((segment) => segment.isWordLike && [...segment.segment].length > 2)
+      .map((segment) => segment.segment)
+    return [...bigrams, ...segmented]
   })
   return [...words, ...cjk]
 }
@@ -33,6 +46,33 @@ export class SearchCache {
   private readonly cache = new Map<string, SearchCacheEntry>()
   private readonly pending = new Map<string, Promise<SearchCacheEntry>>()
   private readonly generations = new Map<string, number>()
+
+  /**
+   * Keeps a built index current after one page changed (an autosave), instead
+   * of discarding it and re-reading every document on the next query.
+   * `text` is the new body; omit it when only page metadata changed.
+   */
+  upsert(page: Page, text?: string) {
+    const workspaceId = page.workspaceId
+    if (this.pending.has(workspaceId)) {
+      this.invalidate(workspaceId)
+      return
+    }
+    const entry = this.cache.get(workspaceId)
+    if (!entry) return
+    if (entry.index.has(page.id)) entry.index.discard(page.id)
+    const position = entry.pages.findIndex((candidate) => candidate.id === page.id)
+    if (page.deletedAt) {
+      if (position >= 0) entry.pages.splice(position, 1)
+      entry.textByPage.delete(page.id)
+      return
+    }
+    const content = text ?? entry.textByPage.get(page.id) ?? ''
+    entry.textByPage.set(page.id, content)
+    if (position >= 0) entry.pages[position] = page
+    else entry.pages.push(page)
+    entry.index.add({ id: page.id, title: page.title, preview: page.preview, content })
+  }
 
   invalidate(workspaceId: string) {
     this.cache.delete(workspaceId)
@@ -123,4 +163,86 @@ export async function searchWorkspaceCandidatesWith(db: NotebookRendererDatabase
   const ids = [...new Set([...strictIds, ...fallbackIds])].slice(0, limit)
   const byId = new Map(pages.map((page) => [page.id, page]))
   return ids.flatMap((id) => byId.get(id) ?? [])
+}
+
+export interface SearchHit {
+  page: Page
+  /** Plain-text excerpt around the first match (or the preview). */
+  snippet: string
+  /** Strings to highlight in the title and snippet. */
+  terms: string[]
+}
+
+/** Readable text of canonical Markdown for excerpts (links show their labels). */
+export function markdownToPlainText(markdown: string) {
+  return markdown
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/^```[^\n]*$/gm, ' ')
+    .replace(/!?\[\[page:[^\]|]*\|((?:\\.|[^\]\\])+)\]\]/g, '$1')
+    .replace(/!?\[\[page:[^\]]*\]\]/g, ' ')
+    .replace(/\[\[([^\]|\n]+)\|([^\]\n]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]|\n]+)\]\]/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[ \t]+\^[A-Za-z0-9][A-Za-z0-9._:-]*[ \t]*$/gm, '')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/gm, '')
+    .replace(/(\*\*|__|~~|`)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Query words; quotes group a phrase. */
+export function searchQueryTerms(query: string) {
+  const terms: string[] = []
+  for (const match of query.matchAll(/"([^"]+)"|(\S+)/g)) {
+    const term = (match[1] ?? match[2] ?? '').trim()
+    if (term) terms.push(term)
+  }
+  return terms
+}
+
+function locate(haystack: string, term: string) {
+  return haystack.toLocaleLowerCase().indexOf(term.toLocaleLowerCase())
+}
+
+/** Terms present in `text`; long CJK terms fall back to their bigrams. */
+export function matchedTerms(text: string, terms: string[]) {
+  const found: string[] = []
+  for (const term of terms) {
+    if (locate(text, term) >= 0) { found.push(term); continue }
+    const characters = [...term]
+    if (characters.length > 2 && /\p{Script=Han}/u.test(term)) {
+      for (let index = 0; index < characters.length - 1; index += 1) {
+        const bigram = characters[index]! + characters[index + 1]!
+        if (locate(text, bigram) >= 0 && !found.includes(bigram)) found.push(bigram)
+      }
+    }
+  }
+  return found
+}
+
+export function searchSnippet(text: string, terms: string[], radius = 48) {
+  let first = -1
+  let length = 0
+  for (const term of terms) {
+    const index = locate(text, term)
+    if (index >= 0 && (first < 0 || index < first)) { first = index; length = term.length }
+  }
+  if (first < 0) return text.slice(0, radius * 3)
+  const start = Math.max(0, first - radius)
+  const end = Math.min(text.length, first + length + radius * 2)
+  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`
+}
+
+/** Ranked full-text hits with highlighted excerpts. */
+export async function searchWorkspaceHitsWith(db: NotebookRendererDatabase, searchIndex: SearchCache, workspaceId: string, query: string, limit = 30): Promise<SearchHit[]> {
+  const terms = searchQueryTerms(query)
+  if (!terms.length) return []
+  const pages = await searchWorkspaceWith(db, searchIndex, workspaceId, terms.join(' '), limit)
+  const { textByPage } = await searchIndex.get(workspaceId, db)
+  return pages.map((page) => {
+    const text = markdownToPlainText(textByPage.get(page.id) ?? '')
+    const found = matchedTerms(`${page.title}\n${text}`, terms)
+    return { page, snippet: found.length ? searchSnippet(text, found) : (page.preview || text.slice(0, 140)), terms: found }
+  })
 }

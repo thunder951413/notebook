@@ -1243,3 +1243,29 @@ test('identical concurrent bodies resolve without a copy, and own-device replays
   expect(replay).toEqual({ cursor: 2, conflicts: [] })
   expect(await repository.db.pages.count()).toBe(pagesBefore)
 })
+
+test('full-text hits carry highlighted excerpts and follow autosaves without a rebuild', async () => {
+  const repository = makeRepository()
+  const notes = { ...page('fts-notes', '周会纪要'), syncStatus: 'pending' as const }
+  await repository.savePage(notes, { pageId: notes.id, schemaVersion: 3, markdown: '# 周会\n\n讨论了**同步冲突**的处理方式，并决定采用 [[冲突副本]] 策略。\n\n其他事项。', tiptapJson: { type: 'doc', content: [] }, updatedAt: notes.updatedAt })
+  const [hit] = await repository.searchWorkspaceHits('workspace-a', '同步冲突')
+  expect(hit?.page.id).toBe(notes.id)
+  expect(hit?.terms).toEqual(['同步冲突'])
+  expect(hit?.snippet).toContain('讨论了同步冲突的处理方式')
+  expect(hit?.snippet).not.toContain('**')
+  // Words split by the user still match and are highlighted separately.
+  expect((await repository.searchWorkspaceHits('workspace-a', '冲突 策略'))[0]?.terms).toEqual(['冲突', '策略'])
+  // An autosave updates the built index in place.
+  const documentsRead = vi.spyOn(repository.db.documents, 'toArray')
+  await repository.savePage({ ...notes, updatedAt: '2026-01-05T00:00:00.000Z' }, { pageId: notes.id, schemaVersion: 3, markdown: '改成了离线优先的讨论', tiptapJson: { type: 'doc', content: [] }, updatedAt: '2026-01-05T00:00:00.000Z' })
+  expect(await repository.searchWorkspaceHits('workspace-a', '同步冲突')).toEqual([])
+  expect((await repository.searchWorkspaceHits('workspace-a', '离线优先'))[0]?.page.id).toBe(notes.id)
+  expect(documentsRead).not.toHaveBeenCalled()
+})
+
+test('Chinese words are segmented for search beyond bigrams', async () => {
+  const { searchTokenize } = await import('./search')
+  const tokens = searchTokenize('中华人民共和国成立')
+  expect(tokens).toContain('中华')
+  expect(tokens.some((token) => [...token].length > 2 && token !== '中华人民共和国成立')).toBe(true)
+})
