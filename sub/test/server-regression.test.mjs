@@ -153,6 +153,67 @@ test('page saves are serialized, detect conflicts, keep explicit titles, and pre
   assert.equal((await fs.readdir(path.join(dataDir, 'pages'))).some(name => name.includes('.tmp-')), false);
 });
 
+test('page and section writes reject cyclic trees before changing saved data', async t => {
+  const { client, store, dataDir } = await startServerFixture(t);
+  const nb = (await client.json('/api/notebooks', { method: 'POST', json: { name: 'Tree' } })).value;
+  const section = (await client.json('/api/sections', { method: 'POST', json: { notebookId: nb.id, name: 'Parent' } })).value;
+  const nested = (await client.json('/api/sections', { method: 'POST', json: { notebookId: nb.id, parentSectionId: section.id, name: 'Child' } })).value;
+  const page = (await client.json('/api/pages', { method: 'POST', json: { notebookId: nb.id, sectionId: section.id, markdown: 'saved body' } })).value;
+  const child = (await client.json('/api/pages', { method: 'POST', json: { notebookId: nb.id, parentPageId: page.id, markdown: 'child' } })).value;
+  assert.equal(child.sectionId, section.id);
+  const grandchild = (await client.json('/api/pages', { method: 'POST', json: { notebookId: nb.id, parentPageId: child.id, markdown: 'grandchild' } })).value;
+
+  for (const parentPageId of [page.id, child.id, grandchild.id]) {
+    const result = await client.json(`/api/pages/${page.id}`, { method: 'PUT', json: { parentPageId, markdown: 'must not replace', expectedUpdatedAt: page.updatedAt } });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.value.code, 'invalid_placement');
+  }
+  for (const parentSectionId of [section.id, nested.id]) {
+    assert.equal((await client.request(`/api/sections/${section.id}`, { method: 'PATCH', json: { parentSectionId, name: 'must not replace' } })).status, 400);
+  }
+  // Store entrypoints enforce the same invariant for import/internal callers.
+  assert.throws(() => store.updateSection(section.id, { parentSectionId: nested.id }), /cyclic/);
+  await assert.rejects(() => store.savePage(page.id, { parentPageId: page.id }, new Set()), /cyclic/);
+  assert.equal((await client.request('/api/pages', { method: 'POST', json: { notebookId: nb.id, sectionId: nested.id, parentPageId: page.id } })).status, 400);
+  const reopened = new Store(dataDir);
+  await reopened.init();
+  assert.equal(await reopened.readBody(page.id), 'saved body');
+  assert.equal(reopened.s.pages.find(item => item.id === page.id).updatedAt, page.updatedAt);
+  assert.equal(reopened.s.sections.find(item => item.id === section.id).name, 'Parent');
+  await reopened.diagnostics.close();
+});
+
+test('moving a page subtree and purging its parent preserves reachable children and restorable backups', async t => {
+  const source = await startServerFixture(t);
+  const { client } = source;
+  const first = (await client.json('/api/notebooks', { method: 'POST', json: { name: 'First' } })).value;
+  const second = (await client.json('/api/notebooks', { method: 'POST', json: { name: 'Second' } })).value;
+  const section = (await client.json('/api/sections', { method: 'POST', json: { notebookId: second.id, name: 'Destination' } })).value;
+  const parent = (await client.json('/api/pages', { method: 'POST', json: { notebookId: first.id, title: 'Parent', markdown: 'parent body' } })).value;
+  const child = (await client.json('/api/pages', { method: 'POST', json: { notebookId: first.id, parentPageId: parent.id, title: 'Child', markdown: 'child body' } })).value;
+  const grandchild = (await client.json('/api/pages', { method: 'POST', json: { notebookId: first.id, parentPageId: child.id, title: 'Grandchild', markdown: 'grandchild body' } })).value;
+  const moved = await client.json(`/api/pages/${parent.id}`, { method: 'PUT', json: { notebookId: second.id, sectionId: section.id, parentPageId: null, expectedUpdatedAt: parent.updatedAt } });
+  assert.equal(moved.response.status, 200);
+  assert.deepEqual(new Set(moved.value.movedPages.map(page => page.id)), new Set([child.id, grandchild.id]));
+  for (const page of [child, grandchild]) {
+    const current = (await client.json(`/api/pages/${page.id}`)).value;
+    assert.equal(current.notebookId, second.id);
+    assert.equal(current.sectionId, section.id);
+    assert.ok(current.updatedAt > page.updatedAt);
+  }
+  assert.equal((await client.request(`/api/pages/${parent.id}/purge`, { method: 'POST' })).status, 200);
+  assert.equal((await client.json(`/api/pages/${child.id}`)).value.parentPageId, undefined);
+  assert.equal((await client.json(`/api/pages/${grandchild.id}`)).value.parentPageId, child.id);
+  const backup = await client.request('/api/backup');
+  assert.equal(backup.status, 200);
+  const target = await startServerFixture(t);
+  const form = new FormData();
+  form.set('file', new Blob([await backup.arrayBuffer()]), 'tree-backup.zip');
+  assert.equal((await target.client.request('/api/backup/restore', { method: 'POST', body: form })).status, 200);
+  assert.equal((await target.client.json(`/api/pages/${child.id}`)).value.markdown, 'child body');
+  assert.equal((await target.client.json(`/api/pages/${grandchild.id}`)).value.markdown, 'grandchild body');
+});
+
 test('complete backup requires unlocked private notebooks and restores all linked data only into an empty workspace', async t => {
   const source = await startServerFixture(t);
   const nb = (await source.client.json('/api/notebooks', { method: 'POST', json: { name: 'Private' } })).value;

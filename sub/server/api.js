@@ -400,8 +400,8 @@ export function createApi(store) {
     const current = store.getPage(params.id, unlocked);
     if (!current) throw new HttpError(404, 'page not found');
     validatePageDestination(req, current, patch);
-    const { page, revision } = await store.savePage(params.id, patch, unlocked);
-    return { ...page, revisionCreated: !!revision };
+    const { page, revision, movedPages } = await store.savePage(params.id, patch, unlocked);
+    return { ...page, revisionCreated: !!revision, ...(movedPages?.length ? { movedPages } : {}) };
   });
 
   route('DELETE', '/api/pages/:id', async ({ params, req }) => {

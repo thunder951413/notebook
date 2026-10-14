@@ -50,7 +50,19 @@ const state = {
 let routeVersion = 0;
 const isNarrow = () => window.innerWidth <= 760;
 const saves = createSaveQueue({
-  save: (id, patch) => api.put('/api/pages/' + id, patch), storage: localStorage,
+  save: async (id, patch) => {
+    const updated = await api.put('/api/pages/' + id, patch);
+    // Adopt the server's complete subtree move before rebuilding navigation.
+    // Pending child drafts keep their old conflict baseline and remain intact.
+    for (const page of updated.movedPages || []) {
+      state.pages.set(page.id, page);
+      const cached = saves.get(page.id);
+      if (cached?.saved) cached.saved = { ...cached.saved, ...page };
+      if (cached && !cached.pending && !cached.promise) saves.register(page);
+    }
+    delete updated.movedPages;
+    return updated;
+  }, storage: localStorage,
   onChange: (id, entry) => {
     if (entry.saved) state.pages.set(id, entry.saved);
     if (state.currentPageId !== id) return;
@@ -255,6 +267,13 @@ async function loadAllPages() {
 // ---------- sidebar ----------
 
 function renderSidebar() {
+  const notebookCounts = new Map();
+  const sectionCounts = new Map();
+  for (const page of state.pages.values()) {
+    if (page.deletedAt) continue;
+    notebookCounts.set(page.notebookId, (notebookCounts.get(page.notebookId) || 0) + 1);
+    if (page.sectionId) sectionCounts.set(page.sectionId, (sectionCounts.get(page.sectionId) || 0) + 1);
+  }
   const root = $('notebooks');
   root.innerHTML = '';
   for (const nb of state.notebooks) {
@@ -266,7 +285,7 @@ function renderSidebar() {
       '<span class="nb-emoji">' + esc(nb.emoji || '📓') + '</span>' +
       '<span class="nb-name">' + esc(nb.name) + '</span>' +
       (nb.locked && !nb.unlocked ? '<span class="nb-lock" title="已锁定">🔒</span>' : '') +
-      '<span class="nb-count">' + nb.pageCount + '</span>' +
+      '<span class="nb-count">' + (notebookCounts.get(nb.id) || 0) + '</span>' +
       '<span class="nb-actions">' +
       '<button class="mini-btn" data-nb-add-page title="新建笔记">＋</button>' +
       '<button class="mini-btn" data-nb-add-sec title="新建分区">🗂</button>' +
@@ -292,7 +311,7 @@ function renderSidebar() {
         secDiv.className = 'sec-row';
         secDiv.innerHTML =
           '<span class="sec-caret">▾</span><span class="sec-name">' + esc(sec.name) + '</span>' +
-          '<span class="nb-count">' + sec.pageCount + '</span>' +
+          '<span class="nb-count">' + (sectionCounts.get(sec.id) || 0) + '</span>' +
           '<span class="sec-actions"><button class="mini-btn" data-sec-add title="新建笔记">＋</button>' +
           '<button class="mini-btn" data-sec-menu title="分区菜单">⋯</button></span>';
         secDiv.addEventListener('click', (e) => {
@@ -1408,12 +1427,15 @@ function updateEditorStats() {
 
 function editorSnapshot() {
   const page = state.currentPage;
+  const notebookId = $('page-notebook-select').value;
+  const sectionId = $('page-section-select').value || null;
+  const moved = notebookId !== page.notebookId || (sectionId || undefined) !== (page.sectionId || undefined);
   return {
     title: $('page-title-input').value.trim() || '无标题', markdown: $('editor').value,
     icon: page.icon ?? null, favorite: !!page.favorite, kind: page.kind,
     important: !!page.important, dueAt: fromLocalInput($('page-due').value),
     reminderAt: fromLocalInput($('page-reminder').value), recurrenceRule: $('page-recurrence').value || null,
-    sectionId: $('page-section-select').value || null, notebookId: $('page-notebook-select').value,
+    sectionId, notebookId, parentPageId: moved ? null : page.parentPageId || null,
   };
 }
 

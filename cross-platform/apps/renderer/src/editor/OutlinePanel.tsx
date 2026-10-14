@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
-
-export const OUTLINE_JUMP_EVENT = 'notebook:outline-jump'
+import { OUTLINE_JUMP_EVENT } from './outlineEvents'
 
 type ContentNode = { type?: string; attrs?: Record<string, unknown>; text?: string; content?: ContentNode[] }
 

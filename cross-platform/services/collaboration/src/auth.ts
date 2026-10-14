@@ -36,8 +36,9 @@ export async function authenticateRequest(
 }
 
 export function assertDocumentAccess(identity: CollaborationIdentity, documentName: string) {
-  const [workspaceId, kind, id, extra] = documentName.split(':')
-  if (extra || workspaceId !== identity.workspaceId || kind !== 'page' || !id) {
+  const parts = documentName.split(':')
+  const [workspaceId, kind, id] = parts
+  if (parts.length !== 3 || workspaceId !== identity.workspaceId || kind !== 'page' || !id) {
     throw new Error('Document is outside the authenticated workspace')
   }
   return { workspaceId, kind: 'page' as const, id }

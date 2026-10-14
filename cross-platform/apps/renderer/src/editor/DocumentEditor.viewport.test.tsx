@@ -5,7 +5,24 @@ import { DocumentEditor } from './DocumentEditor'
 const session = vi.hoisted(() => ({
   document: {},
   status: 'offline' as const,
+  readOnly: false,
 }))
+
+test('shows read-only access and blocks Vim editing for a collaboration viewer', async () => {
+  session.readOnly = true
+  try {
+    const onChange = vi.fn()
+    render(<DocumentEditor workspaceId="workspace" pageId="viewer-page" pageTitle="只读" vimEnabled onChange={onChange} content={{ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '可读取的正文' }] }] }} />)
+    const body = await screen.findByLabelText('页面正文')
+    expect(body).toHaveAttribute('contenteditable', 'false')
+    expect(screen.getByText('实时协作 · 只读访问')).toBeInTheDocument()
+    for (const key of ['Escape', 'x', 'd', 'd', 'o', 'Enter']) fireEvent.keyDown(body, { key })
+    expect(body).toHaveTextContent('可读取的正文')
+    expect(onChange).not.toHaveBeenCalled()
+  } finally {
+    session.readOnly = false
+  }
+})
 
 vi.mock('../collaboration/useCollaborativeDocument', () => ({
   useCollaborativeDocument: () => session,

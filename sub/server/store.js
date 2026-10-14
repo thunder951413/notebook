@@ -380,6 +380,7 @@ export class Store {
       name: String(name || 'New Section'), color: color || null, sortOrder: this.s.sections.length,
       createdAt: isoNow(), updatedAt: isoNow(),
     };
+    this._validateSectionPlacement(sec);
     this.s.sections.push(sec);
     this._scheduleSave();
     return sec;
@@ -388,12 +389,50 @@ export class Store {
   updateSection(id, patch) {
     const sec = this.s.sections.find(x => x.id === id);
     if (!sec) return null;
+    const parentSectionId = patch.parentSectionId !== undefined ? patch.parentSectionId || undefined : sec.parentSectionId;
+    this._validateSectionPlacement({ ...sec, parentSectionId });
     for (const k of ['name', 'color', 'sortOrder', 'parentSectionId']) {
       if (patch[k] !== undefined) sec[k] = patch[k] === null ? undefined : patch[k];
     }
     sec.updatedAt = isoNow();
     this._scheduleSave();
     return sec;
+  }
+
+  _validateSectionPlacement(section) {
+    if (!this.s.notebooks.some(item => item.id === section.notebookId)) throw placementError('notebook not found');
+    validateParentPlacement(this.s.sections, section, 'parentSectionId', 'section');
+  }
+
+  _validatePagePlacement(page) {
+    if (!this.s.notebooks.some(item => item.id === page.notebookId)) throw placementError('notebook not found');
+    if (page.sectionId) {
+      const section = this.s.sections.find(item => item.id === page.sectionId);
+      if (!section || section.notebookId !== page.notebookId) throw placementError('section does not belong to notebook');
+    }
+    validateParentPlacement(this.s.pages, page, 'parentPageId', 'page');
+    if (page.parentPageId) {
+      const parent = this.s.pages.find(item => item.id === page.parentPageId);
+      if ((parent.sectionId || undefined) !== (page.sectionId || undefined)) throw placementError('parent page does not belong to section');
+    }
+  }
+
+  _pageDescendants(id) {
+    const ids = new Set([id]);
+    const children = new Map();
+    for (const page of this.s.pages) {
+      if (!children.has(page.parentPageId)) children.set(page.parentPageId, []);
+      children.get(page.parentPageId).push(page);
+    }
+    const pending = [id];
+    for (let index = 0; index < pending.length; index++) {
+      for (const child of children.get(pending[index]) || []) {
+        if (ids.has(child.id)) continue;
+        ids.add(child.id);pending.push(child.id);
+      }
+    }
+    ids.delete(id);
+    return this.s.pages.filter(page => ids.has(page.id));
   }
 
   async deleteSection(id) {
@@ -497,6 +536,8 @@ export class Store {
       sortOrder: this.s.pages.filter(p => p.sectionId === sectionId && !p.parentPageId).length,
       createdAt: now, updatedAt: now,
     };
+    if (parentPageId && sectionId === undefined) page.sectionId = this.s.pages.find(item => item.id === parentPageId)?.sectionId;
+    this._validatePagePlacement(page);
     this.s.pages.push(page);
     try {
       await this.writeBody(page.id, body);
@@ -511,7 +552,7 @@ export class Store {
     return page;
   }
 
-  /** Save page meta + body. Returns {page, revisionCreated} */
+  /** Save page meta + body, returning the page, revision and moved descendants. */
   async savePage(id, patch, unlockedIds) {
     const previous = this._pageWrites.get(id) || Promise.resolve();
     const task = previous.catch(() => {}).then(() => this._savePage(id, patch, unlockedIds));
@@ -550,6 +591,10 @@ export class Store {
     const preview = makePreview(newBody);
     if (preview !== nextPage.preview) { nextPage.preview = preview; changed = true; }
     if (!changed) return { page: p, revision: null };
+    this._validatePagePlacement(nextPage);
+    const moved = nextPage.notebookId !== p.notebookId || nextPage.sectionId !== p.sectionId;
+    const descendants = moved ? this._pageDescendants(id) : [];
+    for (const child of descendants) this.getPage(child.id, unlockedIds);
     nextPage.updatedAt = nextIso(p.updatedAt);
     let rev = null;
     try {
@@ -575,9 +620,14 @@ export class Store {
     const index = this.s.pages.indexOf(p);
     if (index < 0) throw new Error('page disappeared during save');
     this.s.pages[index] = nextPage;
+    for (const child of descendants) {
+      child.notebookId = nextPage.notebookId;
+      child.sectionId = nextPage.sectionId;
+      child.updatedAt = nextIso(child.updatedAt);
+    }
     if (nextPage.title !== p.title || nextPage.notebookId !== p.notebookId) this._linkDirty = true;
     this._scheduleSave();
-    return { page: nextPage, revision: rev };
+    return { page: nextPage, revision: rev, movedPages: descendants };
   }
 
   async moveToTrash(id, unlockedIds) {
@@ -598,6 +648,14 @@ export class Store {
 
   async purgePage(id, unlockedIds) {
     const p = this.getPage(id, unlockedIds);
+    // Keep surviving children reachable and backups restorable after a parent
+    // is permanently removed. Soft deletion retains the existing tree.
+    const children = this.s.pages.filter(page => page.parentPageId === id);
+    for (const child of children) this.getPage(child.id, unlockedIds);
+    for (const child of children) {
+      child.parentPageId = p.parentPageId;
+      child.updatedAt = nextIso(child.updatedAt);
+    }
     const idx = this.s.pages.indexOf(p);
     if (idx >= 0) this.s.pages.splice(idx, 1);
     this.s.pageTags = this.s.pageTags.filter(t => t.pageId !== id);
@@ -1218,6 +1276,26 @@ function validateBackupManifest(manifest, entries) {
     if (!entries.has(`revisions/${revision.pageId}/${revision.id}.md`)) throw restoreError(`backup revision ${revision.id} is missing`);
   }
   manifest.state.lockSessions = [];
+}
+
+function placementError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  error.extra = { code: 'invalid_placement' };
+  return error;
+}
+
+function validateParentPlacement(items, item, parentKey, label) {
+  const byId = new Map(items.map(value => [value.id, value]));
+  const seen = new Set([item.id]);
+  let parentId = item[parentKey];
+  while (parentId) {
+    if (seen.has(parentId)) throw placementError(`cyclic ${label} relations are not allowed`);
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent || parent.notebookId !== item.notebookId) throw placementError(`parent ${label} does not belong to notebook`);
+    parentId = parent[parentKey];
+  }
 }
 
 function rejectParentCycles(items, parentKey, label) {

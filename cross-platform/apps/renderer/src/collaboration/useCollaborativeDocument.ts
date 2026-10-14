@@ -8,6 +8,8 @@ export interface CollaborativeDocumentSession {
   document: Y.Doc
   provider?: HocuspocusProvider
   status: CollaborationStatus
+  readOnly?: boolean
+  synced?: boolean
 }
 
 const collaborationUrl = import.meta.env.VITE_NOTEBOOK_COLLAB_URL as string | undefined
@@ -29,6 +31,9 @@ export function useCollaborativeDocument(workspaceId: string, pageId: string) {
     const document = new Y.Doc()
     const documentName = `${workspaceId}:page:${pageId}`
     let provider: HocuspocusProvider | undefined
+    let readOnly = true
+    let synced = false
+    let authenticationFailed = false
 
     void (async () => {
       const token = await getAccessToken()
@@ -38,16 +43,26 @@ export function useCollaborativeDocument(workspaceId: string, pageId: string) {
         name: documentName,
         document,
         token,
+        onAuthenticated: ({ scope }) => {
+          authenticationFailed = false
+          readOnly = scope === 'readonly'
+          if (!disposed) setSession({ document, provider, status: 'connected', readOnly, synced })
+        },
         onStatus: ({ status }) => {
-          if (!disposed) setSession({ document, provider, status: status === 'connected' ? 'connected' : 'connecting' })
+          if (!disposed) setSession({ document, provider, status: authenticationFailed ? 'error' : status === 'connected' ? 'connected' : 'connecting', readOnly, synced })
+        },
+        onSynced: ({ state }) => {
+          synced = state
+          if (!disposed) setSession({ document, provider, status: authenticationFailed ? 'error' : state ? 'connected' : 'connecting', readOnly, synced })
         },
         onAuthenticationFailed: () => {
-          if (!disposed) setSession({ document, provider, status: 'error' })
+          authenticationFailed = true
+          if (!disposed) setSession({ document, provider, status: 'error', readOnly, synced })
         },
       })
-      setSession({ document, provider, status: 'connecting' })
+      setSession({ document, provider, status: 'connecting', readOnly, synced })
     })().catch(() => {
-      if (!disposed) setSession({ document, status: 'error' })
+      if (!disposed) setSession({ document, status: 'error', readOnly, synced })
     })
 
     return () => {

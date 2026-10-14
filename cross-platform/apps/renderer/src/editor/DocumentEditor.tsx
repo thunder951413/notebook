@@ -12,7 +12,7 @@ import { createContentExtensions, sanitizeSupportedHtml, type AssetLoader } from
 import { registerFlushHandler } from '../data/flushCoordinator'
 import { createTrailingDebounce, type TrailingDebounce } from './saveScheduler'
 import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail } from './referenceCommands'
-import { OUTLINE_JUMP_EVENT } from './OutlinePanel'
+import { OUTLINE_JUMP_EVENT } from './outlineEvents'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
 
 export const initialContent = `
@@ -245,6 +245,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }
   const collaborative = Boolean(session.provider)
   const editor = useEditor({
+    editable: !session.readOnly,
     extensions: [
       ...createContentExtensions(collaborative, loadAsset, pageId),
       VimBlockCursor,
@@ -257,10 +258,6 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     ],
     content: collaborative ? undefined : content,
     onCreate: ({ editor: currentEditor }) => {
-      // Hydration is not a user edit. Emitting an update here would mark every
-      // opened page as pending and could make an old local copy beat a newer
-      // Android/SSH revision during the next merge.
-      if (collaborative && (forceRestore || session.document.getXmlFragment('default').length === 0) && content) currentEditor.commands.setContent(content, { emitUpdate: false })
       setLargeDocument(isLargeEditorDocument(currentEditor))
     },
     onUpdate: ({ editor: currentEditor }) => {
@@ -281,6 +278,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       },
       handleDOMEvents: {
         beforeinput: (_view, event) => {
+          if (!_view.editable) return false
           const input = event as InputEvent
           if (input.inputType === 'insertText' && input.data === ' ' && convertMarkdownCodeFence(_view, _view.state.selection.from)) {
             event.preventDefault()
@@ -302,6 +300,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
       },
       transformPastedHTML: sanitizeSupportedHtml,
       handlePaste: (view, event) => {
+        if (!view.editable) return false
         const images = imageFilesFromTransfer(event.clipboardData)
         if (images.length && saveAsset) {
           event.preventDefault()
@@ -320,6 +319,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         return false
       },
       handleDrop: (view, event) => {
+        if (!view.editable) return false
         const images = imageFilesFromTransfer(event.dataTransfer)
         if (!images.length || !saveAsset) return false
         event.preventDefault()
@@ -328,6 +328,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         return true
       },
       handleTextInput: (view, from, _to, text) => {
+        if (!view.editable) return false
         if (suppressedVimTransitionText.current === text.toLocaleLowerCase()) {
           suppressedVimTransitionText.current = undefined
           return true
@@ -351,6 +352,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
         return true
       },
       handleKeyDown: (view, event) => {
+        if (!view.editable) return false
         if (!vimEnabledRef.current || event.metaKey || event.altKey) return false
         if (vimModeRef.current === 'insert' && suppressedVimTransitionText.current) {
           if (suppressedVimTransitionText.current === event.key.toLocaleLowerCase()) {
@@ -479,7 +481,22 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }, [session.document, session.provider, loadAsset, pageId, saveAsset])
 
   useEffect(() => {
+    editor?.setEditable(!session.readOnly, false)
+  }, [editor, session.readOnly])
+
+  useEffect(() => {
+    // Wait for authentication and the initial remote document before seeding.
+    // Viewers must never inject a stale offline copy into the shared Y.Doc.
+    if (!editor || !collaborative || session.readOnly || !session.synced || !content) return
+    if (forceRestore || session.document.getXmlFragment('default').length === 0) {
+      editor.commands.setContent(content, { emitUpdate: false })
+      setLargeDocument(isLargeEditorDocument(editor))
+    }
+  }, [editor, collaborative, session.document, session.readOnly, session.synced, content, forceRestore])
+
+  useEffect(() => {
     if (!editor || !content) return
+    if (collaborative && session.readOnly) return
     if (lastAppliedContent.current === content) return
     const contentSignature = JSON.stringify(content)
     if (lastCommittedSignature.current === contentSignature) {
@@ -522,7 +539,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     lastCommittedSignature.current = contentSignature
     lastAppliedContent.current = content
     setLargeDocument(isLargeEditorDocument(editor))
-  }, [content, editor])
+  }, [content, editor, collaborative, session.readOnly])
 
   useEffect(() => {
     restoreTimers.current.forEach(window.clearTimeout)
@@ -581,6 +598,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   useEffect(() => {
     if (!editor) return
     const insert = (event: Event) => {
+      if (!editor.isEditable) return
       const detail = (event as CustomEvent<InsertReferenceDetail>).detail
       const attrs = {
         pageId: detail.target.pageId,
@@ -597,6 +615,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   useEffect(() => {
     if (!editor) return
     const insert = (event: Event) => {
+      if (!editor.isEditable) return
       const detail = (event as CustomEvent<InsertAssetDetail>).detail
       if (!detail || detail.pageId !== pageId) return
       const href = `notebook-asset:${detail.asset.id}`
@@ -679,7 +698,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }
 
   const runSlashCommand = (command: 'paragraph' | 'h1' | 'h2' | 'h3' | 'bullet' | 'task' | 'quote' | 'code' | 'link') => {
-    if (!editor) return
+    if (!editor?.isEditable) return
     const from = Math.max(0, editor.state.selection.from - 1)
     editor.chain().focus().deleteRange({ from, to: editor.state.selection.from }).run()
     if (command === 'paragraph') editor.chain().focus().setParagraph().run()
@@ -693,7 +712,8 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }
 
   return <div className={`document-editor ${duplicateTitle ? 'duplicate-title' : ''} ${largeDocument ? 'large-document' : ''}`}>
-    {(session.status === 'connecting' || session.status === 'error') && <span className={`collaboration-status ${session.status}`}>{statusLabels[session.status]}</span>}
+    {session.readOnly && session.status !== 'connecting' && session.status !== 'error' && <span className="collaboration-status">实时协作 · 只读访问</span>}
+    {(session.status === 'connecting' || session.status === 'error') && <span className={`collaboration-status ${session.status}`}>{session.readOnly && session.status === 'error' ? '协作验证失败 · 正文只读' : statusLabels[session.status]}</span>}
     {largeDocument && <span className="large-document-status">大型笔记 · 已按视口分段渲染</span>}
     <div
       ref={bodyRef}

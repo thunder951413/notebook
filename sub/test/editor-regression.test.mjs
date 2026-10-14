@@ -9,6 +9,10 @@ test('browser editor recovers drafts, retains page snapshots, and honors task cr
  const nb=f.store.createNotebook({name:'Test'});
  const a=await f.store.createPage({notebookId:nb.id,title:'A',markdown:'# A\nserver A'});
  const b=await f.store.createPage({notebookId:nb.id,title:'B',markdown:'# B\nserver B'});
+ const child=await f.store.createPage({notebookId:nb.id,parentPageId:b.id,title:'Child',markdown:'# Child\nchild body'});
+ const grandchild=await f.store.createPage({notebookId:nb.id,parentPageId:child.id,title:'Grandchild',markdown:'# Grandchild\ngrandchild body'});
+ const destination=f.store.createNotebook({name:'Destination'});
+ const section=f.store.createSection({notebookId:destination.id,name:'Moved section'});
  const dom=new JSDOM(await readFile(new URL('../web/index.html',import.meta.url),'utf8'),{url:f.baseUrl+'/#/page/'+a.id,pretendToBeVisual:true});
  const w=dom.window;
  for(const key of ['window','document','location','localStorage','sessionStorage','CustomEvent','HTMLElement'])globalThis[key]=key==='window'?w:w[key];
@@ -60,5 +64,27 @@ test('browser editor recovers drafts, retains page snapshots, and honors task cr
   const create=[...w.document.querySelectorAll('.modal-footer button')].find(el=>el.classList.contains('primary'));create.click();
   await until(()=>$('kind-task').classList.contains('active')&&!$('editor-view').classList.contains('hidden'));
   assert.equal(f.store.s.pages.find(p=>p.id===location.hash.split('/').pop()).kind,'task');
+ });
+ await t.test('moving a subtree updates navigation immediately and moving a child detaches it from the old parent',async()=>{
+  location.hash='#/page/'+child.id;await until(()=>$('page-title-input').value==='Child');
+  edit('# Child\ncached saved child body');save();await until(()=>$('save-status').textContent==='已保存');
+  location.hash='#/page/'+b.id;await until(()=>$('page-title-input').value==='B');
+  $('page-notebook-select').value=destination.id;$('page-notebook-select').dispatchEvent(new w.Event('change',{bubbles:true}));
+  $('page-section-select').value=section.id;$('page-section-select').dispatchEvent(new w.Event('change',{bubbles:true}));save();
+  await until(()=>$('save-status').textContent==='已保存');
+  const movedBlock=w.document.querySelector('[data-nb-id="'+destination.id+'"]').parentElement;
+  assert.match(movedBlock.textContent,/Child/);assert.match(movedBlock.textContent,/Grandchild/);
+  assert.equal(movedBlock.querySelector('.nb-header .nb-count').textContent,'3');
+  assert.equal(movedBlock.querySelector('.sec-row .nb-count').textContent,'3');
+  assert.equal(f.store.s.pages.find(p=>p.id===grandchild.id).sectionId,section.id);
+  location.hash='#/page/'+child.id;await until(()=>$('page-title-input').value==='Child');
+  assert.match($('editor').value,/cached saved child body/);
+  $('page-notebook-select').value=nb.id;$('page-notebook-select').dispatchEvent(new w.Event('change',{bubbles:true}));save();
+  await until(()=>$('save-status').textContent==='已保存');
+  assert.equal(f.store.s.pages.find(p=>p.id===child.id).parentPageId,undefined);
+  assert.equal(f.store.s.pages.find(p=>p.id===grandchild.id).notebookId,nb.id);
+  const originalBlock=w.document.querySelector('[data-nb-id="'+nb.id+'"]').parentElement;
+  assert.match(originalBlock.textContent,/Child/);assert.match(originalBlock.textContent,/Grandchild/);
+  assert.equal(w.document.querySelector('[data-nb-id="'+destination.id+'"]').parentElement.querySelector('.nb-header .nb-count').textContent,'1');
  });
 });
