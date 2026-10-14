@@ -1,5 +1,7 @@
 # Electron Release 与自动更新
 
+> **已废弃**：Electron 外壳自 2026-10-14 起进入淘汰期，桌面主壳改为 Tauri（`apps/tauri`）。本文档仅用于需要回退时手动打包，见 [桌面版迁移到 Tauri](../../../docs/DESKTOP_TAURI_2026-10-13.md)。
+
 Notebook Next 的 Electron 版本从 `2.0.0` 开始。旧版 macOS Notebook 的 `v1.x` Release
 不属于 Electron 更新通道，客户端只识别带 electron-builder 更新元数据的公开 Release。
 
