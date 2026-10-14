@@ -98,7 +98,7 @@ const objectPresenceCache = new SyncCache<boolean>(4096)
 const directoryCache = new SyncCache<boolean>(1024)
 const headCache = new SyncCache<{ etag: string; head: WebdavJournalHead }>(256)
 
-interface WebdavJournalHead {
+export interface WebdavJournalHead {
   version: 1
   deviceId: string
   lastSeq: number
@@ -109,12 +109,18 @@ interface WebdavJournalHead {
   historyEntries: number
 }
 
-function safeRemotePath(value: string): string {
-  const normalized = posix.normalize(value.trim().replaceAll('\\', '/')).replace(/^\.\//, '')
-  if (!normalized || normalized.startsWith('/') || normalized === '..' || normalized.startsWith('../') || normalized.includes('\0')) {
-    throw new Error(`远端同步目录不安全：${value}`)
-  }
-  return normalized
+/**
+ * Repository path relative to the WebDAV root (fixture: remote-path.json).
+ * Empty and "." segments are dropped; "..", absolute paths and control
+ * characters are rejected rather than resolved.
+ */
+export function safeRemotePath(value: string): string {
+  const normalized = value.trim().replaceAll('\\', '/')
+  // eslint-disable-next-line no-control-regex
+  if (normalized.startsWith('/') || /[\u0000-\u001f\u007f-\u009f]/.test(normalized)) throw new Error(`远端同步目录不安全：${value}`)
+  const parts = normalized.split('/').filter((segment) => segment !== '' && segment !== '.')
+  if (!parts.length || parts.includes('..')) throw new Error(`远端同步目录不安全：${value}`)
+  return parts.join('/')
 }
 
 export function validatedWebdavBaseUrl(value: string): URL {
@@ -146,9 +152,9 @@ function clientFor(settings: WebdavConnection): WebDAVClient {
   return createClient(baseUrl.toString().replace(/\/+$/, ''), options)
 }
 
-const journalPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.jsonl`
-const journalHeadPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.head.json`
-const objectPath = (root: string, hash: string) => `${root}/objects/${hash.slice(0, 2)}/${hash}`
+export const journalPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.jsonl`
+export const journalHeadPath = (root: string, deviceId: string) => `${root}/journal/${deviceId}.head.json`
+export const objectPath = (root: string, hash: string) => `${root}/objects/${hash.slice(0, 2)}/${hash}`
 const cacheNamespace = (settings: WebdavConnection) => `${sha256(JSON.stringify([settings.baseUrl.trim(), settings.username.trim(), settings.appPassword, safeRemotePath(settings.remotePath)]))}:`
 // webdav normalizes PROPFIND ETags by removing quotes. Weak validators must
 // never authorize reuse of a commit marker whose content may have changed.
@@ -190,13 +196,34 @@ async function putWithDirectory(client: WebDAVClient, settings: WebdavConnection
   }
 }
 
-/** Parse a journal file body into entries, tolerating a trailing newline. */
-function parseJournal(text: string): WebdavJournalEntry[] {
+/**
+ * Parse a journal body, tolerating blank lines and CRLF (fixture:
+ * journal-parse.json). Every record needs a non-negative integer seq, op
+ * upsert|delete, non-empty type/id and an object payload; one malformed
+ * record rejects the whole journal.
+ */
+export function parseJournal(text: string): WebdavJournalEntry[] {
   const entries: WebdavJournalEntry[] = []
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n')
+  for (const [index, line] of lines.entries()) {
     const trimmed = line.trim()
     if (!trimmed) continue
-    entries.push(JSON.parse(trimmed) as WebdavJournalEntry)
+    const invalid = (detail: string) => new Error(`远端日志第 ${index + 1} 行格式不正确：${detail}`)
+    let value: unknown
+    try {
+      value = JSON.parse(trimmed)
+    } catch (error) {
+      throw invalid(error instanceof Error ? error.message : String(error))
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('record')
+    const record = value as Record<string, unknown>
+    if (!isNonNegativeInteger(record.seq)) throw invalid('seq')
+    if (record.op !== 'upsert' && record.op !== 'delete') throw invalid('op')
+    if (typeof record.type !== 'string' || !record.type) throw invalid('type')
+    if (typeof record.id !== 'string' || !record.id) throw invalid('id')
+    if (!record.payload || typeof record.payload !== 'object' || Array.isArray(record.payload)) throw invalid('payload')
+    if (record.ver !== undefined && record.ver !== null && !isNonNegativeInteger(record.ver)) throw invalid('ver')
+    entries.push(record as unknown as WebdavJournalEntry)
   }
   return entries
 }
@@ -206,7 +233,7 @@ function parseJournal(text: string): WebdavJournalEntry[] {
  * Seq numbers stay monotonic, so other devices' per-device read cursors
  * remain valid after the file shrinks.
  */
-function compactJournal(entries: WebdavJournalEntry[]): { entries: WebdavJournalEntry[]; stateEntries: number; historyEntries: number } {
+export function compactJournal(entries: WebdavJournalEntry[]): { entries: WebdavJournalEntry[]; stateEntries: number; historyEntries: number } {
   const state = new Map<string, WebdavJournalEntry>()
   const revisions = new Map<string, WebdavJournalEntry>()
   for (const entry of entries) {
@@ -232,7 +259,7 @@ function compactJournal(entries: WebdavJournalEntry[]): { entries: WebdavJournal
   }
 }
 
-function buildHead(deviceId: string, body: string, entries: WebdavJournalEntry[], stateEntries: number, historyEntries: number): WebdavJournalHead {
+export function buildHead(deviceId: string, body: string, entries: WebdavJournalEntry[], stateEntries: number, historyEntries: number): WebdavJournalHead {
   return {
     version: 1,
     deviceId,
@@ -245,7 +272,7 @@ function buildHead(deviceId: string, body: string, entries: WebdavJournalEntry[]
   }
 }
 
-function parseHead(text: string, deviceId: string): WebdavJournalHead {
+export function parseHead(text: string, deviceId: string): WebdavJournalHead {
   if (utf8Bytes(text) > MAX_HEAD_BYTES) throw new Error(`远端日志 ${deviceId}.head.json 超过 64 KiB 上限`)
   let value: unknown
   try {
@@ -262,6 +289,35 @@ function parseHead(text: string, deviceId: string): WebdavJournalHead {
     !isNonNegativeInteger(head.historyEntries)
   ) throw new Error(`远端日志 ${deviceId}.head.json 内容不正确`)
   return head as WebdavJournalHead
+}
+
+/**
+ * Before downloading a peer journal (fixture: committed-view.json): a marker
+ * behind the cursor resets it, and a marker at or below the cursor means the
+ * journal does not need to be fetched at all.
+ */
+export function planJournalRead(head: Pick<WebdavJournalHead, 'lastSeq'> | undefined, known: number): { known: number; reset: boolean; fetch: boolean } {
+  if (head && head.lastSeq < known) return { known: 0, reset: true, fetch: true }
+  if (head) return { known, reset: false, fetch: known < head.lastSeq }
+  return { known, reset: false, fetch: true }
+}
+
+/** Committed, unread records of a downloaded peer journal (fixture: committed-view.json). */
+export function committedView(journal: WebdavJournalEntry[], text: string, head: Pick<WebdavJournalHead, 'lastSeq' | 'journalBytes' | 'journalSha256'> | undefined, known: number): { known: number; reset: boolean; mismatch: boolean; seqs: number[] } {
+  const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
+  let reset = false
+  if (!head && journalLastSeq < known) {
+    known = 0
+    reset = true
+  }
+  const mismatch = Boolean(head && (utf8Bytes(text) !== head.journalBytes || sha256(text) !== head.journalSha256.toLowerCase()))
+  const seqs = journal.map((entry) => entry.seq).filter((seq) => seq > known && (!head || seq <= head.lastSeq))
+  return { known, reset, mismatch, seqs }
+}
+
+/** Pulled records are applied per device (code point order), then by seq (fixture: pull-order.json). */
+export function sortPulledEntries<T extends { deviceId: string; seq: number }>(entries: T[]): T[] {
+  return entries.sort((left, right) => left.deviceId === right.deviceId ? left.seq - right.seq : left.deviceId < right.deviceId ? -1 : 1)
 }
 
 export async function testWebdavConnection(settings: WebdavConnection, signal?: AbortSignal): Promise<WebdavTestResult> {
@@ -345,18 +401,19 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
         const status = (error as { status?: number })?.status
         if (status !== 404) throw error
       }
-      // A commit marker behind our cursor means the journal was deleted and
-      // recreated (manual cleanup, restored folder). Skipping it would hide
-      // every new record until it overtook the stale cursor, so re-read it.
-      if (head && head.lastSeq < known) {
-        resetDevices.push(deviceId)
-        warnings.push(`${deviceId} 的远端序号从 ${known} 回退到 ${head.lastSeq}，已重新读取`)
-        known = 0
-      }
-      // The marker is the commit point: once its sequence is known, never
-      // fetch the corresponding large journal merely to confirm that fact.
-      if (head && known >= head.lastSeq) continue
     }
+    // A commit marker behind our cursor means the journal was deleted and
+    // recreated (manual cleanup, restored folder). Skipping it would hide
+    // every new record until it overtook the stale cursor, so re-read it. The
+    // marker is the commit point: once its sequence is known, never fetch the
+    // corresponding large journal merely to confirm that fact.
+    const plan = planJournalRead(head, known)
+    if (plan.reset) {
+      resetDevices.push(deviceId)
+      warnings.push(`${deviceId} 的远端序号从 ${known} 回退到 ${head?.lastSeq ?? 0}，已重新读取`)
+    }
+    known = plan.known
+    if (!plan.fetch) continue
     let text = ''
     try {
       const data = await client.getFileContents(journalPath(root, deviceId), { format: 'text', signal })
@@ -371,25 +428,25 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
     const journal = parseJournal(text)
     const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
-    if (!head && journalLastSeq < known) {
+    const view = committedView(journal, text, head, known)
+    if (view.reset) {
       resetDevices.push(deviceId)
       warnings.push(`${deviceId} 的远端日志序号从 ${known} 回退到 ${journalLastSeq}，已重新读取`)
-      known = 0
     }
-    if (head && (utf8Bytes(text) !== head.journalBytes || sha256(text) !== head.journalSha256)) {
+    if (view.mismatch) {
       // The journal PUT succeeded but its marker PUT did not (or an old v4
       // writer appended without a marker). Every row is still a complete JSON
       // record, so only the committed sequence range is exposed. Blocking the
       // whole repository here would stall every device until the writer came
       // back online; its unacknowledged rows are republished by that writer.
-      warnings.push(`${deviceId} 的日志与提交标记不一致（日志序号 ${journalLastSeq}，标记 ${head.lastSeq}），仅读取已提交部分`)
+      warnings.push(`${deviceId} 的日志与提交标记不一致（日志序号 ${journalLastSeq}，标记 ${head?.lastSeq ?? 0}），仅读取已提交部分`)
     }
+    const visible = new Set(view.seqs)
     for (const entry of journal) {
-      if (entry.seq <= known || (head && entry.seq > head.lastSeq)) continue
-      entries.push({ ...entry, deviceId })
+      if (visible.has(entry.seq)) entries.push({ ...entry, deviceId })
     }
   }
-  entries.sort((left, right) => left.deviceId === right.deviceId ? left.seq - right.seq : left.deviceId.localeCompare(right.deviceId))
+  sortPulledEntries(entries)
   return {
     entries,
     fingerprint: `${settings.baseUrl.trim()}|${settings.username.trim()}|${safeRemotePath(settings.remotePath)}`,
