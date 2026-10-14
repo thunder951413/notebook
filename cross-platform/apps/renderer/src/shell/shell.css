@@ -154,14 +154,18 @@ html[data-shell="tauri"] .fluent-root.theme-dark { --list: rgba(30, 29, 33, .52)
 .sidebar-more { width: 100%; height: 26px; padding: 0 10px 0 36px; border: 0; color: var(--ink-3); background: transparent; font-size: 12px; text-align: left; cursor: pointer; }
 .sidebar-more:hover { color: var(--accent); }
 
-.notebook-item { padding-left: 2px; }
 .sidebar-chevron { display: grid; width: 16px; height: 22px; flex: none; place-items: center; border-radius: 5px; color: var(--ink-3); }
 .sidebar-chevron:hover { color: var(--ink); background: var(--hover); }
 .sidebar-chevron svg { width: 12px; height: 12px; }
 .notebook-emoji { font-size: 14px; }
 .notebook-item.private .sidebar-item-label { color: color-mix(in srgb, var(--accent) 55%, var(--ink)); }
 .notebook-item .notebook-lock-state { display: grid; place-items: center; color: var(--ink-3); }
-.sidebar-page-tree { padding-left: 14px; }
+.notebook-item { padding-left: 10px; }
+/* Notebooks behave like drives; the chosen one's pages start at the left edge. */
+.sidebar-drive-tree { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--hairline); }
+.sidebar-page-tree { padding-left: 0; }
+.sidebar-page-tree .unified-page-row { padding-left: calc(2px + min(var(--page-depth), 8) * 14px); }
+.sidebar-page-tree .page-tree-row.drop-before::before, .sidebar-page-tree .page-tree-row.drop-after::after { left: calc(2px + min(var(--page-depth), 8) * 14px); }
 .sidebar-page-tree .tree-row { min-height: 28px; border-radius: 7px; font-size: 12.5px; }
 .sidebar-page-tree .tree-row:hover { background: var(--hover); }
 .sidebar-page-tree .tree-row.selected,

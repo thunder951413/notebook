@@ -10,7 +10,6 @@ import {
   ArrowSortDownLines20Regular,
   Bot20Regular,
   CheckmarkCircle20Regular,
-  ChevronDown16Regular,
   ChevronLeft20Regular,
   ChevronRight16Regular,
   Compose20Regular,
@@ -1065,6 +1064,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   const sidebarVisible = layout === 'wide' ? navOpen : drawerOpen
   const toggleSidebar = () => { if (layout === 'wide') setNavOpen((value) => !value); else setDrawerOpen((value) => !value) }
+  // Notebooks work like drives: pick one, and its pages fill the tree below,
+  // starting at the left edge instead of being indented under the notebook.
+  const activeDrive = notebooks.find((notebook) => notebook.id === expandedNotebook && (!notebook.locked || privacyUnlocked))
   const listVisible = layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list'
   const showList = () => { setBrowse('list'); setPagesOpen(true) }
   const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
@@ -1148,13 +1150,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               {notebooks.map((notebook) => {
                 const expanded = expandedNotebook === notebook.id && (!notebook.locked || privacyUnlocked)
                 return (
-                  <div key={notebook.id} role="treeitem" aria-label={notebook.name} aria-expanded={expanded} aria-level={1}>
-                    <ActionMenu openOnContext label={`${notebook.name}笔记本操作`} trigger={<button type="button" className={`sidebar-item notebook-item ${listScope.kind === 'notebook' && listScope.id === notebook.id ? 'selected' : ''} ${notebook.locked ? 'private' : ''}`} aria-expanded={expanded} aria-label={notebook.locked && !privacyUnlocked ? `${notebook.name}（已锁定）` : notebook.name} onClick={() => {
+                  <div key={notebook.id} className="notebook-drive">
+                    <ActionMenu openOnContext label={`${notebook.name}笔记本操作`} trigger={<button type="button" className={`sidebar-item notebook-item ${expanded ? 'selected' : ''} ${notebook.locked ? 'private' : ''}`} aria-pressed={expanded} aria-label={notebook.locked && !privacyUnlocked ? `${notebook.name}（已锁定）` : notebook.name} onClick={() => {
                       if (notebook.locked && !privacyUnlocked) { requestPrivacyAccess(notebook.id); return }
-                      if (listScope.kind === 'notebook' && listScope.id === notebook.id) { setExpandedNotebook(expanded ? undefined : notebook.id); return }
+                      if (expanded) { setBrowse('tree'); return }
                       chooseScope({ kind: 'notebook', id: notebook.id })
                     }}>
-                      <span className="sidebar-chevron" aria-hidden="true" onClick={(event) => { event.stopPropagation(); if (notebook.locked && !privacyUnlocked) return; setExpandedNotebook(expanded ? undefined : notebook.id) }}>{expanded ? <ChevronDown16Regular /> : <ChevronRight16Regular />}</span>
                       <span className="sidebar-item-icon notebook-emoji">{notebook.emoji || '📒'}</span>
                       <span className="sidebar-item-label">{notebook.name}</span>
                       {notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen16Regular /> : <LockClosed16Regular />}</span>}
@@ -1169,36 +1170,38 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                       }
                     })() }}>删除笔记本及全部内容</button></>}
                     </ActionMenu>
-                    {expanded && notebook.sections.map((section) => {
-                      const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
-                      const treeRows = flattenPageTree(pagesInSection, expandedPageIds)
-                      if (treeRows.length === 0) return null
-                      return <div key={section.id} className="sidebar-page-tree">
-                        {treeRows.map(({ page, depth, hasChildren }) => <PageTreeRow
-                          key={page.id}
-                          page={page}
-                          depth={depth}
-                          hasChildren={hasChildren}
-                          childCount={pageDescendantCounts.get(page.id) ?? 0}
-                          pagesInSection={pagesInSection}
-                          variant="navigation"
-                          selected={activePage === page.id}
-                          expanded={expandedPageIds.has(page.id)}
-                          dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
-                          actions={rowActions}
-                          onActivate={onTreeActivate}
-                          onToggleExpanded={togglePageExpanded}
-                          onPrefetch={scheduleDocumentPrefetch}
-                          onPrefetchStop={stopDocumentPrefetch}
-                          onDropPosition={setDropPosition}
-                          onDrop={dropPage}
-                          onDragEnd={clearDropTarget}
-                        />)}
-                      </div>
-                    })}
                   </div>
                 )
               })}
+              {activeDrive && <div className="sidebar-drive-tree" role="group" aria-label={activeDrive.name}>
+                {activeDrive && activeDrive.sections.map((section) => {
+                  const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
+                  const treeRows = flattenPageTree(pagesInSection, expandedPageIds)
+                  if (treeRows.length === 0) return null
+                  return <div key={section.id} className="sidebar-page-tree">
+                    {treeRows.map(({ page, depth, hasChildren }) => <PageTreeRow
+                      key={page.id}
+                      page={page}
+                      depth={depth}
+                      hasChildren={hasChildren}
+                      childCount={pageDescendantCounts.get(page.id) ?? 0}
+                      pagesInSection={pagesInSection}
+                      variant="navigation"
+                      selected={activePage === page.id}
+                      expanded={expandedPageIds.has(page.id)}
+                      dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
+                      actions={rowActions}
+                      onActivate={onTreeActivate}
+                      onToggleExpanded={togglePageExpanded}
+                      onPrefetch={scheduleDocumentPrefetch}
+                      onPrefetchStop={stopDocumentPrefetch}
+                      onDropPosition={setDropPosition}
+                      onDrop={dropPage}
+                      onDragEnd={clearDropTarget}
+                    />)}
+                  </div>
+                })}
+              </div>}
             </div>}
           syncStatus={<ActionMenu label="同步状态详情" trigger={<button type="button" className={`sidebar-sync ${showSyncCompleted ? 'synced just-finished' : syncDot}`} aria-label={`同步状态：${syncLabels[syncState]}`}>
               <span className="sync-dot" aria-hidden="true" />
