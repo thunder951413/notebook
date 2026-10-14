@@ -1,5 +1,6 @@
 import { mergeAttributes, Node, type JSONContent, type MarkdownToken } from '@tiptap/core'
 import type { PageLink } from '@notebook/domain'
+import { WikiLinkNode } from './wikiLinks'
 
 export type NotebookReferenceTarget =
   | { pageId: string; kind: 'page' }
@@ -366,4 +367,4 @@ export const BlockGroup = Node.create({
   },
 })
 
-export const notebookReferenceExtensions = [BlockGroup, NotebookEmbed, BlockAnchor, NotebookLink]
+export const notebookReferenceExtensions = [BlockGroup, NotebookEmbed, BlockAnchor, NotebookLink, WikiLinkNode]
