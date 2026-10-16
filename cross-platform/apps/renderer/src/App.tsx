@@ -482,7 +482,14 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const trashPage = async (pageId: string, alwaysConfirm = false): Promise<boolean> => {
     const page = accessiblePages.find((candidate) => candidate.id === pageId)
     if (!page) return false
-    const backlinks = await loadBacklinks(pageId)
+    // The stored link index answers instantly. The title scan can force a full
+    // search-index rebuild on a big library, so it only gets a short budget:
+    // deleting must never wait on it.
+    let backlinks = await loadBacklinks(pageId, { indexedOnly: true })
+    if (!backlinks.length) {
+      const scanned = await Promise.race([loadBacklinks(pageId).catch(() => undefined), new Promise<undefined>((resolve) => window.setTimeout(resolve, 400))])
+      if (scanned) backlinks = scanned
+    }
     const referencedBy = new Set(backlinks.map((link) => link.sourcePageId)).size
     const descendantCount = descendantsOf(accessiblePages, pageId).size
     const description = referencedBy > 0

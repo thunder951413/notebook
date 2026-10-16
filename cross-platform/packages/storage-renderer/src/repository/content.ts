@@ -296,7 +296,9 @@ export class ContentRepository extends RepositoryCore {
       await this.db.tombstones.put(tombstone)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
     })
-    this.searchIndex.invalidate(page.workspaceId)
+    // Drop just this page from a built index; invalidating would make the next
+    // lookup re-read every document in the library.
+    this.searchIndex.upsert({ ...page, deletedAt, syncStatus: 'pending', updatedAt: deletedAt })
   }
 
   async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
@@ -342,7 +344,7 @@ export class ContentRepository extends RepositoryCore {
       ])
       await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
     })
-    this.searchIndex.invalidate(page.workspaceId)
+    this.searchIndex.upsert({ ...page, deletedAt: effectiveDeletedAt })
   }
 
   async listTags(workspaceId: UUID): Promise<Tag[]> {

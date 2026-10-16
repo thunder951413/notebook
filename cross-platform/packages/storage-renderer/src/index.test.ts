@@ -1278,3 +1278,20 @@ test('titles containing the query rank above body-only matches', async () => {
   await repository.savePage(titled, { pageId: titled.id, schemaVersion: 3, markdown: '', tiptapJson: { type: 'doc', content: [] }, updatedAt: titled.updatedAt })
   expect((await repository.searchWorkspaceHits('workspace-a', '数据迁移')).map((hit) => hit.page.id)).toEqual(['titled', 'body-only'])
 })
+
+test('trashing and purging a page keeps the built search index instead of rebuilding it', async () => {
+  const repository = makeRepository()
+  const kept = { ...page('page-kept', 'Kept'), syncStatus: 'pending' as const }
+  const gone = { ...page('page-gone', 'Gone'), syncStatus: 'pending' as const }
+  const document = (pageId: string, markdown: string): PageDocument => ({ pageId, schemaVersion: 3, markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt: kept.updatedAt })
+  await repository.savePage(kept, document(kept.id, 'shared-word kept body'))
+  await repository.savePage(gone, document(gone.id, 'shared-word gone body'))
+  expect((await repository.searchWorkspace('workspace-a', 'shared-word')).map((item) => item.id).sort()).toEqual(['page-gone', 'page-kept'])
+
+  const rebuilds = vi.spyOn(repository.db.documents, 'toArray')
+  await repository.movePageToTrash('page-gone', '2026-01-03T00:00:00.000Z')
+  expect((await repository.searchWorkspace('workspace-a', 'shared-word')).map((item) => item.id)).toEqual(['page-kept'])
+  await repository.purgePage('page-gone')
+  expect((await repository.searchWorkspace('workspace-a', 'shared-word')).map((item) => item.id)).toEqual(['page-kept'])
+  expect(rebuilds).not.toHaveBeenCalled()
+})

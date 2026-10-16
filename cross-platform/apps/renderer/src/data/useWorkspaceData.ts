@@ -214,10 +214,10 @@ export function useWorkspaceData() {
     }
   }, [])
 
-  const loadBacklinks = useCallback(async (pageId: string) => {
+  const loadBacklinks = useCallback(async (pageId: string, options?: { indexedOnly?: boolean }) => {
     const indexed = await repository.listBacklinks(pageId)
     const target = pageRecordsRef.current.find((page) => page.id === pageId)
-    if (!target) return indexed
+    if (!target || options?.indexedOnly) return indexed
     // Title links to a page created after the linking note was saved are not
     // in the stored index yet; find them by title.
     const byTitle = await findTitleBacklinks(repository, target, pageRecordsRef.current, (page) => Boolean(page.locked) || privateSectionIds.has(page.sectionId ?? ''))
