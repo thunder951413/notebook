@@ -12,8 +12,8 @@ import { findTitleBacklinks, planWikiLinkRename, wikiTitleResolver } from './wik
 import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
-import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
-import { restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, isEmptyEditorCache, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
+import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
+import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, isEmptyEditorCache, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
 import { seedNotebooks, seedSections, seedPages, tagMap, toPageSummary, demoSeedAllowed } from './workspaceSeed'
 import { useWorkspaceSync } from './useWorkspaceSync'
 import { usePageTreeMoves } from './usePageTreeMoves'
@@ -47,6 +47,7 @@ export function useWorkspaceData() {
   }, [documents])
 
   const reload = useCallback(async () => {
+    await adoptOrphanPhoneSections().catch((error: unknown) => recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'adopt-phone-sections', status: 'failed', ...rendererErrorDetails(error) }))
     await ensureNotebookPageRoots()
     await ensurePagePrivacyMatchesNotebook()
     const documentIds = [...loadedDocumentIds.current]

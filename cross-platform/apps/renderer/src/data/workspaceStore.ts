@@ -41,6 +41,34 @@ export function recordDocumentFailure(action: 'autosave' | 'draft-stage', error:
   recordDiagnosticEvent({ level: 'error', category: 'page', action, status: 'failed', durationMs: now - startedAt, operationId: crypto.randomUUID(), ...rendererErrorDetails(error) })
 }
 
+/** Notebook id the Android app gives a library it creates before it knows the desktop's notebooks. */
+export const ANDROID_DEFAULT_NOTEBOOK_ID = 'personal'
+
+/**
+ * Libraries created on the phone can arrive filed under the Android default
+ * notebook, which does not exist here; they and their notes were then
+ * invisible in the tree. File them under the main notebook (the one holding
+ * most sections) and sync that back, so the phone agrees.
+ */
+export async function adoptOrphanPhoneSections(): Promise<number> {
+  const notebooks = await repository.listNotebooks(WORKSPACE_ID)
+  if (!notebooks.length || notebooks.some((notebook) => notebook.id === ANDROID_DEFAULT_NOTEBOOK_ID)) return 0
+  const orphans = (await db.sections.where('notebookId').equals(ANDROID_DEFAULT_NOTEBOOK_ID).toArray()).filter((section) => !section.deletedAt)
+  if (!orphans.length) return 0
+  const candidates = notebooks.filter((notebook) => !notebook.locked)
+  if (!candidates.length) return 0
+  const sectionCounts = await Promise.all(candidates.map(async (notebook) => ({ notebook, sections: await repository.listSections(notebook.id) })))
+  const target = sectionCounts.reduce((best, item) => item.sections.length > best.sections.length ? item : best)
+  let sortOrder = Math.max(-1, ...target.sections.map((section) => section.sortOrder)) + 1
+  const now = new Date().toISOString()
+  for (const section of orphans.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))) {
+    await repository.saveSection({ ...section, notebookId: target.notebook.id, sortOrder, updatedAt: now })
+    sortOrder += 1
+  }
+  recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'adopt-phone-sections', status: 'success', message: `${orphans.length} 个手机端笔记库归入笔记本` })
+  return orphans.length
+}
+
 export async function ensureNotebookPageRoots() {
   if (notebookRootMigration) return notebookRootMigration
   notebookRootMigration = (async () => {
