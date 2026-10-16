@@ -1,6 +1,6 @@
 import StarterKit from '@tiptap/starter-kit'
 import { TaskItem, TaskList } from '@tiptap/extension-list'
-import { TableKit } from '@tiptap/extension-table'
+import { Table, TableKit, renderTableToMarkdown } from '@tiptap/extension-table'
 import { Mathematics } from '@tiptap/extension-mathematics'
 import Image from '@tiptap/extension-image'
 import { Markdown, MarkdownManager } from '@tiptap/markdown'
@@ -436,16 +436,36 @@ function referenceExtensions(currentPageId?: string, loadAsset?: AssetLoader) {
   return [BlockGroup, embed, BlockAnchor, link, wikiLink]
 }
 
+/** Fenced code blocks use a fence longer than any backtick run inside, so code that itself contains ``` survives a save. */
+const NotebookCodeBlock = CodeBlockLowlight.extend({
+  renderMarkdown: (node, helpers) => {
+    const language = (node.attrs?.language as string | undefined) || ''
+    const body = node.content ? helpers.renderChildren(node.content) : ''
+    const longestRun = Math.max(0, ...[...body.matchAll(/`+/g)].map((match) => match[0].length))
+    const fence = '`'.repeat(Math.max(3, longestRun + 1))
+    return node.content ? [`${fence}${language}`, body, fence].join('\n') : `${fence}${language}\n\n${fence}`
+  },
+})
+
+/** A literal "|" inside a table cell must be written as "\|", or the cell splits on the next load. */
+const NotebookTable = Table.extend({
+  renderMarkdown: (node, helpers) => renderTableToMarkdown(node, {
+    ...helpers,
+    renderChildren: (nodes, separator) => helpers.renderChildren(nodes, separator).replace(/(?<!\\)\|/g, '\\|'),
+  }),
+})
+
 export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader, currentPageId?: string) {
   return [
     StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false }),
     // The stock triple-enter exit rule counts the newline used to create an
     // empty fenced block, so a user's first blank line can unexpectedly leave
     // the block. ArrowDown at the end still provides an explicit way out.
-    CodeBlockLowlight.configure({ lowlight, exitOnTripleEnter: false }),
+    NotebookCodeBlock.configure({ lowlight, exitOnTripleEnter: false }),
     TaskList,
     TaskItem.configure({ nested: true }),
-    TableKit.configure({ table: { resizable: true } }),
+    TableKit.configure({ table: false }),
+    NotebookTable.configure({ resizable: true }),
     Mathematics.configure({ katexOptions: { throwOnError: false } }),
     notebookImage(loadAsset),
     ...referenceExtensions(currentPageId, loadAsset),
