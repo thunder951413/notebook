@@ -555,6 +555,42 @@ export function useWorkspaceData() {
     setTrashRecords((current) => withoutIds(current, ids))
     setReferenceIndexRevision((current) => current + 1)
   }, [])
+  /**
+   * Permanently deletes the given trashed pages (children first). A trashed
+   * section root takes its section with it only when nothing else lives there;
+   * a root whose section still holds live pages is purged alone, so emptying
+   * the trash never cascades into notes that were not trashed.
+   */
+  const emptyTrash = useCallback(async (only: ReadonlySet<string>) => {
+    const trash = trashRecordsRef.current.filter((page) => only.has(page.id))
+    if (!trash.length) return 0
+    const byId = new Map(trash.map((page) => [page.id, page]))
+    const depth = (page: Page) => {
+      let level = 0
+      for (let parent = page.parentPageId ? byId.get(page.parentPageId) : undefined; parent && level < 64; parent = parent.parentPageId ? byId.get(parent.parentPageId) : undefined) level += 1
+      return level
+    }
+    const deletedAt = new Date().toISOString()
+    const purged = new Set<string>()
+    for (const page of [...trash].sort((a, b) => depth(b) - depth(a))) {
+      await repository.purgePage(page.id, deletedAt, legacyDeviceId())
+      purged.add(page.id)
+    }
+    const emptiedSections = new Set<string>()
+    for (const page of trash) {
+      const sectionId = notebookRootSectionId(page)
+      if (!sectionId) continue
+      const stillUsed = pageRecordsRef.current.some((item) => item.sectionId === sectionId)
+        || trashRecordsRef.current.some((item) => item.sectionId === sectionId && !purged.has(item.id))
+      if (!stillUsed) emptiedSections.add(sectionId)
+    }
+    for (const sectionId of emptiedSections) await repository.deleteSection(sectionId, deletedAt, legacyDeviceId())
+    recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'empty-trash', status: 'success', message: `${purged.size} 个页面` })
+    setTrashRecords((current) => withoutIds(current, purged))
+    if (emptiedSections.size) setSectionRecords((current) => current.filter((item) => !emptiedSections.has(item.id)))
+    setReferenceIndexRevision((current) => current + 1)
+    return purged.size
+  }, [])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
   /** The stored modification time (for "changed since the plan was made" checks). */
@@ -586,7 +622,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
+  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
 }
 
 

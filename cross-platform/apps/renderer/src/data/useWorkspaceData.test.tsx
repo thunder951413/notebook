@@ -163,3 +163,22 @@ test('a title link to a missing note can create it with that title', async () =>
   })
   expect(result.current.pages.find((page) => page.id === created)?.title).toBe('新的想法')
 })
+
+test('emptying the trash purges every trashed page but never notes that were not trashed', async () => {
+  const { result } = await renderLoadedWorkspace()
+  await act(async () => {
+    await result.current.moveToTrash('ai-workflow')
+    await result.current.moveToTrash('vision')
+  })
+  expect(result.current.trashPages.map((page) => page.id).sort()).toEqual(['ai-workflow', 'vision'])
+  const keep = result.current.pages.map((page) => page.id).filter((id) => id !== 'ai-workflow' && id !== 'vision')
+  expect(keep.length).toBeGreaterThan(0)
+
+  let purged = 0
+  await act(async () => {
+    purged = await result.current.emptyTrash(new Set(result.current.trashPages.map((page) => page.id)))
+  })
+  expect(purged).toBe(2)
+  expect(result.current.trashPages).toEqual([])
+  expect(result.current.pages.map((page) => page.id)).toEqual(expect.arrayContaining(keep))
+})

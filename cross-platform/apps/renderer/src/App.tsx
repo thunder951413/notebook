@@ -112,7 +112,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
+  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -1005,6 +1005,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     : syncState === 'conflict' ? '有同步冲突'
     : '同步未完成'
 
+  const confirmEmptyTrash = async () => {
+    const targets = accessibleTrashPages
+    if (!targets.length) return
+    if (!(await requestConfirm({ title: '清空回收站？', description: `将永久删除回收站中的 ${targets.length} 个页面，此操作无法撤销。`, confirmLabel: '清空回收站', destructive: true }))) return
+    try {
+      const count = await emptyTrash(new Set(targets.map((page) => page.id)))
+      showToast(`已永久删除 ${count} 个页面`)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '无法清空回收站', { kind: 'error' })
+    }
+  }
+
   return (
     <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`}>
       <input ref={importInput} hidden type="file" accept=".md,.markdown,.txt,.html,.htm,.json,.zip,.nbx,application/json,application/zip" multiple onChange={(event) => { const selected = [...(event.target.files ?? [])]; void Promise.all(selected.map(async (file) => ({ name: file.name, data: new Uint8Array(await file.arrayBuffer()) }))).then((files) => runImport(transferContext, files)); event.target.value = '' }} />
@@ -1134,6 +1146,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               <button className={grouped ? 'selected' : undefined} onClick={() => { setGrouped(!grouped); writePreference('notebook-list-grouped', grouped ? 'off' : 'on') }}>{listScope.kind === 'tasks' ? '按截止状态分组' : '按日期分组'}</button>
               <button className={density === 'compact' ? 'selected' : undefined} onClick={() => { const next = density === 'compact' ? 'cards' : 'compact'; setDensity(next); writePreference('notebook-list-density', next) }}>紧凑列表</button>
             </ActionMenu>
+            {listScope.kind === 'trash' && accessibleTrashPages.length > 0 && <button type="button" className="toolbar-icon-button" aria-label="清空回收站" title="清空回收站" onClick={() => void confirmEmptyTrash()}><Delete20Regular /></button>}
             {listScope.kind !== 'trash' && <button type="button" className="toolbar-icon-button" aria-label={listScope.kind === 'tasks' ? '新建待办' : '新建笔记'} title={`${listScope.kind === 'tasks' ? '新建待办' : '新建笔记'}（⌘N）`} onClick={() => { void createInScope() }}><Compose20Regular /></button>}
           </header>
           <div className="note-list-search">
