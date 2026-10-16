@@ -424,7 +424,13 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
           return true
         }
         if (event.ctrlKey) return false
-        if (event.key.length > 1) return false
+        if (event.key.length > 1) {
+          // Named keys: let IME composition, navigation and function keys through, but
+          // swallow the ones that would edit the text (Enter, Backspace, Delete, Tab).
+          if (event.isComposing || /^(Process|Dead|Arrow|Home$|End$|Page|F\d+$|Shift$|Control$|Meta$|Alt$|CapsLock$)/.test(event.key)) return false
+          event.preventDefault()
+          return true
+        }
         event.preventDefault()
         const outcome = runVimKey(view, vimState.current, event.key, { moveVertical, openLine: insertOpenLine })
         if (outcome === 'insert') enterVimInsertMode(event.key)

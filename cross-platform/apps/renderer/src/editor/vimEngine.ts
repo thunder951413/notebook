@@ -173,6 +173,31 @@ function wordEnd(text: string, from: number, big: boolean) {
   return index
 }
 
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff
+
+/** Moves `count` characters right, treating a surrogate pair (emoji, rare CJK) as one. */
+function stepRight(text: string, from: number, count: number, limit: number) {
+  let index = from
+  for (let step = 0; step < count && index < limit; step += 1) {
+    index += isHighSurrogate(text.charCodeAt(index)) && isLowSurrogate(text.charCodeAt(index + 1)) ? 2 : 1
+  }
+  return Math.min(index, limit)
+}
+
+function stepLeft(text: string, from: number, count: number, limit: number) {
+  let index = from
+  for (let step = 0; step < count && index > limit; step += 1) {
+    index -= index - 2 >= limit && isLowSurrogate(text.charCodeAt(index - 1)) && isHighSurrogate(text.charCodeAt(index - 2)) ? 2 : 1
+  }
+  return Math.max(index, limit)
+}
+
+/** Pulls an offset that fell between the halves of a surrogate pair back onto the pair's start. */
+function snapToCharacter(text: string, offset: number) {
+  return offset > 0 && isLowSurrogate(text.charCodeAt(offset)) && isHighSurrogate(text.charCodeAt(offset - 1)) ? offset - 1 : offset
+}
+
 function firstNonBlank(line: Line) {
   const offset = line.text.search(/\S/u)
   return offset < 0 ? line.text.length : offset
@@ -250,7 +275,8 @@ function finish(view: EditorView, transaction: Transaction, position: number, in
   if (!insert) {
     const lines = buildLines(transaction.doc)
     const line = lines[lineIndexAt(lines, target)]
-    if (line && target === line.end && line.end > line.start) target -= 1
+    if (line && target === line.end && line.end > line.start) target = line.start + stepLeft(line.text, line.end - line.start, 1, 0)
+    else if (line && target > line.start && target < line.end) target = line.start + snapToCharacter(line.text, target - line.start)
   }
   transaction.setSelection(Selection.near(transaction.doc.resolve(target), 1)).scrollIntoView()
   view.dispatch(transaction)
@@ -315,6 +341,9 @@ function applyOperator(view: EditorView, flat: Flat, operator: 'd' | 'c' | 'y', 
     deleteLines(view, flat.lines, range.from, range.to, operator === 'c')
     return operator === 'c' ? 'insert' as const : 'handled' as const
   }
+  const from0 = snapToCharacter(flat.text, range.from)
+  const to0 = snapToCharacter(flat.text, range.to)
+  range = { kind: 'char', from: from0, to: to0 }
   const text = flat.text.slice(range.from, range.to)
   if (text) register = { text, linewise: false }
   const { from, to } = charwiseRange(flat, range)
@@ -335,8 +364,8 @@ function motionFor(key: string, flat: Flat, cursor: number, lineIndex: number, c
   const lineEnd = lineStart + line.text.length
   const text = flat.text
   switch (key) {
-    case 'h': return { kind: 'char', to: Math.max(lineStart, cursor - count) }
-    case 'l': case ' ': return { kind: 'char', to: Math.min(lineEnd, cursor + count) }
+    case 'h': return { kind: 'char', to: lineStart + stepLeft(line.text, cursor - lineStart, count, 0) }
+    case 'l': case ' ': return { kind: 'char', to: lineStart + stepRight(line.text, cursor - lineStart, count, line.text.length) }
     case '0': return { kind: 'char', to: lineStart }
     case '^': return { kind: 'char', to: lineStart + firstNonBlank(line) }
     case '$': {
@@ -511,13 +540,13 @@ export function runVimKey(view: EditorView, state: VimState, key: string, host: 
   switch (key) {
     case 'i': placeCursor(view, view.state.selection.head, true); return 'insert'
     case 'I': placeCursor(view, line.start, true); return 'insert'
-    case 'a': placeCursor(view, Math.min(line.end, view.state.selection.head + (line.end > line.start ? 1 : 0)), true); return 'insert'
+    case 'a': placeCursor(view, line.start + stepRight(line.text, view.state.selection.head - line.start, 1, line.text.length), true); return 'insert'
     case 'A': placeCursor(view, line.end, true); return 'insert'
     case 'o': case 'O': host.openLine(view, key === 'O' ? 'above' : 'below'); return 'insert'
-    case 's': return applyOperator(view, flat, 'c', { kind: 'char', from: cursor, to: Math.min(flat.offsets[lineIndex]! + line.text.length, cursor + count) })
+    case 's': return applyOperator(view, flat, 'c', { kind: 'char', from: cursor, to: flat.offsets[lineIndex]! + stepRight(line.text, cursor - flat.offsets[lineIndex]!, count, line.text.length) })
     case 'S': return applyOperator(view, flat, 'c', { kind: 'line', from: lineIndex, to: Math.min(flat.lines.length - 1, lineIndex + count - 1) })
-    case 'x': return applyOperator(view, flat, 'd', { kind: 'char', from: cursor, to: Math.min(flat.offsets[lineIndex]! + line.text.length, cursor + count) })
-    case 'X': return applyOperator(view, flat, 'd', { kind: 'char', from: Math.max(flat.offsets[lineIndex]!, cursor - count), to: cursor })
+    case 'x': return applyOperator(view, flat, 'd', { kind: 'char', from: cursor, to: flat.offsets[lineIndex]! + stepRight(line.text, cursor - flat.offsets[lineIndex]!, count, line.text.length) })
+    case 'X': return applyOperator(view, flat, 'd', { kind: 'char', from: flat.offsets[lineIndex]! + stepLeft(line.text, cursor - flat.offsets[lineIndex]!, count, 0), to: cursor })
     case 'D': case 'C': {
       const last = Math.min(flat.lines.length - 1, lineIndex + count - 1)
       return applyOperator(view, flat, key === 'D' ? 'd' : 'c', { kind: 'char', from: cursor, to: flat.offsets[last]! + flat.lines[last]!.text.length })
