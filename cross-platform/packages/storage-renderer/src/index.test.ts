@@ -1295,3 +1295,22 @@ test('trashing and purging a page keeps the built search index instead of rebuil
   expect((await repository.searchWorkspace('workspace-a', 'shared-word')).map((item) => item.id)).toEqual(['page-kept'])
   expect(rebuilds).not.toHaveBeenCalled()
 })
+
+test('trashing publishes a recoverable page upsert, only a purge publishes a delete', async () => {
+  const repository = makeRepository()
+  await repository.savePage(page('page-sync-trash', 'Sync trash'), { pageId: 'page-sync-trash', schemaVersion: 3, markdown: 'body', tiptapJson: { type: 'doc', content: [] }, updatedAt: '2026-01-02T00:00:00.000Z' })
+  await repository.movePageToTrash('page-sync-trash', '2026-01-03T00:00:00.000Z')
+  const trashed = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page' && item.entityId === 'page-sync-trash')
+  expect(trashed).toMatchObject({ operation: 'upsert', payload: expect.objectContaining({ deletedAt: '2026-01-03T00:00:00.000Z' }) })
+
+  await repository.restorePage('page-sync-trash', '2026-01-04T00:00:00.000Z')
+  expect((await repository.listOutbox('workspace-a')).some((item) => item.entityType === 'document' && item.entityId === 'page-sync-trash')).toBe(true)
+  const restored = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page' && item.entityId === 'page-sync-trash')
+  expect(restored?.operation).toBe('upsert')
+  expect(restored?.payload.deletedAt).toBeUndefined()
+
+  await repository.movePageToTrash('page-sync-trash', '2026-01-05T00:00:00.000Z')
+  await repository.purgePage('page-sync-trash', '2026-01-06T00:00:00.000Z')
+  const purged = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page' && item.entityId === 'page-sync-trash')
+  expect(purged?.operation).toBe('delete')
+})

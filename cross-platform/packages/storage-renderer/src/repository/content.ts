@@ -292,9 +292,13 @@ export class ContentRepository extends RepositoryCore {
     if (!page) throw new Error(`Page not found: ${pageId}`)
     const tombstone: Tombstone = { id: `page:${pageId}`, workspaceId: page.workspaceId, entityType: 'page', entityId: pageId, deletedAt, deviceId }
     await this.db.transaction('rw', this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, async () => {
-      await this.db.pages.put({ ...page, deletedAt, syncStatus: 'pending', updatedAt: deletedAt })
+      const trashed = { ...page, deletedAt, syncStatus: 'pending' as const, updatedAt: deletedAt }
+      await this.db.pages.put(trashed)
       await this.db.tombstones.put(tombstone)
-      await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', {})
+      // The trash is recoverable, so publish it as a page carrying `deletedAt`
+      // (what the phone does too). A `delete` operation is a purge on the other
+      // side: it removes the note there for good and later blocks its restore.
+      await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', trashed)
     })
     // Drop just this page from a built index; invalidating would make the next
     // lookup re-read every document in the library.
@@ -304,11 +308,15 @@ export class ContentRepository extends RepositoryCore {
   async restorePage(pageId: UUID, restoredAt = new Date().toISOString()): Promise<void> {
     const page = await this.db.pages.get(pageId)
     if (!page) throw new Error(`Page not found: ${pageId}`)
-    await this.db.transaction('rw', this.db.pages, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, async () => {
+    await this.db.transaction('rw', this.db.pages, this.db.documents, this.db.tombstones, this.db.syncOutbox, this.db.syncVersions, async () => {
       const restored = { ...page, deletedAt: undefined, syncStatus: 'pending' as const, updatedAt: restoredAt }
       await this.db.pages.put(restored)
       await this.db.tombstones.delete(`page:${pageId}`)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'upsert', restored)
+      // A peer that handled an earlier trash as a delete has dropped the body;
+      // sending it again makes the restore complete there.
+      const document = await this.db.documents.get(pageId)
+      if (document) await this.enqueueChange(page.workspaceId, 'document', pageId, 'upsert', { ...document, yjsState: undefined })
     })
     this.searchIndex.invalidate(page.workspaceId)
   }
