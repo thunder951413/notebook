@@ -15,6 +15,7 @@ import { INSERT_REFERENCE_EVENT, openReferencePicker, type InsertReferenceDetail
 import { isLinkableTitle } from '@notebook/sync-contract'
 import { suggestWikiLinkPages } from './referenceRuntime'
 import { findWikiTrigger, wikiSuggestions, type WikiSuggestion, type WikiTrigger } from './wikiLinkSuggest'
+import { createVimState, isVimRedo, runVimKey } from './vimEngine'
 import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
 import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } from '../search/FullTextSearch'
 import { OUTLINE_JUMP_EVENT } from './outlineEvents'
@@ -202,7 +203,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const onVimCommandModeChangeRef = useRef(onVimCommandModeChange)
   const vimEnabledRef = useRef(vimEnabled)
   const vimModeRef = useRef<'normal' | 'insert'>('insert')
-  const pendingVimKey = useRef<string | undefined>(undefined)
+  const vimState = useRef(createVimState())
   const suppressedVimTransitionText = useRef<string | undefined>(undefined)
   const draftScheduler = useRef<TrailingDebounce | undefined>(undefined)
   const commitScheduler = useRef<TrailingDebounce | undefined>(undefined)
@@ -241,7 +242,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   }
   const changeVimMode = (mode: 'normal' | 'insert') => {
     vimModeRef.current = mode
-    pendingVimKey.current = undefined
+    vimState.current = createVimState()
     setVimMode(mode)
     onVimCommandModeChangeRef.current?.(vimEnabledRef.current && mode === 'normal')
   }
@@ -417,98 +418,20 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
           moveVertical(view, event.key.toLocaleLowerCase() === 'p' ? -1 : 1)
           return true
         }
+        if (isVimRedo(event)) {
+          event.preventDefault()
+          queueMicrotask(() => editor?.commands.redo?.())
+          return true
+        }
         if (event.ctrlKey) return false
-        if (event.key === 'i' || event.key === 'I') {
-          event.preventDefault()
-          if (event.key === 'I') moveToTextblockEdge(view, 'start')
-          enterVimInsertMode(event.key)
-          return true
-        }
-        if (event.key === 'a' || event.key === 'A') {
-          event.preventDefault()
-          if (event.key === 'A') moveToTextblockEdge(view, 'end')
-          else moveAfterCursor(view)
-          enterVimInsertMode(event.key)
-          return true
-        }
-        if (event.key === 'o' || event.key === 'O') {
-          event.preventDefault()
-          if (event.repeat) return true
-          insertOpenLine(view, event.key === 'O' ? 'above' : 'below')
-          enterVimInsertMode(event.key)
-          return true
-        }
-        if (event.key === 's' || event.key === 'S') {
-          event.preventDefault()
-          if (event.key === 'S') clearCurrentTextblock(view)
-          else deleteCharacter(view)
-          enterVimInsertMode(event.key)
-          return true
-        }
-        if (event.key === '/') {
-          event.preventDefault()
+        if (event.key.length > 1) return false
+        event.preventDefault()
+        const outcome = runVimKey(view, vimState.current, event.key, { moveVertical, openLine: insertOpenLine })
+        if (outcome === 'insert') enterVimInsertMode(event.key)
+        else if (outcome === 'search') {
           setSearchQuery('')
           setSearchOpen(true)
-          return true
-        }
-        if (event.key === 'g') {
-          event.preventDefault()
-          if (pendingVimKey.current === 'g') {
-            pendingVimKey.current = undefined
-            moveSelection(view, Selection.atStart(view.state.doc))
-          } else {
-            pendingVimKey.current = 'g'
-          }
-          return true
-        }
-        if (event.key === 'd') {
-          event.preventDefault()
-          if (pendingVimKey.current === 'd') {
-            pendingVimKey.current = undefined
-            deleteCurrentBlock(view)
-          } else {
-            pendingVimKey.current = 'd'
-          }
-          return true
-        }
-        if (pendingVimKey.current === 'd' && event.key === 'w') {
-          event.preventDefault()
-          pendingVimKey.current = undefined
-          deleteWord(view)
-          return true
-        }
-        pendingVimKey.current = undefined
-        if (event.key === 'G') {
-          event.preventDefault()
-          moveSelection(view, Selection.atEnd(view.state.doc))
-          return true
-        }
-        if (event.key === '0' || event.key === '$') {
-          event.preventDefault()
-          moveToTextblockEdge(view, event.key === '0' ? 'start' : 'end')
-          return true
-        }
-        if (event.key === 'h' || event.key === 'l') {
-          event.preventDefault()
-          moveHorizontal(view, event.key === 'h' ? -1 : 1)
-          return true
-        }
-        if (event.key === 'j' || event.key === 'k') {
-          event.preventDefault()
-          moveVertical(view, event.key === 'k' ? -1 : 1)
-          return true
-        }
-        if (event.key === 'x') {
-          event.preventDefault()
-          deleteCharacter(view)
-          return true
-        }
-        if (event.key === 'u') {
-          event.preventDefault()
-          queueMicrotask(() => editor?.commands.undo?.())
-          return true
-        }
-        event.preventDefault()
+        } else if (outcome === 'undo') queueMicrotask(() => editor?.commands.undo?.())
         return true
       },
     },
@@ -936,11 +859,6 @@ function moveSelection(view: ProseMirrorView, selection: Selection) {
   view.dispatch(view.state.tr.setSelection(selection).scrollIntoView())
 }
 
-function moveHorizontal(view: ProseMirrorView, direction: -1 | 1) {
-  const position = Math.max(0, Math.min(view.state.doc.content.size, view.state.selection.head + direction))
-  moveSelection(view, Selection.near(view.state.doc.resolve(position), direction))
-}
-
 function moveVertical(view: ProseMirrorView, direction: -1 | 1) {
   try {
     const coordinates = view.coordsAtPos(view.state.selection.head)
@@ -949,15 +867,6 @@ function moveVertical(view: ProseMirrorView, direction: -1 | 1) {
   } catch {
     const fallback = Selection.findFrom(view.state.selection.$head, direction, true)
     if (fallback) moveSelection(view, fallback)
-  }
-}
-
-function moveToTextblockEdge(view: ProseMirrorView, edge: 'start' | 'end') {
-  const { $head } = view.state.selection
-  for (let depth = $head.depth; depth > 0; depth -= 1) {
-    if (!$head.node(depth).isTextblock) continue
-    moveSelection(view, TextSelection.create(view.state.doc, edge === 'start' ? $head.start(depth) : $head.end(depth)))
-    return
   }
 }
 
@@ -975,13 +884,6 @@ function currentTextblockRange(state: EditorState) {
     }
   }
   return undefined
-}
-
-function moveAfterCursor(view: ProseMirrorView) {
-  const range = currentTextblockRange(view.state)
-  if (!range) return
-  const position = Math.min(range.textEnd, view.state.selection.head + 1)
-  moveSelection(view, TextSelection.create(view.state.doc, position))
 }
 
 function insertOpenLine(view: ProseMirrorView, direction: 'above' | 'below') {
@@ -1025,33 +927,4 @@ function insertOpenLine(view: ProseMirrorView, direction: 'above' | 'below') {
   const transaction = state.tr.insert(position, paragraph)
   transaction.setSelection(TextSelection.near(transaction.doc.resolve(position + 1))).scrollIntoView()
   view.dispatch(transaction)
-}
-
-function clearCurrentTextblock(view: ProseMirrorView) {
-  const range = currentTextblockRange(view.state)
-  if (!range || range.textStart === range.textEnd) return
-  const transaction = view.state.tr.delete(range.textStart, range.textEnd)
-  transaction.setSelection(TextSelection.create(transaction.doc, range.textStart)).scrollIntoView()
-  view.dispatch(transaction)
-}
-
-function deleteCurrentBlock(view: ProseMirrorView) {
-  const range = currentTextblockRange(view.state)
-  if (range) view.dispatch(view.state.tr.delete(range.from, range.to).scrollIntoView())
-}
-
-function deleteWord(view: ProseMirrorView) {
-  const range = currentTextblockRange(view.state)
-  if (!range) return
-  const from = view.state.selection.head
-  const remaining = view.state.doc.textBetween(from, range.textEnd, '', '')
-  const length = remaining.match(/^\s+|^[^\s]+\s*/u)?.[0].length ?? 0
-  if (length) view.dispatch(view.state.tr.delete(from, Math.min(range.textEnd, from + length)).scrollIntoView())
-}
-
-function deleteCharacter(view: ProseMirrorView) {
-  const range = currentTextblockRange(view.state)
-  if (!range) return
-  const from = view.state.selection.head
-  if (from < range.textEnd) view.dispatch(view.state.tr.delete(from, from + 1).scrollIntoView())
 }
