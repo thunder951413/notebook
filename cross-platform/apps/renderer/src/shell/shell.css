@@ -428,7 +428,11 @@ html[data-shell="tauri"] .theme-dark .note-list-section.sticky { background: rgb
 .toolbar-back:hover { background: var(--hover); }
 .workspace-grid.shell .breadcrumb { min-width: 0; flex: 1; overflow: hidden; color: var(--ink-3); }
 .workspace-grid.shell .breadcrumb-title-input.fui-Input { min-width: 60px; }
-.workspace-grid.shell .editor-toolbar { min-width: 0; overflow: clip; }
+/* Clip sideways only, so toolbar popovers (版本) can still hang below it. */
+.workspace-grid.shell .editor-toolbar { min-width: 0; overflow-x: clip; overflow-y: visible; }
+/* Anchor the version popover to the toolbar and keep it inside its width. */
+.workspace-grid.shell .version-history { position: static; }
+.workspace-grid.shell .version-popover { top: calc(100% - 4px); right: 10px; width: min(680px, calc(100% - 20px)); }
 .workspace-grid.shell .breadcrumb-title-input.fui-Input { font-size: 13.5px; }
 .workspace-grid.shell .editor-actions { flex: none; gap: 2px; }
 .workspace-grid.shell .page-utilities .fui-Button { min-width: 30px; height: 30px; border-radius: 8px; color: var(--ink-2); }
