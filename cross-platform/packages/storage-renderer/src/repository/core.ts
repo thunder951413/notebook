@@ -1,5 +1,12 @@
 import { MAX_AUTOSAVE_REVISIONS_PER_PAGE, MAX_PINNED_REVISIONS_PER_PAGE, NotebookRendererDatabase } from '../database'
+import type { SyncOutboxItem } from '../database'
 import { SearchCache } from '../search'
+
+/** Publication order: containers before what they contain. Deletes run in reverse. */
+const SYNC_DEPENDENCY_RANK: Record<string, number> = {
+  notebook: 10, section: 20, tag: 25, page: 30, document: 40, page_tag: 45, task_step: 50,
+  asset: 50, page_link: 55, reading_position: 60, revision: 70,
+}
 
 /**
  * Shared state and the primitives every repository layer uses: the Dexie
@@ -56,7 +63,26 @@ export class RepositoryCore {
     await this.db.syncOutbox.put({ id: crypto.randomUUID(), workspaceId, entityType, entityId, expectedVersion: version?.version ?? 0, operation, payload, createdAt: new Date().toISOString() })
   }
 
-  listOutbox(workspaceId: string, limit = 200) { return this.db.syncOutbox.where('workspaceId').equals(workspaceId).limit(limit).toArray() }
+  /**
+   * Oldest-first, parents before children. IndexedDB returns equal index keys
+   * in random primary-key (UUID) order, so a bare `workspaceId` read could hand
+   * a document to the journal before its page. Rows queued within the same
+   * millisecond are never split across two batches.
+   */
+  async listOutbox(workspaceId: string, limit = 200) {
+    const items = await this.db.syncOutbox.where('[workspaceId+createdAt]').between([workspaceId, ''], [workspaceId, '\uffff']).limit(limit).toArray()
+    const last = items[items.length - 1]
+    if (items.length >= limit && last) {
+      const ids = new Set(items.map((item) => item.id))
+      const ties = await this.db.syncOutbox.where('[workspaceId+createdAt]').equals([workspaceId, last.createdAt]).toArray()
+      items.push(...ties.filter((item) => !ids.has(item.id)))
+    }
+    const rank = (item: SyncOutboxItem) => {
+      const value = SYNC_DEPENDENCY_RANK[item.entityType] ?? 50
+      return item.operation === 'delete' ? 200 - value : value
+    }
+    return items.sort((left, right) => rank(left) - rank(right) || left.createdAt.localeCompare(right.createdAt))
+  }
   async hasPendingSyncChanges(workspaceId: string) { return Boolean(await this.db.syncOutbox.where('workspaceId').equals(workspaceId).first()) }
   getSyncCursor(workspaceId: string) { return this.db.syncCursors.get(workspaceId).then((value) => value?.cursor ?? 0) }
 

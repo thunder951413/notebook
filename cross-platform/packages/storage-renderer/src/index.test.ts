@@ -1168,6 +1168,26 @@ test('ranks an exact Chinese phrase ahead of weak bigram matches', async () => {
   expect((await repository.searchWorkspace('workspace-a', '小说提示词'))[0]?.id).toBe('exact')
 })
 
+test('lists the outbox oldest first with containers before their contents', async () => {
+  const repository = makeRepository()
+  const notebook = { id: 'order-nb', workspaceId: 'workspace-a', name: 'N', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
+  const section = { id: 'order-sec', notebookId: notebook.id, name: 'S', sortOrder: 0, createdAt: notebook.createdAt, updatedAt: notebook.updatedAt }
+  const value = { ...page('order-page', 'P', section.id), syncStatus: 'pending' as const }
+  // A new page queues its document first; the page must still be listed first.
+  await repository.db.syncOutbox.bulkPut([
+    { id: 'zzz', workspaceId: 'workspace-a', entityType: 'notebook', entityId: notebook.id, operation: 'upsert', expectedVersion: 0, payload: { ...notebook }, createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'aaa', workspaceId: 'workspace-a', entityType: 'document', entityId: value.id, operation: 'upsert', expectedVersion: 0, payload: {}, createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'mmm', workspaceId: 'workspace-a', entityType: 'page', entityId: value.id, operation: 'upsert', expectedVersion: 0, payload: { ...value }, createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'bbb', workspaceId: 'workspace-a', entityType: 'section', entityId: section.id, operation: 'upsert', expectedVersion: 0, payload: { ...section }, createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'ccc', workspaceId: 'workspace-a', entityType: 'revision', entityId: 'rev', operation: 'delete', expectedVersion: 0, payload: {}, createdAt: '2025-12-31T00:00:00.000Z' },
+    { id: 'ddd', workspaceId: 'workspace-b', entityType: 'tag', entityId: 'other', operation: 'upsert', expectedVersion: 0, payload: {}, createdAt: '2025-12-31T00:00:00.000Z' },
+  ])
+  const listed = await repository.listOutbox('workspace-a')
+  expect(listed.map((item) => `${item.operation}:${item.entityType}`)).toEqual(['upsert:notebook', 'upsert:section', 'upsert:page', 'upsert:document', 'delete:revision'])
+  // Rows queued in the same millisecond stay together across a batch boundary.
+  expect(await repository.listOutbox('workspace-a', 2)).toHaveLength(5)
+})
+
 test('classifies private notebook entities and related page records as local-only sync', async () => {
   const repository = makeRepository()
   const notebook = { id: 'private-notebook', workspaceId: 'workspace-a', name: 'Private', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', locked: true }

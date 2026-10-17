@@ -282,5 +282,7 @@ export class NotebookRendererDatabase extends Dexie {
         if (staleOutboxIds.length) await outbox.bulkDelete(staleOutboxIds)
       }
     })
+    // Lets the outbox be read oldest-first per workspace (queue order).
+    this.version(20).stores({ syncOutbox: 'id, workspaceId, createdAt, [workspaceId+createdAt], [entityType+entityId]' })
   }
 }
