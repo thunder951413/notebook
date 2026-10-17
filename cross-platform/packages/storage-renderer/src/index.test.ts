@@ -1188,6 +1188,47 @@ test('lists the outbox oldest first with containers before their contents', asyn
   expect(await repository.listOutbox('workspace-a', 2)).toHaveLength(5)
 })
 
+test('moving a public page, section or notebook into private space retracts the published copies', async () => {
+  const repository = makeRepository()
+  const open = { id: 'nb-open', workspaceId: 'workspace-a', name: 'Open', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
+  const vault = { ...open, id: 'nb-vault', name: 'Vault', locked: true }
+  const sectionA = { id: 'sec-a', notebookId: open.id, name: 'A', sortOrder: 0, createdAt: open.createdAt, updatedAt: open.updatedAt }
+  const sectionB = { id: 'sec-b', notebookId: open.id, name: 'B', sortOrder: 1, createdAt: open.createdAt, updatedAt: open.updatedAt }
+  const vaultSection = { ...sectionA, id: 'sec-vault', notebookId: vault.id }
+  const publish = async () => {
+    const outbox = await repository.listOutbox('workspace-a')
+    await repository.acknowledgeSync('workspace-a', outbox.map((item) => ({ operation_id: item.id, entity_type: item.entityType, entity_id: item.entityId, version: 1 })))
+  }
+  const retracted = async () => (await repository.listOutbox('workspace-a')).filter((item) => item.payload.privacyRetraction).map((item) => `${item.entityType}:${item.entityId}`).sort()
+  await repository.saveNotebook(open)
+  await repository.saveNotebook(vault)
+  await repository.saveSection(sectionA)
+  await repository.saveSection(sectionB)
+  await repository.saveSection(vaultSection)
+  const moved = { ...page('moved-page', 'Moved', sectionA.id), syncStatus: 'pending' as const }
+  const staying = { ...page('staying-page', 'Staying', sectionB.id), syncStatus: 'pending' as const }
+  await repository.savePage(moved, syncedDocument(moved.id, 'public'))
+  await repository.savePage(staying, syncedDocument(staying.id, 'public'))
+  await publish()
+
+  // Page → section of a locked notebook.
+  await repository.savePage({ ...(await repository.getPage(moved.id))!, sectionId: vaultSection.id, syncStatus: 'pending' })
+  expect(await retracted()).toEqual([`document:${moved.id}`, `page:${moved.id}`])
+  await publish()
+
+  // Section → locked notebook takes its pages with it.
+  await repository.saveSection({ ...sectionB, notebookId: vault.id })
+  expect(await retracted()).toEqual([`document:${staying.id}`, `page:${staying.id}`, `section:${sectionB.id}`])
+  await publish()
+
+  // Locking a notebook retracts the notebook, its sections and their pages.
+  const fresh = { ...page('fresh-page', 'Fresh', sectionA.id), syncStatus: 'pending' as const }
+  await repository.savePage(fresh, syncedDocument(fresh.id, 'public'))
+  await publish()
+  await repository.saveNotebook({ ...open, locked: true })
+  expect(await retracted()).toEqual([`document:${fresh.id}`, `notebook:${open.id}`, `page:${fresh.id}`, `section:${sectionA.id}`])
+})
+
 test('classifies private notebook entities and related page records as local-only sync', async () => {
   const repository = makeRepository()
   const notebook = { id: 'private-notebook', workspaceId: 'workspace-a', name: 'Private', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', locked: true }

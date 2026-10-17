@@ -117,6 +117,14 @@ export class RepositoryCore {
     await this.enqueueChange(workspaceId, entityType, entityId, 'delete', { privacyRetraction: true })
   }
 
+  /** A section turned private: retract it and every page that was still public. */
+  protected async retractPublicSectionForPrivacy(workspaceId: string, sectionId: string) {
+    await this.queuePrivacyRetractionIfPublished(workspaceId, 'section', sectionId)
+    for (const page of await this.db.pages.where('sectionId').equals(sectionId).toArray()) {
+      if (!page.locked) await this.retractPublicPageForPrivacy(workspaceId, page.id)
+    }
+  }
+
   protected async retractPublicPageForPrivacy(workspaceId: string, pageId: string) {
     await this.queuePrivacyRetractionIfPublished(workspaceId, 'page', pageId)
     await this.queuePrivacyRetractionIfPublished(workspaceId, 'document', pageId)

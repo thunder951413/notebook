@@ -80,9 +80,18 @@ export class ContentRepository extends RepositoryCore {
     if (expired.length) await this.db.editorCaches.bulkDelete(expired)
   }
   async saveNotebook(notebook: Notebook) {
-    await this.db.transaction('rw', [this.db.notebooks, this.db.syncOutbox, this.db.syncVersions], async () => {
+    await this.db.transaction('rw', this.db.tables, async () => {
+      const previous = await this.db.notebooks.get(notebook.id)
       await this.db.notebooks.put(notebook)
       await this.enqueueChange(notebook.workspaceId, 'notebook', notebook.id, 'upsert', { ...notebook })
+      // Locking a notebook makes everything inside it private: retract the
+      // public copies the same way locking a single page does.
+      if (previous && !previous.locked && notebook.locked) {
+        await this.queuePrivacyRetractionIfPublished(notebook.workspaceId, 'notebook', notebook.id)
+        for (const section of await this.db.sections.where('notebookId').equals(notebook.id).toArray()) {
+          await this.retractPublicSectionForPrivacy(notebook.workspaceId, section.id)
+        }
+      }
     })
   }
   async deleteNotebook(notebookId: string, deletedAt: string, deviceId: string) {
@@ -102,11 +111,15 @@ export class ContentRepository extends RepositoryCore {
     if (workspaceId) this.searchIndex.invalidate(workspaceId)
   }
   async saveSection(section: Section) {
-    await this.db.transaction('rw', [this.db.notebooks, this.db.sections, this.db.syncOutbox, this.db.syncVersions], async () => {
+    await this.db.transaction('rw', this.db.tables, async () => {
       const notebook = await this.db.notebooks.get(section.notebookId)
       if (!notebook) throw new Error(`Notebook not found: ${section.notebookId}`)
+      const previous = await this.db.sections.get(section.id)
+      const previousNotebook = previous ? await this.db.notebooks.get(previous.notebookId) : undefined
       await this.db.sections.put(section)
       await this.enqueueChange(notebook.workspaceId, 'section', section.id, 'upsert', { ...section })
+      // Moving a section into a locked notebook makes it private.
+      if (previousNotebook && !previousNotebook.locked && notebook.locked) await this.retractPublicSectionForPrivacy(notebook.workspaceId, section.id)
     })
   }
   async deleteSection(sectionId: UUID, deletedAt: string, deviceId: string) {
@@ -235,6 +248,7 @@ export class ContentRepository extends RepositoryCore {
         if (draft && draft.document.updatedAt <= document.updatedAt) await this.db.drafts.delete(page.id)
         return
       }
+      const wasPrivate = previousPage ? await this.isPrivatePage(page.id) : false
       await this.db.pages.put(page)
       if (document) {
         if (document.pageId !== page.id) throw new Error('Document pageId must match page id')
@@ -263,7 +277,8 @@ export class ContentRepository extends RepositoryCore {
         if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'document', page.id, 'upsert', { ...document, yjsState: undefined })
       }
       if (page.syncStatus === 'pending') await this.enqueueChange(page.workspaceId, 'page', page.id, 'upsert', { ...page })
-      if (page.syncStatus === 'pending' && page.locked && previousPage && !previousPage.locked) {
+      // Locking the page, or moving it into a locked notebook, hides it.
+      if (page.syncStatus === 'pending' && previousPage && !wasPrivate && await this.isPrivatePage(page.id)) {
         await this.retractPublicPageForPrivacy(page.workspaceId, page.id)
       }
     })
