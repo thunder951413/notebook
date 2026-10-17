@@ -32,6 +32,11 @@ export const WEBDAV_OPERATION_TIMEOUT_MS = 60_000
  * as requests keep completing.
  */
 export const WEBDAV_SYNC_IDLE_TIMEOUT_MS = 120_000
+/** Upper bound for one push; mirrors the native deadline (60 s + 5 s per object, max 900 s). */
+const WEBDAV_PUSH_MAX_MS = 900_000
+/** Assumed worst-case upload speed: 64 KiB/s (~0.5 Mbps). */
+const WEBDAV_PUSH_BYTES_PER_SECOND = 64 * 1024
+const WEBDAV_PUSH_HEARTBEAT_MS = 30_000
 /** Absolute upper bound for one run. Applied batches are kept either way. */
 export const WEBDAV_SYNC_TIMEOUT_MS = 30 * 60_000
 const SSH_MIGRATION_TIMEOUT_MS = 180_000
@@ -310,8 +315,21 @@ function boundedTransport(transport: WebdavTransport, syncSignal: AbortSignal, a
     test: (connection, signal) => progressed(withDeadline('WebDAV 连接测试', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.test(connection, requestSignal))),
     pull: (connection, knownSeqs, signal) => progressed(withDeadline('读取远端日志', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.pull(connection, knownSeqs, requestSignal))),
     objectGet: (connection, hash, signal) => progressed(withDeadline('下载远端对象', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.objectGet(connection, hash, requestSignal))),
-    push: (connection, deviceId, entries, objects, signal, minSeq) => progressed(withDeadline('上传同步变更', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.push(connection, deviceId, entries, objects, requestSignal, minSeq))),
+    // A batch of up to 8 MiB cannot finish in 60 s on a slow uplink. Scale the
+    // deadline with the payload, and keep the idle watchdog fed while the
+    // upload is genuinely in flight; cancellation still works throughout.
+    push: (connection, deviceId, entries, objects, signal, minSeq) => {
+      const heartbeat = window.setInterval(alive, WEBDAV_PUSH_HEARTBEAT_MS)
+      return progressed(withDeadline('上传同步变更', signal ?? syncSignal, pushDeadlineMs(objects), (requestSignal) => transport.push(connection, deviceId, entries, objects, requestSignal, minSeq)))
+        .finally(() => window.clearInterval(heartbeat))
+    },
   }
+}
+
+export function pushDeadlineMs(objects: ReadonlyArray<{ data: Uint8Array }>): number {
+  const bytes = objects.reduce((total, object) => total + object.data.byteLength, 0)
+  const budget = WEBDAV_OPERATION_TIMEOUT_MS + objects.length * 5_000 + Math.ceil(bytes / WEBDAV_PUSH_BYTES_PER_SECOND) * 1_000
+  return Math.min(WEBDAV_PUSH_MAX_MS, budget)
 }
 
 const encoder = new TextEncoder()

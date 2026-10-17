@@ -3,7 +3,7 @@ import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { migrateSshToWebdav, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
+import { migrateSshToWebdav, pushDeadlineMs, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { synchronizeLegacySsh } from './legacySshSync'
 
@@ -618,6 +618,13 @@ describe('synchronizeWebdav', () => {
     // A broken local store must not silently publish a truncated attachment.
     ;(repo.getAssetContent as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
     await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('缺少本地内容')
+  })
+
+  test('scales the push deadline with the payload so slow uplinks can finish', () => {
+    expect(pushDeadlineMs([])).toBe(WEBDAV_OPERATION_TIMEOUT_MS)
+    // 8 MiB at 64 KiB/s needs ~128 s on top of the base budget.
+    expect(pushDeadlineMs([{ data: new Uint8Array(8 * 1024 * 1024) }])).toBe(WEBDAV_OPERATION_TIMEOUT_MS + 5_000 + 128_000)
+    expect(pushDeadlineMs(Array.from({ length: 400 }, () => ({ data: new Uint8Array(1) })))).toBe(900_000)
   })
 
   test('one unreadable attachment does not hold back the rest of the outbox', async () => {
