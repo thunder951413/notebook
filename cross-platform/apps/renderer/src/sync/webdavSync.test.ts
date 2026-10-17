@@ -620,6 +620,28 @@ describe('synchronizeWebdav', () => {
     await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('缺少本地内容')
   })
 
+  test('one unreadable attachment does not hold back the rest of the outbox', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const { repo, calls } = repository()
+    const broken = {
+      id: 'op-broken', workspaceId, entityType: 'asset', entityId: 'asset-missing', operation: 'upsert' as const, expectedVersion: 0,
+      payload: { id: 'asset-missing', pageId, kind: 'image', filename: 'gone.png', mimeType: 'image/png', createdAt: timestamp, byteSize: 4 },
+    }
+    const healthy = {
+      id: 'op-page', workspaceId, entityType: 'page', entityId: pageId, operation: 'upsert' as const, expectedVersion: 0,
+      payload: { id: pageId, workspaceId, kind: 'document', title: '正常笔记', preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp },
+    }
+    ;(repo.listOutbox as ReturnType<typeof vi.fn>).mockResolvedValue([broken, healthy])
+    webdav.push.mockResolvedValue({ firstSeq: 1, count: 1 })
+
+    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('缺少本地内容')
+
+    const [pushedEntries] = (webdav.push as ReturnType<typeof vi.fn>).mock.calls[0]!.slice(2) as [Array<{ type: string }>]
+    expect(pushedEntries.map((entry) => entry.type)).toEqual(['page'])
+    expect(calls.acknowledge).toEqual([[expect.objectContaining({ operation_id: 'op-page' })]])
+  })
+
   test('keeps conflicted entities queued and reports the conflict state', async () => {
     const { webdav } = installDesktopMock()
     seedWebdavSettings()

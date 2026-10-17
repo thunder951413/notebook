@@ -632,49 +632,70 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
       if (!scope) return true
       return outboxPageId(item) === scope.pageId
     })
+    let failedItems = 0
+    let uploadFailure: unknown
     if (pending.length) {
       const entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }> = []
       const objects: Array<{ hash: string; data: Uint8Array }> = []
+      // One unreadable item (a missing attachment, a corrupt body) must not
+      // hold back everything else. Failed items stay queued; later changes to
+      // the same entity wait behind them so versions are never published out
+      // of order. The first failure is reported after the rest has uploaded.
+      const prepared: typeof pending = []
+      const blockedKeys = new Set<string>()
       for (const item of pending) {
         throwIfAborted(syncSignal)
-        const entry: { ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> } = {
-          ts: new Date().toISOString(),
-          op: item.operation,
-          type: item.entityType,
-          id: item.entityId,
-          ver: item.expectedVersion,
-          payload: item.operation === 'upsert' ? serializeWebdavPayload(item.entityType, item.payload) : item.payload,
-        }
-        const privateItem = privacy[outgoing.indexOf(item)] === true
-        if (!privateItem && ['document', 'revision'].includes(item.entityType) && item.operation === 'upsert') {
-          const external = externalizeDocument(entry.payload, objects)
-          entry.payload = external.payload
-          entry.hash = external.hash
-        }
-        if (item.entityType === 'asset' && item.operation === 'upsert') {
-          const content = await repository.getAssetContent(item.entityId)
-          if (!content) throw new Error(`附件 ${item.entityId} 缺少本地内容，已阻止不完整同步`)
-          const bytes = new Uint8Array(await content.arrayBuffer())
-          const data = privateItem ? encoder.encode(JSON.stringify(await cipher.encrypt(`asset-bytes:${item.entityId}`, bytes))) : bytes
-          const hash = await sha256Bytes(data)
-          objects.push({ hash, data })
-          entry.hash = hash
-          entry.payload = { ...entry.payload, objectHash: hash, checksum: await sha256Bytes(bytes), byteSize: bytes.byteLength }
-        }
-        if (privateItem) {
-          entry.payload = await cipher.encryptPayload(item.entityType, item.entityId, entry.payload, item.operation, item.expectedVersion)
-          // Whole encrypted envelopes may be externalized, never plaintext.
-          const encrypted = externalizeDocument(entry.payload, objects)
-          entry.payload = encrypted.payload
-          // Asset bytes use their own encrypted object; its reference is in
-          // the encrypted metadata. Keep hash available for upload batching.
-          if (encrypted.hash) {
-            if (entry.hash) entry.payload = { ...entry.payload, $assetObject: entry.hash }
-            entry.hash = encrypted.hash
+        const itemKey = `${item.entityType}:${item.entityId}`
+        if (blockedKeys.has(itemKey)) continue
+        const objectStart = objects.length
+        try {
+          const entry: { ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> } = {
+            ts: new Date().toISOString(),
+            op: item.operation,
+            type: item.entityType,
+            id: item.entityId,
+            ver: item.expectedVersion,
+            payload: item.operation === 'upsert' ? serializeWebdavPayload(item.entityType, item.payload) : item.payload,
           }
+          const privateItem = privacy[outgoing.indexOf(item)] === true
+          if (!privateItem && ['document', 'revision'].includes(item.entityType) && item.operation === 'upsert') {
+            const external = externalizeDocument(entry.payload, objects)
+            entry.payload = external.payload
+            entry.hash = external.hash
+          }
+          if (item.entityType === 'asset' && item.operation === 'upsert') {
+            const content = await repository.getAssetContent(item.entityId)
+            if (!content) throw new Error(`附件 ${item.entityId} 缺少本地内容，已阻止不完整同步`)
+            const bytes = new Uint8Array(await content.arrayBuffer())
+            const data = privateItem ? encoder.encode(JSON.stringify(await cipher.encrypt(`asset-bytes:${item.entityId}`, bytes))) : bytes
+            const hash = await sha256Bytes(data)
+            objects.push({ hash, data })
+            entry.hash = hash
+            entry.payload = { ...entry.payload, objectHash: hash, checksum: await sha256Bytes(bytes), byteSize: bytes.byteLength }
+          }
+          if (privateItem) {
+            entry.payload = await cipher.encryptPayload(item.entityType, item.entityId, entry.payload, item.operation, item.expectedVersion)
+            // Whole encrypted envelopes may be externalized, never plaintext.
+            const encrypted = externalizeDocument(entry.payload, objects)
+            entry.payload = encrypted.payload
+            // Asset bytes use their own encrypted object; its reference is in
+            // the encrypted metadata. Keep hash available for upload batching.
+            if (encrypted.hash) {
+              if (entry.hash) entry.payload = { ...entry.payload, $assetObject: entry.hash }
+              entry.hash = encrypted.hash
+            }
+          }
+          entries.push(entry)
+          prepared.push(item)
+        } catch (error) {
+          throwIfAborted(syncSignal)
+          objects.length = objectStart
+          blockedKeys.add(itemKey)
+          uploadFailure ??= error
+          recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'prepare-item', status: 'failed', message: `${itemKey} 暂无法上传：${error instanceof Error ? error.message : String(error)}`.slice(0, 300) })
         }
-        entries.push(entry)
       }
+      failedItems = pending.length - prepared.length
       // Each IPC push shares one deadline. Bound object requests AND bytes,
       // but combine small metadata records to avoid rewriting the whole v4
       // journal once per 25 tags/steps. A single oversized item stands alone.
@@ -684,7 +705,7 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
         const pushed = await transport.push(connection, deviceId, batch, batchObjects, syncSignal, (await loadSeqs(repository, settings))[deviceId] ?? 0)
         throwIfAborted(syncSignal)
         assertUploadConfirmation(pushed, batch.length)
-        const acknowledged = pending.slice(offset, offset + batch.length).map((item) => ({
+        const acknowledged = prepared.slice(offset, offset + batch.length).map((item) => ({
           operation_id: item.id,
           entity_type: item.entityType,
           entity_id: item.entityId,
@@ -715,8 +736,9 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
     if (localOnly.length) await repository.acknowledgeLocalOnlySync(localOnly)
     if (repository.db) recordDiagnosticEvent({
       level: 'info', category: 'sync', action: 'outbox', status: 'success',
-      message: `本批上传 ${pending.length} 条；剩余待上传 ${await repository.db.syncOutbox.where('workspaceId').equals(workspaceId).count()} 条`,
+      message: `本批上传 ${pending.length - failedItems} 条；剩余待上传 ${await repository.db.syncOutbox.where('workspaceId').equals(workspaceId).count()} 条`,
     })
+    if (failedItems) throw uploadFailure
     return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts, ...extras() }
   })
 }
