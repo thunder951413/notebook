@@ -87,6 +87,8 @@ export interface NotebookDesktopApi {
     pull(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, knownSeqs: Record<string, number>, requestId: string): Promise<{ entries: Array<{ seq: number; ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown>; deviceId: string }>; fingerprint: string; devices?: string[]; resetDevices?: string[]; warnings?: string[]; blocked?: Array<{ deviceId: string; code: 'journal-corrupt' | 'head-corrupt' | 'journal-truncated' | 'journal-missing' | 'journal-too-large'; message: string; knownSeq: number; headLastSeq?: number; journalLastSeq?: number }> }>
     objectGet(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, hash: string, requestId: string): Promise<Uint8Array>
     push(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, entries: Array<{ ts: string; op: 'upsert' | 'delete'; type: string; id: string; ver: number; hash?: string; payload: Record<string, unknown> }>, objects: Array<{ hash: string; data: Uint8Array }>, requestId: string, minSeq?: number): Promise<{ firstSeq: number; count: number }>
+    /** Repair: keep a copy of a damaged own journal, remove it, and report the sequence floor to continue above. */
+    rebuildJournal(settings: { baseUrl: string; username: string; appPassword: string; remotePath: string; syncPassword?: string }, deviceId: string, requestId: string): Promise<{ backup?: string; floorSeq: number }>
     cancel(requestId: string): Promise<void>
   }
   events: {
@@ -167,6 +169,7 @@ const api: NotebookDesktopApi = Object.freeze({
     pull: (settings: Parameters<NotebookDesktopApi['webdav']['pull']>[0], knownSeqs: Record<string, number>, requestId: string) => ipcRenderer.invoke('webdav:pull', settings, knownSeqs, requestId),
     objectGet: (settings: Parameters<NotebookDesktopApi['webdav']['objectGet']>[0], hash: string, requestId: string) => ipcRenderer.invoke('webdav:object:get', settings, hash, requestId),
     push: (settings: Parameters<NotebookDesktopApi['webdav']['push']>[0], deviceId: string, entries: Parameters<NotebookDesktopApi['webdav']['push']>[2], objects: Parameters<NotebookDesktopApi['webdav']['push']>[3], requestId: string, minSeq?: number) => ipcRenderer.invoke('webdav:push', settings, deviceId, entries, objects, requestId, minSeq),
+    rebuildJournal: (settings: Parameters<NotebookDesktopApi['webdav']['rebuildJournal']>[0], deviceId: string, requestId: string) => ipcRenderer.invoke('webdav:rebuild-journal', settings, deviceId, requestId),
     cancel: (requestId: string) => ipcRenderer.invoke('webdav:cancel', requestId),
   }),
   events: Object.freeze({

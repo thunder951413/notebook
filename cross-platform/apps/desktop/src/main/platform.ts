@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { saveDataRoot, type DataRootSelection } from './dataRoot'
 import { pullLegacyRepository, pushLegacyRepository, releaseLegacySession, runRepositoryHelper, testLegacyConnection, type LegacySftpFile, type LegacySftpHelperResult, type LegacySftpPullOptions, type LegacySftpPushOptions, type LegacySshConnection } from './legacySftp'
-import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, type WebdavConnection, type WebdavJournalEntry } from './webdav'
+import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, rebuildWebdavJournal, testWebdavConnection, type WebdavConnection, type WebdavJournalEntry } from './webdav'
 import { appendDiagnosticEvent, diagnosticErrorDetails, diagnosticLogPath, exportDiagnosticEvents, readDiagnosticEvents, type DiagnosticEventInput } from './diagnostics'
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024
@@ -357,6 +357,11 @@ export function registerPlatformHandlers(options: { defaultUserDataPath: string;
         for (const object of objects) await putWebdavObject(settings, object.hash, object.data, signal)
         return appendWebdavJournal(settings, deviceId, entries, signal, typeof minSeq === 'number' ? minSeq : 0)
       }))
+  })
+  ipcMain.handle('webdav:rebuild-journal', async (event, settings: WebdavConnection, deviceId: string, requestId: string) => {
+    assertTrustedSender(event)
+    return diagnoseOperation({ category: 'sync', action: 'webdav-rebuild-journal', operationId: requestId, summarize: (result) => `floor ${result.floorSeq}${result.backup ? ' · backed up' : ''}` },
+      () => withWebdavDeadline(requestId, webdavRequests, (signal) => rebuildWebdavJournal(settings, deviceId, signal)))
   })
   ipcMain.handle('webdav:cancel', (event, requestId: string) => {
     assertTrustedSender(event)

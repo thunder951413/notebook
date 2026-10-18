@@ -588,6 +588,77 @@ export async function putWebdavObject(settings: WebdavConnection, hash: string, 
  * whole file is written back. This is safe because only one device ever
  * writes a given journal file.
  */
+/** Where a damaged journal is kept when it is rebuilt (never matched by a listing). */
+export function corruptBackupPath(path: string, stampMs: number): string {
+  return `${path}.corrupt-${stampMs}`
+}
+
+/**
+ * The highest sequence number a damaged own journal and its marker still vouch
+ * for (fixture: journal-rebuild.json). A rebuilt journal must continue above
+ * it: other devices have already consumed everything up to there. Both inputs
+ * are read leniently, since they are exactly the files that failed strict
+ * parsing. Only integer values count.
+ */
+export function rebuildFloor(journalText: string | undefined, headText: string | undefined): number {
+  const integer = (value: unknown): number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
+  let fromHead = 0
+  try { fromHead = integer((JSON.parse(headText ?? '') as { lastSeq?: unknown } | null)?.lastSeq) } catch { /* unreadable marker contributes nothing */ }
+  let fromRows = 0
+  for (const line of (journalText ?? '').split('\n')) {
+    try {
+      const value = JSON.parse(line.trim()) as unknown
+      if (value && typeof value === 'object' && !Array.isArray(value)) fromRows = Math.max(fromRows, integer((value as { seq?: unknown }).seq))
+    } catch { /* a damaged line contributes nothing */ }
+  }
+  return Math.max(fromHead, fromRows)
+}
+
+/**
+ * Repair for a device whose own journal can no longer be read or appended to:
+ * keep the damaged files, remove them from the live layout and report the
+ * sequence floor. The caller republishes the library; numbering continues
+ * above the floor, so readers that already consumed the old rows keep their
+ * cursors. Nothing is deleted unless its copy was stored first.
+ */
+export async function rebuildWebdavJournal(settings: WebdavConnection, deviceId: string, signal?: AbortSignal): Promise<{ backup?: string; floorSeq: number }> {
+  if (!DEVICE_ID_PATTERN.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
+  const client = clientFor(settings)
+  const root = safeRemotePath(settings.remotePath)
+  const journalFile = journalPath(root, deviceId)
+  const headFile = journalHeadPath(root, deviceId)
+  const read = async (path: string): Promise<Buffer | undefined> => {
+    try {
+      return Buffer.from(await client.getFileContents(path, { format: 'binary', signal }) as ArrayBuffer)
+    } catch (error) {
+      if ((error as { status?: number })?.status === 404) return undefined
+      throw error
+    }
+  }
+  const journal = await read(journalFile)
+  if (journal && journal.byteLength > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限，无法先备份再重建`)
+  const head = await read(headFile)
+  const floorSeq = rebuildFloor(journal?.toString('utf8'), head?.toString('utf8'))
+  const stamp = Date.now()
+  let backup: string | undefined
+  if (journal) {
+    backup = corruptBackupPath(journalFile, stamp)
+    await putWithDirectory(client, settings, backup, journal, signal)
+  }
+  if (head) await putWithDirectory(client, settings, corruptBackupPath(headFile, stamp), head, signal)
+  // Journal first: a marker without a journal is reported as missing, while a
+  // journal without a marker would be read as a legacy one.
+  for (const path of [journalFile, headFile]) {
+    try {
+      await client.deleteFile(path, { signal })
+    } catch (error) {
+      if ((error as { status?: number })?.status !== 404) throw error
+    }
+  }
+  headCache.invalidate(cacheNamespace(settings) + deviceId)
+  return { ...(backup ? { backup } : {}), floorSeq }
+}
+
 export async function appendWebdavJournal(settings: WebdavConnection, deviceId: string, entries: Array<Omit<WebdavJournalEntry, 'seq'>>, signal?: AbortSignal, minSeq = 0): Promise<{ firstSeq: number; count: number }> {
   if (!DEVICE_ID_PATTERN.test(deviceId)) throw new Error(`设备 ID 不正确：${deviceId}`)
   const client = clientFor(settings)

@@ -140,6 +140,7 @@ const api: Desktop = Object.freeze({
       requestId,
       minSeq: minSeq ?? null,
     }),
+    rebuildJournal: (settings, deviceId, requestId) => call<Awaited<ReturnType<Desktop['webdav']['rebuildJournal']>>>('webdav_rebuild_journal', { settings, deviceId, requestId }),
     cancel: (requestId: string) => call<void>('webdav_cancel', { requestId }),
     recentRequestCount: () => call<number>('webdav_recent_requests'),
   },

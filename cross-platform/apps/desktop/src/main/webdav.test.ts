@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, testWebdavConnection, validatedWebdavBaseUrl, type WebdavConnection } from './webdav'
+import { appendWebdavJournal, getWebdavObject, pullWebdavJournals, putWebdavObject, rebuildWebdavJournal, testWebdavConnection, validatedWebdavBaseUrl, type WebdavConnection } from './webdav'
 import { configureWebdavFetch } from './webdavFetch'
 
 /**
@@ -337,6 +337,33 @@ describe('webdav transport', () => {
     expect(caughtUp.entries).toEqual([])
     // The corrupt journal is not re-read once the cursor is at its marker.
     expect(caughtUp.blocked?.map((item) => item.code)).toEqual(['journal-truncated'])
+  })
+
+  test('rebuilding a damaged own journal keeps a copy and continues above the old sequence', async () => {
+    const isolated = { ...connection, remotePath: 'rebuild-test' }
+    const deviceId = '00000000-0000-4000-8000-0000000000d1'
+    const row = { ts: '2026-09-04T00:00:00.000Z', op: 'upsert' as const, type: 'page', payload: {} }
+    await appendWebdavJournal(isolated, deviceId, [{ ...row, id: 'a', ver: 0 }, { ...row, id: 'b', ver: 0 }])
+    const dir = '/dav/rebuild-test/journal'
+    const journalEntry = entries.get(`${dir}/${deviceId}.jsonl`)!
+    const damaged = Buffer.concat([journalEntry.data!, Buffer.from('{truncated record')])
+    journalEntry.data = damaged
+    await expect(appendWebdavJournal(isolated, deviceId, [{ ...row, id: 'c', ver: 0 }])).rejects.toThrow()
+
+    const result = await rebuildWebdavJournal(isolated, deviceId)
+    expect(result.floorSeq).toBe(2)
+    expect(result.backup).toBeDefined()
+    expect(entries.get(`/dav/${result.backup}`)?.data?.equals(damaged)).toBe(true)
+    expect(entries.has(`${dir}/${deviceId}.jsonl`)).toBe(false)
+    expect(entries.has(`${dir}/${deviceId}.head.json`)).toBe(false)
+
+    const pushed = await appendWebdavJournal(isolated, deviceId, [{ ...row, id: 'fresh', ver: 0 }], undefined, result.floorSeq)
+    expect(pushed.firstSeq).toBe(3)
+    const pulled = await pullWebdavJournals(isolated, { [deviceId]: 2 })
+    expect(pulled.entries.map((entry) => entry.id)).toEqual(['fresh'])
+    expect(pulled.blocked).toBeUndefined()
+    // Nothing to rebuild is harmless.
+    expect(await rebuildWebdavJournal(isolated, '00000000-0000-4000-8000-0000000000d2')).toEqual({ floorSeq: 0 })
   })
 
   test('pulls only entries newer than the per-device read cursor', async () => {

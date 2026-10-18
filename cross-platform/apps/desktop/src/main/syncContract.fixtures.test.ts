@@ -18,6 +18,7 @@ import {
   parseJournal,
   planJournalRead,
   planJournalReadSized,
+  rebuildFloor,
   safeRemotePath,
   sortPulledEntries,
   validatedWebdavBaseUrl,
@@ -131,6 +132,12 @@ describe('shared WebDAV v4 contract fixtures', () => {
       expect(assessment.blocked ?? null, testCase.name).toBe(testCase.expected.blocked)
       expect(assessment.seqs, testCase.name).toEqual(testCase.expected.seqs)
       expect(plan.reset || assessment.reset, testCase.name).toBe(testCase.expected.reset)
+    }
+  })
+
+  it('journal-rebuild.json', () => {
+    for (const testCase of fixture('journal-rebuild.json').cases) {
+      expect(rebuildFloor(testCase.journalText ?? undefined, testCase.headText ?? undefined), testCase.name).toBe(testCase.expectedFloor)
     }
   })
 

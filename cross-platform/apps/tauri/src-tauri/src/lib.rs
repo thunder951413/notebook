@@ -658,6 +658,15 @@ async fn webdav_push(app: AppHandle, settings: webdav::Connection, device_id: St
     .await
 }
 
+#[tauri::command]
+async fn webdav_rebuild_journal(app: AppHandle, settings: webdav::Connection, device_id: String, request_id: String) -> CommandResult<webdav::RebuildResult> {
+    let http = app.state::<AppState>().http.clone();
+    webdav_operation(&app, "webdav-rebuild-journal", &request_id, WEBDAV_DEADLINE, |r: &webdav::RebuildResult| format!("floor {}{}", r.floor_seq, if r.backup.is_some() { " · backed up" } else { "" }), async move {
+        webdav::rebuild_journal(&http, &settings, &device_id).await
+    })
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // Updates
 
@@ -1052,6 +1061,7 @@ pub fn run() {
             webdav_pull,
             webdav_object_get,
             webdav_push,
+            webdav_rebuild_journal,
             webdav_cancel,
             webdav_recent_requests,
             legacy_import_take,
