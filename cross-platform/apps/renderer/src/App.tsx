@@ -839,7 +839,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return () => { cancelled = true }
   }, [query])
 
-  const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
+  const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, recentCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
 
   const focusEditor = () => requestAnimationFrame(() => requestAnimationFrame(() => {
     document.querySelector<HTMLElement>('.document-editor-content')?.focus({ preventScroll: true })
@@ -1063,7 +1063,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         <Sidebar
           scope={layout !== 'narrow' && !listVisible ? { kind: 'notebook', id: '' } : listScope}
           onScope={chooseScope}
-          counts={{ all: documentPages.length, favorites: favoriteCount, tasks: openTodoCount, taskBadge: digest.badge, taskOverdue: digest.overdue.length > 0, trash: accessibleTrashPages.length }}
+          counts={{ all: documentPages.length, recent: recentCount, favorites: favoriteCount, tasks: openTodoCount, taskBadge: digest.badge, taskOverdue: digest.overdue.length > 0, trash: accessibleTrashPages.length }}
           tags={tags}
           settingsRef={settingsTriggerRef}
           onSettings={() => { setSettingsPage('general'); setSettingsOpen(true) }}
@@ -1235,6 +1235,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             </> : listScope.kind === 'trash' ? <>
               <strong>回收站是空的</strong>
               <span>移到回收站的笔记会保留在这里，可以随时恢复。</span>
+            </> : listScope.kind === 'recent' ? <>
+              <strong>还没有同步过的笔记</strong>
+              <span>连接坚果云后，同步完成的笔记会出现在这里。</span>
             </> : listScope.kind === 'favorites' ? <>
               <strong>还没有置顶的笔记</strong>
               <span>在笔记上点右键，选择“置顶”。</span>

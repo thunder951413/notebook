@@ -1,6 +1,7 @@
 import { useState, type ReactNode, type Ref } from 'react'
 import {
   Add16Regular,
+  ArrowSync20Regular,
   CheckmarkCircle20Regular,
   Delete20Regular,
   DocumentMultiple20Regular,
@@ -13,6 +14,7 @@ import {
 
 export type ListScope =
   | { kind: 'all' }
+  | { kind: 'recent' }
   | { kind: 'favorites' }
   | { kind: 'tasks' }
   | { kind: 'trash' }
@@ -31,7 +33,7 @@ const SCOPE_KEY = 'notebook-list-scope-v1'
 export function readScope(): ListScope {
   try {
     const value = JSON.parse(globalThis.localStorage?.getItem(SCOPE_KEY) ?? 'null') as ListScope | null
-    if (value && ['all', 'favorites', 'tasks', 'trash'].includes(value.kind)) return { kind: value.kind } as ListScope
+    if (value && ['all', 'recent', 'favorites', 'tasks', 'trash'].includes(value.kind)) return { kind: value.kind } as ListScope
     if (value?.kind === 'notebook' && typeof value.id === 'string') return value
     if (value?.kind === 'tag' && typeof value.name === 'string') return value
   } catch { /* storage unavailable or corrupt */ }
@@ -63,7 +65,7 @@ function SidebarItem({ icon, label, count, badge, badgeTone = 'normal', selected
 export interface SidebarProps {
   scope: ListScope
   onScope: (scope: ListScope) => void
-  counts: { all: number; favorites: number; tasks: number; taskBadge: number; taskOverdue: boolean; trash: number }
+  counts: { all: number; recent: number; favorites: number; tasks: number; taskBadge: number; taskOverdue: boolean; trash: number }
   tags: Array<{ name: string; count: number }>
   notebooks: ReactNode
   syncStatus: ReactNode
@@ -90,6 +92,7 @@ export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, s
     <div className="sidebar-scroll">
       <div className="sidebar-group" role="group" aria-label="笔记">
         <SidebarItem icon={<DocumentMultiple20Regular />} label="全部笔记" count={counts.all} selected={!assistantOpen && scope.kind === 'all'} onClick={() => onScope({ kind: 'all' })} />
+        <SidebarItem icon={<ArrowSync20Regular />} label="最近同步" count={counts.recent} selected={!assistantOpen && scope.kind === 'recent'} onClick={() => onScope({ kind: 'recent' })} />
         <SidebarItem icon={<Pin20Regular />} label="置顶" count={counts.favorites} selected={!assistantOpen && scope.kind === 'favorites'} onClick={() => onScope({ kind: 'favorites' })} />
         <SidebarItem icon={<CheckmarkCircle20Regular />} label="待办" count={counts.tasks} badge={counts.taskBadge} badgeTone={counts.taskOverdue ? 'alert' : 'normal'} selected={!assistantOpen && scope.kind === 'tasks'} onClick={() => onScope({ kind: 'tasks' })} />
         <SidebarItem icon={<Delete20Regular />} label="回收站" count={counts.trash || undefined} selected={!assistantOpen && scope.kind === 'trash'} onClick={() => onScope({ kind: 'trash' })} />

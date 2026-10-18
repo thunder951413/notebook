@@ -124,6 +124,19 @@ const timeOf = (value: string | undefined) => {
 }
 
 export const updatedTime = (page: PageSummary) => timeOf(page.updatedAt)
+
+export const RECENT_SYNC_WINDOW_MS = 24 * 60 * 60 * 1000
+export const RECENT_SYNC_MIN = 5
+
+/**
+ * Synced notes from the last day, newest first; topped up to the five most
+ * recent synced notes when fewer than five fall inside the day.
+ */
+export function recentlySynced(pages: PageSummary[], now: number): PageSummary[] {
+  const synced = pages.filter((page) => page.syncStatus === 'synced').sort((left, right) => updatedTime(right) - updatedTime(left))
+  const withinDay = synced.filter((page) => now - updatedTime(page) <= RECENT_SYNC_WINDOW_MS)
+  return withinDay.length >= RECENT_SYNC_MIN ? withinDay : synced.slice(0, RECENT_SYNC_MIN)
+}
 export const createdTime = (page: PageSummary) => timeOf(page.createdAt ?? page.updatedAt)
 
 /** Title matches first, then notebook; newer first within a tier. */

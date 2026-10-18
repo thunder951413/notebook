@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'vitest'
 import type { PageSummary } from '../model'
-import { buildSections, dateGroupLabel, dueDescription, installPinyin, pageMatches, parseSearchQuery, rankSearchHits, relativeDateLabel, sortPages, tagCounts, todoDigest, todoGroupLabel } from './browse'
+import { buildSections, dateGroupLabel, dueDescription, installPinyin, pageMatches, parseSearchQuery, rankSearchHits, recentlySynced, relativeDateLabel, sortPages, tagCounts, todoDigest, todoGroupLabel } from './browse'
 
 const now = new Date(2026, 9, 13, 14, 0).getTime()
 const at = (days: number, hours = 12, minutes = 0) => {
@@ -125,4 +125,23 @@ describe('todos', () => {
 
 test('tag counts, most used first', () => {
   expect(tagCounts([page('a', { tags: ['旅行', '计划'] }), page('b', { tags: ['旅行'] })])).toEqual([{ name: '旅行', count: 2 }, { name: '计划', count: 1 }])
+})
+
+describe('recently synced', () => {
+  const synced = (id: string, updatedAt: string) => page(id, { syncStatus: 'synced', updatedAt })
+
+  test('keeps only synced notes from the last day when there are at least five', () => {
+    const pages = [
+      ...['a', 'b', 'c', 'd', 'e'].map((id, index) => synced(id, at(0, 8 + index))),
+      synced('old', at(-3)),
+      page('pending', { syncStatus: 'pending', updatedAt: at(0, 13) }),
+    ]
+    expect(recentlySynced(pages, now).map((entry) => entry.id)).toEqual(['e', 'd', 'c', 'b', 'a'])
+  })
+
+  test('tops up to the five newest synced notes when the last day has fewer', () => {
+    const pages = [synced('today', at(0, 9)), ...[-2, -3, -4, -5, -6].map((days) => synced(`d${-days}`, at(days))), page('local', { syncStatus: 'local' })]
+    expect(recentlySynced(pages, now).map((entry) => entry.id)).toEqual(['today', 'd2', 'd3', 'd4', 'd5'])
+    expect(recentlySynced([], now)).toEqual([])
+  })
 })

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo } from 'react'
 import type { NotebookSummary, PageSummary } from '../model'
 import type { ListScope } from '../shell/Sidebar'
 import { useDueBannerState } from '../shell/DueBanner'
-import { buildSections, createdTime, isEmptyQuery, isOpenTodo, pageMatches, parseSearchQuery, rankSearchHits, tagCounts, todoDigest, updatedTime, type ListOrder, type ListSection } from '../shell/browse'
+import { buildSections, createdTime, isEmptyQuery, isOpenTodo, pageMatches, parseSearchQuery, rankSearchHits, recentlySynced, tagCounts, todoDigest, updatedTime, type ListOrder, type ListSection } from '../shell/browse'
 
 /**
  * Everything the note list shows, derived from the library and the chosen
@@ -36,6 +36,7 @@ export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashP
   const listScope = useMemo<ListScope>(() => scope.kind === 'notebook' && !scopeNotebook ? { kind: 'all' } : scope, [scope, scopeNotebook])
   const scopedPages = useMemo(() => {
     switch (listScope.kind) {
+      case 'recent': return recentlySynced(documentPages, nowMs)
       case 'favorites': return documentPages.filter((page) => page.favorite)
       case 'tasks': return taskPages
       case 'trash': return accessibleTrashPages
@@ -43,7 +44,7 @@ export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashP
       case 'tag': return documentPages.filter((page) => page.tags.includes(listScope.name))
       default: return documentPages
     }
-  }, [accessibleTrashPages, documentPages, listScope, notebookBySection, taskPages])
+  }, [accessibleTrashPages, documentPages, listScope, notebookBySection, nowMs, taskPages])
   const parsedQuery = useMemo(() => parseSearchQuery(query), [query])
   const searching = !isEmptyQuery(parsedQuery)
   const listOrder: ListOrder = listScope.kind === 'tasks' ? tasksOrder : notesOrder === 'due' ? 'updated' : notesOrder
@@ -69,12 +70,14 @@ export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashP
   useEffect(() => { void window.notebookDesktop?.badge?.set(digest.badge).catch(() => undefined) }, [digest.badge])
 
   const scopeTitle = listScope.kind === 'all' ? '全部笔记'
+    : listScope.kind === 'recent' ? '最近同步'
     : listScope.kind === 'favorites' ? '置顶'
     : listScope.kind === 'tasks' ? '待办'
     : listScope.kind === 'trash' ? '回收站'
     : listScope.kind === 'notebook' ? `${scopeNotebook?.emoji ? `${scopeNotebook.emoji} ` : ''}${scopeNotebook?.name ?? '笔记本'}`
     : `#${listScope.name}`
   const openTodoCount = useMemo(() => taskPages.filter(isOpenTodo).length, [taskPages])
+  const recentCount = useMemo(() => recentlySynced(documentPages, nowMs).length, [documentPages, nowMs])
   const favoriteCount = useMemo(() => documentPages.filter((page) => page.favorite).length, [documentPages])
   const notebookCounts = useMemo(() => {
     const counts = new Map<string, number>()
@@ -88,5 +91,5 @@ export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashP
     : listScope.kind === 'tasks' ? `${openTodoCount} 项未完成`
     : listScope.kind === 'trash' ? `${scopedPages.length} 项`
     : `${scopedPages.length} 篇`
-  return { notebookBySection, notebookName, browseContext, documentPages, taskPages, scopeNotebook, listScope, scopedPages, parsedQuery, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, favoriteCount, notebookCounts, scopeSubtitle }
+  return { notebookBySection, notebookName, browseContext, documentPages, taskPages, scopeNotebook, listScope, scopedPages, parsedQuery, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, recentCount, favoriteCount, notebookCounts, scopeSubtitle }
 }
