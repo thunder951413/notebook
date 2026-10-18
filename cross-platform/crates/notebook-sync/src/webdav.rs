@@ -443,6 +443,15 @@ impl Dav {
         Err(DavError::http(response.status()))
     }
 
+    /// DELETE; a resource that is already gone counts as deleted.
+    pub async fn delete(&self, path: &str) -> DavResult<()> {
+        let response = self.send(Method::DELETE, self.url(path, false), None, None, None).await?;
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            return Ok(());
+        }
+        Err(DavError::http(response.status()))
+    }
+
     /// GET returning the body and the response ETag.
     pub async fn get(&self, path: &str, limit: usize) -> DavResult<(Vec<u8>, Option<String>)> {
         let response = self.send(Method::GET, self.url(path, false), None, None, None).await?;
@@ -1047,6 +1056,85 @@ pub async fn append_journal(http: &reqwest::Client, connection: &Connection, dev
     // readers on the previous committed view rather than exposing this write.
     dav.put(&journal_head_path(&root, device), serde_json::to_vec(&head).map_err(|error| DavError::new(error.to_string()))?).await?;
     Ok(PushResult { first_seq, count })
+}
+
+/// Where a damaged journal is kept when it is rebuilt (never matched by a
+/// listing: it neither ends in `.jsonl` nor in `.head.json`).
+pub fn corrupt_backup_path(path: &str, stamp_ms: u64) -> String {
+    format!("{path}.corrupt-{stamp_ms}")
+}
+
+/// The highest sequence number a damaged own journal and its marker still
+/// vouch for (fixture: `journal-rebuild.json`). A rebuilt journal must continue
+/// above it: other devices have already consumed everything up to there. Both
+/// inputs are read leniently, since they are exactly the files that failed to
+/// parse; unreadable lines and an unreadable marker simply contribute nothing.
+pub fn rebuild_floor(journal_text: Option<&str>, head_text: Option<&str>) -> u64 {
+    let from_head = head_text
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|value| value.get("lastSeq").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let from_rows = journal_text
+        .map(|text| {
+            text.split('\n')
+                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                .filter_map(|value| value.get("seq").and_then(Value::as_u64))
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    from_head.max(from_rows)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildResult {
+    /// Remote path of the kept copy of the damaged journal, if there was one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
+    /// Sequence numbers continue above this when the journal is written again.
+    pub floor_seq: u64,
+}
+
+/// Repair for a device whose own journal can no longer be read or appended to:
+/// keep the damaged files, remove them from the live layout and report the
+/// sequence floor. The caller republishes the library; because numbering
+/// continues above the floor, readers that already consumed the old rows keep
+/// their cursors. Nothing is deleted unless its copy was stored first.
+pub async fn rebuild_journal(http: &reqwest::Client, connection: &Connection, device: &str) -> DavResult<RebuildResult> {
+    if !DEVICE_ID.is_match(device) {
+        return Err(DavError::new(format!("设备 ID 不正确：{device}")));
+    }
+    let dav = Dav::new(http, connection)?;
+    let root = safe_remote_path(&connection.remote_path)?;
+    let (journal_path, head_path) = (journal_path(&root, device), journal_head_path(&root, device));
+    let read = |result: DavResult<(Vec<u8>, Option<String>)>| match result {
+        Ok((bytes, _)) => Ok(Some(bytes)),
+        Err(error) if error.is(404) => Ok(None),
+        Err(error) => Err(error),
+    };
+    let journal = read(dav.get(&journal_path, MAX_LOG_BYTES + 1).await)?;
+    if journal.as_ref().is_some_and(|bytes| bytes.len() > MAX_LOG_BYTES) {
+        return Err(DavError::new(format!("远端日志 {device}.jsonl 超过 100 MB 上限，无法先备份再重建")));
+    }
+    let head = read(dav.get(&head_path, MAX_HEAD_BYTES * 2).await)?;
+    let floor_seq = rebuild_floor(journal.as_deref().map(String::from_utf8_lossy).as_deref(), head.as_deref().map(String::from_utf8_lossy).as_deref());
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64);
+    let mut backup = None;
+    if let Some(bytes) = journal {
+        let target = corrupt_backup_path(&journal_path, stamp);
+        put_with_directory(&dav, connection, &target, bytes).await?;
+        backup = Some(target);
+    }
+    if let Some(bytes) = head {
+        put_with_directory(&dav, connection, &corrupt_backup_path(&head_path, stamp), bytes).await?;
+    }
+    // Journal first: a marker without a journal is reported as missing, while a
+    // journal without a marker would be read as a legacy one.
+    dav.delete(&journal_path).await?;
+    dav.delete(&head_path).await?;
+    HEADS.lock().unwrap().invalidate(&format!("{}{device}", cache_namespace(connection)));
+    Ok(RebuildResult { backup, floor_seq })
 }
 
 #[cfg(test)]

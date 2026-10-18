@@ -176,6 +176,14 @@ fn pull_isolation() {
 }
 
 #[test]
+fn journal_rebuild() {
+    for case in cases(&fixture("journal-rebuild.json"), "cases") {
+        let floor = webdav::rebuild_floor(case["journalText"].as_str(), case["headText"].as_str());
+        assert_eq!(floor, case["expectedFloor"].as_u64().unwrap(), "{}", name(case));
+    }
+}
+
+#[test]
 fn pull_order() {
     let fixture = fixture("pull-order.json");
     let mut entries: Vec<Entry> = cases(&fixture, "entries").iter().map(entry).collect();

@@ -55,6 +55,10 @@ impl TestServer {
                             tiny_http::Response::from_data(Vec::new()).with_status_code(201)
                         }
                     }
+                    "DELETE" => {
+                        let existed = state.entries.remove(&path).is_some();
+                        tiny_http::Response::from_data(Vec::new()).with_status_code(if existed { 204 } else { 404 })
+                    }
                     "GET" => match state.entries.get(&path) {
                         Some(Some(data)) => {
                             let etag = format!("\"{}\"", sha256_hex(data));
@@ -403,6 +407,37 @@ async fn a_truncated_journal_exposes_its_complete_rows_and_is_reported_even_when
     server.set_file(&format!("/dav/notebook_backup/journal/{device}.jsonl"), tail.as_bytes());
     let healthy = pull_journals(&http(), &c, &HashMap::from([(device.to_string(), 2)])).await.unwrap();
     assert!(healthy.blocked.is_empty());
+}
+
+#[tokio::test]
+async fn rebuilding_a_damaged_own_journal_keeps_a_copy_and_continues_above_the_old_sequence() {
+    let server = TestServer::start();
+    let c = server.connection("notebook_backup");
+    let device = "00000000-0000-4000-8000-0000000000f1";
+    let (journal_path, head_path) = (format!("/dav/notebook_backup/journal/{device}.jsonl"), format!("/dav/notebook_backup/journal/{device}.head.json"));
+    let body = format!("{}\n{}\n", line(1, "kept-1"), line(2, "kept-2"));
+    let damaged = format!("{body}{{truncated record");
+    server.set_file(&journal_path, damaged.as_bytes());
+    server.set_file(&head_path, head_json(device, &body, 5).as_bytes());
+    assert!(append_journal(&http(), &c, device, vec![row("page", "blocked", 0, serde_json::json!({}))], 0).await.is_err(), "a damaged journal cannot be appended to");
+
+    let result = rebuild_journal(&http(), &c, device).await.unwrap();
+    assert_eq!(result.floor_seq, 5, "the marker vouched for sequence 5");
+    let backup = result.backup.expect("the damaged journal is kept");
+    assert_eq!(server.file(&format!("/dav/{backup}")).as_deref(), Some(damaged.as_bytes()));
+    assert!(server.file(&journal_path).is_none() && server.file(&head_path).is_none());
+
+    // Listings ignore the backup, and writing again continues above the floor.
+    let pulled = pull_journals(&http(), &c, &HashMap::new()).await.unwrap();
+    assert!(pulled.devices.is_empty() && pulled.blocked.is_empty());
+    let pushed = append_journal(&http(), &c, device, vec![row("page", "fresh", 0, serde_json::json!({}))], result.floor_seq).await.unwrap();
+    assert_eq!(pushed.first_seq, 6);
+    // A reader that consumed up to 5 sees exactly the new row.
+    let pulled = pull_journals(&http(), &c, &HashMap::from([(device.to_string(), 5)])).await.unwrap();
+    assert_eq!(ids(&pulled, device), vec!["fresh"]);
+    // Rebuilding when nothing exists is harmless.
+    let again = rebuild_journal(&http(), &c, "00000000-0000-4000-8000-0000000000f2").await.unwrap();
+    assert!(again.backup.is_none() && again.floor_seq == 0);
 }
 
 #[tokio::test]

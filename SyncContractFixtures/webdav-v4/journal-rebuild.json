@@ -1,0 +1,59 @@
+{
+  "description": "Sequence floor for rebuilding a device's own damaged journal. The damaged files are kept under journal/<deviceId>.jsonl.corrupt-<unix ms> and journal/<deviceId>.head.json.corrupt-<unix ms>, then removed (journal first, marker second); the rebuilt journal is written with minSeq = max(expectedFloor, the device's own read position), so numbering never moves backwards and readers that already consumed older rows keep their cursors. expectedFloor = max(marker.lastSeq if the marker text is JSON with an integer lastSeq, largest integer seq among lines that parse as JSON objects). Both inputs are read leniently: they are exactly the files that failed strict parsing. Only integer values count (a seq written as 2.0 or \"7\" is ignored).",
+  "cases": [
+    {
+      "name": "nothing on the remote",
+      "journalText": null,
+      "headText": null,
+      "expectedFloor": 0
+    },
+    {
+      "name": "healthy journal and marker agree",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{}}\n",
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":10,\"journalSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":1,\"historyEntries\":0}",
+      "expectedFloor": 3
+    },
+    {
+      "name": "rows beyond the marker still count (uncommitted tail)",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{}}\n{\"seq\":4,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p4\",\"ver\":0,\"payload\":{}}\n",
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":10,\"journalSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":1,\"historyEntries\":0}",
+      "expectedFloor": 4
+    },
+    {
+      "name": "marker vouches for more than the journal holds (truncated)",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\n",
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":7,\"journalBytes\":10,\"journalSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":1,\"historyEntries\":0}",
+      "expectedFloor": 7
+    },
+    {
+      "name": "a damaged line is skipped, the good ones still count",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{}}\n{not json\n{\"seq\":9,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p9\",\"ver\":0,\"payload\":{}}\n",
+      "headText": null,
+      "expectedFloor": 9
+    },
+    {
+      "name": "unreadable marker contributes nothing",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{}}\n",
+      "headText": "{broken",
+      "expectedFloor": 3
+    },
+    {
+      "name": "marker only, journal gone",
+      "journalText": null,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":5,\"journalBytes\":10,\"journalSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":1,\"historyEntries\":0}",
+      "expectedFloor": 5
+    },
+    {
+      "name": "lines without an integer seq are ignored",
+      "journalText": "{\"seq\":2,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{}}\n{\"seq\":\"7\",\"op\":\"upsert\"}\n{\"seq\":-3}\n[1,2]\n",
+      "headText": null,
+      "expectedFloor": 2
+    },
+    {
+      "name": "blank and CRLF lines are tolerated",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{}}\r\n\r\n{\"seq\":4,\"ts\":\"2026-10-01T00:00:00.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p4\",\"ver\":0,\"payload\":{}}\r\n",
+      "headText": null,
+      "expectedFloor": 4
+    }
+  ]
+}
