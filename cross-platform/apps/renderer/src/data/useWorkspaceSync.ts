@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { loadSyncSettings } from '../sync/syncSettings'
 import { synchronizeLegacySsh, type LegacySyncMode } from '../sync/legacySshSync'
 import { loadSyncBackend } from '../sync/legacySshSettings'
-import { synchronizeWebdav } from '../sync/webdavSync'
+import { synchronizeWebdav, type WebdavSyncIssues } from '../sync/webdavSync'
+import { describeIssues } from '../sync/webdavIssues'
 import { describeSyncError, recordSyncSuccess } from '../sync/syncErrors'
 import { showToast } from '../components/toast'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
@@ -28,6 +29,8 @@ export function useWorkspaceSync(reload: () => Promise<void>) {
   const [syncState, setSyncState] = useState<'offline' | 'syncing' | 'synced' | 'conflict' | 'error'>('offline')
   const [syncError, setSyncError] = useState<string>()
   const [syncProgress, setSyncProgress] = useState<string>()
+  const [syncIssues, setSyncIssues] = useState<WebdavSyncIssues>()
+  const reportedIssues = useRef('')
   const settledSyncState = useRef<SettledSyncState>('offline')
   const syncRunning = useRef(false)
   const syncTask = useRef<Promise<boolean> | undefined>(undefined)
@@ -109,6 +112,13 @@ export function useWorkspaceSync(reload: () => Promise<void>) {
           ? await synchronizeWebdav(repository, WORKSPACE_ID, options?.signal, options?.scope, mode, setSyncProgress)
           : await synchronizeLegacySsh(repository, WORKSPACE_ID, options?.force, options?.mode)
         stateFinalizer.complete(result.state)
+        // The sync worked, but records or devices still need attention: say so
+        // (once per distinct situation) instead of letting "synced" mean "all fine".
+        const issues = 'issues' in result ? result.issues : undefined
+        setSyncIssues(issues)
+        const issueSummary = issues ? describeIssues(issues) : ''
+        if (issueSummary && issueSummary !== reportedIssues.current) showToast(`已同步，但${issueSummary}。详情见 设置 → 同步状态与修复。`, { durationMs: 10_000 })
+        reportedIssues.current = issueSummary
         if (result.state !== 'offline' && !('changed' in result && result.changed === false)) {
           await reload()
           const pages = repository.db?.pages
@@ -222,5 +232,5 @@ export function useWorkspaceSync(reload: () => Promise<void>) {
     }
   }, [requestSyncSoon])
 
-  return { syncState, syncError, syncProgress, syncNow, requestSyncSoon, requestBoundarySync }
+  return { syncState, syncError, syncProgress, syncIssues, syncNow, requestSyncSoon, requestBoundarySync }
 }

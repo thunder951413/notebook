@@ -4,6 +4,8 @@ import { Badge, Button, Input, Switch, Tab, TabList, Text } from '@fluentui/reac
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from '../sync/syncSettings'
 import { clearWebdavAppPassword, clearWebdavSyncPassword, getWebdavAppPassword, getWebdavSyncPassword, hasWebdavAppPassword, loadWebdavSettings, saveWebdavSettings, type WebdavSettings } from '../sync/webdavSettings'
 import { testWebdavConnection } from '../sync/webdavSync'
+import type { WebdavBlockedDevice } from '../sync/webdavIssues'
+import type { QuarantineReason, SyncQuarantineItem } from '@notebook/storage-renderer'
 import { serializeWebdavQrPayload } from '../sync/webdavQrConfig'
 import QRCode from 'qrcode'
 import type { LegacySyncMode } from '../sync/legacySshSync'
@@ -61,7 +63,29 @@ interface SettingsCenterProps {
     status: () => Promise<{ pending: number; conflictCopies: number }>
     resetReadPositions: () => Promise<void>
     republishAll: () => Promise<number>
+    /** Remote records set aside and devices whose journal cannot be read. */
+    issues: () => Promise<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[] }>
+    retryIssues: () => Promise<number>
+    dismissIssues: (ids: string[]) => Promise<void>
   }
+}
+
+const quarantineLabels: Record<QuarantineReason, { title: string; hint: string }> = {
+  'needs-key': { title: '需要隐私同步密钥', hint: '在上方填写与其他设备相同的同步密码，下次同步会自动读取。' },
+  'bad-key': { title: '隐私同步密钥不匹配', hint: '确认各设备使用同一个同步密码；正确后会自动读取。' },
+  'unknown-type': { title: '来自更新版本的记录', hint: '升级本应用后会自动读取。' },
+  'invalid-payload': { title: '记录内容不正确', hint: '可能由其他版本写入。升级应用后会重试一次；仍失败请导出诊断日志。' },
+  'workspace-mismatch': { title: '属于其他工作区', hint: '不会影响本机内容，可以删除。' },
+  'missing-object': { title: '云端文件缺失', hint: '请在产生该内容的设备上选“重新上传本机全部内容”，再点“重试”。' },
+  'object-corrupt': { title: '云端文件已损坏', hint: '请在产生该内容的设备上选“重新上传本机全部内容”，再点“重试”。' },
+}
+
+const blockedLabels: Record<WebdavBlockedDevice['code'], string> = {
+  'journal-corrupt': '日志含有无法解析的记录',
+  'head-corrupt': '提交标记损坏',
+  'journal-truncated': '日志被截断，部分记录丢失',
+  'journal-missing': '日志文件缺失',
+  'journal-too-large': '日志超过 100 MB',
 }
 
 const syncLabels: Record<SyncState, string> = {
@@ -370,12 +394,40 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const [repairStatus, setRepairStatus] = useState<{ pending: number; conflictCopies: number }>()
   const [repairing, setRepairing] = useState(false)
+  const [issueSnapshot, setIssueSnapshot] = useState<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[] }>()
   useEffect(() => {
     if (page !== 'services' || !syncRepair) return
     let cancelled = false
     void syncRepair.status().then((status) => { if (!cancelled) setRepairStatus(status) }).catch(() => undefined)
+    void syncRepair.issues().then((snapshot) => { if (!cancelled) setIssueSnapshot(snapshot) }).catch(() => undefined)
     return () => { cancelled = true }
   }, [page, syncRepair, syncState])
+
+  const retryIssues = async () => {
+    if (!syncRepair || repairing || savingSync || syncState === 'syncing') return
+    setRepairing(true)
+    setSyncMessage(undefined)
+    setSyncMessageIsError(false)
+    try {
+      const remaining = await syncRepair.retryIssues()
+      setSyncMessage(remaining ? `仍有 ${remaining} 条云端记录暂时无法应用，原因见下方列表。` : '所有异常记录都已处理。')
+      setSyncMessageIsError(remaining > 0)
+      setIssueSnapshot(await syncRepair.issues())
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '重试失败')
+      setSyncMessageIsError(true)
+    } finally {
+      setRepairing(false)
+    }
+  }
+
+  const dismissIssues = async () => {
+    if (!syncRepair || !issueSnapshot?.items.length || repairing) return
+    const confirmed = await requestConfirm({ title: `删除 ${issueSnapshot.items.length} 条异常记录？`, description: '这些云端记录将不再尝试读取，本机内容不受影响。其他设备上的原始记录不会被删除。此操作无法撤销。', confirmLabel: '删除异常记录' })
+    if (!confirmed) return
+    await syncRepair.dismissIssues(issueSnapshot.items.map((item) => item.id))
+    setIssueSnapshot(await syncRepair.issues())
+  }
 
   const runRepair = async (kind: 'reread' | 'republish') => {
     if (!syncRepair || repairing || savingSync || syncState === 'syncing') return
@@ -699,6 +751,18 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
                 <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void runRepair('reread')}>{repairing ? '正在修复…' : '重新读取全部云端记录'}</Button>
                 <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void runRepair('republish')}>重新上传本机全部内容</Button>
               </div>
+              {issueSnapshot && (issueSnapshot.items.length > 0 || issueSnapshot.blocked.length > 0) && <div className="sync-issues" role="status">
+                <strong>需要处理的同步问题</strong>
+                {issueSnapshot.blocked.map((device) => <p key={device.deviceId}>设备 {device.deviceId.slice(0, 8)}：{blockedLabels[device.code]}。其余设备的同步不受影响；该设备的记录要等它的日志修复后才能读取。</p>)}
+                {[...new Set(issueSnapshot.items.map((item) => item.reason))].map((reason) => {
+                  const rows = issueSnapshot.items.filter((item) => item.reason === reason)
+                  return <p key={reason}>{rows.length} 条：{quarantineLabels[reason].title}。{quarantineLabels[reason].hint}</p>
+                })}
+                <div className="settings-action-grid">
+                  {issueSnapshot.items.length > 0 && <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void retryIssues()}>{repairing ? '正在重试…' : '重试异常记录'}</Button>}
+                  {issueSnapshot.items.length > 0 && <Button appearance="subtle" disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void dismissIssues()}>删除异常记录</Button>}
+                </div>
+              </div>}
               <Text size={200}>别的设备的修改没出现：选“重新读取”。云端目录被清空或新设备缺笔记：选“重新上传”。两者都不会删除任何内容，可以放心重复执行。仍有问题时，在“数据与备份 → 诊断日志”导出日志。</Text>
             </SettingsSection>}
             <SettingsSection title="其他服务" description="AI 与实时协作可以独立部署；未配置时不影响本地笔记和数据同步。">

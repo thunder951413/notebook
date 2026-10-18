@@ -44,7 +44,8 @@ import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
-import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions } from './sync/webdavSync'
+import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions, retryWebdavQuarantine, webdavSyncIssues } from './sync/webdavSync'
+import { describeIssues } from './sync/webdavIssues'
 import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
@@ -112,7 +113,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
+  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -128,6 +129,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     }),
     resetReadPositions: () => resetWebdavReadPositions(automationRepository),
     republishAll: () => queueFullWebdavRepublish(automationRepository, WORKSPACE_ID),
+    issues: async () => ({ ...(await webdavSyncIssues(automationRepository)), items: await automationRepository.listQuarantine() }),
+    retryIssues: async () => (await retryWebdavQuarantine(automationRepository, WORKSPACE_ID)).remaining,
+    dismissIssues: (ids: string[]) => automationRepository.dismissQuarantine(ids),
   }), [pages])
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [activeArea, setActiveArea] = useState('notes')
@@ -1005,8 +1009,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     fullTextSearch: () => setFullTextQuery((current) => current ?? (query.trim() || '')),
   })
 
-  const syncDot = syncState === 'syncing' ? 'syncing' : syncState === 'error' ? 'error' : syncState === 'conflict' ? 'conflict' : syncState === 'offline' ? 'offline' : 'synced'
+  const syncIssueSummary = syncIssues ? describeIssues(syncIssues) : ''
+  const syncDot = syncState === 'syncing' ? 'syncing' : syncState === 'error' ? 'error' : syncState === 'conflict' || (syncState === 'synced' && syncIssueSummary) ? 'conflict' : syncState === 'offline' ? 'offline' : 'synced'
   const syncText = syncState === 'syncing' ? (syncProgress ?? '正在同步…')
+    : syncState === 'synced' && syncIssueSummary ? '已同步 · 有项目需要处理'
     : syncState === 'synced' ? `已同步 · ${relativeTime(lastSyncSuccess(), nowMs)}`
     : syncState === 'offline' ? '未开启同步'
     : syncState === 'conflict' ? '有同步冲突'
@@ -1126,7 +1132,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             </button>}>
                 <div className="sync-status-detail">
                   <strong>{syncLabels[syncState]}</strong>
-                  <span>{syncState === 'offline' ? '自动同步未启用或尚未配置，当前修改保存在本机。' : syncState === 'syncing' ? syncProgress ?? '正在与坚果云交换最新数据。' : syncState === 'synced' ? `本机与坚果云已同步（${relativeTime(lastSyncSuccess())}）。` : syncState === 'conflict' ? '同步版本存在冲突，自动重试已暂停。请到同步设置选择处理方式。' : `最近一次同步没有完成，本机修改已安全保存，稍后会自动重试。上次成功：${relativeTime(lastSyncSuccess())}。`}</span>
+                  <span>{syncState === 'offline' ? '自动同步未启用或尚未配置，当前修改保存在本机。' : syncState === 'syncing' ? syncProgress ?? '正在与坚果云交换最新数据。' : syncState === 'synced' ? `本机与坚果云已同步（${relativeTime(lastSyncSuccess())}）。${syncIssueSummary ? `但${syncIssueSummary}，请到同步设置处理。` : ''}` : syncState === 'conflict' ? '同步版本存在冲突，自动重试已暂停。请到同步设置选择处理方式。' : `最近一次同步没有完成，本机修改已安全保存，稍后会自动重试。上次成功：${relativeTime(lastSyncSuccess())}。`}</span>
                   {(syncState === 'error' || syncState === 'conflict') && <code>{syncError ?? (syncState === 'conflict' ? accessiblePages.filter((page) => page.syncStatus === 'conflict').map((page) => page.title).join('、') || '存在尚未处理的同步冲突。' : '没有提供更详细的错误信息。')}</code>}
                 </div>
                 <ActionMenuDivider />

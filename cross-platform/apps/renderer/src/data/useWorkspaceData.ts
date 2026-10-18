@@ -120,7 +120,7 @@ export function useWorkspaceData() {
     return () => { cancelled = true }
   }, [reload])
 
-  const { syncState, syncError, syncProgress, syncNow, requestBoundarySync } = useWorkspaceSync(reload)
+  const { syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync } = useWorkspaceSync(reload)
 
 
   const notebooks = useMemo<NotebookSummary[]>(() => notebookRecords.map((notebook) => ({
@@ -622,7 +622,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
+  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
 }
 
 
