@@ -29,6 +29,8 @@ export interface RemoteQuarantineInput {
   stage: 'materialize' | 'apply'
   raw: Record<string, unknown>
   hash?: string
+  /** The payload came out of authenticated decryption (private data). */
+  authenticated?: boolean
 }
 
 export interface RemoteResolvedConflict {

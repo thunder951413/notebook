@@ -4,6 +4,7 @@ import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { loadWebdavSettings, saveWebdavKnownSeqs, webdavFingerprint } from './webdavSettings'
+import { WebdavPrivacyCipher } from './webdavPrivacy'
 import { loadSeqs, migrateSshToWebdav, pushDeadlineMs, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { synchronizeLegacySsh } from './legacySshSync'
@@ -134,9 +135,22 @@ describe('synchronizeWebdav', () => {
     expect(new TextDecoder().decode(received.calls.importedAssets[0]![1])).toBe('PRIVATE BYTES')
     secrets.get.mockImplementation(async key => key === 'webdav-app-password' ? appPassword : 'wrong-key')
     webdav.pull.mockResolvedValueOnce({ entries: [{ ...pushed[0]!, seq: 10, deviceId: 'peer-private' }], fingerprint: 'fp' })
+    // A key that does not fit sets the record aside (it must never overwrite
+    // local data or stop the other records) instead of failing the whole sync.
     const wrong = repository()
-    await expect(synchronizeWebdav(wrong.repo, workspaceId)).rejects.toThrow('密钥')
-    expect(wrong.calls.applyChanges).toEqual([])
+    await expect(synchronizeWebdav(wrong.repo, workspaceId)).resolves.toMatchObject({ state: 'synced' })
+    expect(wrong.calls.applyChanges.flatMap((call) => call.changes)).toEqual([])
+    const quarantined = (wrong.repo.applyRemoteChanges as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => (call[6] as { quarantine?: Array<{ reason: string; deviceId: string; seq: number; stage: string }> } | undefined)?.quarantine ?? [])
+    expect(quarantined).toEqual([expect.objectContaining({ reason: 'bad-key', deviceId: 'peer-private', seq: 10, stage: 'materialize' })])
+
+    // No key at all: private records wait for one, public records still apply.
+    secrets.get.mockImplementation(async key => key === 'webdav-app-password' ? appPassword : undefined)
+    webdav.pull.mockResolvedValueOnce({ entries: [{ ...pushed[0]!, seq: 10, deviceId: 'peer-private' }, remoteEntry({ seq: 11, id: 'public-page', deviceId: 'peer-private', payload: { ...remoteEntry().payload, id: 'public-page' } })], fingerprint: 'fp' })
+    const keyless = repository()
+    await expect(synchronizeWebdav(keyless.repo, workspaceId)).resolves.toMatchObject({ state: 'synced' })
+    expect(keyless.calls.applyChanges.flatMap((call) => call.changes as Array<{ entityId: string }>).map((change) => change.entityId)).toEqual(['public-page'])
+    const waiting = (keyless.repo.applyRemoteChanges as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => (call[6] as { quarantine?: Array<{ reason: string }> } | undefined)?.quarantine ?? [])
+    expect(waiting.map((item) => item.reason)).toEqual(['needs-key'])
   })
 
   test('push recovery re-reads remote heads and explicitly preserves local content; pull mode never publishes', async () => {
@@ -162,6 +176,44 @@ describe('synchronizeWebdav', () => {
     expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('conflict')
     expect(webdav.push).not.toHaveBeenCalled()
     expect(repo.listOutbox).not.toHaveBeenCalled()
+  })
+
+  test('private records wait in the quarantine without a key, public ones sync, and the key brings them in', async () => {
+    const { webdav, secrets } = installDesktopMock()
+    seedWebdavSettings()
+    const db = new NotebookRendererDatabase(`webdav-quarantine-${crypto.randomUUID()}`)
+    const repo = new RealRepository(db)
+    try {
+      const privateId = '30000000-0000-4000-8000-0000000000aa'
+      const publicId = '30000000-0000-4000-8000-0000000000bb'
+      const page = (id: string, title: string, locked = false) => ({ id, workspaceId, kind: 'document', title, preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp, syncStatus: 'synced', ...(locked ? { locked: true } : {}) })
+      const secret = 'quarantine-test-key'
+      const sealed = await new WebdavPrivacyCipher(secret).encryptPayload('page', privateId, page(privateId, 'Secret', true), 'upsert', 0)
+      webdav.pull.mockResolvedValueOnce({
+        entries: [
+          { ...remoteEntry({ seq: 1, id: privateId, deviceId: 'peer-1', payload: sealed }) },
+          { ...remoteEntry({ seq: 2, id: publicId, deviceId: 'peer-1', payload: page(publicId, 'Open') }) },
+        ],
+        fingerprint: 'fp',
+      })
+      const first = await synchronizeWebdav(repo, workspaceId)
+      expect(first.state).toBe('synced')
+      expect(first.issues).toMatchObject({ quarantined: 1 })
+      expect(await repo.getPage(publicId)).toMatchObject({ title: 'Open' })
+      expect(await repo.getPage(privateId)).toBeUndefined()
+      expect((await repo.listQuarantine()).map((row) => [row.entityId, row.reason, row.stage])).toEqual([[privateId, 'needs-key', 'materialize']])
+      expect(await repo.getWebdavSeqs(webdavFingerprint(loadWebdavSettings()))).toEqual({ 'peer-1': 2 })
+
+      // Configuring the key is enough: the next sync reads the record again.
+      secrets.get.mockImplementation(async (key: string) => key === 'webdav-app-password' ? appPassword : secret)
+      const second = await synchronizeWebdav(repo, workspaceId)
+      expect(second.state).toBe('synced')
+      expect(second.issues).toBeUndefined()
+      expect(await repo.getPage(privateId)).toMatchObject({ title: 'Secret', locked: true })
+      expect(await repo.countQuarantine()).toBe(0)
+    } finally {
+      db.close()
+    }
   })
 
   test('read cursors: the database is authoritative and stale localStorage cursors never skip unapplied records', async () => {
@@ -529,9 +581,12 @@ describe('synchronizeWebdav', () => {
       fingerprint: 'fp',
     })
 
-    await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow('缺少内容哈希')
-    expect(calls.applyChanges).toEqual([])
+    // Set aside, not applied: no metadata, no bytes, and the rest of the batch is unaffected.
+    await expect(synchronizeWebdav(repo, workspaceId)).resolves.toMatchObject({ state: 'synced' })
+    expect(calls.applyChanges.flatMap((call) => call.changes)).toEqual([])
     expect(calls.importedAssets).toEqual([])
+    const quarantined = (repo.applyRemoteChanges as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => (call[6] as { quarantine?: Array<{ reason: string; entityId: string }> } | undefined)?.quarantine ?? [])
+    expect(quarantined).toEqual([expect.objectContaining({ reason: 'invalid-payload', entityId: 'asset-missing-bytes' })])
   })
 
   test('pushes pending local changes into this device journal and acknowledges them', async () => {

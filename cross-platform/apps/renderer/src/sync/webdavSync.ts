@@ -1,4 +1,4 @@
-import type { DexieNotebookRepository, RemoteSyncChange } from '@notebook/storage-renderer'
+import { isSupportedSyncEntityType, type DexieNotebookRepository, type RemoteQuarantineInput, type RemoteSyncChange, type SyncQuarantineItem } from '@notebook/storage-renderer'
 import { sha256Hex } from '@notebook/sync-contract'
 import { legacyDeviceId } from './legacySshSettings'
 import { synchronizeLegacySsh } from './legacySshSync'
@@ -6,6 +6,8 @@ import { getWebdavAppPassword, getWebdavSyncPassword, loadWebdavKnownSeqs, loadW
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { buildWebdavSnapshot, serializeWebdavPayload } from './webdavPayload'
 import { isEncryptedPayload, WebdavPrivacyCipher } from './webdavPrivacy'
+import { classifyMaterializeFailure, describeIssues, loadBlockedDevices, saveBlockedDevices, shouldRetryAutomatically, type MaterializeFailure, type WebdavBlockedDevice, type WebdavSyncIssues } from './webdavIssues'
+export type { WebdavBlockedDevice, WebdavSyncIssues } from './webdavIssues'
 
 /**
  * v4 append-only journal synchronizer over WebDAV (e.g. 坚果云).
@@ -79,7 +81,7 @@ interface WebdavPushEntry {
 /** Transport abstraction: Electron IPC on desktop, loopback helper in browsers. */
 interface WebdavTransport {
   test(connection: WebdavConnection, signal?: AbortSignal): Promise<{ ok: boolean; remotePathExists: boolean; latencyMs: number; message: string }>
-  pull(connection: WebdavConnection, knownSeqs: Record<string, number>, signal?: AbortSignal): Promise<{ entries: WebdavPullEntry[]; fingerprint: string; devices?: string[]; resetDevices?: string[]; warnings?: string[] }>
+  pull(connection: WebdavConnection, knownSeqs: Record<string, number>, signal?: AbortSignal): Promise<{ entries: WebdavPullEntry[]; fingerprint: string; devices?: string[]; resetDevices?: string[]; warnings?: string[]; blocked?: WebdavBlockedDevice[] }>
   objectGet(connection: WebdavConnection, hash: string, signal?: AbortSignal): Promise<Uint8Array>
   push(connection: WebdavConnection, deviceId: string, entries: WebdavPushEntry[], objects: Array<{ hash: string; data: Uint8Array }>, signal?: AbortSignal, minSeq?: number): Promise<{ firstSeq: number; count: number }>
 }
@@ -188,6 +190,8 @@ export interface WebdavSyncResult {
   resolved?: Array<{ entityType: string; entityId: string; pageIds: string[]; copyPageId?: string }>
   /** The repository lost this device's journal; the full library was queued again. */
   republished?: number
+  /** Present when the sync worked but something still needs attention: never show a plain "synced". */
+  issues?: WebdavSyncIssues
 }
 
 /**
@@ -406,6 +410,101 @@ function journalKey(entry: WebdavPullEntry) {
   return `${entry.deviceId}\n${entry.type}\n${entry.id}`
 }
 
+interface ReadableEntry { index: number; entry: WebdavPullEntry; payload: Record<string, unknown>; encrypted: boolean; asset?: Uint8Array; failure?: undefined }
+interface UnreadableEntry { index: number; entry: WebdavPullEntry; failure: MaterializeFailure }
+
+/** Download, decrypt and verify everything one journal record needs. */
+async function materializeEntry(
+  entry: WebdavPullEntry,
+  transport: WebdavTransport,
+  connection: WebdavConnection,
+  cipher: WebdavPrivacyCipher,
+  signal?: AbortSignal,
+): Promise<{ payload: Record<string, unknown>; encrypted: boolean; asset?: Uint8Array }> {
+  let payload = await materializePayload(entry.payload, transport, connection, signal)
+  const encrypted = isEncryptedPayload(payload)
+  if (encrypted) payload = await cipher.decryptPayload(entry.type, entry.id, payload, entry.op, entry.ver)
+  if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection, signal)
+  let asset: Uint8Array | undefined
+  if (entry.type === 'asset' && entry.op === 'upsert') {
+    const hash = payload.objectHash as string | undefined ?? entry.hash
+    if (!hash) throw new Error(`远端附件 ${entry.id} 缺少内容哈希，已阻止不完整同步`)
+    let data = await transport.objectGet(connection, hash, signal)
+    if (encrypted) data = await cipher.decrypt(`asset-bytes:${entry.id}`, JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>)
+    if (typeof payload.checksum === 'string' && await sha256Bytes(data) !== payload.checksum) throw new Error(`附件 ${entry.id} 的内容校验失败`)
+    asset = data
+  }
+  return { payload, encrypted, ...(asset ? { asset } : {}) }
+}
+
+/**
+ * Try set-aside records again, in one transaction with their release: a record
+ * that now applies leaves the quarantine, one that still fails stays with its
+ * attempt counted. The read position is not touched (it already moved past).
+ */
+async function retryQuarantineWith(
+  repository: DexieNotebookRepository,
+  workspaceId: string,
+  settings: WebdavSettings,
+  connection: WebdavConnection,
+  transport: WebdavTransport,
+  signal: AbortSignal,
+  select: (item: SyncQuarantineItem) => boolean,
+): Promise<{ retried: number; remaining: number }> {
+  if (typeof repository.listQuarantine !== 'function') return { retried: 0, remaining: 0 }
+  const repositoryKey = webdavFingerprint(settings)
+  const items = (await repository.listQuarantine()).filter((item) => item.repository === repositoryKey && select(item))
+  if (!items.length) return { retried: 0, remaining: await repository.countQuarantine() }
+  const cipher = new WebdavPrivacyCipher(connection.syncPassword ?? '')
+  const ownDeviceId = legacyDeviceId()
+  const changes: RemoteSyncChange[] = []
+  const assets = new Map<string, Uint8Array>()
+  const stillFailing: RemoteQuarantineInput[] = []
+  const cursor = await repository.getSyncCursor(workspaceId)
+  for (const item of items) {
+    throwIfAborted(signal)
+    const source = { repository: item.repository, deviceId: item.deviceId, seq: item.seq, ...(item.hash ? { hash: item.hash } : {}) }
+    let payload = item.raw
+    let encrypted = item.authenticated === true
+    if (item.stage === 'materialize') {
+      try {
+        const entry: WebdavPullEntry = { seq: item.seq, ts: item.firstSeenAt, op: item.operation, type: item.entityType, id: item.entityId, ver: item.version, payload: item.raw, deviceId: item.deviceId, ...(item.hash ? { hash: item.hash } : {}) }
+        const result = await materializeEntry(entry, transport, connection, cipher, signal)
+        payload = result.payload
+        encrypted = result.encrypted
+        if (result.asset) assets.set(item.entityId, result.asset)
+      } catch (error) {
+        throwIfAborted(signal)
+        const failure = classifyMaterializeFailure(error)
+        if (!failure) throw error
+        stillFailing.push({ ...source, entityType: item.entityType, entityId: item.entityId, version: item.version, operation: item.operation, reason: failure.reason, message: failure.message.slice(0, 300), stage: 'materialize', raw: item.raw })
+        continue
+      }
+    }
+    changes.push({
+      cursor: cursor + changes.length + 1, entityType: item.entityType, entityId: item.entityId, version: item.version, operation: item.operation, payload, source,
+      ...(encrypted ? { authenticatedPrivate: true as const } : {}),
+      ...(item.deviceId === ownDeviceId ? { ownDevice: true as const } : {}),
+    })
+  }
+  await repository.applyRemoteChanges(workspaceId, changes, cursor, assets, true, false, { autoResolve: true, quarantine: stillFailing, releaseQuarantine: items.map((item) => item.id) })
+  const remaining = await repository.countQuarantine()
+  recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'quarantine-retry', status: 'success', message: `重试 ${items.length} 条，剩余 ${remaining} 条` })
+  return { retried: items.length, remaining }
+}
+
+/** User-initiated: try the set-aside records again (all of them, or the given ones). */
+export async function retryWebdavQuarantine(repository: DexieNotebookRepository, workspaceId: string, ids?: string[], signal?: AbortSignal): Promise<{ retried: number; remaining: number }> {
+  return withDeadline('重试同步问题', signal, WEBDAV_SYNC_TIMEOUT_MS, async (retrySignal) => {
+    const settings = loadWebdavSettings()
+    const appPassword = await getWebdavAppPassword()
+    if (!settings.baseUrl || !settings.username || !appPassword) throw new Error('请先完整填写并保存坚果云 WebDAV 设置')
+    const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
+    const wanted = ids ? new Set(ids) : undefined
+    return retryQuarantineWith(repository, workspaceId, settings, connection, boundedTransport(webdavTransport(), retrySignal), retrySignal, (item) => !wanted || wanted.has(item.id))
+  })
+}
+
 /**
  * One full pull round: read every journal's new entries, fetch referenced
  * objects, apply through the shared change pipeline, then advance read cursors.
@@ -424,7 +523,7 @@ async function pullWebdavOnce(
   signal: AbortSignal,
   keepLocal = false,
   onProgress?: (message: string) => void,
-): Promise<{ conflicts: number; conflictKeys: Set<string>; changed: boolean; resolved: NonNullable<WebdavSyncResult['resolved']>; devices?: string[] }> {
+): Promise<{ conflicts: number; conflictKeys: Set<string>; changed: boolean; resolved: NonNullable<WebdavSyncResult['resolved']>; devices?: string[]; blocked: WebdavBlockedDevice[] }> {
   throwIfAborted(signal)
   onProgress?.('正在读取远端日志…')
   // Recovery re-reads every device head, including previously consumed
@@ -435,13 +534,18 @@ async function pullWebdavOnce(
   const pulled = await transport.pull(connection, knownSeqs, signal)
   for (const warning of pulled.warnings ?? []) recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'repository-warning', status: 'info', message: warning })
   const ownDeviceId = legacyDeviceId()
+  const repositoryKey = webdavFingerprint(settings)
+  // A missing own journal is healed by republishing, so it is not a problem to report.
+  const blocked = (pulled.blocked ?? []).filter((item) => !(item.deviceId === ownDeviceId && item.code === 'journal-missing'))
+  saveBlockedDevices(repositoryKey, blocked)
+  for (const item of blocked) recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'device-blocked', status: 'failed', message: `${item.deviceId} · ${item.code} · ${item.message}`.slice(0, 300) })
   // Read positions advance only across entries that are durably applied.
   const seqs = { ...storedSeqs }
   for (const device of pulled.resetDevices ?? []) seqs[device] = 0
   const entries = pulled.entries
   if (!entries.length) {
     if (pulled.resetDevices?.length) await saveSeqs(repository, settings, seqs)
-    return { conflicts: 0, conflictKeys: new Set(), changed: false, resolved: [], devices: pulled.devices }
+    return { conflicts: 0, conflictKeys: new Set(), changed: false, resolved: [], devices: pulled.devices, blocked }
   }
   // A journal keeps every version of a note. Within one device's journal a
   // later entry for the same entity replaces the earlier ones, so only the
@@ -462,28 +566,34 @@ async function pullWebdavOnce(
     const indices: number[] = []
     for (let index = start; index < end; index += 1) if (needed(index)) indices.push(index)
     const downloadedAssets = new Map<string, Uint8Array>()
-    const materialized = await mapLimit(indices, WEBDAV_PULL_CONCURRENCY, async (index) => {
+    // A record that cannot be read (object gone, no key, damaged) is set aside
+    // with its position instead of failing the run: every other record in the
+    // batch still applies, and the set-aside one is retried later.
+    const materialized = await mapLimit<number, ReadableEntry | UnreadableEntry>(indices, WEBDAV_PULL_CONCURRENCY, async (index) => {
       const entry = entries[index] as WebdavPullEntry
-      let payload = await materializePayload(entry.payload, transport, connection, signal)
-      const encrypted = isEncryptedPayload(payload)
-      if (encrypted) payload = await cipher.decryptPayload(entry.type, entry.id, payload, entry.op, entry.ver)
-      if (entry.type === 'document' && entry.op === 'upsert') payload = await materializeDocument(payload, transport, connection, signal)
-      if (entry.type === 'asset' && entry.op === 'upsert') {
-        const hash = payload.objectHash as string | undefined ?? entry.hash
-        if (!hash) throw new Error(`远端附件 ${entry.id} 缺少内容哈希，已阻止不完整同步`)
-        let data = await transport.objectGet(connection, hash, signal)
-        if (encrypted) data = await cipher.decrypt(`asset-bytes:${entry.id}`, JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>)
-        if (typeof payload.checksum === 'string' && await sha256Bytes(data) !== payload.checksum) throw new Error(`附件 ${entry.id} 的内容校验失败`)
-        downloadedAssets.set(entry.id, data)
+      try {
+        const result = await materializeEntry(entry, transport, connection, cipher, signal)
+        done += 1
+        onProgress?.(total > 1 ? `正在同步远端内容 ${done} / ${total}` : '正在同步远端内容…')
+        return { index, entry, ...result }
+      } catch (error) {
+        throwIfAborted(signal)
+        const failure = classifyMaterializeFailure(error)
+        if (!failure) throw error
+        done += 1
+        return { index, entry, failure }
       }
-      done += 1
-      onProgress?.(total > 1 ? `正在同步远端内容 ${done} / ${total}` : '正在同步远端内容…')
-      return { index, entry, payload, encrypted }
     })
     throwIfAborted(signal)
+    const readable = materialized.filter((item): item is ReadableEntry => item.failure === undefined)
+    const setAside: RemoteQuarantineInput[] = materialized.flatMap((item) => item.failure
+      ? [{ repository: repositoryKey, deviceId: item.entry.deviceId, seq: item.entry.seq, entityType: item.entry.type, entityId: item.entry.id, version: item.entry.ver, operation: item.entry.op, reason: item.failure.reason, message: item.failure.message.slice(0, 300), stage: 'materialize' as const, raw: item.entry.payload, ...(item.entry.hash ? { hash: item.entry.hash } : {}) }]
+      : [])
+    for (const item of readable) if (item.asset) downloadedAssets.set(item.entry.id, item.asset)
     const batchCursor = await repository.getSyncCursor(workspaceId)
-    const changes: RemoteSyncChange[] = materialized.map(({ entry, payload, encrypted }, offset) => ({
+    const changes: RemoteSyncChange[] = readable.map(({ entry, payload, encrypted }, offset) => ({
       cursor: batchCursor + offset + 1, entityType: entry.type, entityId: entry.id, version: entry.ver, operation: entry.op, payload,
+      source: { repository: repositoryKey, deviceId: entry.deviceId, seq: entry.seq, ...(entry.hash ? { hash: entry.hash } : {}) },
       ...(encrypted ? { authenticatedPrivate: true as const } : {}),
       ...(entry.deviceId === ownDeviceId ? { ownDevice: true as const } : {}),
     }))
@@ -497,7 +607,7 @@ async function pullWebdavOnce(
     // position becomes visible, so the same journal record stays retryable.
     // Test and third-party repository adapters may still use the older
     // two-stage contract (bytes imported afterwards).
-    const applied = await repository.applyRemoteChanges(workspaceId, changes, batchCursor + changes.length, downloadedAssets, true, keepLocal, { autoResolve: true, webdavSeqs: { key: webdavFingerprint(settings), seqs: batchSeqs } })
+    const applied = await repository.applyRemoteChanges(workspaceId, changes, batchCursor + changes.length, downloadedAssets, true, keepLocal, { autoResolve: true, webdavSeqs: { key: repositoryKey, seqs: batchSeqs }, quarantine: setAside })
     if (repository.applyRemoteChanges.length < 4) await repository.importAssetContents(downloadedAssets)
     for (const conflict of applied.conflicts) {
       conflictKeys.add(`${conflict.entityType}:${conflict.entityId}`)
@@ -526,6 +636,9 @@ async function pullWebdavOnce(
         message: `${item.entityType}:${item.entityId} · 保留本机版本${item.copyPageId ? ` · 另一版本已存为 ${item.copyPageId}` : ''}`,
       })
     }
+    for (const item of [...setAside.map((row) => ({ entityType: row.entityType, entityId: row.entityId, reason: row.reason })), ...(applied.quarantined ?? [])]) {
+      recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'record-quarantined', status: 'failed', message: `${item.entityType}:${item.entityId} · ${item.reason}` })
+    }
     for (const item of applied.discarded ?? []) {
       recordDiagnosticEvent({
         level: 'warning', category: 'sync', action: 'remote-upsert-ignored', status: 'success',
@@ -537,7 +650,7 @@ async function pullWebdavOnce(
     // committed; otherwise the conflicting entry and every later entry would
     // be filtered out forever on the next pull.
     const appliedCount = Math.max(0, Math.min(changes.length, applied.cursor - batchCursor))
-    const stopAt = appliedCount < changes.length ? (materialized[appliedCount] as { index: number }).index : end
+    const stopAt = appliedCount < changes.length ? (readable[appliedCount] as { index: number }).index : end
     for (let index = start; index < stopAt; index += 1) {
       const entry = entries[index] as WebdavPullEntry
       seqs[entry.deviceId] = Math.max(seqs[entry.deviceId] ?? 0, entry.seq)
@@ -551,7 +664,7 @@ async function pullWebdavOnce(
     start = end
   }
   if (keepLocal) recordDiagnosticEvent({ level: 'info', category: 'sync', action: 'keep-local', status: 'success', message: `已核对 ${entries.length} 条远端记录；本机内容保留，覆盖变更已持久排队` })
-  return { conflicts, conflictKeys, changed: true, resolved, devices: pulled.devices }
+  return { conflicts, conflictKeys, changed: true, resolved, devices: pulled.devices, blocked }
 }
 
 /** The page an outbox item belongs to, so scoped syncs can filter by note. */
@@ -592,7 +705,22 @@ function assertUploadConfirmation(pushed: { firstSeq: number; count: number }, c
   if (pushed.count !== count || !Number.isSafeInteger(pushed.firstSeq) || pushed.firstSeq < 1) throw new Error('远端上传确认不完整，待同步内容已保留')
 }
 
+/** What still needs attention in this repository, for the status line and the issues panel. */
+export async function webdavSyncIssues(repository: DexieNotebookRepository): Promise<WebdavSyncIssues> {
+  const quarantined = typeof repository.countQuarantine === 'function' ? await repository.countQuarantine() : 0
+  return { quarantined, blocked: loadBlockedDevices(webdavFingerprint(loadWebdavSettings())) }
+}
+
 export async function synchronizeWebdav(repository: DexieNotebookRepository, workspaceId: string, signal?: AbortSignal, scope?: { pageId: string }, mode: 'bidirectional' | 'pull' | 'push' = 'bidirectional', onProgress?: (message: string) => void): Promise<WebdavSyncResult> {
+  const result = await runWebdavSync(repository, workspaceId, signal, scope, mode, onProgress)
+  if (result.state === 'offline') return result
+  const issues = await webdavSyncIssues(repository)
+  if (!issues.quarantined && !issues.blocked.length) return result
+  recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'issues', status: 'info', message: describeIssues(issues) })
+  return { ...result, issues }
+}
+
+async function runWebdavSync(repository: DexieNotebookRepository, workspaceId: string, signal?: AbortSignal, scope?: { pageId: string }, mode: 'bidirectional' | 'pull' | 'push' = 'bidirectional', onProgress?: (message: string) => void): Promise<WebdavSyncResult> {
   return withWatchdog('本次同步', signal, WEBDAV_SYNC_IDLE_TIMEOUT_MS, WEBDAV_SYNC_TIMEOUT_MS, async (syncSignal, alive) => {
     const settings = loadWebdavSettings()
     if (!settings.baseUrl || !settings.username) return { state: 'offline', skipped: 0, conflicts: 0 }
@@ -623,6 +751,14 @@ export async function synchronizeWebdav(repository: DexieNotebookRepository, wor
     // ---- Pull: adopt everything other devices published (journals are
     // append-only and shared, so pulls are always full increments — even a
     // scoped sync must see remote edits before pushing the focused page).
+    // Records set aside earlier may be readable now (key configured, app
+    // upgraded, object re-uploaded). A failure here must not stop the sync.
+    try {
+      await retryQuarantineWith(repository, workspaceId, settings, connection, transport, syncSignal, (item) => shouldRetryAutomatically(item, { hasKey: Boolean(connection.syncPassword), supportsType: isSupportedSyncEntityType }))
+    } catch (error) {
+      throwIfAborted(syncSignal)
+      recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'quarantine-retry', status: 'failed', message: error instanceof Error ? error.message.slice(0, 200) : String(error) })
+    }
     let conflicts = 0
     let conflictKeys = new Set<string>()
     const firstPull = await pullWebdavOnce(repository, workspaceId, settings, connection, transport, syncSignal, mode === 'push', onProgress)

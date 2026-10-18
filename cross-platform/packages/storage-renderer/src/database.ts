@@ -62,6 +62,8 @@ export interface SyncQuarantineItem {
   stage: 'materialize' | 'apply'
   raw: Record<string, unknown>
   hash?: string
+  /** The payload came out of authenticated decryption (private data). */
+  authenticated?: boolean
   attempts: number
   firstSeenAt: string
   lastTriedAt: string

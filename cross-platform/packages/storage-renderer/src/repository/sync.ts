@@ -276,7 +276,7 @@ export class SyncRepository extends ContentRepository {
             ...source, entityType: change.entityType, entityId: change.entityId, version: change.version, operation: change.operation === 'delete' ? 'delete' : 'upsert',
             reason: error instanceof RecordRejected ? error.reason : 'invalid-payload',
             message: error instanceof Error ? error.message.slice(0, 300) : String(error),
-            stage: 'apply', raw: change.payload,
+            stage: 'apply', raw: change.payload, ...(change.authenticatedPrivate ? { authenticated: true } : {}),
           })
           continue
         }
