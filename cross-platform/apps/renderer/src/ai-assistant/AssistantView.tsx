@@ -35,9 +35,10 @@ import { completeAI } from '../ai/completion'
 import type { PlanGroup } from '../ai/organize'
 import type { ApplyOutcome } from '../ai/organizeApply'
 import { OrganizePanel } from './OrganizePanel'
+import { QuizPanel } from './QuizPanel'
 import { RewritePanel } from './RewritePanel'
 
-type Tab = 'ask' | 'generate' | 'search' | 'merge' | 'organize' | 'rewrite'
+type Tab = 'ask' | 'generate' | 'search' | 'merge' | 'organize' | 'rewrite' | 'quiz'
 type Message = { id: string; role: 'user' | 'assistant'; content: string; sources?: ContextSource[]; failed?: boolean; task?: AssistantTask }
 type SearchHit = { page: PageSummary; path: string; reason: string }
 
@@ -99,9 +100,9 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
   const scopedPages = useMemo(() => scopeIsEmpty(scope) ? allNotes : resolveScope(scope, pages, notebooks), [allNotes, notebooks, pages, scope])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [tab, setTab] = useState<Tab>('ask')
-  // Organize/rewrite results are expensive: keep the panels alive across tab switches.
+  // Organize/rewrite/quiz results are expensive (or a session in progress): keep the panels alive across tab switches.
   const [visited, setVisited] = useState<Set<Tab>>(() => new Set())
-  useEffect(() => { if ((tab === 'organize' || tab === 'rewrite') && !visited.has(tab)) setVisited(new Set([...visited, tab])) }, [tab, visited])
+  useEffect(() => { if ((tab === 'organize' || tab === 'rewrite' || tab === 'quiz') && !visited.has(tab)) setVisited(new Set([...visited, tab])) }, [tab, visited])
   // Export: pick answers, then turn them into one new note.
   const [exporting, setExporting] = useState(false)
   const [picked, setPicked] = useState<Set<string>>(() => new Set())
@@ -287,7 +288,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
     </header>
     {pickerOpen && <ScopePicker scope={scope} pages={pages} notebooks={notebooks} tags={tags} onChange={setScope} onDone={() => setPickerOpen(false)} />}
     <div className="assistant-tabs" role="tablist" aria-label="AI 功能">
-      {([['ask', '问答'], ['generate', '生成'], ['search', '搜索'], ['merge', '合并'], ['organize', '整理'], ['rewrite', '改写']] as const).map(([id, name]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setNotice(undefined) }}>{name}</button>)}
+      {([['ask', '问答'], ['generate', '生成'], ['search', '搜索'], ['merge', '合并'], ['organize', '整理'], ['rewrite', '改写'], ['quiz', '测验']] as const).map(([id, name]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setNotice(undefined) }}>{name}</button>)}
     </div>
     {needsSetup && <div className="assistant-setup" role="note">
       <strong>还没有配置 AI</strong>
@@ -360,6 +361,9 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
     </div>}
     {(tab === 'rewrite' || visited.has('rewrite')) && <div className="assistant-plan" hidden={tab !== 'rewrite'}>
       <RewritePanel {...planProps} />
+    </div>}
+    {(tab === 'quiz' || visited.has('quiz')) && <div className="assistant-plan" hidden={tab !== 'quiz'}>
+      <QuizPanel {...planProps} />
     </div>}
 
     {exporting && <div className="assistant-export-bar">
