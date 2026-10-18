@@ -132,6 +132,20 @@ export class SyncRepository extends ContentRepository {
     return undefined
   }
 
+  /** A tombstone without a live row means the entity (or its page) was permanently deleted. */
+  protected async isPermanentlyDeleted(change: RemoteSyncChange, pageIds: string[]): Promise<boolean> {
+    if (change.entityType === 'section') {
+      return Boolean(await this.db.tombstones.get(`section:${change.entityId}`)) && !await this.db.sections.get(change.entityId)
+    }
+    // Notebooks and tags have no tombstones; a section/tag change only lists
+    // the pages it touches, which says nothing about the entity itself.
+    if (change.entityType === 'notebook' || change.entityType === 'tag') return false
+    for (const pageId of pageIds) {
+      if (await this.db.tombstones.get(`page:${pageId}`) && !await this.db.pages.get(pageId)) return true
+    }
+    return false
+  }
+
   protected async createConflictCopy(workspaceId: string, pageId: string, remote: Record<string, unknown>): Promise<string> {
     const source = await this.db.pages.get(pageId)
     const now = new Date().toISOString()
@@ -186,6 +200,7 @@ export class SyncRepository extends ContentRepository {
       let appliedCursor = cursor
       const conflicts: RemoteApplyResult['conflicts'] = []
       const resolved: NonNullable<RemoteApplyResult['resolved']> = []
+      const discarded: NonNullable<RemoteApplyResult['discarded']> = []
       /**
        * Concurrent edits never stop synchronization. Local content stays the
        * visible version and is republished as the successor of the remote
@@ -223,6 +238,20 @@ export class SyncRepository extends ContentRepository {
           if (await this.isPrivatePage(pageId)) { privatePage = true; break }
         }
         if (privatePage && !change.authenticatedPrivate) continue
+        // Deletion wins: an entity that was permanently deleted here must not
+        // be brought back by a peer's older branch. The deletion is re-queued
+        // as the successor of that branch so the peer converges too.
+        if (change.operation === 'upsert' && await this.isPermanentlyDeleted(change, pageIds)) {
+          if (!change.ownDevice) {
+            discarded.push({ entityType: change.entityType, entityId: change.entityId })
+            if (change.entityType === 'page' || change.entityType === 'section') {
+              const known = await this.db.syncVersions.get(this.versionId(workspaceId, change.entityType, change.entityId))
+              await this.db.syncVersions.put({ id: this.versionId(workspaceId, change.entityType, change.entityId), version: Math.max(known?.version ?? 0, change.version + 1), webdavParentVersion: true })
+              await this.enqueueChange(workspaceId, change.entityType, change.entityId, 'delete', {})
+            }
+          }
+          continue
+        }
         const pendingExact = await this.db.syncOutbox.where('[entityType+entityId]').equals([change.entityType, change.entityId]).and((item) => item.workspaceId === workspaceId).first()
         // A metadata-only local edit does not compete with a remote body.
         const pendingPage = change.entityType === 'document' && !autoResolve
@@ -324,7 +353,16 @@ export class SyncRepository extends ContentRepository {
           break
         }
         if (change.operation === 'delete') {
-          if (change.entityType === 'page') await this.db.pages.delete(change.entityId)
+          // A remote delete is a permanent delete (trash is published as an
+          // upsert). Record it, and for pages remove everything that belongs
+          // to the page. A privacy retraction is only a hidden public copy:
+          // the encrypted successor follows, so it must leave no tombstone.
+          const retraction = change.payload?.privacyRetraction === true
+          if ((change.entityType === 'page' || change.entityType === 'section') && !retraction) {
+            await this.db.tombstones.put({ id: `${change.entityType}:${change.entityId}`, workspaceId, entityType: change.entityType, entityId: change.entityId, deletedAt: new Date().toISOString(), deviceId: 'remote' })
+          }
+          if (change.entityType === 'page' && !retraction) await this.deletePageRows(change.entityId)
+          else if (change.entityType === 'page') await this.db.pages.delete(change.entityId)
           else if (change.entityType === 'document') await this.db.documents.delete(change.entityId)
           else if (change.entityType === 'notebook') await this.db.notebooks.delete(change.entityId)
           else if (change.entityType === 'section') await this.db.sections.delete(change.entityId)
@@ -368,7 +406,7 @@ export class SyncRepository extends ContentRepository {
       }
       await this.db.syncCursors.put({ workspaceId, cursor: appliedCursor })
       if (options.webdavSeqs && !conflicts.length) await this.db.syncCursors.put({ workspaceId: `webdav:${options.webdavSeqs.key}`, cursor: 0, seqs: options.webdavSeqs.seqs })
-      return { cursor: appliedCursor, conflicts, ...(resolved.length ? { resolved } : {}) }
+      return { cursor: appliedCursor, conflicts, ...(resolved.length ? { resolved } : {}), ...(discarded.length ? { discarded } : {}) }
     })
       .then((result) => {
         this.searchIndex.invalidate(workspaceId)

@@ -336,6 +336,25 @@ export class ContentRepository extends RepositoryCore {
     this.searchIndex.invalidate(page.workspaceId)
   }
 
+  /** Remove a page and everything that belongs to it from the local store (no sync side effects). */
+  protected async deletePageRows(pageId: UUID): Promise<void> {
+    const assets = await this.db.assets.where('pageId').equals(pageId).toArray()
+    await Promise.all([
+      this.db.pages.delete(pageId),
+      this.db.documents.delete(pageId),
+      this.db.taskSteps.where('pageId').equals(pageId).delete(),
+      this.db.assets.where('pageId').equals(pageId).delete(),
+      this.db.pageLinks.where('sourcePageId').equals(pageId).delete(),
+      this.db.pageTags.where('pageId').equals(pageId).delete(),
+      this.db.readingPositions.where('pageId').equals(pageId).delete(),
+      this.db.revisions.where('pageId').equals(pageId).delete(),
+      this.db.comments.where('pageId').equals(pageId).delete(),
+      this.db.drafts.delete(pageId),
+      this.db.editorCaches.delete(pageId),
+    ])
+    await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
+  }
+
   async purgePage(pageId: UUID, deletedAt = new Date().toISOString(), deviceId = 'electron'): Promise<void> {
     const page = await this.db.pages.get(pageId)
     if (!page) return
@@ -352,20 +371,7 @@ export class ContentRepository extends RepositoryCore {
       await this.enqueueChange(page.workspaceId, 'document', pageId, 'delete', localOnly)
       await this.enqueueChange(page.workspaceId, 'page', pageId, 'delete', localOnly)
       await this.db.tombstones.put(tombstone)
-      await Promise.all([
-        this.db.pages.delete(pageId),
-        this.db.documents.delete(pageId),
-        this.db.taskSteps.where('pageId').equals(pageId).delete(),
-        this.db.assets.where('pageId').equals(pageId).delete(),
-        this.db.pageLinks.where('sourcePageId').equals(pageId).delete(),
-        this.db.pageTags.where('pageId').equals(pageId).delete(),
-        this.db.readingPositions.where('pageId').equals(pageId).delete(),
-        this.db.revisions.where('pageId').equals(pageId).delete(),
-        this.db.comments.where('pageId').equals(pageId).delete(),
-        this.db.drafts.delete(pageId),
-        this.db.editorCaches.delete(pageId),
-      ])
-      await this.db.assetContents.bulkDelete(assets.map((item) => item.id))
+      await this.deletePageRows(pageId)
     })
     this.searchIndex.upsert({ ...page, deletedAt: effectiveDeletedAt })
   }

@@ -1229,6 +1229,64 @@ test('moving a public page, section or notebook into private space retracts the 
   expect(await retracted()).toEqual([`document:${fresh.id}`, `notebook:${open.id}`, `page:${fresh.id}`, `section:${sectionA.id}`])
 })
 
+test('a remote delete is a permanent delete: it leaves a tombstone and removes everything on the page', async () => {
+  const repository = makeRepository()
+  const value = { ...page('remote-deleted', 'Doomed'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, 'body'))
+  await repository.saveTaskSteps(value.id, [{ id: 'doomed-step', pageId: value.id, text: 'x', checked: false, sortOrder: 0, createdAt: value.createdAt }])
+  await repository.saveAsset({ id: 'doomed-asset', pageId: value.id, kind: 'image', filename: 'a.png', mimeType: 'image/png', createdAt: value.createdAt }, new Blob([new Uint8Array([1])]))
+  await repository.db.syncOutbox.clear()
+
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 0, operation: 'delete', payload: {} }], 1, undefined, true)
+
+  expect(await repository.getPage(value.id)).toBeUndefined()
+  expect(await repository.db.documents.get(value.id)).toBeUndefined()
+  expect(await repository.db.taskSteps.where('pageId').equals(value.id).count()).toBe(0)
+  expect(await repository.db.assets.where('pageId').equals(value.id).count()).toBe(0)
+  expect(await repository.db.assetContents.get('doomed-asset')).toBeUndefined()
+  expect(await repository.db.tombstones.get(`page:${value.id}`)).toMatchObject({ workspaceId: 'workspace-a', entityType: 'page', entityId: value.id })
+  // A republish after the cloud was wiped carries the deletion along.
+  expect((await repository.exportData('workspace-a')).tombstones.map((item) => item.entityId)).toContain(value.id)
+})
+
+test('an older branch cannot bring a permanently deleted page back; the deletion is re-queued instead', async () => {
+  const repository = makeRepository()
+  const value = { ...page('no-zombie', 'Gone'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, 'body'))
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 0, operation: 'delete', payload: {} }], 1, undefined, true)
+  await repository.db.syncOutbox.clear()
+
+  const result = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 2, entityType: 'page', entityId: value.id, version: 3, operation: 'upsert', payload: { ...value, title: 'Edited elsewhere', syncStatus: 'synced' } },
+    { cursor: 3, entityType: 'document', entityId: value.id, version: 3, operation: 'upsert', payload: { ...syncedDocument(value.id, 'late edit') } },
+  ], 3, undefined, true)
+
+  expect(await repository.getPage(value.id)).toBeUndefined()
+  expect(await repository.db.documents.get(value.id)).toBeUndefined()
+  expect(result.discarded).toEqual([{ entityType: 'page', entityId: value.id }, { entityType: 'document', entityId: value.id }])
+  expect(await repository.listOutbox('workspace-a')).toEqual([
+    expect.objectContaining({ entityType: 'page', entityId: value.id, operation: 'delete', expectedVersion: 4 }),
+  ])
+})
+
+test('a privacy retraction leaves no tombstone, and a trashed page still accepts newer versions', async () => {
+  const repository = makeRepository()
+  const value = { ...page('retracted', 'Was public'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, 'body'))
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 1, entityType: 'page', entityId: value.id, version: 0, operation: 'delete', payload: { privacyRetraction: true } }], 1, undefined, true)
+  expect(await repository.db.tombstones.get(`page:${value.id}`)).toBeUndefined()
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 2, entityType: 'page', entityId: value.id, version: 1, operation: 'upsert', payload: { ...value, title: 'Encrypted successor', syncStatus: 'synced' }, authenticatedPrivate: true }], 2, undefined, true)
+  expect(await repository.getPage(value.id)).toMatchObject({ title: 'Encrypted successor' })
+
+  const trashed = { ...page('in-trash', 'Trashed'), syncStatus: 'synced' as const }
+  await repository.savePage(trashed, syncedDocument(trashed.id, 'body'))
+  await repository.movePageToTrash(trashed.id, '2026-10-01T00:00:00.000Z')
+  await repository.db.syncOutbox.clear()
+  const result = await repository.applyRemoteChanges('workspace-a', [{ cursor: 3, entityType: 'page', entityId: trashed.id, version: 5, operation: 'upsert', payload: { ...trashed, title: 'Renamed elsewhere', syncStatus: 'synced' } }], 3, undefined, true)
+  expect(result.discarded).toBeUndefined()
+  expect(await repository.getPage(trashed.id)).toMatchObject({ title: 'Renamed elsewhere' })
+})
+
 test('classifies private notebook entities and related page records as local-only sync', async () => {
   const repository = makeRepository()
   const notebook = { id: 'private-notebook', workspaceId: 'workspace-a', name: 'Private', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', locked: true }

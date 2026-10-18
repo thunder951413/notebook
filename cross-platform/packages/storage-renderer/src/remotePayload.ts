@@ -26,6 +26,8 @@ export interface RemoteApplyResult {
   conflicts: Array<{ entityType: string; entityId: string; pageIds: string[] }>
   /** Conflicts settled automatically: local content wins, the remote body is kept as a copy. */
   resolved?: RemoteResolvedConflict[]
+  /** Remote upserts ignored because the entity was permanently deleted here (deletion wins). */
+  discarded?: Array<{ entityType: string; entityId: string }>
 }
 
 const recordSchema = z.record(z.string(), z.unknown())

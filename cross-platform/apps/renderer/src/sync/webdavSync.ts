@@ -518,6 +518,12 @@ async function pullWebdavOnce(
         message: `${item.entityType}:${item.entityId} · 保留本机版本${item.copyPageId ? ` · 另一版本已存为 ${item.copyPageId}` : ''}`,
       })
     }
+    for (const item of applied.discarded ?? []) {
+      recordDiagnosticEvent({
+        level: 'warning', category: 'sync', action: 'remote-upsert-ignored', status: 'success',
+        message: `${item.entityType}:${item.entityId} 已在本机永久删除，忽略其他设备的旧版本`,
+      })
+    }
     // applyRemoteChanges stops immediately before the first conflicting
     // change. Only advance the read positions across the prefix it actually
     // committed; otherwise the conflicting entry and every later entry would
