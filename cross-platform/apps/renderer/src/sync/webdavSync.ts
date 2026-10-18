@@ -190,17 +190,25 @@ export interface WebdavSyncResult {
   republished?: number
 }
 
-/** Read cursors live in IndexedDB (atomic with applied data); localStorage is the legacy mirror. */
-async function loadSeqs(repository: DexieNotebookRepository, settings: WebdavSettings): Promise<Record<string, number>> {
+/**
+ * Read cursors live in IndexedDB, committed in the same transaction as the
+ * records they cover, so the database is the authority. localStorage is only
+ * a legacy mirror: it can run ahead of the database (a crash between the two
+ * writes) or outlive it (the database was cleared), and trusting it would skip
+ * records this device never applied, including its own journal.
+ */
+export async function loadSeqs(repository: DexieNotebookRepository, settings: WebdavSettings): Promise<Record<string, number>> {
   const stored = typeof repository.getWebdavSeqs === 'function' ? await repository.getWebdavSeqs(webdavFingerprint(settings)) : undefined
   const legacy = loadWebdavKnownSeqs(settings)
-  if (!stored) return legacy
-  // Take the furthest position known by either store; both only ever advance
-  // through records that were actually applied.
-  const merged: Record<string, number> = { ...legacy }
-  for (const [device, seq] of Object.entries(stored)) if (Number.isInteger(seq) && seq > 0) merged[device] = Math.max(merged[device] ?? 0, seq)
-  for (const device of Object.keys(merged)) if (stored[device] === 0) merged[device] = 0
-  return merged
+  if (stored) return Object.fromEntries(Object.entries(stored).filter(([, seq]) => Number.isInteger(seq) && seq >= 0))
+  if (typeof repository.getWebdavSeqs !== 'function' || !repository.db) return legacy
+  // No cursors in the database. If it holds synchronised data, these are
+  // pre-upgrade cursors worth keeping; if it is empty, they describe data that
+  // is gone and everything must be read again (applying is idempotent).
+  const hasSyncState = Boolean(await repository.db.syncVersions.limit(1).count())
+  if (hasSyncState) return legacy
+  if (Object.keys(legacy).length) recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'cursors-discarded', status: 'success', message: '本机数据库没有同步记录，已忽略残留的读取位置并重新读取云端' })
+  return {}
 }
 
 async function saveSeqs(repository: DexieNotebookRepository, settings: WebdavSettings, seqs: Record<string, number>) {

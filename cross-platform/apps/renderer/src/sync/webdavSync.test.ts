@@ -3,7 +3,8 @@ import type { NotebookDataBundle } from '@notebook/domain'
 import type { DexieNotebookRepository } from '@notebook/storage-renderer'
 import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { migrateSshToWebdav, pushDeadlineMs, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
+import { loadWebdavSettings, saveWebdavKnownSeqs, webdavFingerprint } from './webdavSettings'
+import { loadSeqs, migrateSshToWebdav, pushDeadlineMs, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { synchronizeLegacySsh } from './legacySshSync'
 
@@ -161,6 +162,26 @@ describe('synchronizeWebdav', () => {
     expect((await synchronizeWebdav(repo, workspaceId)).state).toBe('conflict')
     expect(webdav.push).not.toHaveBeenCalled()
     expect(repo.listOutbox).not.toHaveBeenCalled()
+  })
+
+  test('read cursors: the database is authoritative and stale localStorage cursors never skip unapplied records', async () => {
+    seedWebdavSettings()
+    const settings = loadWebdavSettings()
+    saveWebdavKnownSeqs(settings, { [deviceId]: 9, peer: 4 })
+    const db = new NotebookRendererDatabase(`webdav-cursors-${crypto.randomUUID()}`)
+    const repo = new RealRepository(db)
+    try {
+      // The database was cleared while localStorage survived: read everything again.
+      expect(await loadSeqs(repo, settings)).toEqual({})
+      // Pre-upgrade cursors are kept while the database still holds sync state.
+      await db.syncVersions.put({ id: `${workspaceId}:page:${pageId}`, version: 1 })
+      expect(await loadSeqs(repo, settings)).toEqual({ [deviceId]: 9, peer: 4 })
+      // Once the database has cursors they win, even over a larger localStorage value.
+      await repo.saveWebdavSeqs(webdavFingerprint(settings), { [deviceId]: 3, peer: 2 })
+      expect(await loadSeqs(repo, settings)).toEqual({ [deviceId]: 3, peer: 2 })
+    } finally {
+      db.close()
+    }
   })
 
   test('real repository recovers legacy conflicts, survives a failed upload, and stays synced on subsequent pulls', async () => {
