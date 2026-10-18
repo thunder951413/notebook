@@ -24,6 +24,7 @@
 | `journal-compact.json` | 压缩：每实体保留最新记录 + 修订历史环 | ✓ | ✓ | – | ✓ |
 | `journal-head.json` | 提交标记的生成与解析 | ✓ | ✓ | – | ✓ |
 | `committed-view.json` | 读游标、提交标记、回退重读与“仅读已提交部分” | ✓ | ✓ | – | ✓ |
+| `journal-rebuild.json` | 重建自己损坏日志时的序号下限（`rebuildFloor`） | ✓ | ✓ | – | ✓ |
 | `pull-isolation.json` | 单台设备的日志/提交标记异常如何隔离（blocked 原因码、截断检测） | ✓ | ✓ | – | ✓ |
 | `pull-order.json` | 多设备记录的应用顺序 | ✓ | ✓ | – | ✓ |
 | `propfind-listing.json` | PROPFIND 目录响应解析 | ✓ | –¹ | – | ✓ |
