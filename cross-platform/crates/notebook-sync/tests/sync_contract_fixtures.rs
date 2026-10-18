@@ -148,6 +148,34 @@ fn committed_view() {
 }
 
 #[test]
+fn pull_isolation() {
+    let fixture = fixture("pull-isolation.json");
+    let device = fixture["deviceId"].as_str().unwrap();
+    for case in cases(&fixture, "cases") {
+        let expected = &case["expected"];
+        let (known, listed) = (case["known"].as_u64().unwrap(), case["listedBytes"].as_u64());
+        let (blocked, fetch, seqs, reset) = match case["headText"].as_str().map(|text| webdav::parse_head(text, device)) {
+            Some(Err(_)) => (Some(webdav::BlockCode::HeadCorrupt), false, Vec::new(), false),
+            parsed => {
+                let head = parsed.map(Result::unwrap);
+                let (planned, marker_reset, fetch) = webdav::plan_journal_read_sized(head.as_ref(), known, listed);
+                if fetch {
+                    let assessment = webdav::assess_journal(device, case["journalText"].as_str(), head.as_ref(), planned);
+                    (assessment.blocked, true, assessment.seqs, marker_reset || assessment.reset)
+                } else {
+                    (None, false, Vec::new(), marker_reset)
+                }
+            }
+        };
+        assert_eq!(fetch, expected["fetch"].as_bool().unwrap(), "{}", name(case));
+        assert_eq!(blocked.map(webdav::BlockCode::as_str), expected["blocked"].as_str(), "{}", name(case));
+        let expected_seqs: Vec<u64> = cases(expected, "seqs").iter().map(|value| value.as_u64().unwrap()).collect();
+        assert_eq!(seqs, expected_seqs, "{}", name(case));
+        assert_eq!(reset, expected["reset"].as_bool().unwrap(), "{}", name(case));
+    }
+}
+
+#[test]
 fn pull_order() {
     let fixture = fixture("pull-order.json");
     let mut entries: Vec<Entry> = cases(&fixture, "entries").iter().map(entry).collect();

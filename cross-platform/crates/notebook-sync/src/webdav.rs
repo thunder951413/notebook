@@ -124,6 +124,45 @@ pub struct PullResult {
     pub reset_devices: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Devices whose journal could not be trusted. Other devices are unaffected.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<BlockedDevice>,
+}
+
+/// Why a peer's journal cannot be read as a whole (fixture: `pull-isolation.json`).
+/// The codes are part of the cross-platform contract; messages are local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockCode {
+    JournalCorrupt,
+    HeadCorrupt,
+    JournalTruncated,
+    JournalMissing,
+    JournalTooLarge,
+}
+
+impl BlockCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalCorrupt => "journal-corrupt",
+            Self::HeadCorrupt => "head-corrupt",
+            Self::JournalTruncated => "journal-truncated",
+            Self::JournalMissing => "journal-missing",
+            Self::JournalTooLarge => "journal-too-large",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedDevice {
+    pub device_id: String,
+    pub code: String,
+    pub message: String,
+    pub known_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_last_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_last_seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,6 +348,8 @@ pub fn recent_request_count() -> usize {
 pub struct DavItem {
     pub name: String,
     pub etag: Option<String>,
+    /// `getcontentlength`, when the server reports it.
+    pub size: Option<u64>,
 }
 
 pub struct Dav {
@@ -458,7 +499,12 @@ fn parse_multistatus(text: &str) -> DavResult<Vec<DavItem>> {
             .and_then(|node| node.text())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        items.push(DavItem { name, etag });
+        let size = response
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "getcontentlength")
+            .and_then(|node| node.text())
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        items.push(DavItem { name, etag, size });
     }
     Ok(items)
 }
@@ -636,6 +682,8 @@ pub struct CommittedView {
     pub reset: bool,
     /// The commit marker does not describe these exact bytes.
     pub mismatch: bool,
+    /// The journal ends before the marker's `lastSeq`: committed records are gone.
+    pub truncated: bool,
     /// Sequence numbers to expose, in journal order.
     pub seqs: Vec<u64>,
 }
@@ -650,6 +698,61 @@ pub fn plan_journal_read(head: Option<&JournalHead>, known: u64) -> (u64, bool, 
     }
 }
 
+/// Like [`plan_journal_read`], but a journal listed as shorter than the bytes the
+/// marker committed is fetched even when the cursor is already at the marker:
+/// it is either mid-compaction (marker not yet updated) or truncated, and only
+/// its last sequence tells which (fixture: `pull-isolation.json`).
+pub fn plan_journal_read_sized(head: Option<&JournalHead>, known: u64, listed_bytes: Option<u64>) -> (u64, bool, bool) {
+    let (planned, reset, fetch) = plan_journal_read(head, known);
+    let suspicious = !fetch && head.is_some_and(|head| listed_bytes.is_some_and(|size| size < head.journal_bytes));
+    (planned, reset, fetch || suspicious)
+}
+
+/// What one fetched peer journal yields: the records to expose and, when the
+/// journal cannot be fully trusted, why (fixture: `pull-isolation.json`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceAssessment {
+    pub known: u64,
+    pub reset: bool,
+    pub mismatch: bool,
+    pub blocked: Option<BlockCode>,
+    pub journal_last_seq: u64,
+    /// Sequence numbers to expose, in journal order.
+    pub seqs: Vec<u64>,
+    /// The parsed journal (empty when it could not be read).
+    pub journal: Vec<Entry>,
+}
+
+/// Judges a downloaded journal body against its (already parsed) marker. A
+/// journal that fails to parse exposes nothing; a truncated one still exposes
+/// its complete committed rows but is reported so nobody trusts the gap.
+pub fn assess_journal(device: &str, text: Option<&str>, head: Option<&JournalHead>, known: u64) -> DeviceAssessment {
+    let blocked_without_rows = |code: BlockCode| DeviceAssessment { known, reset: false, mismatch: false, blocked: Some(code), journal_last_seq: 0, seqs: Vec::new(), journal: Vec::new() };
+    let Some(text) = text else {
+        // Gone between the listing and the read: only a problem when the
+        // marker committed records this reader has not seen yet.
+        let unread = head.is_some_and(|head| head.last_seq > known);
+        return DeviceAssessment { blocked: unread.then_some(BlockCode::JournalMissing), ..blocked_without_rows(BlockCode::JournalMissing) };
+    };
+    if text.len() > MAX_LOG_BYTES {
+        return blocked_without_rows(BlockCode::JournalTooLarge);
+    }
+    let Ok(journal) = parse_journal(text, device) else {
+        return blocked_without_rows(BlockCode::JournalCorrupt);
+    };
+    let journal_last_seq = journal.iter().map(entry_seq).max().unwrap_or(0);
+    let view = committed_view(&journal, text, head, known);
+    DeviceAssessment {
+        known: view.known,
+        reset: view.reset,
+        mismatch: view.mismatch,
+        blocked: view.truncated.then_some(BlockCode::JournalTruncated),
+        journal_last_seq,
+        seqs: view.seqs,
+        journal,
+    }
+}
+
 /// Selects the committed, unread records of a downloaded journal.
 pub fn committed_view(journal: &[Entry], text: &str, head: Option<&JournalHead>, known: u64) -> CommittedView {
     let journal_last_seq = journal.iter().map(entry_seq).max().unwrap_or(0);
@@ -659,12 +762,13 @@ pub fn committed_view(journal: &[Entry], text: &str, head: Option<&JournalHead>,
         reset = true;
     }
     let mismatch = head.is_some_and(|head| text.len() as u64 != head.journal_bytes || !sha256_hex(text.as_bytes()).eq_ignore_ascii_case(&head.journal_sha256));
+    let truncated = head.is_some_and(|head| journal_last_seq < head.last_seq);
     let seqs = journal
         .iter()
         .map(entry_seq)
         .filter(|seq| *seq > known && head.is_none_or(|head| *seq <= head.last_seq))
         .collect();
-    CommittedView { known, reset, mismatch, seqs }
+    CommittedView { known, reset, mismatch, truncated, seqs }
 }
 
 /// Pulled records are applied per device (code point order), then by seq
@@ -710,12 +814,16 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
     let mut device_ids: Vec<String> = Vec::new();
     let mut devices_with_heads: HashSet<String> = HashSet::new();
     let mut head_etags: HashMap<String, String> = HashMap::new();
+    let mut journal_sizes: HashMap<String, u64> = HashMap::new();
     match dav.list(&format!("{root}/journal")).await {
         Ok(items) => {
             for item in &items {
                 if let Some(device) = item.name.strip_suffix(".jsonl") {
                     if DEVICE_ID.is_match(device) && !device_ids.iter().any(|known| known == device) {
                         device_ids.push(device.to_string());
+                    }
+                    if let Some(size) = item.size {
+                        journal_sizes.insert(device.to_string(), size);
                     }
                 }
                 if let Some(device) = item.name.strip_suffix(".head.json") {
@@ -737,9 +845,23 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
     let mut entries: Vec<Entry> = Vec::new();
     let mut reset_devices: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut blocked: Vec<BlockedDevice> = Vec::new();
+    // A commit marker without a journal: its committed records are unreachable.
+    let mut orphan_heads: Vec<&String> = devices_with_heads.iter().filter(|device| !device_ids.contains(device)).collect();
+    orphan_heads.sort();
+    for device in orphan_heads {
+        let known = known_seqs.get(device).copied().unwrap_or(0);
+        blocked.push(BlockedDevice { device_id: device.clone(), code: BlockCode::JournalMissing.as_str().into(), message: format!("{device} 只有提交标记，缺少日志文件"), known_seq: known, head_last_seq: None, journal_last_seq: None });
+    }
+    // Only the failure of one device's *data* is isolated. Authentication,
+    // server and network errors still fail the pull: they say nothing about
+    // that device and hiding them would make every device look healthy.
     for device in &device_ids {
         let mut known = known_seqs.get(device).copied().unwrap_or(0);
         let mut head: Option<JournalHead> = None;
+        let block = |code: BlockCode, message: String, known_seq: u64, head: Option<&JournalHead>, journal_last_seq: Option<u64>| BlockedDevice {
+            device_id: device.clone(), code: code.as_str().into(), message, known_seq, head_last_seq: head.map(|head| head.last_seq), journal_last_seq,
+        };
         if devices_with_heads.contains(device) {
             let key = format!("{namespace}{device}");
             let etag = head_etags.get(device).cloned();
@@ -747,17 +869,22 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
             match cached {
                 Some((cached_etag, cached_head)) if Some(&cached_etag) == etag.as_ref() => head = Some(cached_head),
                 _ => match dav.get_text(&journal_head_path(&root, device), MAX_HEAD_BYTES * 2).await {
-                    Ok((text, response_etag)) => {
-                        let parsed = parse_head(&text, device)?;
-                        // Only bind the body to the listing validator if GET
-                        // confirms it; a concurrent writer may have changed it.
-                        if let Some(etag) = &etag {
-                            if strong_etag(response_etag.as_deref()).as_ref() == Some(etag) {
-                                HEADS.lock().unwrap().set(key, (etag.clone(), parsed.clone()));
+                    Ok((text, response_etag)) => match parse_head(&text, device) {
+                        Ok(parsed) => {
+                            // Only bind the body to the listing validator if GET
+                            // confirms it; a concurrent writer may have changed it.
+                            if let Some(etag) = &etag {
+                                if strong_etag(response_etag.as_deref()).as_ref() == Some(etag) {
+                                    HEADS.lock().unwrap().set(key, (etag.clone(), parsed.clone()));
+                                }
                             }
+                            head = Some(parsed);
                         }
-                        head = Some(parsed);
-                    }
+                        Err(error) => {
+                            blocked.push(block(BlockCode::HeadCorrupt, error.message, known, None, None));
+                            continue;
+                        }
+                    },
                     Err(error) if error.is(404) => {}
                     Err(error) => return Err(error),
                 },
@@ -766,8 +893,10 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
         // A marker behind our cursor means the journal was deleted and
         // recreated; skipping it would hide every new record, so re-read. The
         // marker is the commit point: never fetch the large journal merely to
-        // confirm a sequence we already consumed.
-        let (planned_known, marker_reset, fetch) = plan_journal_read(head.as_ref(), known);
+        // confirm a sequence we already consumed, unless its listed size says
+        // it is shorter than what the marker committed.
+        let listed = journal_sizes.get(device).copied();
+        let (planned_known, marker_reset, fetch) = plan_journal_read_sized(head.as_ref(), known, listed);
         if marker_reset {
             reset_devices.push(device.clone());
             warnings.push(format!("{device} 的远端序号从 {known} 回退到 {}，已重新读取", head.as_ref().map_or(0, |head| head.last_seq)));
@@ -776,28 +905,40 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
         if !fetch {
             continue;
         }
+        if listed.is_some_and(|size| size as usize > MAX_LOG_BYTES) {
+            blocked.push(block(BlockCode::JournalTooLarge, format!("远端日志 {device}.jsonl 超过 100 MB 上限"), known, head.as_ref(), None));
+            continue;
+        }
         let text = match dav.get_text(&journal_path(&root, device), MAX_LOG_BYTES + 1).await {
-            Ok((text, _)) => text,
-            Err(error) if error.is(404) => continue,
+            Ok((text, _)) => Some(text),
+            Err(error) if error.is(404) => None,
             Err(error) => return Err(error),
         };
-        if text.len() > MAX_LOG_BYTES {
-            return Err(DavError::new(format!("远端日志 {device}.jsonl 超过 100 MB 上限")));
-        }
-        let journal = parse_journal(&text, device)?;
-        let journal_last_seq = journal.iter().map(entry_seq).max().unwrap_or(0);
-        let view = committed_view(&journal, &text, head.as_ref(), known);
-        if view.reset {
+        let assessment = assess_journal(device, text.as_deref(), head.as_ref(), known);
+        if assessment.reset {
             reset_devices.push(device.clone());
-            warnings.push(format!("{device} 的远端日志序号从 {known} 回退到 {journal_last_seq}，已重新读取"));
+            warnings.push(format!("{device} 的远端日志序号从 {known} 回退到 {}，已重新读取", assessment.journal_last_seq));
         }
-        if view.mismatch {
+        if assessment.mismatch {
             // The journal PUT succeeded but its marker PUT did not. Every row
             // is still a complete record, so only the committed range is used.
-            warnings.push(format!("{device} 的日志与提交标记不一致（日志序号 {journal_last_seq}，标记 {}），仅读取已提交部分", head.as_ref().map_or(0, |head| head.last_seq)));
+            warnings.push(format!("{device} 的日志与提交标记不一致（日志序号 {}，标记 {}），仅读取已提交部分", assessment.journal_last_seq, head.as_ref().map_or(0, |head| head.last_seq)));
         }
-        let visible: HashSet<u64> = view.seqs.into_iter().collect();
-        for mut entry in journal {
+        if let Some(code) = assessment.blocked {
+            let message = match code {
+                BlockCode::JournalCorrupt => format!("远端日志 {device}.jsonl 含有无法解析的记录"),
+                BlockCode::JournalTruncated => format!("远端日志 {device}.jsonl 被截断（日志序号 {}，提交标记 {}）", assessment.journal_last_seq, head.as_ref().map_or(0, |head| head.last_seq)),
+                BlockCode::JournalMissing => format!("远端日志 {device}.jsonl 不存在，但提交标记指向序号 {}", head.as_ref().map_or(0, |head| head.last_seq)),
+                BlockCode::JournalTooLarge => format!("远端日志 {device}.jsonl 超过 100 MB 上限"),
+                BlockCode::HeadCorrupt => String::new(),
+            };
+            blocked.push(block(code, message, known, head.as_ref(), (code == BlockCode::JournalTruncated).then_some(assessment.journal_last_seq)));
+        }
+        if assessment.seqs.is_empty() {
+            continue;
+        }
+        let visible: HashSet<u64> = assessment.seqs.into_iter().collect();
+        for mut entry in assessment.journal {
             if !visible.contains(&entry_seq(&entry)) {
                 continue;
             }
@@ -812,6 +953,7 @@ pub async fn pull_journals(http: &reqwest::Client, connection: &Connection, know
         devices: device_ids,
         reset_devices,
         warnings,
+        blocked,
     })
 }
 

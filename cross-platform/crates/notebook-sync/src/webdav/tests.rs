@@ -83,6 +83,7 @@ impl TestServer {
                                 xml.push_str(&format!("<d:response><d:href>{href}</d:href><d:propstat><d:prop>"));
                                 xml.push_str(if data.is_none() { "<d:resourcetype><d:collection/></d:resourcetype>" } else { "<d:resourcetype/>" });
                                 if let Some(data) = data {
+                                    xml.push_str(&format!("<d:getcontentlength>{}</d:getcontentlength>", data.len()));
                                     let prefix = if state.weak_etags { "W/" } else { "" };
                                     xml.push_str(&format!("<d:getetag>{prefix}&quot;{}&quot;</d:getetag>", sha256_hex(data)));
                                 }
@@ -342,6 +343,66 @@ async fn reads_legacy_journals_without_heads_and_hides_uncommitted_tails() {
     assert_eq!(ids(&pulled, device), vec!["committed"]);
     assert!(pulled.warnings.iter().any(|w| w.contains(device)));
     assert_eq!(ids(&pulled, legacy), vec!["legacy"], "a mismatched writer must not block other devices");
+}
+
+fn head_json(device: &str, body: &str, last_seq: u64) -> String {
+    serde_json::json!({ "version": 1, "deviceId": device, "lastSeq": last_seq, "journalBytes": body.len(), "journalSha256": sha256_hex(body.as_bytes()), "updatedAt": "2026-08-07T00:00:00.000Z", "stateEntries": 1, "historyEntries": 0 }).to_string()
+}
+
+fn blocked_codes(result: &PullResult) -> Vec<(String, String)> {
+    result.blocked.iter().map(|item| (item.device_id.clone(), item.code.clone())).collect()
+}
+
+#[tokio::test]
+async fn a_broken_peer_is_isolated_and_other_devices_keep_syncing() {
+    let server = TestServer::start();
+    let c = server.connection("notebook_backup");
+    let (healthy, corrupt, bad_head, no_journal) = ("00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2", "00000000-0000-4000-8000-0000000000a3", "00000000-0000-4000-8000-0000000000a4");
+    let body = format!("{}\n", line(1, "healthy-page"));
+    server.set_file(&format!("/dav/notebook_backup/journal/{healthy}.jsonl"), body.as_bytes());
+    server.set_file(&format!("/dav/notebook_backup/journal/{healthy}.head.json"), head_json(healthy, &body, 1).as_bytes());
+    server.set_file(&format!("/dav/notebook_backup/journal/{corrupt}.jsonl"), format!("{}\n{{not json\n", line(1, "lost")).as_bytes());
+    server.set_file(&format!("/dav/notebook_backup/journal/{bad_head}.jsonl"), body.as_bytes());
+    server.set_file(&format!("/dav/notebook_backup/journal/{bad_head}.head.json"), b"{broken");
+    server.set_file(&format!("/dav/notebook_backup/journal/{no_journal}.head.json"), head_json(no_journal, &body, 1).as_bytes());
+
+    let pulled = pull_journals(&http(), &c, &HashMap::new()).await.unwrap();
+    assert_eq!(ids(&pulled, healthy), vec!["healthy-page"]);
+    assert!(ids(&pulled, corrupt).is_empty() && ids(&pulled, bad_head).is_empty());
+    assert_eq!(blocked_codes(&pulled), vec![
+        (no_journal.to_string(), "journal-missing".to_string()),
+        (corrupt.to_string(), "journal-corrupt".to_string()),
+        (bad_head.to_string(), "head-corrupt".to_string()),
+    ]);
+    assert!(pulled.devices.contains(&corrupt.to_string()), "a blocked device is still a known device");
+}
+
+#[tokio::test]
+async fn a_truncated_journal_exposes_its_complete_rows_and_is_reported_even_when_caught_up() {
+    let server = TestServer::start();
+    let c = server.connection("notebook_backup");
+    let device = "00000000-0000-4000-8000-0000000000b1";
+    let full = format!("{}\n{}\n", line(1, "first"), line(2, "second"));
+    let cut = format!("{}\n", line(1, "first"));
+    server.set_file(&format!("/dav/notebook_backup/journal/{device}.jsonl"), cut.as_bytes());
+    server.set_file(&format!("/dav/notebook_backup/journal/{device}.head.json"), head_json(device, &full, 2).as_bytes());
+
+    let fresh = pull_journals(&http(), &c, &HashMap::new()).await.unwrap();
+    assert_eq!(ids(&fresh, device), vec!["first"]);
+    assert_eq!(blocked_codes(&fresh), vec![(device.to_string(), "journal-truncated".to_string())]);
+    assert_eq!((fresh.blocked[0].head_last_seq, fresh.blocked[0].journal_last_seq), (Some(2), Some(1)));
+
+    // A reader already at the marker never re-reads a healthy journal, but the
+    // listed size gives the truncation away.
+    let caught_up = pull_journals(&http(), &c, &HashMap::from([(device.to_string(), 2)])).await.unwrap();
+    assert!(caught_up.entries.is_empty());
+    assert_eq!(blocked_codes(&caught_up), vec![(device.to_string(), "journal-truncated".to_string())]);
+
+    // An uncommitted tail (journal longer than the marker) is not a problem.
+    let tail = format!("{full}{}\n", line(3, "uncommitted"));
+    server.set_file(&format!("/dav/notebook_backup/journal/{device}.jsonl"), tail.as_bytes());
+    let healthy = pull_journals(&http(), &c, &HashMap::from([(device.to_string(), 2)])).await.unwrap();
+    assert!(healthy.blocked.is_empty());
 }
 
 #[tokio::test]

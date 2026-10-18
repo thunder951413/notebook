@@ -1,0 +1,232 @@
+{
+  "description": "Failure isolation for one peer device. Input per case: the device's cursor (known), the raw marker text (headText, null when absent), the raw journal text as downloaded (journalText, null when the file is gone) and the journal size the directory listing reported (listedBytes, null when unknown). expected.fetch says whether the journal is downloaded at all (a caught-up reader skips it unless the listed size is below the marker's journalBytes). expected.blocked is null or one of head-corrupt | journal-corrupt | journal-truncated | journal-missing; a blocked device never fails the pull for other devices. expected.seqs are the records still exposed (a truncated journal exposes its complete committed rows). reset follows committed-view.json. Only the codes are contract; messages are local. Network, authentication and server errors are not isolated: they fail the whole pull.",
+  "deviceId": "0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb",
+  "cases": [
+    {
+      "name": "healthy journal with marker, fresh reader",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [
+          1,
+          2,
+          3
+        ],
+        "reset": false
+      }
+    },
+    {
+      "name": "marker behind the cursor resets and re-reads",
+      "known": 9,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [
+          1,
+          2,
+          3
+        ],
+        "reset": true
+      }
+    },
+    {
+      "name": "legacy journal without marker",
+      "known": 0,
+      "headText": null,
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": null,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [
+          1,
+          2,
+          3
+        ],
+        "reset": false
+      }
+    },
+    {
+      "name": "malformed record in the journal blocks the device",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n{not json\n",
+      "listedBytes": null,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-corrupt",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "record with an unknown operation blocks the device",
+      "known": 0,
+      "headText": null,
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\": 3, \"op\": \"merge\", \"type\": \"page\", \"id\": \"x\", \"payload\": {}}\n",
+      "listedBytes": null,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-corrupt",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "unparseable marker blocks the device",
+      "known": 0,
+      "headText": "{broken",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": false,
+        "blocked": "head-corrupt",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "marker for another device blocks the device",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0c0c0c0c-3333-4333-8333-cccccccccccc\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": false,
+        "blocked": "head-corrupt",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "marker with an unsupported version blocks the device",
+      "known": 0,
+      "headText": "{\"version\":2,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": false,
+        "blocked": "head-corrupt",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "journal ends before the marker: complete rows are exposed, device is reported",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n",
+      "listedBytes": 220,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-truncated",
+        "seqs": [
+          1,
+          2
+        ],
+        "reset": false
+      }
+    },
+    {
+      "name": "journal emptied while the marker commits records",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":2,\"journalBytes\":220,\"journalSha256\":\"1b2b637093f1f48e8ad1eaf5e2ddded71824a77582d6dfa0a0049c0ba4aabdb6\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":2,\"historyEntries\":0}",
+      "journalText": "",
+      "listedBytes": 0,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-truncated",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "caught-up reader notices a truncated journal from its listed size",
+      "known": 2,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":2,\"journalBytes\":220,\"journalSha256\":\"1b2b637093f1f48e8ad1eaf5e2ddded71824a77582d6dfa0a0049c0ba4aabdb6\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":2,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n",
+      "listedBytes": 110,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-truncated",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "caught-up reader, journal shorter than the marker but newer (compaction in flight)",
+      "known": 3,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n{\"seq\":4,\"ts\":\"2026-10-01T00:00:04.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p4\",\"ver\":0,\"payload\":{\"id\":\"p4\"}}\n",
+      "listedBytes": 220,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "caught-up reader with matching size downloads nothing",
+      "known": 3,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": false,
+        "blocked": null,
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "uncommitted tail beyond the marker is not a problem",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":2,\"journalBytes\":220,\"journalSha256\":\"1b2b637093f1f48e8ad1eaf5e2ddded71824a77582d6dfa0a0049c0ba4aabdb6\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":2,\"historyEntries\":0}",
+      "journalText": "{\"seq\":1,\"ts\":\"2026-10-01T00:00:01.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p1\",\"ver\":0,\"payload\":{\"id\":\"p1\"}}\n{\"seq\":2,\"ts\":\"2026-10-01T00:00:02.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p2\",\"ver\":0,\"payload\":{\"id\":\"p2\"}}\n{\"seq\":3,\"ts\":\"2026-10-01T00:00:03.000Z\",\"op\":\"upsert\",\"type\":\"page\",\"id\":\"p3\",\"ver\":0,\"payload\":{\"id\":\"p3\"}}\n",
+      "listedBytes": 330,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [
+          1,
+          2
+        ],
+        "reset": false
+      }
+    },
+    {
+      "name": "journal gone while the marker commits unread records",
+      "known": 0,
+      "headText": "{\"version\":1,\"deviceId\":\"0b0b0b0b-2222-4222-8222-bbbbbbbbbbbb\",\"lastSeq\":3,\"journalBytes\":330,\"journalSha256\":\"e897e761dab991d1ee22197a937227dcee884e3fabbb436945ff11697c74aef3\",\"updatedAt\":\"2026-10-01T00:00:00.000Z\",\"stateEntries\":3,\"historyEntries\":0}",
+      "journalText": null,
+      "listedBytes": null,
+      "expected": {
+        "fetch": true,
+        "blocked": "journal-missing",
+        "seqs": [],
+        "reset": false
+      }
+    },
+    {
+      "name": "journal gone, nothing unread",
+      "known": 3,
+      "headText": null,
+      "journalText": null,
+      "listedBytes": null,
+      "expected": {
+        "fetch": true,
+        "blocked": null,
+        "seqs": [],
+        "reset": false
+      }
+    }
+  ]
+}
