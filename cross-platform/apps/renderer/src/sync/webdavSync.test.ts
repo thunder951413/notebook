@@ -5,7 +5,7 @@ import { DexieNotebookRepository as RealRepository, NotebookRendererDatabase } f
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { loadWebdavSettings, saveWebdavKnownSeqs, webdavFingerprint } from './webdavSettings'
 import { WebdavPrivacyCipher } from './webdavPrivacy'
-import { loadSeqs, migrateSshToWebdav, pushDeadlineMs, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
+import { loadSeqs, migrateSshToWebdav, OWN_JOURNAL_DAMAGED_MESSAGE, pushDeadlineMs, rebuildWebdavOwnJournal, synchronizeWebdav, WEBDAV_OPERATION_TIMEOUT_MS, WEBDAV_SYNC_IDLE_TIMEOUT_MS } from './webdavSync'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
 import { synchronizeLegacySsh } from './legacySshSync'
 
@@ -81,6 +81,7 @@ function installDesktopMock() {
     pull: vi.fn(async (): Promise<PullResult> => ({ entries: [], fingerprint: 'fp' })),
     objectGet: vi.fn(async (_settings: unknown, hash: string) => new TextEncoder().encode(`content-of-${hash}`)),
     push: vi.fn(async (_settings: unknown, _deviceId: string, _entries: Array<Omit<ReturnType<typeof remoteEntry>, 'seq' | 'deviceId'>>, _objects: Array<{ hash: string; data: Uint8Array }>) => ({ firstSeq: 1, count: 0 })),
+    rebuildJournal: vi.fn(async (): Promise<{ backup?: string; floorSeq: number }> => ({ floorSeq: 0 })),
     cancel: vi.fn(async () => undefined),
   }
   const secrets = {
@@ -211,6 +212,42 @@ describe('synchronizeWebdav', () => {
       expect(second.issues).toBeUndefined()
       expect(await repo.getPage(privateId)).toMatchObject({ title: 'Secret', locked: true })
       expect(await repo.countQuarantine()).toBe(0)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('a damaged own journal stops publishing with a clear message, and rebuilding it republishes above the old sequence', async () => {
+    const { webdav } = installDesktopMock()
+    seedWebdavSettings()
+    const db = new NotebookRendererDatabase(`webdav-rebuild-${crypto.randomUUID()}`)
+    const repo = new RealRepository(db)
+    try {
+      const page = { id: pageId, workspaceId, kind: 'document' as const, title: '本机笔记', preview: '', favorite: false, createdAt: timestamp, updatedAt: timestamp, syncStatus: 'pending' as const }
+      await repo.savePage(page)
+      await repo.saveWebdavSeqs(webdavFingerprint(loadWebdavSettings()), { [deviceId]: 3 })
+      webdav.pull.mockResolvedValue({ entries: [], fingerprint: 'fp', devices: [deviceId], blocked: [{ deviceId, code: 'journal-corrupt', message: '损坏', knownSeq: 3 }] } as never)
+      await expect(synchronizeWebdav(repo, workspaceId)).rejects.toThrow(OWN_JOURNAL_DAMAGED_MESSAGE)
+      expect(webdav.push).not.toHaveBeenCalled()
+      // A peer's damaged journal does not stop this device from publishing.
+      webdav.pull.mockResolvedValue({ entries: [], fingerprint: 'fp', devices: [deviceId, 'peer-1'], blocked: [{ deviceId: 'peer-1', code: 'journal-corrupt', message: '损坏', knownSeq: 0 }] } as never)
+      webdav.push.mockResolvedValue({ firstSeq: 4, count: 1 })
+      await expect(synchronizeWebdav(repo, workspaceId)).resolves.toMatchObject({ state: 'synced', issues: { blocked: [{ deviceId: 'peer-1' }] } })
+      expect(webdav.push).toHaveBeenCalled()
+
+      // Rebuilding: the floor joins the own read position and everything is queued again.
+      webdav.rebuildJournal.mockResolvedValue({ backup: 'notebook_backup/journal/x.jsonl.corrupt-1', floorSeq: 9 })
+      await repo.db.syncOutbox.clear()
+      const rebuilt = await rebuildWebdavOwnJournal(repo, workspaceId)
+      expect(webdav.rebuildJournal).toHaveBeenCalledWith(expect.objectContaining({ remotePath: 'notebook_backup' }), deviceId, expect.any(String))
+      expect(rebuilt).toMatchObject({ floorSeq: 9, republished: expect.any(Number) })
+      expect(rebuilt.republished).toBeGreaterThan(0)
+      expect((await loadSeqs(repo, loadWebdavSettings()))[deviceId]).toBe(9)
+      expect(await repo.hasPendingSyncChanges(workspaceId)).toBe(true)
+      // A floor below the existing position never moves it backwards.
+      webdav.rebuildJournal.mockResolvedValue({ floorSeq: 2 })
+      await rebuildWebdavOwnJournal(repo, workspaceId)
+      expect((await loadSeqs(repo, loadWebdavSettings()))[deviceId]).toBe(9)
     } finally {
       db.close()
     }

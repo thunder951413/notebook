@@ -44,7 +44,8 @@ import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
 import { configurePrivacyLock, hasPrivacyLock, verifyPrivacyLock } from './crypto/privacyLock'
-import { migrateSshToWebdav, queueFullWebdavRepublish, resetWebdavReadPositions, retryWebdavQuarantine, webdavSyncIssues } from './sync/webdavSync'
+import { migrateSshToWebdav, queueFullWebdavRepublish, rebuildWebdavOwnJournal, resetWebdavReadPositions, retryWebdavQuarantine, webdavSyncIssues } from './sync/webdavSync'
+import { legacyDeviceId } from './sync/legacySshSettings'
 import { describeIssues } from './sync/webdavIssues'
 import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
@@ -129,7 +130,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     }),
     resetReadPositions: () => resetWebdavReadPositions(automationRepository),
     republishAll: () => queueFullWebdavRepublish(automationRepository, WORKSPACE_ID),
-    issues: async () => ({ ...(await webdavSyncIssues(automationRepository)), items: await automationRepository.listQuarantine() }),
+    issues: async () => ({ ...(await webdavSyncIssues(automationRepository)), items: await automationRepository.listQuarantine(), ownDeviceId: legacyDeviceId() }),
+    rebuildOwnJournal: () => rebuildWebdavOwnJournal(automationRepository, WORKSPACE_ID),
     retryIssues: async () => (await retryWebdavQuarantine(automationRepository, WORKSPACE_ID)).remaining,
     dismissIssues: (ids: string[]) => automationRepository.dismissQuarantine(ids),
   }), [pages])

@@ -64,7 +64,9 @@ interface SettingsCenterProps {
     resetReadPositions: () => Promise<void>
     republishAll: () => Promise<number>
     /** Remote records set aside and devices whose journal cannot be read. */
-    issues: () => Promise<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[] }>
+    issues: () => Promise<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[]; ownDeviceId: string }>
+    /** Keep a copy of this device's damaged journal, remove it and queue everything for publication again. */
+    rebuildOwnJournal: () => Promise<{ backup?: string; floorSeq: number; republished: number }>
     retryIssues: () => Promise<number>
     dismissIssues: (ids: string[]) => Promise<void>
   }
@@ -394,7 +396,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
 
   const [repairStatus, setRepairStatus] = useState<{ pending: number; conflictCopies: number }>()
   const [repairing, setRepairing] = useState(false)
-  const [issueSnapshot, setIssueSnapshot] = useState<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[] }>()
+  const [issueSnapshot, setIssueSnapshot] = useState<{ quarantined: number; blocked: WebdavBlockedDevice[]; items: SyncQuarantineItem[]; ownDeviceId: string }>()
   useEffect(() => {
     if (page !== 'services' || !syncRepair) return
     let cancelled = false
@@ -415,6 +417,27 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
       setIssueSnapshot(await syncRepair.issues())
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : '重试失败')
+      setSyncMessageIsError(true)
+    } finally {
+      setRepairing(false)
+    }
+  }
+
+  const rebuildOwnJournal = async () => {
+    if (!syncRepair || repairing || savingSync || syncState === 'syncing') return
+    const confirmed = await requestConfirm({ title: '重建本机日志？', description: '本机在云端的同步日志已损坏，所以无法上传新的修改。重建会保留一份损坏文件的副本（同目录下以 .corrupt 结尾），移除损坏的日志，再把本机全部内容重新上传；序号会接着原来的继续，其他设备已读取的内容不会重复或丢失。本机笔记不会改动。', confirmLabel: '重建并重新上传' })
+    if (!confirmed) return
+    setRepairing(true)
+    setSyncMessage(undefined)
+    setSyncMessageIsError(false)
+    try {
+      const rebuilt = await syncRepair.rebuildOwnJournal()
+      const succeeded = await onSyncNow('bidirectional')
+      setSyncMessage(succeeded ? `本机日志已重建，已重新排队 ${rebuilt.republished} 条内容${rebuilt.backup ? '，损坏的日志已另存备份' : ''}。` : '日志已重建，但这次同步没有完成；内容已排队保留，请稍后重试。')
+      setSyncMessageIsError(!succeeded)
+      setIssueSnapshot(await syncRepair.issues())
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : '重建失败')
       setSyncMessageIsError(true)
     } finally {
       setRepairing(false)
@@ -753,12 +776,15 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
               </div>
               {issueSnapshot && (issueSnapshot.items.length > 0 || issueSnapshot.blocked.length > 0) && <div className="sync-issues" role="status">
                 <strong>需要处理的同步问题</strong>
-                {issueSnapshot.blocked.map((device) => <p key={device.deviceId}>设备 {device.deviceId.slice(0, 8)}：{blockedLabels[device.code]}。其余设备的同步不受影响；该设备的记录要等它的日志修复后才能读取。</p>)}
+                {issueSnapshot.blocked.map((device) => device.deviceId === issueSnapshot.ownDeviceId
+                  ? <p key={device.deviceId}>本机的云端同步日志异常（{blockedLabels[device.code]}），新的修改暂时无法上传。请选择下方“重建本机日志”。</p>
+                  : <p key={device.deviceId}>设备 {device.deviceId.slice(0, 8)}：{blockedLabels[device.code]}。其余设备的同步不受影响；请在那台设备上打开应用，在同步设置中选择“重建本机日志”。</p>)}
                 {[...new Set(issueSnapshot.items.map((item) => item.reason))].map((reason) => {
                   const rows = issueSnapshot.items.filter((item) => item.reason === reason)
                   return <p key={reason}>{rows.length} 条：{quarantineLabels[reason].title}。{quarantineLabels[reason].hint}</p>
                 })}
                 <div className="settings-action-grid">
+                  {issueSnapshot.blocked.some((device) => device.deviceId === issueSnapshot.ownDeviceId) && <Button appearance="primary" disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void rebuildOwnJournal()}>重建本机日志</Button>}
                   {issueSnapshot.items.length > 0 && <Button disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void retryIssues()}>{repairing ? '正在重试…' : '重试异常记录'}</Button>}
                   {issueSnapshot.items.length > 0 && <Button appearance="subtle" disabled={repairing || savingSync || syncState === 'syncing'} onClick={() => void dismissIssues()}>删除异常记录</Button>}
                 </div>

@@ -84,6 +84,8 @@ interface WebdavTransport {
   pull(connection: WebdavConnection, knownSeqs: Record<string, number>, signal?: AbortSignal): Promise<{ entries: WebdavPullEntry[]; fingerprint: string; devices?: string[]; resetDevices?: string[]; warnings?: string[]; blocked?: WebdavBlockedDevice[] }>
   objectGet(connection: WebdavConnection, hash: string, signal?: AbortSignal): Promise<Uint8Array>
   push(connection: WebdavConnection, deviceId: string, entries: WebdavPushEntry[], objects: Array<{ hash: string; data: Uint8Array }>, signal?: AbortSignal, minSeq?: number): Promise<{ firstSeq: number; count: number }>
+  /** Repair: keep a copy of a damaged own journal, remove it, report the sequence floor to continue above. */
+  rebuildJournal(connection: WebdavConnection, deviceId: string, signal?: AbortSignal): Promise<{ backup?: string; floorSeq: number }>
 }
 
 function abortError(): DOMException {
@@ -121,6 +123,7 @@ function desktopTransport(): WebdavTransport {
     pull: (connection, knownSeqs, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.pull(connection, knownSeqs, requestId)),
     objectGet: (connection, hash, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.objectGet(connection, hash, requestId)),
     push: (connection, deviceId, entries, objects, signal, minSeq) => invokeDesktopWebdav(signal, (requestId) => minSeq ? webdav.push(connection, deviceId, entries, objects, requestId, minSeq) : webdav.push(connection, deviceId, entries, objects, requestId)),
+    rebuildJournal: (connection, deviceId, signal) => invokeDesktopWebdav(signal, (requestId) => webdav.rebuildJournal(connection, deviceId, requestId)),
   }
 }
 
@@ -167,6 +170,7 @@ function bridgeTransport(): WebdavTransport {
       const result = await bridgePost<{ dataBase64: string }>('/v1/local-webdav/object', { settings: connection, hash }, signal)
       return base64ToBytes(result.dataBase64)
     },
+    rebuildJournal: async () => { throw new Error('重建本机日志仅在桌面版中提供') },
     push: async (connection, deviceId, entries, objects, signal) => bridgePost('/v1/local-webdav/push', {
       settings: connection,
       deviceId,
@@ -326,6 +330,7 @@ function boundedTransport(transport: WebdavTransport, syncSignal: AbortSignal, a
   return {
     test: (connection, signal) => progressed(withDeadline('WebDAV 连接测试', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.test(connection, requestSignal))),
     pull: (connection, knownSeqs, signal) => progressed(withDeadline('读取远端日志', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.pull(connection, knownSeqs, requestSignal))),
+    rebuildJournal: (connection, deviceId, signal) => progressed(withDeadline('重建本机日志', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS * 3, (requestSignal) => transport.rebuildJournal(connection, deviceId, requestSignal))),
     objectGet: (connection, hash, signal) => progressed(withDeadline('下载远端对象', signal ?? syncSignal, WEBDAV_OPERATION_TIMEOUT_MS, (requestSignal) => transport.objectGet(connection, hash, requestSignal))),
     // A batch of up to 8 MiB cannot finish in 60 s on a slow uplink. Scale the
     // deadline with the payload, and keep the idle watchdog fed while the
@@ -705,6 +710,34 @@ function assertUploadConfirmation(pushed: { firstSeq: number; count: number }, c
   if (pushed.count !== count || !Number.isSafeInteger(pushed.firstSeq) || pushed.firstSeq < 1) throw new Error('远端上传确认不完整，待同步内容已保留')
 }
 
+export const OWN_JOURNAL_DAMAGED_MESSAGE = '本机在云端的同步日志已损坏，暂时无法上传。请在 设置 → 同步状态与修复 中选择“重建本机日志”。'
+
+/**
+ * Repair: this device's own journal is damaged (unreadable, truncated or too
+ * large), so nothing can be appended to it. Keep a copy of the damaged files,
+ * remove them, continue numbering above everything other devices consumed and
+ * queue the whole library for publication again.
+ */
+export async function rebuildWebdavOwnJournal(repository: DexieNotebookRepository, workspaceId: string, signal?: AbortSignal): Promise<{ backup?: string; floorSeq: number; republished: number }> {
+  return withDeadline('重建本机日志', signal, WEBDAV_SYNC_TIMEOUT_MS, async (rebuildSignal) => {
+    const settings = loadWebdavSettings()
+    const appPassword = await getWebdavAppPassword()
+    if (!settings.baseUrl || !settings.username || !appPassword) throw new Error('请先完整填写并保存坚果云 WebDAV 设置')
+    const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
+    const deviceId = legacyDeviceId()
+    const result = await boundedTransport(webdavTransport(), rebuildSignal).rebuildJournal(connection, deviceId, rebuildSignal)
+    // The floor outlives the removed files: sequence numbers must never move
+    // backwards, so it joins this device's own read position.
+    const seqs = await loadSeqs(repository, settings)
+    seqs[deviceId] = Math.max(seqs[deviceId] ?? 0, result.floorSeq)
+    await saveSeqs(repository, settings, seqs)
+    const republished = await queueFullWebdavRepublish(repository, workspaceId)
+    saveBlockedDevices(webdavFingerprint(settings), loadBlockedDevices(webdavFingerprint(settings)).filter((item) => item.deviceId !== deviceId))
+    recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'journal-rebuilt', status: 'success', message: `序号从 ${result.floorSeq} 继续；${result.backup ? '已备份损坏的日志' : '没有可备份的日志'}；已重新排队 ${republished} 条` })
+    return { ...result, republished }
+  })
+}
+
 /** What still needs attention in this repository, for the status line and the issues panel. */
 export async function webdavSyncIssues(repository: DexieNotebookRepository): Promise<WebdavSyncIssues> {
   const quarantined = typeof repository.countQuarantine === 'function' ? await repository.countQuarantine() : 0
@@ -778,6 +811,11 @@ async function runWebdavSync(repository: DexieNotebookRepository, workspaceId: s
       republished = await queueFullWebdavRepublish(repository, workspaceId)
       recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'remote-journal-missing', status: 'success', message: `本机日志在云端缺失（原序号 ${ownSeq}），已重新排队 ${republished} 条` })
     }
+    // Nothing can be published while this device's own journal is damaged:
+    // appending to it would fail (or, if truncated, could reuse sequence
+    // numbers other devices already consumed). Say so instead of retrying.
+    const ownDamage = firstPull.blocked.find((item) => item.deviceId === deviceId && item.code !== 'journal-missing')
+    if (ownDamage && mode !== 'pull') throw new Error(OWN_JOURNAL_DAMAGED_MESSAGE)
     // A blocked prefix may conceal conflicts later in the same journal. Do
     // not publish a document/asset from a page whose metadata is unresolved.
     if (conflicts || mode === 'pull') return { state: conflicts ? 'conflict' : 'synced', skipped: 0, conflicts, ...extras() }
