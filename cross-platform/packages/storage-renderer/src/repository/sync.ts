@@ -1,11 +1,26 @@
 import type { Notebook, Page, PageDocument, Section, Tag, TaskStep, PageLink, Asset, PageTag, ReadingPosition, PageRevision } from '@notebook/domain'
 import { legacyTiptapToCanonicalMarkdown, markdownToEditorCache } from '@notebook/sync-contract'
 import { type SyncOutboxItem } from '../database'
-import { parseRemotePayload, remapAssetReferences, type RemoteApplyResult, type RemoteSyncChange } from '../remotePayload'
+import { parseRemotePayload, remapAssetReferences, type RemoteApplyResult, type RemoteQuarantineInput, type RemoteSyncChange } from '../remotePayload'
+import type { QuarantineReason, SyncQuarantineItem } from '../database'
 import { ContentRepository } from './content'
+
+/** More open quarantine rows than this stop the pull: setting aside more would hide real trouble. */
+export const MAX_QUARANTINE_ITEMS = 1000
+const SUPPORTED_ENTITY_TYPES = new Set(['notebook', 'section', 'page', 'document', 'tag', 'task_step', 'asset', 'page_link', 'reading_position', 'revision', 'page_tag'])
+export const isSupportedSyncEntityType = (entityType: string) => SUPPORTED_ENTITY_TYPES.has(entityType)
+
+class RecordRejected extends Error {
+  constructor(readonly reason: QuarantineReason, message: string) { super(message) }
+}
 
 /** Outbox acknowledgement and applying remote changes (WebDAV merge and conflict copies). */
 export class SyncRepository extends ContentRepository {
+  listQuarantine(): Promise<SyncQuarantineItem[]> { return this.db.syncQuarantine.toArray().then((items) => items.sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.seq - b.seq)) }
+  countQuarantine(): Promise<number> { return this.db.syncQuarantine.count() }
+  /** Permanently drop set-aside records (the user confirmed they are not wanted). */
+  async dismissQuarantine(ids: string[]): Promise<void> { await this.db.syncQuarantine.bulkDelete(ids) }
+
   async isPrivateSyncItem(item: SyncOutboxItem): Promise<boolean> {
     // A privacy retraction is deliberately public: it deletes the previous
     // remote representation before later private edits are encrypted.
@@ -132,6 +147,30 @@ export class SyncRepository extends ContentRepository {
     return undefined
   }
 
+  /**
+   * Store set-aside records and release the ones that applied. Runs inside the
+   * apply transaction, so a record is either applied, set aside or still
+   * unread, never lost between the three.
+   */
+  private async writeQuarantine(workspaceId: string, items: RemoteQuarantineInput[], release: string[]): Promise<void> {
+    if (!items.length && !release.length) return
+    const now = new Date().toISOString()
+    const idOf = (item: RemoteQuarantineInput) => `${item.repository}|${item.deviceId}|${item.seq}`
+    const kept = new Set(items.map(idOf))
+    const gone = release.filter((id) => !kept.has(id))
+    if (gone.length) await this.db.syncQuarantine.bulkDelete(gone)
+    const existing = new Map((await this.db.syncQuarantine.bulkGet([...kept])).map((row, index) => [[...kept][index]!, row]))
+    const unseen = [...kept].filter((id) => !existing.get(id)).length
+    if (unseen && await this.db.syncQuarantine.count() + unseen > MAX_QUARANTINE_ITEMS) {
+      throw new Error(`同步问题过多（超过 ${MAX_QUARANTINE_ITEMS} 条），请先在“同步问题”中处理或删除`)
+    }
+    await this.db.syncQuarantine.bulkPut(items.map((item): SyncQuarantineItem => {
+      const id = idOf(item)
+      const before = existing.get(id)
+      return { ...item, id, workspaceId, attempts: (before?.attempts ?? 0) + 1, firstSeenAt: before?.firstSeenAt ?? now, lastTriedAt: now }
+    }))
+  }
+
   /** A tombstone without a live row means the entity (or its page) was permanently deleted. */
   protected async isPermanentlyDeleted(change: RemoteSyncChange, pageIds: string[]): Promise<boolean> {
     if (change.entityType === 'section') {
@@ -192,7 +231,7 @@ export class SyncRepository extends ContentRepository {
     return copyId
   }
 
-  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false, keepLocal = false, options: { autoResolve?: boolean; webdavSeqs?: { key: string; seqs: Record<string, number> } } = {}): Promise<RemoteApplyResult> {
+  async applyRemoteChanges(workspaceId: string, changes: RemoteSyncChange[], cursor: number, assetContents?: Map<string, Uint8Array>, webdavParentVersion = false, keepLocal = false, options: { autoResolve?: boolean; webdavSeqs?: { key: string; seqs: Record<string, number> }; quarantine?: RemoteQuarantineInput[]; releaseQuarantine?: string[] } = {}): Promise<RemoteApplyResult> {
     if (keepLocal && !webdavParentVersion) throw new Error('Local conflict recovery is only supported for WebDAV')
     const autoResolve = options.autoResolve === true && webdavParentVersion && !keepLocal
     return this.db.transaction('rw', this.db.tables, async () => {
@@ -201,6 +240,7 @@ export class SyncRepository extends ContentRepository {
       const conflicts: RemoteApplyResult['conflicts'] = []
       const resolved: NonNullable<RemoteApplyResult['resolved']> = []
       const discarded: NonNullable<RemoteApplyResult['discarded']> = []
+      const setAside: RemoteQuarantineInput[] = [...(options.quarantine ?? [])]
       /**
        * Concurrent edits never stop synchronization. Local content stays the
        * visible version and is republished as the successor of the remote
@@ -220,13 +260,25 @@ export class SyncRepository extends ContentRepository {
         resolved.push({ entityType: change.entityType, entityId: change.entityId, pageIds, ...(copyPageId ? { copyPageId } : {}) })
       }
       for (const change of changes) {
-        const supportedEntityTypes = new Set(['notebook', 'section', 'page', 'document', 'tag', 'task_step', 'asset', 'page_link', 'reading_position', 'revision', 'page_tag'])
-        if (!supportedEntityTypes.has(change.entityType) || !Number.isSafeInteger(change.version) || change.version < 0 || !['upsert', 'delete'].includes(change.operation)) {
-          throw new Error(`Invalid remote change for ${change.entityType}:${change.entityId}`)
-        }
-        const payload = change.operation === 'upsert' ? parseRemotePayload(change) : undefined
-        if (payload && typeof payload.workspaceId === 'string' && payload.workspaceId !== workspaceId) {
-          throw new Error(`Remote ${change.entityType} belongs to another workspace`)
+        // A record this device cannot understand is set aside, not fatal: it
+        // would otherwise stop every device on the same entry forever. Callers
+        // that cannot say where a record came from keep the old behaviour.
+        let payload: Record<string, unknown> | undefined
+        try {
+          if (!isSupportedSyncEntityType(change.entityType)) throw new RecordRejected('unknown-type', `不支持的记录类型：${change.entityType}`)
+          if (!Number.isSafeInteger(change.version) || change.version < 0 || !['upsert', 'delete'].includes(change.operation)) throw new RecordRejected('invalid-payload', `记录版本或操作不正确：${change.entityType}:${change.entityId}`)
+          payload = change.operation === 'upsert' ? parseRemotePayload(change) : undefined
+          if (payload && typeof payload.workspaceId === 'string' && payload.workspaceId !== workspaceId) throw new RecordRejected('workspace-mismatch', `${change.entityType} 属于其他工作区`)
+        } catch (error) {
+          const source = change.source
+          if (!source) throw error instanceof RecordRejected ? new Error(`Invalid remote change for ${change.entityType}:${change.entityId}: ${error.message}`) : error
+          setAside.push({
+            ...source, entityType: change.entityType, entityId: change.entityId, version: change.version, operation: change.operation === 'delete' ? 'delete' : 'upsert',
+            reason: error instanceof RecordRejected ? error.reason : 'invalid-payload',
+            message: error instanceof Error ? error.message.slice(0, 300) : String(error),
+            stage: 'apply', raw: change.payload,
+          })
+          continue
         }
         const pageIds = await this.conflictPageIds(change, payload)
         // Once local data has moved into a private notebook, remote history is
@@ -404,9 +456,13 @@ export class SyncRepository extends ContentRepository {
           ...(webdavParentVersion ? { webdavParentVersion: true as const } : {}),
         })
       }
+      await this.writeQuarantine(workspaceId, setAside, options.releaseQuarantine ?? [])
       await this.db.syncCursors.put({ workspaceId, cursor: appliedCursor })
       if (options.webdavSeqs && !conflicts.length) await this.db.syncCursors.put({ workspaceId: `webdav:${options.webdavSeqs.key}`, cursor: 0, seqs: options.webdavSeqs.seqs })
-      return { cursor: appliedCursor, conflicts, ...(resolved.length ? { resolved } : {}), ...(discarded.length ? { discarded } : {}) }
+      return {
+        cursor: appliedCursor, conflicts, ...(resolved.length ? { resolved } : {}), ...(discarded.length ? { discarded } : {}),
+        ...(setAside.length ? { quarantined: setAside.map((item) => ({ entityType: item.entityType, entityId: item.entityId, reason: item.reason })) } : {}),
+      }
     })
       .then((result) => {
         this.searchIndex.invalidate(workspaceId)

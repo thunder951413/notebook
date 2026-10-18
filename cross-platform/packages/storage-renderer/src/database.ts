@@ -32,6 +32,41 @@ export interface SyncOutboxItem {
   createdAt: string
 }
 
+/**
+ * Why one remote record was set aside instead of applied. The codes are shared
+ * with Android; a record is retried when its cause may have gone away.
+ */
+export type QuarantineReason =
+  | 'unknown-type' | 'invalid-payload' | 'workspace-mismatch'
+  | 'missing-object' | 'object-corrupt' | 'needs-key' | 'bad-key'
+
+/**
+ * A remote record this device could not apply. Its read position moves past it
+ * (so everything else keeps syncing) in the same transaction that stores it
+ * here, which makes it durable and retryable instead of lost.
+ */
+export interface SyncQuarantineItem {
+  /** `${repository}|${deviceId}|${seq}` */
+  id: string
+  workspaceId: string
+  repository: string
+  deviceId: string
+  seq: number
+  entityType: string
+  entityId: string
+  version: number
+  operation: 'upsert' | 'delete'
+  reason: QuarantineReason
+  message: string
+  /** `materialize`: raw is the journal payload as downloaded. `apply`: raw is the final decoded payload. */
+  stage: 'materialize' | 'apply'
+  raw: Record<string, unknown>
+  hash?: string
+  attempts: number
+  firstSeenAt: string
+  lastTriedAt: string
+}
+
 export interface SyncCursor {
   workspaceId: string
   cursor: number
@@ -79,6 +114,7 @@ export class NotebookRendererDatabase extends Dexie {
   tombstones!: EntityTable<Tombstone, 'id'>
   syncOutbox!: EntityTable<SyncOutboxItem, 'id'>
   syncCursors!: EntityTable<SyncCursor, 'workspaceId'>
+  syncQuarantine!: EntityTable<SyncQuarantineItem, 'id'>
   syncVersions!: EntityTable<SyncVersion, 'id'>
   assetContents!: EntityTable<AssetContent, 'id'>
   revisions!: EntityTable<PageRevision, 'id'>
@@ -284,5 +320,6 @@ export class NotebookRendererDatabase extends Dexie {
     })
     // Lets the outbox be read oldest-first per workspace (queue order).
     this.version(20).stores({ syncOutbox: 'id, workspaceId, createdAt, [workspaceId+createdAt], [entityType+entityId]' })
+    this.version(21).stores({ syncQuarantine: 'id, workspaceId, repository, reason' })
   }
 }

@@ -4,7 +4,7 @@ import { searchWorkspaceCandidatesWith, searchWorkspaceHitsWith, searchWorkspace
 import { TransferRepository } from './repository/transfer'
 
 export type { RemoteSyncChange, RemoteApplyResult } from './remotePayload'
-export type { SyncOutboxItem } from './database'
+export type { QuarantineReason, SyncOutboxItem, SyncQuarantineItem } from './database'
 export { NotebookRendererDatabase, MAX_AUTOSAVE_REVISIONS_PER_PAGE, MAX_EDITOR_CACHE_BYTES, MAX_PINNED_REVISIONS_PER_PAGE, MAX_REVISIONS_PER_PAGE } from './database'
 export { preserveChangesSinceSnapshot } from './rebase'
 export { markdownToPlainText, matchedTerms, searchQueryTerms, searchSnippet, searchTokenize, type SearchHit } from './search'

@@ -11,6 +11,24 @@ export interface RemoteSyncChange {
   authenticatedPrivate?: true
   /** The record came from this device's own journal (a replay of local work). */
   ownDevice?: true
+  /** Where the record came from, so a rejected one can be set aside and retried. */
+  source?: { repository: string; deviceId: string; seq: number; hash?: string }
+}
+
+/** A record the transport could not materialize (missing object, no key, ...). */
+export interface RemoteQuarantineInput {
+  repository: string
+  deviceId: string
+  seq: number
+  entityType: string
+  entityId: string
+  version: number
+  operation: 'upsert' | 'delete'
+  reason: import('./database').QuarantineReason
+  message: string
+  stage: 'materialize' | 'apply'
+  raw: Record<string, unknown>
+  hash?: string
 }
 
 export interface RemoteResolvedConflict {
@@ -28,6 +46,8 @@ export interface RemoteApplyResult {
   resolved?: RemoteResolvedConflict[]
   /** Remote upserts ignored because the entity was permanently deleted here (deletion wins). */
   discarded?: Array<{ entityType: string; entityId: string }>
+  /** Records set aside by the merge itself (unknown type, invalid payload, wrong workspace). */
+  quarantined?: Array<{ entityType: string; entityId: string; reason: import('./database').QuarantineReason }>
 }
 
 const recordSchema = z.record(z.string(), z.unknown())

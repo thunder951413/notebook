@@ -1287,6 +1287,37 @@ test('a privacy retraction leaves no tombstone, and a trashed page still accepts
   expect(await repository.getPage(trashed.id)).toMatchObject({ title: 'Renamed elsewhere' })
 })
 
+test('records this device cannot understand are set aside with their position, and everything else still applies', async () => {
+  const repository = makeRepository()
+  const source = (seq: number) => ({ repository: 'repo', deviceId: 'peer', seq })
+  const good = { ...page('good-remote', 'Fine'), syncStatus: 'synced' as const }
+  const result = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 1, entityType: 'hologram', entityId: 'h1', version: 0, operation: 'upsert', payload: { id: 'h1' }, source: source(1) },
+    { cursor: 2, entityType: 'page', entityId: good.id, version: 0, operation: 'upsert', payload: good, source: source(2) },
+    { cursor: 3, entityType: 'page', entityId: 'half', version: 0, operation: 'upsert', payload: { id: 'half' }, source: source(3) },
+    { cursor: 4, entityType: 'page', entityId: 'alien', version: 0, operation: 'upsert', payload: { ...page('alien', 'Elsewhere'), workspaceId: 'workspace-z', syncStatus: 'synced' }, source: source(4) },
+  ], 4, undefined, true, false, { webdavSeqs: { key: 'repo', seqs: { peer: 4 } } })
+
+  expect(await repository.getPage(good.id)).toMatchObject({ title: 'Fine' })
+  expect(result.quarantined?.map((item) => `${item.entityType}:${item.reason}`)).toEqual(['hologram:unknown-type', 'page:invalid-payload', 'page:workspace-mismatch'])
+  const rows = await repository.listQuarantine()
+  expect(rows.map((row) => [row.id, row.stage, row.attempts])).toEqual([['repo|peer|1', 'apply', 1], ['repo|peer|3', 'apply', 1], ['repo|peer|4', 'apply', 1]])
+  expect(await repository.getWebdavSeqs('repo')).toEqual({ peer: 4 })
+
+  // Seeing the same record again keeps its first-seen time and counts the attempt;
+  // a released record that is no longer rejected disappears.
+  await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 5, entityType: 'hologram', entityId: 'h1', version: 0, operation: 'upsert', payload: { id: 'h1' }, source: source(1) },
+  ], 5, undefined, true, false, { releaseQuarantine: ['repo|peer|1', 'repo|peer|3'] })
+  const after = await repository.listQuarantine()
+  expect(after.map((row) => [row.id, row.attempts])).toEqual([['repo|peer|1', 2], ['repo|peer|4', 1]])
+  await repository.dismissQuarantine(['repo|peer|4'])
+  expect(await repository.countQuarantine()).toBe(1)
+
+  // Without a source (HTTP API callers) an invalid record is still an error.
+  await expect(repository.applyRemoteChanges('workspace-a', [{ cursor: 6, entityType: 'hologram', entityId: 'h2', version: 0, operation: 'upsert', payload: {} }], 6)).rejects.toThrow('Invalid remote change')
+})
+
 test('classifies private notebook entities and related page records as local-only sync', async () => {
   const repository = makeRepository()
   const notebook = { id: 'private-notebook', workspaceId: 'workspace-a', name: 'Private', sortOrder: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', locked: true }
