@@ -26,6 +26,7 @@ function multistatus(entries: Array<{ href: string; isDirectory: boolean; data: 
     '      <d:prop>',
     isDirectory ? '        <d:resourcetype><d:collection/></d:resourcetype>' : '        <d:resourcetype/>',
     `        <d:displayname>${xmlEscape(href.split('/').filter(Boolean).pop() ?? '')}</d:displayname>`,
+    data ? `        <d:getcontentlength>${data.length}</d:getcontentlength>` : '',
     data && etagMode !== 'missing' ? `        <d:getetag>${xmlEscape(`${etagMode === 'weak' ? 'W/' : ''}"${createHash('sha256').update(data).digest('hex')}"`)}</d:getetag>` : '',
     '      </d:prop>',
     '      <d:status>HTTP/1.1 200 OK</d:status>',
@@ -314,6 +315,28 @@ describe('webdav transport', () => {
     expect(stored.byteLength).toBeLessThan(4 * 1024 * 1024)
     expect(stored.toString().trim().split('\n').map((line) => JSON.parse(line).seq)).toEqual([2, 3])
     entries.delete(`/dav/notebook_backup/journal/${deviceA}.jsonl`)
+  })
+
+  test('isolates a broken peer, reports truncation, and keeps healthy devices syncing', async () => {
+    const isolated = { ...connection, remotePath: 'isolation-test' }
+    const [healthy, corrupt, truncated] = ['00000000-0000-4000-8000-0000000000c1', '00000000-0000-4000-8000-0000000000c2', '00000000-0000-4000-8000-0000000000c3']
+    const row = { ts: '2026-09-04T00:00:00.000Z', op: 'upsert' as const, type: 'page', payload: {} }
+    await appendWebdavJournal(isolated, healthy, [{ ...row, id: 'healthy-page', ver: 0 }])
+    await appendWebdavJournal(isolated, corrupt, [{ ...row, id: 'doomed', ver: 0 }])
+    await appendWebdavJournal(isolated, truncated, [{ ...row, id: 't1', ver: 0 }, { ...row, id: 't2', ver: 0 }])
+    const dir = '/dav/isolation-test/journal'
+    const damage = (name: string, edit: (data: Buffer) => Buffer) => { const entry = entries.get(`${dir}/${name}`)!; entry.data = edit(entry.data!) }
+    damage(`${corrupt}.jsonl`, (data) => Buffer.concat([data, Buffer.from('{not json\n')]))
+    damage(`${truncated}.jsonl`, (data) => Buffer.from(data.toString('utf8').split('\n')[0] + '\n'))
+
+    const pulled = await pullWebdavJournals(isolated, {})
+    expect(pulled.entries.map((entry) => `${entry.deviceId}:${entry.id}`).sort()).toEqual([`${healthy}:healthy-page`, `${truncated}:t1`].sort())
+    expect(pulled.blocked?.map((item) => [item.deviceId, item.code])).toEqual([[corrupt, 'journal-corrupt'], [truncated, 'journal-truncated']])
+    // Caught up with the marker: the shorter listed size still gives it away.
+    const caughtUp = await pullWebdavJournals(isolated, { [truncated]: 2, [healthy]: 1, [corrupt]: 1 })
+    expect(caughtUp.entries).toEqual([])
+    // The corrupt journal is not re-read once the cursor is at its marker.
+    expect(caughtUp.blocked?.map((item) => item.code)).toEqual(['journal-truncated'])
   })
 
   test('pulls only entries newer than the per-device read cursor', async () => {

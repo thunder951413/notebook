@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  assessJournal,
   buildHead,
   committedView,
   compactJournal,
@@ -16,6 +17,7 @@ import {
   parseHead,
   parseJournal,
   planJournalRead,
+  planJournalReadSized,
   safeRemotePath,
   sortPulledEntries,
   validatedWebdavBaseUrl,
@@ -104,6 +106,31 @@ describe('shared WebDAV v4 contract fixtures', () => {
       expect(view.seqs, testCase.name).toEqual(testCase.expected.seqs)
       expect(plan.reset || view.reset, testCase.name).toBe(testCase.expected.reset)
       expect(view.mismatch, testCase.name).toBe(testCase.expected.mismatch)
+    }
+  })
+
+  it('pull-isolation.json', () => {
+    const value = fixture('pull-isolation.json')
+    for (const testCase of value.cases) {
+      let head
+      try {
+        head = testCase.headText === null ? undefined : parseHead(testCase.headText, value.deviceId)
+      } catch {
+        expect(testCase.expected, testCase.name).toMatchObject({ fetch: false, blocked: 'head-corrupt', seqs: [] })
+        continue
+      }
+      const plan = planJournalReadSized(head, testCase.known, testCase.listedBytes ?? undefined)
+      expect(plan.fetch, testCase.name).toBe(testCase.expected.fetch)
+      if (!plan.fetch) {
+        expect(testCase.expected.blocked, testCase.name).toBeNull()
+        expect(testCase.expected.seqs).toEqual([])
+        expect(plan.reset, testCase.name).toBe(testCase.expected.reset)
+        continue
+      }
+      const assessment = assessJournal(testCase.journalText ?? undefined, head, plan.known)
+      expect(assessment.blocked ?? null, testCase.name).toBe(testCase.expected.blocked)
+      expect(assessment.seqs, testCase.name).toEqual(testCase.expected.seqs)
+      expect(plan.reset || assessment.reset, testCase.name).toBe(testCase.expected.reset)
     }
   })
 

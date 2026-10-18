@@ -50,6 +50,20 @@ export interface WebdavPullResult {
   resetDevices?: string[]
   /** Recoverable repository anomalies worth recording in diagnostics. */
   warnings?: string[]
+  /** Devices whose journal cannot be trusted; every other device is read as usual. */
+  blocked?: WebdavBlockedDevice[]
+}
+
+/** Why a peer's journal cannot be read as a whole (fixture: pull-isolation.json). */
+export type WebdavBlockCode = 'journal-corrupt' | 'head-corrupt' | 'journal-truncated' | 'journal-missing' | 'journal-too-large'
+
+export interface WebdavBlockedDevice {
+  deviceId: string
+  code: WebdavBlockCode
+  message: string
+  knownSeq: number
+  headLastSeq?: number
+  journalLastSeq?: number
 }
 
 export interface WebdavTestResult {
@@ -302,8 +316,53 @@ export function planJournalRead(head: Pick<WebdavJournalHead, 'lastSeq'> | undef
   return { known, reset: false, fetch: true }
 }
 
+/**
+ * Like planJournalRead, but a journal listed as shorter than the bytes the
+ * marker committed is fetched even when the cursor is at the marker: it is
+ * either mid-compaction or truncated, and only its last sequence tells which
+ * (fixture: pull-isolation.json).
+ */
+export function planJournalReadSized(head: Pick<WebdavJournalHead, 'lastSeq' | 'journalBytes'> | undefined, known: number, listedBytes: number | undefined): { known: number; reset: boolean; fetch: boolean } {
+  const plan = planJournalRead(head, known)
+  const suspicious = !plan.fetch && head !== undefined && listedBytes !== undefined && listedBytes < head.journalBytes
+  return { ...plan, fetch: plan.fetch || suspicious }
+}
+
+export interface WebdavDeviceAssessment {
+  known: number
+  reset: boolean
+  mismatch: boolean
+  blocked?: WebdavBlockCode
+  journalLastSeq: number
+  /** Sequence numbers to expose, in journal order. */
+  seqs: number[]
+  journal: WebdavJournalEntry[]
+}
+
+/**
+ * Judges a downloaded journal body against its (already parsed) marker. A
+ * journal that fails to parse exposes nothing; a truncated one still exposes
+ * its complete committed rows but is reported so nobody trusts the gap
+ * (fixture: pull-isolation.json). `text` is undefined when the file is gone.
+ */
+export function assessJournal(text: string | undefined, head: Pick<WebdavJournalHead, 'lastSeq' | 'journalBytes' | 'journalSha256'> | undefined, known: number): WebdavDeviceAssessment {
+  const withoutRows = (blocked?: WebdavBlockCode): WebdavDeviceAssessment => ({ known, reset: false, mismatch: false, blocked, journalLastSeq: 0, seqs: [], journal: [] })
+  // Gone between the listing and the read: only a problem when the marker
+  // committed records this reader has not seen yet.
+  if (text === undefined) return withoutRows(head && head.lastSeq > known ? 'journal-missing' : undefined)
+  if (utf8Bytes(text) > MAX_LOG_BYTES) return withoutRows('journal-too-large')
+  let journal: WebdavJournalEntry[]
+  try {
+    journal = parseJournal(text)
+  } catch {
+    return withoutRows('journal-corrupt')
+  }
+  const view = committedView(journal, text, head, known)
+  return { known: view.known, reset: view.reset, mismatch: view.mismatch, ...(view.truncated ? { blocked: 'journal-truncated' as const } : {}), journalLastSeq: view.journalLastSeq, seqs: view.seqs, journal }
+}
+
 /** Committed, unread records of a downloaded peer journal (fixture: committed-view.json). */
-export function committedView(journal: WebdavJournalEntry[], text: string, head: Pick<WebdavJournalHead, 'lastSeq' | 'journalBytes' | 'journalSha256'> | undefined, known: number): { known: number; reset: boolean; mismatch: boolean; seqs: number[] } {
+export function committedView(journal: WebdavJournalEntry[], text: string, head: Pick<WebdavJournalHead, 'lastSeq' | 'journalBytes' | 'journalSha256'> | undefined, known: number): { known: number; reset: boolean; mismatch: boolean; truncated: boolean; journalLastSeq: number; seqs: number[] } {
   const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
   let reset = false
   if (!head && journalLastSeq < known) {
@@ -311,8 +370,9 @@ export function committedView(journal: WebdavJournalEntry[], text: string, head:
     reset = true
   }
   const mismatch = Boolean(head && (utf8Bytes(text) !== head.journalBytes || sha256(text) !== head.journalSha256.toLowerCase()))
+  const truncated = Boolean(head && journalLastSeq < head.lastSeq)
   const seqs = journal.map((entry) => entry.seq).filter((seq) => seq > known && (!head || seq <= head.lastSeq))
-  return { known, reset, mismatch, seqs }
+  return { known, reset, mismatch, truncated, journalLastSeq, seqs }
 }
 
 /** Pulled records are applied per device (code point order), then by seq (fixture: pull-order.json). */
@@ -350,6 +410,7 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
   let deviceIds: string[] = []
   const devicesWithHeads = new Set<string>()
   const headEtags = new Map<string, string>()
+  const journalSizes = new Map<string, number>()
   try {
     const contents = await client.getDirectoryContents(`${root}/journal`, { signal })
     const items = Array.isArray(contents) ? contents : []
@@ -358,6 +419,13 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
       .filter((name) => name.endsWith('.jsonl'))
       .map((name) => name.slice(0, -'.jsonl'.length))
       .filter((deviceId) => DEVICE_ID_PATTERN.test(deviceId))
+    for (const item of items) {
+      if (!item.basename.endsWith('.jsonl')) continue
+      // The webdav client reports 0 for a missing getcontentlength, so 0 is
+      // treated as unknown (an empty journal is still caught when it is read).
+      const size = Number(item.size)
+      if (Number.isFinite(size) && size > 0) journalSizes.set(item.basename.slice(0, -'.jsonl'.length), size)
+    }
     for (const item of items) {
       const name = item.basename
       if (!name.endsWith('.head.json')) continue
@@ -378,9 +446,20 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
   const entries: Array<WebdavJournalEntry & { deviceId: string }> = []
   const resetDevices: string[] = []
   const warnings: string[] = []
+  const blocked: WebdavBlockedDevice[] = []
+  // A commit marker without a journal: its committed records are unreachable.
+  for (const deviceId of [...devicesWithHeads].filter((candidate) => !deviceIds.includes(candidate)).sort()) {
+    blocked.push({ deviceId, code: 'journal-missing', message: `${deviceId} 只有提交标记，缺少日志文件`, knownSeq: knownSeqs[deviceId] ?? 0 })
+  }
+  // Only the failure of one device's *data* is isolated. Authentication,
+  // server and network errors still fail the pull: they say nothing about
+  // that device and hiding them would make every device look healthy.
   for (const deviceId of deviceIds) {
     let known = knownSeqs[deviceId] ?? 0
     let head: WebdavJournalHead | undefined
+    const block = (code: WebdavBlockCode, message: string, journalLastSeq?: number): WebdavBlockedDevice => ({
+      deviceId, code, message, knownSeq: known, ...(head ? { headLastSeq: head.lastSeq } : {}), ...(journalLastSeq === undefined ? {} : { journalLastSeq }),
+    })
     if (devicesWithHeads.has(deviceId)) {
       try {
         const key = cacheNamespace(settings) + deviceId
@@ -392,7 +471,14 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
           if (typeof response !== 'object' || !('data' in response)) throw new Error('WebDAV 提交标记响应缺少详情')
           const data = response.data
           const text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
-          head = parseHead(text, deviceId)
+          let parsed: WebdavJournalHead
+          try {
+            parsed = parseHead(text, deviceId)
+          } catch (error) {
+            blocked.push(block('head-corrupt', error instanceof Error ? error.message : String(error)))
+            continue
+          }
+          head = parsed
           // Only bind the body to the listing validator if GET confirms it;
           // a concurrent writer may change the marker between these requests.
           if (etag && strongEtag(response.headers.etag) === etag) headCache.set(key, { etag, head })
@@ -406,43 +492,53 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     // recreated (manual cleanup, restored folder). Skipping it would hide
     // every new record until it overtook the stale cursor, so re-read it. The
     // marker is the commit point: once its sequence is known, never fetch the
-    // corresponding large journal merely to confirm that fact.
-    const plan = planJournalRead(head, known)
+    // corresponding large journal merely to confirm that fact, unless its
+    // listed size says it is shorter than what the marker committed.
+    const listed = journalSizes.get(deviceId)
+    const plan = planJournalReadSized(head, known, listed)
     if (plan.reset) {
       resetDevices.push(deviceId)
       warnings.push(`${deviceId} 的远端序号从 ${known} 回退到 ${head?.lastSeq ?? 0}，已重新读取`)
     }
     known = plan.known
     if (!plan.fetch) continue
-    let text = ''
+    if (listed !== undefined && listed > MAX_LOG_BYTES) {
+      blocked.push(block('journal-too-large', `远端日志 ${deviceId}.jsonl 超过 100 MB 上限`))
+      continue
+    }
+    let text: string | undefined
     try {
       const data = await client.getFileContents(journalPath(root, deviceId), { format: 'text', signal })
       text = typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf8')
     } catch (error) {
       const status = (error as { status?: number })?.status
-      if (status === 404) continue
-      throw error
+      if (status !== 404) throw error
     }
-    // Long-lived devices may already exceed the legacy 4 MB failure limit;
-    // 100 MB is only a recovery/abuse guard until v5 segments the log.
-    if (utf8Bytes(text) > MAX_LOG_BYTES) throw new Error(`远端日志 ${deviceId}.jsonl 超过 100 MB 上限`)
-    const journal = parseJournal(text)
-    const journalLastSeq = journal.reduce((maximum, entry) => Math.max(maximum, entry.seq), 0)
-    const view = committedView(journal, text, head, known)
-    if (view.reset) {
+    const assessment = assessJournal(text, head, known)
+    if (assessment.reset) {
       resetDevices.push(deviceId)
-      warnings.push(`${deviceId} 的远端日志序号从 ${known} 回退到 ${journalLastSeq}，已重新读取`)
+      warnings.push(`${deviceId} 的远端日志序号从 ${known} 回退到 ${assessment.journalLastSeq}，已重新读取`)
     }
-    if (view.mismatch) {
+    if (assessment.mismatch) {
       // The journal PUT succeeded but its marker PUT did not (or an old v4
       // writer appended without a marker). Every row is still a complete JSON
       // record, so only the committed sequence range is exposed. Blocking the
       // whole repository here would stall every device until the writer came
       // back online; its unacknowledged rows are republished by that writer.
-      warnings.push(`${deviceId} 的日志与提交标记不一致（日志序号 ${journalLastSeq}，标记 ${head?.lastSeq ?? 0}），仅读取已提交部分`)
+      warnings.push(`${deviceId} 的日志与提交标记不一致（日志序号 ${assessment.journalLastSeq}，标记 ${head?.lastSeq ?? 0}），仅读取已提交部分`)
     }
-    const visible = new Set(view.seqs)
-    for (const entry of journal) {
+    if (assessment.blocked) {
+      const messages: Record<WebdavBlockCode, string> = {
+        'journal-corrupt': `远端日志 ${deviceId}.jsonl 含有无法解析的记录`,
+        'journal-truncated': `远端日志 ${deviceId}.jsonl 被截断（日志序号 ${assessment.journalLastSeq}，提交标记 ${head?.lastSeq ?? 0}）`,
+        'journal-missing': `远端日志 ${deviceId}.jsonl 不存在，但提交标记指向序号 ${head?.lastSeq ?? 0}`,
+        'journal-too-large': `远端日志 ${deviceId}.jsonl 超过 100 MB 上限`,
+        'head-corrupt': '',
+      }
+      blocked.push(block(assessment.blocked, messages[assessment.blocked], assessment.blocked === 'journal-truncated' ? assessment.journalLastSeq : undefined))
+    }
+    const visible = new Set(assessment.seqs)
+    for (const entry of assessment.journal) {
       if (visible.has(entry.seq)) entries.push({ ...entry, deviceId })
     }
   }
@@ -453,6 +549,7 @@ export async function pullWebdavJournals(settings: WebdavConnection, knownSeqs: 
     devices: deviceIds,
     ...(resetDevices.length ? { resetDevices } : {}),
     ...(warnings.length ? { warnings } : {}),
+    ...(blocked.length ? { blocked } : {}),
   }
 }
 
