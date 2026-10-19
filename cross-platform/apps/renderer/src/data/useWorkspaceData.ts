@@ -15,7 +15,7 @@ import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
-import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
+import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, documentNeedsAssets, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
 import { seedNotebooks, seedSections, seedPages, tagMap, toPageSummary, demoSeedAllowed } from './workspaceSeed'
 import { useWorkspaceSync } from './useWorkspaceSync'
 import { usePageTreeMoves } from './usePageTreeMoves'
@@ -153,7 +153,7 @@ export function useWorkspaceData() {
         setDocuments((current) => ({ ...current, [pageId]: empty }))
         return empty
       }
-      const assets = document.markdown !== undefined
+      const assets = documentNeedsAssets(document)
         ? await repository.listAssets(pageId)
         : []
       const tiptapJson = await editorDocumentFromStorage(document, assets)

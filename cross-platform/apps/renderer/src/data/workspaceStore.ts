@@ -126,6 +126,12 @@ export function editorCacheVersion(document: PageDocument, assets: Asset[]) {
   return `${document.updatedAt}:${document.markdown?.length ?? 0}:${assetVersion}`
 }
 
+/** Assets only matter when the editor cache is rebuilt from Markdown or a large-note handle carries them. */
+export function documentNeedsAssets(document: PageDocument) {
+  return document.markdown !== undefined
+    && (isEmptyEditorCache(document.tiptapJson) || document.markdown.length >= LARGE_DOCUMENT_CHARACTERS)
+}
+
 export async function editorDocumentFromStorage(document: PageDocument, assets: Asset[]) {
   // Shared rich documents retain their authoritative collaborative tree.
   if (!import.meta.env.VITE_NOTEBOOK_COLLAB_URL && document.markdown !== undefined && document.markdown.length >= LARGE_DOCUMENT_CHARACTERS) {

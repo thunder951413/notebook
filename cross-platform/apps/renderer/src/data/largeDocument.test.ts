@@ -1,7 +1,7 @@
 import { indexLargeMarkdown, chunkAtOffset } from './largeDocumentIndex'
 import { isLargeDocument, largeDocument, replaceMarkdownSection } from './largeDocument'
 import { documentToMarkdown } from '../editor/extensions'
-import { editorDocumentFromStorage } from './workspaceStore'
+import { documentNeedsAssets, editorDocumentFromStorage } from './workspaceStore'
 import * as parser from './markdownParser'
 import { vi } from 'vitest'
 
@@ -60,4 +60,13 @@ test('reference groups remain whole and an unclosed math block remains bounded',
   expect(source.slice(index.chunks[0]!.start, index.chunks[0]!.end)).toBe(group)
   const unclosed = indexLargeMarkdown('$$\n\n' + '无限延续的公式\n\n'.repeat(40_000))
   expect(Math.max(...unclosed.chunks.map((chunk) => chunk.end - chunk.start))).toBeLessThanOrEqual(6_000)
+})
+
+test('asset lookup is skipped when an existing editor cache needs no rebuild', () => {
+  const base = { pageId: 'p', schemaVersion: 3 as const, updatedAt: '2026-10-19T00:00:00Z' }
+  const cached = { type: 'doc', content: [{ type: 'paragraph' }] }
+  expect(documentNeedsAssets({ ...base, markdown: '正文', tiptapJson: cached })).toBe(false)
+  expect(documentNeedsAssets({ ...base, markdown: '正文', tiptapJson: { type: 'doc', content: [] } })).toBe(true)
+  expect(documentNeedsAssets({ ...base, markdown: 'x'.repeat(200_000), tiptapJson: cached })).toBe(true)
+  expect(documentNeedsAssets({ ...base, tiptapJson: cached })).toBe(false)
 })
