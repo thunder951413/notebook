@@ -9,10 +9,10 @@ permissions:
 
 on:
   push:
-    branches: [next]
+    branches: [main]
     paths: ['cross-platform/**', 'SyncContractFixtures/**', '.github/workflows/cross-platform.yml']
   pull_request:
-    branches: [next]
+    branches: [main]
     paths: ['cross-platform/**', 'SyncContractFixtures/**', '.github/workflows/cross-platform.yml']
   workflow_dispatch:
 
