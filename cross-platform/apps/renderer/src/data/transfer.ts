@@ -1,5 +1,4 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
-import { parse as parsePlist } from 'plist'
 import type { NotebookDataBundle } from '@notebook/domain'
 import {
   importLegacyBundle,
@@ -72,7 +71,9 @@ function decodeBase64Text(value: string) {
   return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)))
 }
 
-function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknown): LegacyEncryptedData {
+// plist (and its XML parser) is only needed for legacy Apple packages: keep it out of the startup bundle.
+async function decodeLegacyPrivacyConfiguration(files: ImportFile[], embedded?: unknown): Promise<LegacyEncryptedData> {
+  const { parse: parsePlist } = await import('plist')
   const encryptedFile = files.find((file) => /(^|\/)Config\/EncryptedData\.plist$/i.test(file.name))
   const folderFile = files.find((file) => /(^|\/)Config\/EncryptedFolders\.plist$/i.test(file.name))
   const encrypted = normalizeLegacyEncryptedData(encryptedFile ? parsePlist(strFromU8(encryptedFile.data)) : embedded)
@@ -155,7 +156,7 @@ export async function decodeImport(files: ImportFile[], workspaceId: string, pri
         return [note.documentPath, migratedDocumentSchema.parse(JSON.parse(strFromU8(file.data)))] as const
       }))
       const embeddedPrivacy = (parsedManifest.data as unknown as { encryptedData?: unknown }).encryptedData
-      const imported = importDocumentMigrationPackage(parsedManifest.data, documents, workspaceId, decodeLegacyPrivacyConfiguration(expanded, embeddedPrivacy))
+      const imported = importDocumentMigrationPackage(parsedManifest.data, documents, workspaceId, await decodeLegacyPrivacyConfiguration(expanded, embeddedPrivacy))
       const bundle: NotebookDataBundle = {
         notebooks: [imported.notebook, ...(imported.privateNotebook ? [imported.privateNotebook] : [])], sections: imported.sections, pages: imported.pages, documents: imported.documents,
         tags: imported.tags, pageTags: imported.pageTags, taskSteps: imported.taskSteps, assets: imported.assets,
