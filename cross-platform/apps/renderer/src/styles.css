@@ -1172,11 +1172,10 @@ html:not([data-platform="mac"]):not([data-shell="tauri"]) .ai-workspace { box-si
 .large-note-toolbar input { width: 160px; padding: 6px 10px; color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 6px; }
 .large-note-reader button { padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border-subtle); color: var(--text-primary); background: var(--surface-raised); cursor: pointer; }
 .large-note-reader button:hover { background: var(--accent-soft); }
-.large-note-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.large-note-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 0 24vh; }
 .large-note-chunk { position: relative; }
 .large-note-loaded { display: flow-root; }
-.large-note-loaded .document-editor-content { min-height: 0; padding-top: 8px; padding-bottom: 16px; }
-.large-note-chapter-action { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(860px, calc(100% - 92px)); margin: 0 auto; padding: 10px 0 0; color: var(--text-secondary); font-size: 12px; }
+.large-note-loaded .document-editor-content { min-height: 0; padding-top: 0; padding-bottom: 0; }
 .large-note-save-error { padding: 12px 22px; color: var(--text-primary); background: var(--accent-soft); }
 .large-note-save-error button { margin-left: 12px; }
 .large-note-source-editor { display: flex; flex: 1; min-height: 0; flex-direction: column; padding: 16px 24px; }

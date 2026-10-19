@@ -138,6 +138,20 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
       content: initial.length <= 80_000 ? markdownToEditorCache(initial + '\n\n' + index.definitions, content.assets) : undefined })
   }
 
+  /** The chapter under the top of the reading area: the one the reader is looking at. */
+  const chapterInView = () => {
+    const root = scroller.current
+    if (!root) return 0
+    const probe = root.getBoundingClientRect().top + 80
+    let current = 0
+    for (let number = 0; number < index.chunks.length; number++) {
+      const shell = shells.current.get(number)
+      if (shell && shell.getBoundingClientRect().top <= probe) current = number
+      else if (shell) break
+    }
+    return index.chunks[current]!.chapter
+  }
+
   const saveChapter = (replacement: string) => {
     const session = editing
     if (!session) return Promise.resolve()
@@ -178,6 +192,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
         : <SourceChapterEditor source={editing.initial} onSave={saveChapter} />}
     </> : <div className="large-note-toolbar">
       <span>阅读模式 · 按需加载</span>
+      <button type="button" onClick={() => openChapter(chapterInView())}>编辑</button>
       <form role="search" onSubmit={(event) => { event.preventDefault(); find() }}>
         <input ref={input} aria-label="在本篇中查找" placeholder="查找全文" value={query} onChange={(event) => { setQuery(event.target.value); searchOffset.current = -1; setSearchMessage('') }} />
         <button type="button" onClick={() => find(true)}>上一处</button><button type="submit">下一处</button>
@@ -206,15 +221,15 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
             if (shell) shell.style.minHeight = `${height}px`
             if (root && atEnd) root.scrollTop = root.scrollHeight
           }}
-          onEdit={() => openChapter(chunk.chapter)} />}
+          />}
       </div>)}
     </div>
   </div>
 }
 
-function ReadChunk({ source, chunk, index, document, pageId, loadAsset, jump, onJumpDone, onHeight, onEdit }: {
+function ReadChunk({ source, chunk, index, document, pageId, loadAsset, jump, onJumpDone, onHeight }: {
   source: string; chunk: ReadingChunk; index: ReadingIndex; document: LargeDocument; pageId: string; loadAsset: DocumentEditorProps['loadAsset'];
-  jump?: Jump; onJumpDone: () => void; onHeight: (height: number) => void; onEdit: () => void;
+  jump?: Jump; onJumpDone: () => void; onHeight: (height: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null)
   const callbacks = useRef({ onHeight, onJumpDone })
@@ -249,7 +264,6 @@ function ReadChunk({ source, chunk, index, document, pageId, loadAsset, jump, on
     return () => cancelAnimationFrame(frame)
   }, [editor, jump, index, chunk])
   return <div ref={host} className="large-note-loaded">
-    <div className="large-note-chapter-action"><span>{index.chapters[chunk.chapter]?.title}</span><button onClick={onEdit}>编辑本章</button></div>
     <EditorContent editor={editor} />
   </div>
 }
