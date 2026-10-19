@@ -200,3 +200,72 @@ impl Diagnostics {
         entries[start..].to_vec()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("notebook-diagnostics-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn sanitize_redacts_urls_credentials_and_keys() {
+        let text = sanitize("GET https://dav.example.com/path?token=abc failed password=hunter2 key sk-abcdefgh12345678 and ghp_abcDEF123");
+        for secret in ["dav.example.com", "abc", "hunter2", "sk-abcdefgh12345678", "ghp_abcDEF123"] {
+            assert!(!text.contains(secret), "{secret} leaked in {text}");
+        }
+        assert!(text.contains("https://[redacted]"));
+    }
+
+    #[test]
+    fn sanitize_flattens_lines_and_caps_length() {
+        assert_eq!(sanitize("a\nb\tc"), "a b c");
+        assert_eq!(sanitize(&"x".repeat(2_000)).chars().count(), MAX_TEXT);
+    }
+
+    #[test]
+    fn tokens_keep_only_safe_characters() {
+        assert_eq!(token("sync/pull #1", "x", 64), "sync-pull--1");
+        assert_eq!(token("   ", "fallback", 64), "fallback");
+        assert_eq!(token(&"a".repeat(200), "x", 10).len(), 10);
+    }
+
+    #[test]
+    fn unknown_levels_and_statuses_fall_back_and_stack_is_bounded() {
+        let diagnostics = Diagnostics::new(scratch(), "9.9.9".into());
+        let mut input = EventInput::new("fatal", "sync", "pull", "weird");
+        input.stack = Some((0..9).map(|i| format!("frame {i} https://secret.example/x")).collect());
+        let entry = diagnostics.normalize(&input);
+        assert_eq!(entry["level"], "info");
+        assert_eq!(entry["status"], "info");
+        assert_eq!(entry["appVersion"], "9.9.9");
+        let stack = entry["stack"].as_array().unwrap();
+        assert_eq!(stack.len(), 5);
+        assert!(stack.iter().all(|frame| !frame.as_str().unwrap().contains("secret.example")));
+    }
+
+    #[test]
+    fn records_round_trip_and_list_respects_the_limit() {
+        let directory = scratch();
+        let diagnostics = Diagnostics::new(directory.clone(), "1.0.0".into());
+        for index in 0..5 {
+            diagnostics.record(EventInput::new("info", "sync", &format!("step{index}"), "success").message("done"));
+        }
+        assert_eq!(diagnostics.all().len(), 5);
+        let latest = diagnostics.list(Some(2.0));
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[1]["action"], "step4");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn corrupt_lines_are_skipped() {
+        let directory = scratch();
+        let diagnostics = Diagnostics::new(directory.clone(), "1.0.0".into());
+        diagnostics.record(EventInput::new("info", "app", "start", "success"));
+        fs::write(diagnostics.path(), format!("not json\n{{\"x\":1}}\n{}", fs::read_to_string(diagnostics.path()).unwrap())).unwrap();
+        assert_eq!(diagnostics.all().len(), 1);
+        let _ = fs::remove_dir_all(directory);
+    }
+}

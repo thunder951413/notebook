@@ -171,3 +171,35 @@ pub async fn complete(http: &reqwest::Client, secrets: &Secrets, request: ChatRe
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_urls_that_could_leak_a_key() {
+        for bad in ["http://api.openai.com/v1", "https://user:pw@example.com/v1", "https://example.com/v1?key=1", "https://example.com/v1#frag", "not a url"] {
+            assert!(validated_base_url("custom", bad).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn built_in_providers_only_reach_their_own_host() {
+        assert!(validated_base_url("openai", "https://api.openai.com/v1").is_ok());
+        assert!(validated_base_url("openai", "https://evil.example/v1").is_err());
+        assert!(validated_base_url("openai", "https://api.openai.com:8443/v1").is_err());
+        assert!(validated_base_url("deepseek", "https://api.deepseek.com").is_ok());
+        assert!(validated_base_url("deepseek", "https://api.openai.com").is_err());
+        assert!(validated_base_url("custom", "https://proxy.example.com/v1").is_ok());
+    }
+
+    #[test]
+    fn credential_keys_are_scoped_per_provider_and_custom_endpoint() {
+        assert_eq!(credential_key("openai", "https://api.openai.com/v1").unwrap(), "ai-provider-key:openai");
+        assert!(credential_key("unknown", "https://example.com").is_err());
+        let first = credential_key("custom", "https://a.example.com/v1").unwrap();
+        let second = credential_key("custom", "https://b.example.com/v1").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first, credential_key("custom", "https://a.example.com/v1/").unwrap());
+    }
+}
