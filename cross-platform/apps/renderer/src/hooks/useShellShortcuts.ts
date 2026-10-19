@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { shellShortcutAction } from '../shell/keys'
 
 export interface ShellShortcutHandlers {
   create: () => void
@@ -9,22 +10,18 @@ export interface ShellShortcutHandlers {
   fullTextSearch: () => void
 }
 
-/** Mac shortcuts: ⌘N new, ⌘F list search (outside the editor), ⌘⇧F full-text search, ⌃⌘S sidebar, ⌃⌘L note list, ⌘, settings. */
+/** Shortcuts per platform are listed in shell/keys.ts. */
 export function useShellShortcuts(handlers: ShellShortcutHandlers) {
   // The latest handlers are read at key time; the listener is installed once.
   const latest = useRef(handlers)
   latest.current = handlers
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey) return
-      const key = event.key.toLowerCase()
       const inEditor = event.target instanceof Element && Boolean(event.target.closest('.document-editor-content'))
-      if (key === 'n' && !event.shiftKey && !event.ctrlKey) { event.preventDefault(); latest.current.create() }
-      else if (key === 'f' && event.shiftKey && !event.ctrlKey) { event.preventDefault(); latest.current.fullTextSearch() }
-      else if (key === 'f' && !event.shiftKey && !event.ctrlKey && !inEditor) { event.preventDefault(); latest.current.search() }
-      else if (key === 's' && event.ctrlKey) { event.preventDefault(); latest.current.toggleSidebar() }
-      else if (key === 'l' && event.ctrlKey) { event.preventDefault(); latest.current.toggleList() }
-      else if (key === ',') { event.preventDefault(); latest.current.settings() }
+      const action = shellShortcutAction(event, inEditor)
+      if (!action) return
+      event.preventDefault()
+      latest.current[action]()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)

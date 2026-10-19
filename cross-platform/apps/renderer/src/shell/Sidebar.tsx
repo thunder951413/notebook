@@ -11,6 +11,7 @@ import {
   Pin20Regular,
   Settings20Regular,
 } from '@fluentui/react-icons'
+import { keyHint } from './keys'
 
 export type ListScope =
   | { kind: 'all' }
@@ -87,7 +88,7 @@ export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, s
   const shownTags = allTags ? tags : tags.slice(0, 8)
   return <nav className="app-sidebar" aria-label="导航">
     <div className="sidebar-titlebar" data-tauri-drag-region>
-      <button type="button" className="toolbar-icon-button" aria-label="隐藏边栏" title="隐藏边栏（⌃⌘S）" onClick={onHide}><PanelLeft20Regular /></button>
+      <button type="button" className="toolbar-icon-button" aria-label="隐藏边栏" title={`隐藏边栏（${keyHint('sidebar')}）`} onClick={onHide}><PanelLeft20Regular /></button>
     </div>
     <div className="sidebar-scroll">
       <div className="sidebar-group" role="group" aria-label="笔记">
@@ -117,7 +118,7 @@ export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, s
     </div>
     <div className="sidebar-footer">
       {syncStatus}
-      <button ref={settingsRef} type="button" className="toolbar-icon-button" aria-label="设置" title="设置（⌘,）" onClick={onSettings}><Settings20Regular /></button>
+      <button ref={settingsRef} type="button" className="toolbar-icon-button" aria-label="设置" title={`设置（${keyHint('settings')}）`} onClick={onSettings}><Settings20Regular /></button>
     </div>
     {resizer}
   </nav>

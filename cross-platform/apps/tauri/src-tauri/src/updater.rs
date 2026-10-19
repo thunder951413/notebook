@@ -1,4 +1,8 @@
-//! In-app updates from GitHub Releases (macOS).
+//! In-app updates from GitHub Releases (macOS and Windows).
+//!
+//! Windows: the release carries the NSIS installer. The app downloads it,
+//! verifies the SHA-256 and, once it has quit, a hidden PowerShell runs the
+//! installer silently (`/S`, per-user, no admin prompt) and reopens the app (`/R`).
 //!
 //! Releases are unsigned (no Apple Developer ID), so a copy downloaded with a
 //! browser is quarantined and needs `xattr -cr` before it opens. The app does
@@ -9,8 +13,9 @@
 //! Release contract (see .github/workflows/desktop-tauri.yml):
 //!   tag       desktop-v<version>
 //!   assets    Notebook-macos-<arch>.zip  and  Notebook-macos-<arch>.zip.sha256
-//! The repository is private, so requests use the GitHub token saved in
-//! Settings (keychain key `github-release-token`).
+//!             Notebook-windows-<arch>-setup.exe  and  Notebook-windows-<arch>-setup.exe.sha256
+//! The repository is public, so no token is needed; a GitHub token saved in
+//! Settings (key `github-release-token`) is still sent when there is one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -94,7 +99,20 @@ fn arch() -> &'static str {
 }
 
 pub fn asset_name() -> String {
-    format!("Notebook-macos-{}.zip", arch())
+    if cfg!(windows) {
+        format!("Notebook-windows-{}-setup.exe", arch())
+    } else {
+        format!("Notebook-macos-{}.zip", arch())
+    }
+}
+
+/// File extension of the downloaded package.
+fn package_extension() -> &'static str {
+    if cfg!(windows) {
+        "exe"
+    } else {
+        "zip"
+    }
 }
 
 /// Numeric comparison of dotted versions; pre-release suffixes are ignored.
@@ -138,7 +156,7 @@ fn github_request(http: &reqwest::Client, url: &str, token: Option<&str>, accept
     request
 }
 
-/// Picks the newest published `desktop-v*` release with an asset for this Mac.
+/// Picks the newest published `desktop-v*` release with an asset for this computer.
 pub fn select_release(releases: &[Value], current: &str) -> Option<(ReleaseAssetInfo, Value)> {
     let wanted = asset_name();
     releases
@@ -263,7 +281,7 @@ async fn download_inner(app: &AppHandle, release: &ReleaseAsset) -> Result<PathB
     let token = token(app).await;
     let dir = updates_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录：{e}"))?;
-    let target = dir.join(format!("Notebook-{}.zip", release.version));
+    let target = dir.join(format!("Notebook-{}.{}", release.version, package_extension()));
     let expected = match &release.checksum_url {
         Some(url) => {
             let text = github_request(&state.http, url, token.as_deref(), "application/octet-stream")
@@ -297,7 +315,7 @@ async fn download_inner(app: &AppHandle, release: &ReleaseAsset) -> Result<PathB
         .and_then(|response| response.error_for_status())
         .map_err(|e| format!("下载失败：{}", crate::webdav::reqwest_error_text(&e.without_url())))?;
     let total = response.content_length().unwrap_or(release.size);
-    let partial = target.with_extension("zip.part");
+    let partial = target.with_extension(format!("{}.part", package_extension()));
     let mut file = std::fs::File::create(&partial).map_err(|e| format!("无法写入下载文件：{e}"))?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
@@ -338,6 +356,7 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 /// The running bundle: …/Notebook.app/Contents/MacOS/notebook → …/Notebook.app
+#[cfg(target_os = "macos")]
 fn current_bundle() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bundle = exe.parent().and_then(Path::parent).and_then(Path::parent).map(Path::to_path_buf).ok_or("无法确定应用位置")?;
@@ -347,6 +366,7 @@ fn current_bundle() -> Result<PathBuf, String> {
     Ok(bundle)
 }
 
+#[cfg(target_os = "macos")]
 fn run(command: &str, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new(command).args(args).output().map_err(|e| format!("{command}：{e}"))?;
     if !output.status.success() {
@@ -357,6 +377,7 @@ fn run(command: &str, args: &[&str]) -> Result<String, String> {
 
 /// Prepares the new bundle and starts a detached helper that swaps it in once
 /// this process has exited, then reopens the app. Returns after the helper started.
+#[cfg(target_os = "macos")]
 pub fn prepare_install(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let zip = state.updater.downloaded.lock().unwrap().clone().ok_or("更新尚未下载完成")?;
@@ -423,6 +444,42 @@ open "$current"
     Ok(())
 }
 
+/// Starts a hidden helper that waits for this process to exit, runs the
+/// downloaded installer silently and lets it reopen the app.
+#[cfg(windows)]
+pub fn prepare_install(app: &AppHandle) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP: no console, and not tied to this process.
+    const FLAGS: u32 = 0x0800_0000 | 0x0000_0200;
+    let state = app.state::<AppState>();
+    let installer = state.updater.downloaded.lock().unwrap().clone().ok_or("更新尚未下载完成")?;
+    if state.updater.release.lock().unwrap().is_none() {
+        return Err("没有待安装的版本".into());
+    }
+    let script = powershell_install_script(std::process::id(), &installer);
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(FLAGS)
+        .spawn()
+        .map_err(|e| format!("无法启动更新程序：{e}"))?;
+    Ok(())
+}
+
+/// PowerShell text: wait for `pid`, then run the installer with `/S /R`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn powershell_install_script(pid: u32, installer: &Path) -> String {
+    let quoted = installer.to_string_lossy().replace('\'', "''");
+    format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{quoted}' -ArgumentList '/S','/R'")
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn prepare_install(_app: &AppHandle) -> Result<(), String> {
+    Err("当前系统暂不支持自动安装，请从发布页下载。".into())
+}
+
 /// Background policy: check shortly after launch and every six hours; a found
 /// update downloads quietly, and the window is told it is ready to install.
 pub fn start_background(app: AppHandle) {
@@ -455,7 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn selects_newest_published_desktop_release_with_this_macs_asset() {
+    fn the_installer_script_waits_for_the_app_and_survives_quotes() {
+        let script = powershell_install_script(4242, Path::new(r"C:\Users\O'Neil\AppData\Local\Notebook\updates\Notebook-3.7.0.exe"));
+        assert!(script.starts_with("Wait-Process -Id 4242 "));
+        assert!(script.contains(r"'C:\Users\O''Neil\AppData\Local\Notebook\updates\Notebook-3.7.0.exe'"));
+        assert!(script.ends_with("-ArgumentList '/S','/R'"));
+    }
+
+    #[test]
+    fn selects_newest_published_desktop_release_with_this_computers_asset() {
         let name = asset_name();
         let asset = |tag: &str| json!([{ "name": name, "url": format!("https://api/{tag}/zip"), "size": 10 }, { "name": format!("{name}.sha256"), "url": format!("https://api/{tag}/sum") }]);
         let releases = vec![

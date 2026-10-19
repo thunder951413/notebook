@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Search20Regular } from '@fluentui/react-icons'
 import type { SearchHit } from '@notebook/storage-renderer'
 import { highlightText } from '../shell/NoteList'
+import { keyHint } from '../shell/keys'
 
 export const OPEN_FULL_TEXT_SEARCH_EVENT = 'notebook:open-full-text-search'
 export const FIND_IN_DOCUMENT_EVENT = 'notebook:find-in-document'
@@ -11,7 +12,7 @@ export interface FindInDocumentDetail {
   terms: string[]
 }
 
-/** Opens the full-text search panel, optionally with a query (⌘⇧F). */
+/** Opens the full-text search panel, optionally with a query (Cmd+Shift+F / Ctrl+Shift+F). */
 export function openFullTextSearch(query = '') {
   window.dispatchEvent(new CustomEvent(OPEN_FULL_TEXT_SEARCH_EVENT, { detail: query }))
 }
@@ -98,7 +99,7 @@ export function FullTextSearch({ initialQuery = '', search, notebookName, onOpen
             else if (event.key === 'Enter') { event.preventDefault(); choose(hits[active]) }
           }}
         />
-        <kbd>⌘⇧F</kbd>
+        <kbd>{keyHint('fullText')}</kbd>
       </div>
       <div id="full-text-search-results" className="full-text-search-results" role="listbox" aria-label="搜索结果">
         {!query.trim() && <p className="full-text-search-empty">输入关键词，同时搜索标题和正文。多个词用空格分开，"引号" 内为完整短语。</p>}

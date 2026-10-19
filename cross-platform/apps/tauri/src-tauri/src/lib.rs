@@ -302,7 +302,9 @@ fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
 
 fn quick_capture_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
     use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN)
+    // ⇧⌘N on the Mac; the Windows key is mostly taken by the system, so Ctrl+Alt+Shift+N there.
+    let modifiers = if cfg!(target_os = "macos") { Modifiers::SUPER | Modifiers::SHIFT } else { Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT };
+    Shortcut::new(Some(modifiers), Code::KeyN)
 }
 
 /// `source`: "shortcut" and "menu" also read the clipboard; "open" only takes opened files.
@@ -356,6 +358,14 @@ fn take_c_string(pointer: *mut std::os::raw::c_char) -> Option<String> {
     Some(value)
 }
 
+/// A stable, non-negative stamp of copied text (stands in for a change counter).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn text_stamp(text: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    i64::from_be_bytes(digest[..8].try_into().unwrap()) & i64::MAX
+}
+
 fn read_paths(paths: Vec<std::path::PathBuf>) -> (Vec<PickedFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut skipped = Vec::new();
@@ -400,7 +410,13 @@ async fn clipboard_snapshot(app: AppHandle) -> CommandResult<ClipboardSnapshot> 
     .await
     .map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "macos"))]
-    let (change_count, paths, html, text): (i64, Vec<std::path::PathBuf>, Option<String>, Option<String>) = (0, Vec::new(), None, app.clipboard().read_text().ok());
+    let (change_count, paths, html, text): (i64, Vec<std::path::PathBuf>, Option<String>, Option<String>) = {
+        // No pasteboard change counter here: the text itself stands in for it, so
+        // the shortcut does not offer the same copied text again.
+        let text = app.clipboard().read_text().ok();
+        let change_count = text.as_deref().map_or(0, text_stamp);
+        (change_count, Vec::new(), None, text)
+    };
     let (files, skipped) = if paths.is_empty() { (Vec::new(), Vec::new()) } else { tauri::async_runtime::spawn_blocking(move || read_paths(paths)).await.map_err(|e| e.to_string())? };
     // Copied files also put their names on the pasteboard as text; the files are what matters.
     let copied_files = !files.is_empty() || !skipped.is_empty();
@@ -475,8 +491,13 @@ fn clipboard_read_image(app: AppHandle) -> Option<ClipboardImage> {
 
 #[tauri::command]
 fn storage_info(app: AppHandle) -> serde_json::Value {
-    let identifier = app.config().identifier.clone();
-    let path = app.path().home_dir().map(|home| home.join("Library/WebKit").join(identifier)).unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let path = {
+        let identifier = app.config().identifier.clone();
+        app.path().home_dir().map(|home| home.join("Library/WebKit").join(identifier)).unwrap_or_default()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let path = app.path().app_local_data_dir().map(|dir| dir.join("EBWebView")).unwrap_or_default();
     serde_json::json!({ "path": path.to_string_lossy(), "source": "default" })
 }
 
@@ -790,6 +811,7 @@ async fn ai_key_delete(app: AppHandle, provider: String, base_url: String) -> Co
 // ---------------------------------------------------------------------------
 // Menu
 
+#[cfg(target_os = "macos")]
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let separator = || PredefinedMenuItem::separator(app);
     let app_menu = Submenu::with_items(
@@ -859,6 +881,49 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
 }
 
+/// Windows and Linux: a small menu bar. No predefined edit items (the web view
+/// handles copy, paste and undo itself, and a menu accelerator for them would
+/// swallow the keys), and no accelerators the vim-mode editor needs (Ctrl+P, Ctrl+R, Ctrl+W).
+#[cfg(not(target_os = "macos"))]
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let separator = || PredefinedMenuItem::separator(app);
+    let file_menu = Submenu::with_items(
+        app,
+        "文件",
+        true,
+        &[
+            &MenuItem::with_id(app, "quick-capture", "快速记录（Ctrl+Alt+Shift+N）", true, None::<&str>)?,
+            &MenuItem::with_id(app, "inbox", "AI 收纳文件…", true, None::<&str>)?,
+            &MenuItem::with_id(app, "command-palette", "命令面板…", true, None::<&str>)?,
+            &separator()?,
+            &MenuItem::with_id(app, "check-updates", "检查更新…", true, None::<&str>)?,
+            &separator()?,
+            &MenuItem::with_id(app, "close-window", "关闭窗口", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "退出 Notebook", true, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(
+        app,
+        "显示",
+        true,
+        &[
+            &MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?,
+            &MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?,
+            &MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?,
+            &separator()?,
+            &MenuItem::with_id(app, "reload", "重新载入", true, Some("F5"))?,
+            &MenuItem::with_id(app, "devtools", "开发者工具", true, Some("CmdOrCtrl+Alt+I"))?,
+        ],
+    )?;
+    Menu::with_items(app, &[&file_menu, &view_menu])
+}
+
+/// The Mac menu bar wants a black "template" glyph; the Windows tray needs the coloured app icon.
+#[cfg(target_os = "macos")]
+const TRAY_ICON: &[u8] = include_bytes!("../../../renderer/public/notebook-trayTemplate@2x.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON: &[u8] = include_bytes!("../icons/32x32.png");
+
 /// Menu bar icon (as in the Electron app): quick capture, open, check for
 /// updates, quit. Menu events go through the global `on_menu` handler.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -875,8 +940,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
     TrayIconBuilder::with_id("notebook-tray")
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../../../renderer/public/notebook-trayTemplate@2x.png"))?)
-        .icon_as_template(true)
+        .icon(tauri::image::Image::from_bytes(TRAY_ICON)?)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Notebook")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -1111,4 +1176,16 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_stamp;
+
+    #[test]
+    fn text_stamp_is_stable_and_not_negative() {
+        assert_eq!(text_stamp("hello"), text_stamp("hello"));
+        assert_ne!(text_stamp("hello"), text_stamp("hello!"));
+        assert!(text_stamp("任意文字") >= 0);
+    }
 }

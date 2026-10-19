@@ -19,6 +19,7 @@ import { AutomationWorkspaceReview } from '../automation/AutomationWorkspaceRevi
 import type { NotebookSummary, PageSummary } from '../model'
 import { AIProviderSettingsPanel } from './AIProviderSettings'
 import { lastSyncSuccess, relativeTime } from '../sync/syncErrors'
+import { fileManagerName } from '../shell/keys'
 
 type SettingsPage = 'general' | 'data' | 'services' | 'automation'
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
@@ -721,7 +722,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
               <div className="settings-action-grid">
                 <Button onClick={() => void refreshDiagnostics()}>刷新日志</Button>
                 <Button onClick={() => void exportDiagnostics()}>导出日志</Button>
-                <Button appearance="subtle" onClick={() => void window.notebookDesktop?.diagnostics.reveal()}>在访达中显示</Button>
+                <Button appearance="subtle" onClick={() => void window.notebookDesktop?.diagnostics.reveal()}>在{fileManagerName()}中显示</Button>
               </div>
               {diagnosticMessage && <div className="sync-settings-result" role="status">{diagnosticMessage}</div>}
             </SettingsSection>}

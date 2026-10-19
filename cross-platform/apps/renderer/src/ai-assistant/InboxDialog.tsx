@@ -19,6 +19,7 @@ import {
   type InboxLocation,
 } from '../ai/inbox'
 import { failureMessage } from './OrganizePanel'
+import { keyHint } from '../shell/keys'
 
 export interface InboxFiling { entry: InboxEntry; location: InboxLocation; newFolder?: string; title: string; tags: string[] }
 export interface InboxOutcome { created: Array<{ entryId: string; pageId: string }>; failed: Array<{ entryId: string; message: string }> }
@@ -194,7 +195,7 @@ export function InboxDialog({ entries, onEntriesChange, pages, notebooks, tags, 
       </div>}
 
       <div className={`inbox-drop ${entries.length ? 'compact' : ''}`}>
-        <span>{entries.length ? '继续拖入文件，或按 ⌘V 粘贴' : '把文件拖到这里，或按 ⌘V 粘贴文字、图片'}</span>
+        <span>{entries.length ? `继续拖入文件，或按 ${keyHint('paste')} 粘贴` : `把文件拖到这里，或按 ${keyHint('paste')} 粘贴文字、图片`}</span>
         <div>
           {onReadClipboard && <button type="button" onClick={() => void readClipboard()}><Clipboard20Regular />读取剪贴板</button>}
           <button type="button" onClick={onPickFiles}><Attach20Regular />选择文件</button>

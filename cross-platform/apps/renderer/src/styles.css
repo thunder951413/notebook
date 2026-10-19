@@ -53,8 +53,8 @@ html[data-platform="mac"] .app-rail { padding-top: 44px; }
 html[data-platform="mac"] .notebook-pane .pane-heading { min-height: 92px; padding-top: 46px; }
 html[data-platform="mac"] .page-pane .page-pane-header { padding-top: 46px; }
 html[data-platform="mac"] .workspace-grid.navigation-collapsed .editor-toolbar { padding-left: 76px; }
-html:not([data-platform="mac"]) .workspace-grid { padding-top: 38px; }
-html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixed; z-index: 39; top: 0; right: 140px; left: 0; height: 38px; -webkit-app-region: drag; }
+html:not([data-platform="mac"]):not([data-shell="tauri"]) .workspace-grid { padding-top: 38px; }
+html:not([data-platform="mac"]):not([data-shell="tauri"]) .app-shell::before { content: ""; position: fixed; z-index: 39; top: 0; right: 140px; left: 0; height: 38px; -webkit-app-region: drag; }
 .compact-sync-button.fui-Button { position: relative; color: #737078; }
 .sync-visual-icon { width: 20px; height: 20px; display: grid; place-items: center; }
 .compact-sync-button.syncing { color: var(--accent); }
@@ -619,7 +619,7 @@ html:not([data-platform="mac"]) .app-shell::before { content: ""; position: fixe
   -webkit-app-region: drag;
 }
 html[data-platform="mac"] .ai-workspace-topbar { padding-left: 78px; }
-html:not([data-platform="mac"]) .ai-workspace { box-sizing: border-box; padding-top: 46px; }
+html:not([data-platform="mac"]):not([data-shell="tauri"]) .ai-workspace { box-sizing: border-box; padding-top: 46px; }
 .ai-workspace-topbar > div { display: flex; min-width: 0; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
 .ai-workspace-topbar select {
   max-width: 360px;

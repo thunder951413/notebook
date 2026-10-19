@@ -55,10 +55,24 @@
 }
 
 /* Native vibrancy shows through: the page itself has no background. */
-html[data-shell="tauri"], html[data-shell="tauri"] body, html[data-shell="tauri"] #root,
-html[data-shell="tauri"] .fluent-root, html[data-shell="tauri"] .app-shell { background: transparent !important; }
-html[data-shell="tauri"] .fluent-root { --side: transparent; --list: rgba(255, 255, 255, .5); }
-html[data-shell="tauri"] .fluent-root.theme-dark { --list: rgba(30, 29, 33, .52); }
+html[data-shell="tauri"]:not([data-platform="windows"]), html[data-shell="tauri"]:not([data-platform="windows"]) body, html[data-shell="tauri"]:not([data-platform="windows"]) #root,
+html[data-shell="tauri"]:not([data-platform="windows"]) .fluent-root, html[data-shell="tauri"]:not([data-platform="windows"]) .app-shell { background: transparent !important; }
+html[data-shell="tauri"]:not([data-platform="windows"]) .fluent-root { --side: transparent; --list: rgba(255, 255, 255, .5); }
+html[data-shell="tauri"]:not([data-platform="windows"]) .fluent-root.theme-dark { --list: rgba(30, 29, 33, .52); }
+
+/* Windows: a normal opaque window with the system title bar, so there is no
+   native glass behind the page (the solid tokens above are used as they are)
+   and nothing has to leave room for the Mac traffic lights. */
+html[data-platform="windows"] body { background: #e9e7ec; }
+html[data-platform="windows"] .sidebar-titlebar { padding-left: 10px; }
+html[data-platform="windows"] .sidebar-closed .note-list-header,
+html[data-platform="windows"] .layout-medium .note-list-header,
+html[data-platform="windows"] .layout-narrow .note-list-header { padding-left: 16px; }
+html[data-platform="windows"] .list-closed.sidebar-closed .editor-toolbar,
+html[data-platform="windows"] .layout-narrow .editor-toolbar,
+html[data-platform="windows"] .layout-narrow.stack-editor .editor-toolbar,
+html[data-platform="windows"] .app-shell.focus-mode .editor-toolbar { padding-left: 14px; }
+html[data-platform="windows"] .sidebar-closed .assistant-header { padding-left: 16px; }
 
 /* ------------------------------------------------------------------ grid */
 

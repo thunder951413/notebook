@@ -3,6 +3,7 @@ import { Checkmark12Filled, LockClosed12Regular, Pin12Filled, Star12Filled } fro
 import type { PageSummary } from '../model'
 import { ActionMenu, ActionMenuDivider } from '../ActionMenu'
 import { dueDescription, relativeDateLabel, type ListSection } from './browse'
+import { hasPrimaryKey } from './keys'
 
 export type ListDensity = 'cards' | 'compact'
 
@@ -239,7 +240,7 @@ export function VirtualNoteList({ sections, density, selectedId, terms, showNote
     else if (event.key === 'Enter' && position >= 0) {
       event.preventDefault()
       onOpen(pageRows[position]!.page, true)
-    } else if (event.key === 'Backspace' && event.metaKey && position >= 0 && onDelete) {
+    } else if (((event.key === 'Backspace' && hasPrimaryKey(event)) || event.key === 'Delete') && position >= 0 && onDelete) {
       event.preventDefault()
       onDelete(pageRows[position]!.page)
     }

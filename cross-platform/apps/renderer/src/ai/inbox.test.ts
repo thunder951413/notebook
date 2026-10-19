@@ -69,6 +69,8 @@ describe('shortcut', () => {
     expect(press('Space', { metaKey: true, shiftKey: true })).toBe('Shift+Super+Space')
     expect(shortcutLabel('Control+Alt+KeyN')).toBe('⌃⌥N')
     expect(shortcutLabel('Shift+Super+Digit1')).toBe('⇧⌘1')
+    expect(shortcutLabel('Control+Alt+KeyN', false)).toBe('Ctrl+Alt+N')
+    expect(shortcutLabel('Shift+Super+Digit1', false)).toBe('Shift+Win+1')
     expect(shortcutLabel(null)).toBe('未设置')
   })
 })

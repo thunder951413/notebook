@@ -37,6 +37,7 @@ import type { ApplyOutcome } from '../ai/organizeApply'
 import { OrganizePanel } from './OrganizePanel'
 import { QuizPanel } from './QuizPanel'
 import { RewritePanel } from './RewritePanel'
+import { credentialStoreName } from '../shell/keys'
 
 type Tab = 'ask' | 'generate' | 'search' | 'merge' | 'organize' | 'rewrite' | 'quiz'
 type Message = { id: string; role: 'user' | 'assistant'; content: string; sources?: ContextSource[]; failed?: boolean; task?: AssistantTask }
@@ -292,7 +293,7 @@ export function AssistantView({ pages, notebooks, tags, initialScope, loadMarkdo
     </div>
     {needsSetup && <div className="assistant-setup" role="note">
       <strong>还没有配置 AI</strong>
-      <span>在设置里选择 DeepSeek、OpenAI 或自定义接口，填入 API Key 并打开开关。Key 只保存在本机钥匙串里。</span>
+      <span>在设置里选择 DeepSeek、OpenAI 或自定义接口，填入 API Key 并打开开关。Key 只保存在本机{credentialStoreName()}里。</span>
       <Button appearance="primary" size="small" onClick={openAISettings}>打开 AI 设置</Button>
     </div>}
 

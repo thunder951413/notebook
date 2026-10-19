@@ -64,7 +64,7 @@ const onUpdateState = channel<UpdateState>('notebook:update-state')
 const onAutomationRequest = channel<AutomationRequest>('notebook:automation-request')
 
 const api: Desktop = Object.freeze({
-  platform: 'darwin',
+  platform: /Mac/i.test(navigator.platform) ? 'darwin' : /Win/i.test(navigator.platform) ? 'win32' : 'linux',
   versions: Object.freeze({ electron: '', chrome: '' }),
   notifications: { show: (title: string, body: string) => call<boolean>('notify', { title, body }) },
   badge: { set: (count: number) => call<void>('set_badge', { count: Math.max(0, Math.round(count)) }) },

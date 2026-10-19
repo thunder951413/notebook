@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Button } from '@fluentui/react-components'
+import { keyHint } from '../shell/keys'
 
 interface ReferenceHelpDialogProps {
   onClose: () => void
@@ -73,7 +74,7 @@ export function ReferenceHelpDialog({ onClose }: ReferenceHelpDialogProps) {
       </section>
 
       <footer>
-        <span>以后可随时按 <kbd>⌘P</kbd>，搜索“<strong>双链使用说明</strong>”。</span>
+        <span>以后可随时按 <kbd>{keyHint('palette')}</kbd>，搜索“<strong>双链使用说明</strong>”。</span>
         <Button appearance="primary" onClick={onClose}>知道了</Button>
       </footer>
     </section>

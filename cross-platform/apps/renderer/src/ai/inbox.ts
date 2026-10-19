@@ -9,6 +9,7 @@ import { flattenPageTree } from '../pageTree'
 import { decodeImportedText, importedTitle, plainTextToMarkdown, stripRepeatedTitle, textImportKind, TEXT_IMPORT_MAX_BYTES } from '../data/textImport'
 import { pagePath } from './assistant'
 import type { ChatMessage } from './organize'
+import { isMacPlatform } from '../shell/keys'
 
 export interface InboxAttachment { name: string; mimeType: string; data: Uint8Array }
 
@@ -177,15 +178,17 @@ export const INBOX_SHORTCUT_KEY = 'notebook-inbox-shortcut-v1'
 export const DEFAULT_INBOX_SHORTCUT = 'Control+Alt+KeyN'
 
 const MODIFIER_SYMBOL: Record<string, string> = { Control: '⌃', Alt: '⌥', Shift: '⇧', Super: '⌘' }
+const MODIFIER_NAME: Record<string, string> = { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift', Super: 'Win' }
 const MODIFIER_ORDER = ['Control', 'Alt', 'Shift', 'Super']
 
-/** "Control+Alt+KeyN" → "⌃⌥N". */
-export function shortcutLabel(accelerator: string | null | undefined): string {
+/** "Control+Alt+KeyN" → "⌃⌥N" on the Mac, "Ctrl+Alt+N" elsewhere. */
+export function shortcutLabel(accelerator: string | null | undefined, mac = isMacPlatform()): string {
   if (!accelerator) return '未设置'
   const parts = accelerator.split('+')
   const key = parts.pop() ?? ''
   const keyLabel = key.replace(/^Key/, '').replace(/^Digit/, '').replace(/^Space$/, '空格')
-  return `${MODIFIER_ORDER.filter((modifier) => parts.includes(modifier)).map((modifier) => MODIFIER_SYMBOL[modifier]).join('')}${keyLabel}`
+  const modifiers = MODIFIER_ORDER.filter((modifier) => parts.includes(modifier))
+  return mac ? `${modifiers.map((modifier) => MODIFIER_SYMBOL[modifier]).join('')}${keyLabel}` : [...modifiers.map((modifier) => MODIFIER_NAME[modifier]), keyLabel].join('+')
 }
 
 /**

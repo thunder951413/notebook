@@ -4,6 +4,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type { PaletteItem } from '../CommandPalette'
 import type { NotebookSummary, PageSummary } from '../model'
 import type { LegacySyncMode } from '../sync/legacySshSync'
+import { keyHint } from '../shell/keys'
 
 export const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
 
@@ -99,7 +100,7 @@ export function useCommandPaletteItems(options: CommandPaletteOptions) {
       { id: 'command:new-notebook', group: 'command', title: '新建笔记本', keywords: '工作区', run: () => options.setCreateRequest('notebook') },
       currentNotebook && (!currentNotebook.locked || options.privacyUnlocked) && { id: 'command:new-section', group: 'command', title: '新建顶层页面', subtitle: currentNotebook.name, keywords: '根页面 文件夹 分类', run: () => options.setCreateRequest('rootPage') },
       { id: 'command:sync', group: 'command', title: options.syncState === 'syncing' ? '正在同步' : '立即同步', subtitle: syncLabels[options.syncState], keywords: 'ssh sftp 服务器 推送 拉取', run: () => { if (options.syncState !== 'syncing') void options.syncNow({ force: true }) } },
-      { id: 'command:full-text-search', group: 'command', title: '全文搜索', subtitle: '搜索全部笔记的标题和正文（⌘⇧F）', keywords: 'search find 查找 正文 内容 关键词', run: () => openFullTextSearch() },
+      { id: 'command:full-text-search', group: 'command', title: '全文搜索', subtitle: `搜索全部笔记的标题和正文（${keyHint('fullText')}）`, keywords: 'search find 查找 正文 内容 关键词', run: () => openFullTextSearch() },
       { id: 'command:notes', group: 'command', title: '打开笔记', keywords: '页面', run: () => options.selectArea('notes') },
       { id: 'command:tasks', group: 'command', title: '打开任务', keywords: '待办 todo', run: () => options.selectArea('tasks') },
       { id: 'command:trash', group: 'command', title: '打开回收站', keywords: '删除 恢复', run: () => options.selectArea('trash') },

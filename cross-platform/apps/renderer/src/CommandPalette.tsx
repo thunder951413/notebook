@@ -9,6 +9,7 @@ import {
   Star16Regular,
   WindowConsole20Regular,
 } from '@fluentui/react-icons'
+import { keyHint } from './shell/keys'
 
 export type PaletteGroup = 'command' | 'page' | 'setting'
 
@@ -195,7 +196,7 @@ export function CommandPalette({ open, items, searchPageIds, onClose }: CommandP
           if (event.key === 'ArrowUp') { event.preventDefault(); moveActive(-1) }
           if (event.key === 'Enter') { event.preventDefault(); const item = flatItems.find((candidate) => candidate.id === activeId); if (item) execute(item) }
           if (event.key === 'Escape') { event.preventDefault(); onClose() }
-        }} /><kbd>⌘P</kbd></div>
+        }} /><kbd>{keyHint('palette')}</kbd></div>
         <div className="command-palette-results" role="listbox" aria-label="命令面板结果" aria-activedescendant={activeId ? `palette-${activeId}` : undefined}>
           {grouped.length ? grouped.map((section) => <section key={section.group} className="command-palette-group">
             <header>{groupIcons[section.group]}<span>{groupLabels[section.group]}</span></header>

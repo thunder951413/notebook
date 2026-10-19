@@ -99,6 +99,7 @@ import {
   readVimEnabled,
   type RightPanel,
 } from './persistence/localLayout'
+import { keyHint } from './shell/keys'
 
 
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
@@ -997,7 +998,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     activateTreePage(page, hasChildren, closeOnNarrow)
   }, [activateTreePage])
 
-  // Mac shortcuts: ⌘N new, ⌘F search, ⌃⌘S sidebar, ⌃⌘L note list, ⌘, settings.
+  // Shortcuts per platform: shell/keys.ts.
   useShellShortcuts({
     create: () => { void createInScope() },
     toggleSidebar,
@@ -1146,7 +1147,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
         <section className="note-list-pane" aria-label="笔记列表">
           <header className="note-list-header" data-tauri-drag-region>
-            {!sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title="显示边栏（⌃⌘S）" onClick={toggleSidebar}><PanelLeft20Regular /></button>}
+            {!sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title={`显示边栏（${keyHint('sidebar')}）`} onClick={toggleSidebar}><PanelLeft20Regular /></button>}
             <div className="note-list-titles" data-tauri-drag-region>
               <h2 data-tauri-drag-region>{scopeTitle}</h2>
               <span data-tauri-drag-region>{scopeSubtitle}</span>
@@ -1162,7 +1163,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               <button className={density === 'compact' ? 'selected' : undefined} onClick={() => { const next = density === 'compact' ? 'cards' : 'compact'; setDensity(next); writePreference('notebook-list-density', next) }}>紧凑列表</button>
             </ActionMenu>
             {listScope.kind === 'trash' && accessibleTrashPages.length > 0 && <button type="button" className="toolbar-icon-button" aria-label="清空回收站" title="清空回收站" onClick={() => void confirmEmptyTrash()}><Delete20Regular /></button>}
-            {listScope.kind !== 'trash' && <button type="button" className="toolbar-icon-button" aria-label={listScope.kind === 'tasks' ? '新建待办' : '新建笔记'} title={`${listScope.kind === 'tasks' ? '新建待办' : '新建笔记'}（⌘N）`} onClick={() => { void createInScope() }}><Compose20Regular /></button>}
+            {listScope.kind !== 'trash' && <button type="button" className="toolbar-icon-button" aria-label={listScope.kind === 'tasks' ? '新建待办' : '新建笔记'} title={`${listScope.kind === 'tasks' ? '新建待办' : '新建笔记'}（${keyHint('newNote')}）`} onClick={() => { void createInScope() }}><Compose20Regular /></button>}
           </header>
           <div className="note-list-search">
             <Search16Regular aria-hidden="true" />
@@ -1183,13 +1184,13 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 }
               }}
             />
-            {query ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { setQuery(''); listSearchRef.current?.focus() }}><Dismiss12Regular /></button> : <kbd>⌘F</kbd>}
+            {query ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { setQuery(''); listSearchRef.current?.focus() }}><Dismiss12Regular /></button> : <kbd>{keyHint('search')}</kbd>}
           </div>
           {searching && listScope.kind !== 'all' && listScope.kind !== 'trash' && <div className="search-scope" role="radiogroup" aria-label="搜索范围">
             <button type="button" role="radio" aria-checked={!searchAll} className={!searchAll ? 'selected' : undefined} onClick={() => setSearchAll(false)}>仅{scopeTitle}</button>
             <button type="button" role="radio" aria-checked={searchAll} className={searchAll ? 'selected' : undefined} onClick={() => setSearchAll(true)}>全部笔记</button>
           </div>}
-          {searching && <button type="button" className="search-full-text" onClick={() => openFullTextSearch(query.trim())}><Search16Regular aria-hidden="true" />在正文中搜索“{query.trim()}”<kbd>⌘⇧F</kbd></button>}
+          {searching && <button type="button" className="search-full-text" onClick={() => openFullTextSearch(query.trim())}><Search16Regular aria-hidden="true" />在正文中搜索“{query.trim()}”<kbd>{keyHint('fullText')}</kbd></button>}
           {!searching && (listScope.kind === 'all' || listScope.kind === 'tasks') && <DueBanner
             items={bannerItems}
             now={nowMs}
@@ -1243,7 +1244,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               <span>在笔记上点右键，选择“置顶”。</span>
             </> : <>
               <strong>这里还没有笔记</strong>
-              <span>{documentPages.length ? '按 ⌘N 新建一篇。' : '已经在坚果云保存过笔记？连接后会自动恢复到这里。'}</span>
+              <span>{documentPages.length ? `按 ${keyHint('newNote')} 新建一篇。` : '已经在坚果云保存过笔记？连接后会自动恢复到这里。'}</span>
               {notebooks.length > 0 && <button type="button" onClick={() => { void createInScope() }}>新建笔记</button>}
               {!documentPages.length && <button type="button" className="secondary" onClick={() => { setSettingsPage('services'); setSettingsOpen(true) }}>连接坚果云</button>}
             </>}
@@ -1269,8 +1270,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           <div className="editor-toolbar" data-tauri-drag-region>
             <div className="toolbar-leading" data-tauri-drag-region>
               {layout === 'narrow' && <button type="button" className="toolbar-back" onClick={() => setStackView('list')}><ChevronLeft20Regular /><span>{scopeTitle}</span></button>}
-              {layout !== 'narrow' && !listVisible && !sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title="显示边栏（⌃⌘S）" onClick={toggleSidebar}><PanelLeft20Regular /></button>}
-              {layout !== 'narrow' && !listVisible && <button type="button" className="toolbar-icon-button" aria-label="显示笔记列表" title="显示笔记列表（⌃⌘L）" onClick={showList}><TextBulletListLtr20Regular /></button>}
+              {layout !== 'narrow' && !listVisible && !sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title={`显示边栏（${keyHint('sidebar')}）`} onClick={toggleSidebar}><PanelLeft20Regular /></button>}
+              {layout !== 'narrow' && !listVisible && <button type="button" className="toolbar-icon-button" aria-label="显示笔记列表" title={`显示笔记列表（${keyHint('list')}）`} onClick={showList}><TextBulletListLtr20Regular /></button>}
               {activeArea === 'notes' && hasActivePage && <>
               <div className="page-history-controls" role="group" aria-label="笔记浏览历史">
                 <Button appearance="subtle" size="small" icon={<ArrowLeft20Regular />} aria-label="后退到上一笔记" title="后退到上一笔记" disabled={!previousPageVisit} onClick={() => navigatePageHistory(-1)} />
@@ -1295,7 +1296,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                   <ActionMenuDivider />
                 </>}
                 <button onClick={() => setFocusMode(true)}>专注模式（F11）</button>
-                {layout !== 'narrow' && <button onClick={() => { if (listVisible) setPagesOpen(false); else showList() }}>{listVisible ? '隐藏笔记列表' : '显示笔记列表'}（⌃⌘L）</button>}
+                {layout !== 'narrow' && <button onClick={() => { if (listVisible) setPagesOpen(false); else showList() }}>{listVisible ? '隐藏笔记列表' : '显示笔记列表'}（{keyHint('list')}）</button>}
                 <ActionMenuDivider />
                 <span className="action-menu-heading">外观</span>
                 <button className={themePreference === 'light' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('light')}>浅色</button>

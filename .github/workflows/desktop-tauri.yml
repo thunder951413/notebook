@@ -1,14 +1,17 @@
 name: Desktop (Tauri)
 
-# Builds the macOS app (Apple Silicon) and publishes it as a GitHub Release.
-# Releases are unsigned (no Apple Developer ID). The in-app updater downloads
-# the zip itself, verifies the SHA-256, clears extended attributes and swaps
-# the bundle; a copy downloaded with a browser needs:
+# Builds the macOS app (Apple Silicon) and the Windows installer (x64) and
+# publishes both on one GitHub Release.
+# Releases are unsigned (no Apple Developer ID, no Windows code-signing
+# certificate). The in-app updater downloads the package itself, verifies the
+# SHA-256 and installs it; a copy downloaded with a browser needs on the Mac:
 #   xattr -cr /Applications/Notebook.app
+# and on Windows shows a SmartScreen notice ("More info" → "Run anyway").
 #
 # Release contract read by apps/tauri/src-tauri/src/updater.rs:
 #   tag     desktop-v<version>
 #   assets  Notebook-macos-arm64.zip, Notebook-macos-arm64.zip.sha256
+#           Notebook-windows-x64-setup.exe, Notebook-windows-x64-setup.exe.sha256
 
 permissions:
   contents: write
@@ -21,6 +24,10 @@ on:
       version:
         description: 'Version, for example 3.0.1 (tag desktop-v3.0.1 is created)'
         required: true
+      publish:
+        description: 'Publish on the GitHub Release (off: the Windows installer is only kept as a build artifact)'
+        type: boolean
+        default: true
 
 concurrency:
   group: desktop-tauri-${{ github.ref }}
@@ -78,12 +85,78 @@ jobs:
           # Source maps for mapping crash stacks in the diagnostics log.
           (cd cross-platform/apps/tauri/dist-maps && zip -q -r "$GITHUB_WORKSPACE/Notebook-sourcemaps.zip" .)
       - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\n首次手动安装：解压后把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。'
+          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes"
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
           gh release upload "$TAG" Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 Notebook-sourcemaps.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.9.0 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm, cache-dependency-path: cross-platform/pnpm-lock.yaml }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: cross-platform/apps/tauri/src-tauri }
+      - name: Resolve version
+        run: |
+          version="${{ inputs.version || github.ref_name }}"
+          version="${version#desktop-v}"
+          version="${version#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Invalid version: $version" >&2; exit 1; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=desktop-v$version" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        working-directory: cross-platform
+        run: pnpm install --frozen-lockfile
+      - name: Rust tests
+        # Not a gate yet: the sync crates were written on the Mac. Read the
+        # result, fix what Windows shows, then remove continue-on-error.
+        continue-on-error: true
+        working-directory: cross-platform
+        run: |
+          cargo test --manifest-path crates/notebook-sync/Cargo.toml
+          cargo test --manifest-path crates/notebook-automation/Cargo.toml
+          (cd apps/tauri/src-tauri && cargo test)
+      - name: Build installer
+        working-directory: cross-platform/apps/tauri
+        run: pnpm exec tauri build --bundles nsis --config "{\"version\":\"$VERSION\"}"
+      - name: Package
+        run: |
+          installer="$(ls cross-platform/apps/tauri/src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)"
+          echo "Installer: $installer"
+          cp "$installer" Notebook-windows-x64-setup.exe
+          sha256sum Notebook-windows-x64-setup.exe | awk '{print $1"  Notebook-windows-x64-setup.exe"}' > Notebook-windows-x64-setup.exe.sha256
+          cat Notebook-windows-x64-setup.exe.sha256
+      - name: Keep the installer (not published)
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Notebook-windows-x64-setup
+          path: |
+            Notebook-windows-x64-setup.exe
+            Notebook-windows-x64-setup.exe.sha256
+          retention-days: 3
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          fi
+          gh release upload "$TAG" Notebook-windows-x64-setup.exe Notebook-windows-x64-setup.exe.sha256 --repo "$GITHUB_REPOSITORY" --clobber
