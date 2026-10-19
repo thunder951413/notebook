@@ -27,3 +27,6 @@ overrides:
   # One ProseMirror view for tiptap and the app: two copies break instanceof
   # checks and carry an XSS advisory below 1.42.3.
   prosemirror-view: 1.42.6
+  # Same-major patches for the Electron shell's transitive dependencies.
+  'brace-expansion@^2': 2.1.7
+  'js-yaml@^4': 4.3.2

@@ -50,3 +50,6 @@ recovery/
 
 # Local audit screenshots, test runs and diagnostic bundles (reports stay tracked).
 docs/audits/**/evidence/
+
+# Local profile backups
+.dsh-profile-backup-*/
