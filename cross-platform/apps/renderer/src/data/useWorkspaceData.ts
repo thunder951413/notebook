@@ -658,12 +658,13 @@ export function useWorkspaceData() {
   }, [reload])
   const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])
-  const saveReadingPosition = useCallback(async (pageId: string, viewportOffsetFraction: number) => {
-    const previous = await repository.getReadingPosition(pageId)
+  const saveReadingPosition = useCallback(async (pageId: string, viewportOffsetFraction: number, anchorUtf16Offset?: number) => {
     await repository.saveReadingPosition({
       id: pageId,
       pageId,
-      anchorUtf16Offset: previous?.anchorUtf16Offset ?? 0,
+      // Only the large-note reader knows an exact offset; a stale one next to a
+      // new fraction would send another device to the wrong place.
+      anchorUtf16Offset: anchorUtf16Offset !== undefined && Number.isInteger(anchorUtf16Offset) && anchorUtf16Offset > 0 ? anchorUtf16Offset : 0,
       viewportOffsetFraction: Math.max(0, Math.min(1, viewportOffsetFraction)),
       updatedAt: new Date().toISOString(),
       deviceId: legacyDeviceId(),

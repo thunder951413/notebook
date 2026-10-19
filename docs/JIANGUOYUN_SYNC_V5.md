@@ -302,3 +302,14 @@ v4.1 仍不是最终协议：有变化时会完整重写自己的日志；全局
 - 跨域重定向被拒绝，不转发 Basic 凭据；服务端错误正文不会进入用户可见同步错误。
 
 上述是可重复的回归基线，不等于完成 v5。真实坚果云的 429/`Retry-After`、ETag/If-Match、750 条目录分页和长期流量预算仍需用专用测试账号与隔离目录做非破坏性认证。
+
+## 阅读位置（reading_position）
+
+每篇笔记一条记录：`viewportOffsetFraction`（0–1 的滚动比例）、`anchorUtf16Offset`（正文 Markdown 的 UTF-16 偏移，0 表示未设置）、`updatedAt`、`deviceId`。私密笔记本的阅读位置只留在本机。
+
+桌面端的行为：
+
+- 打开笔记时，本机位置与同步记录比较：同步记录来自另一台设备且比本机记录新时用同步记录，否则保留本机位置。本机位置带 `updatedAt`；没有时间戳的旧记录让位于另一台设备的记录。
+- 同步记录没有像素偏移，只用 `anchorUtf16Offset`（大于 0 时）或 `viewportOffsetFraction` 还原。
+- 大笔记阅读器知道精确的块位置，发布时写入 `anchorUtf16Offset`；普通编辑器无法换算，写入 0，避免旧偏移配上新比例。
+- 偏移按发布时的正文计算，正文之后有改动时只是近似。其他客户端若不读取 `anchorUtf16Offset`，仍用 `viewportOffsetFraction`。

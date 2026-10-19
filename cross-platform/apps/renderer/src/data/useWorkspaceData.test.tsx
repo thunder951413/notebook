@@ -54,6 +54,15 @@ test.each(['text-dialog', 'backup-entry'])('%s imports a full large Markdown not
   expect(stored?.tiptapJson).toEqual({ type: 'doc', content: [] })
 })
 
+test('a reading position keeps the exact anchor only when the reader supplied one', async () => {
+  const { result } = await renderLoadedWorkspace()
+  const pageId = result.current.pages[0]!.id
+  await act(async () => { await result.current.saveReadingPosition(pageId, 0.5, 123_456) })
+  expect(await automationRepository.getReadingPosition(pageId)).toMatchObject({ viewportOffsetFraction: 0.5, anchorUtf16Offset: 123_456 })
+  await act(async () => { await result.current.saveReadingPosition(pageId, 0.7) })
+  expect(await automationRepository.getReadingPosition(pageId)).toMatchObject({ viewportOffsetFraction: 0.7, anchorUtf16Offset: 0 })
+})
+
 // `referenceIndexRevision` only advances at the end of a full reload, so
 // waiting for it guarantees the startup load has finished.
 async function renderLoadedWorkspace() {

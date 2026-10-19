@@ -10,13 +10,14 @@ import { showToast } from '../components/toast'
 import { DocumentEditor, type DocumentEditorProps } from './DocumentEditor'
 import { createContentExtensions, documentToMarkdown } from './extensions'
 import { OUTLINE_JUMP_EVENT } from './outlineEvents'
+import { anchorAtProbe, scrollTopForAnchor, type BlockBox } from './readingAnchor'
 import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
 
 type Props = Omit<DocumentEditorProps, 'content' | 'onChange' | 'onDraft'> & {
   content: LargeDocument
   onSaveSection: (source: string, start: number, end: number, replacement: string) => Promise<{ markdown: string; end: number }>
 }
-type Jump = { offset: number; heading?: number; term?: string; occurrence?: number; serial: number }
+type Jump = { offset: number; heading?: number; term?: string; occurrence?: number; serial: number; /** Restoring a position: where inside the block, 0 to 1. */ inner?: number }
 type EditSession = { source: string; start: number; end: number; title: string; initial: string; definitions: string; content?: Record<string, unknown>; lastSaved?: string }
 
 export function LargeDocumentReader(props: Props) {
@@ -75,14 +76,35 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
     return () => observer.disconnect()
   }, [index, editing])
 
+  /** A block's box relative to the visible top of the reading area, or to its scroll origin. */
+  const boxOf = (scrollOrigin: boolean) => (number: number): BlockBox | undefined => {
+    const root = scroller.current
+    const shell = shells.current.get(number)
+    if (!root || !shell) return undefined
+    const box = shell.getBoundingClientRect()
+    return { top: box.top - root.getBoundingClientRect().top + (scrollOrigin ? root.scrollTop : 0), height: box.height }
+  }
+
   useLayoutEffect(() => {
     const root = scroller.current
     if (!root || editing || restored.current || userMoved.current || !props.viewportPosition) return
     restored.current = true
+    const { anchor, fraction } = props.viewportPosition
+    if (anchor !== undefined && anchor > 0 && anchor < body.length) {
+      // An exact Markdown offset (this or another device): go to its block now,
+      // and refine inside the block once it has been laid out.
+      const number = chunkAtOffset(index, anchor)
+      const chunk = index.chunks[number]!
+      const top = scrollTopForAnchor(index, anchor, boxOf(true))
+      if (top !== undefined) root.scrollTop = top
+      setVisible((previous) => new Set([...previous, number]))
+      setJump({ offset: anchor, inner: (anchor - chunk.start) / Math.max(1, chunk.end - chunk.start), serial: performance.now() })
+      return
+    }
     // Fractions survive a change from the old full editor to estimated block
     // heights; pixel offsets do not. Measurements refine the nearby blocks.
-    root.scrollTop = props.viewportPosition.fraction * Math.max(0, root.scrollHeight - root.clientHeight)
-  }, [index, props.viewportPosition, editing])
+    root.scrollTop = fraction * Math.max(0, root.scrollHeight - root.clientHeight)
+  }, [index, props.viewportPosition, editing, body])
 
   useEffect(() => {
     const onOutline = (event: Event) => {
@@ -204,7 +226,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
       onScroll={(event) => {
         if (editing) return
         const root = event.currentTarget
-        positionCallback.current?.({ scrollTop: root.scrollTop, fraction: root.scrollTop / Math.max(1, root.scrollHeight - root.clientHeight) })
+        positionCallback.current?.({ scrollTop: root.scrollTop, fraction: root.scrollTop / Math.max(1, root.scrollHeight - root.clientHeight), anchor: anchorAtProbe(index, boxOf(false)) })
       }}>
       {index.chunks.map((chunk, number) => <div key={number} data-chunk={number} className="large-note-chunk"
         ref={(element) => { if (element) shells.current.set(number, element); else shells.current.delete(number) }}
@@ -255,6 +277,13 @@ function ReadChunk({ source, chunk, index, document, pageId, loadAsset, jump, on
       if (transaction) editor.view.dispatch(transaction)
     }
     const frame = requestAnimationFrame(() => {
+      if (jump.inner !== undefined) {
+        const root = host.current?.closest('.large-note-scroll')
+        const box = host.current?.getBoundingClientRect()
+        if (root && box) root.scrollTop += box.top - root.getBoundingClientRect().top + jump.inner * box.height
+        callbacks.current.onJumpDone()
+        return
+      }
       const localHeading = index.headings.filter((heading) => heading.start >= chunk.start && heading.start < chunk.end).findIndex((heading) => heading.index === jump.heading)
       const target = jump.term ? host.current?.querySelectorAll('.search-hit-highlight')[jump.occurrence ?? 0]
         : localHeading >= 0 ? host.current?.querySelectorAll('h1,h2,h3,h4,h5,h6')[localHeading] : host.current

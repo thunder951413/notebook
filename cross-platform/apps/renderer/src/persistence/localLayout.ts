@@ -14,7 +14,12 @@ export const PAGE_TREE_DRAG_TYPE = 'application/x-notebook-page-id'
 export const LOCAL_READING_POSITIONS_KEY = 'notebook-local-reading-positions-v1'
 
 export type RightPanel = 'outline' | 'backlinks'
-export type ViewportPosition = { scrollTop?: number; fraction: number }
+/**
+ * `anchor` is a UTF-16 offset into the note's Markdown (set by the large-note
+ * reader, which knows it exactly); `updatedAt` orders a local position against
+ * the one other devices synchronize.
+ */
+export type ViewportPosition = { scrollTop?: number; fraction: number; anchor?: number; updatedAt?: string }
 export type SavedLayout = { navOpen?: boolean; pagesOpen?: boolean; aiOpen?: boolean; rightPanel?: RightPanel; notebookWidth?: number; pageWidth?: number; aiWidth?: number; sidebarWidth?: number; listWidth?: number; browse?: 'tree' | 'list' }
 
 export function readLayout(): SavedLayout {
@@ -30,10 +35,13 @@ export function readLocalReadingPositions(): Record<string, ViewportPosition> {
       const position = raw as Record<string, unknown>
       const fraction = Number(position.fraction)
       const scrollTop = Number(position.scrollTop)
+      const anchor = Number(position.anchor)
       if (!Number.isFinite(fraction)) return []
       return [[pageId, {
         fraction: Math.max(0, Math.min(1, fraction)),
         ...(Number.isFinite(scrollTop) && scrollTop >= 0 ? { scrollTop } : {}),
+        ...(position.anchor !== undefined && Number.isInteger(anchor) && anchor > 0 ? { anchor } : {}),
+        ...(typeof position.updatedAt === 'string' && !Number.isNaN(Date.parse(position.updatedAt)) ? { updatedAt: position.updatedAt } : {}),
       } satisfies ViewportPosition]]
     }).slice(-500))
   } catch {

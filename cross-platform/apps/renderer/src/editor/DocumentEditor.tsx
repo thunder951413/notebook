@@ -50,8 +50,8 @@ export interface DocumentEditorProps {
   saveAsset?: (pageId: string, file: File) => Promise<Asset>
   vimEnabled?: boolean
   onVimCommandModeChange?: (active: boolean) => void
-  viewportPosition?: { scrollTop?: number; fraction: number }
-  onViewportChange?: (position: { scrollTop: number; fraction: number }) => void
+  viewportPosition?: { scrollTop?: number; fraction: number; anchor?: number }
+  onViewportChange?: (position: { scrollTop: number; fraction: number; anchor?: number }) => void
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }

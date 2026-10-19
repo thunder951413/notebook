@@ -37,3 +37,19 @@ test('loads only nearby content, finds unseen text, jumps to a distant chapter, 
   await screen.findByText('阅读模式 · 按需加载')
   expect(save).not.toHaveBeenCalled()
 })
+
+test('scrolling reports the Markdown offset at the top, and a saved offset reopens at its block', async () => {
+  Element.prototype.scrollIntoView = vi.fn()
+  const source = Array.from({ length: 200 }, (_, index) => `# 第 ${index} 章\n\n${`章节 ${index} 正文。`.repeat(150)}\n\n`).join('')
+  const changes: Array<{ fraction: number; anchor?: number }> = []
+  const rect = (top: number) => ({ top, bottom: top + 1000, left: 0, right: 800, width: 800, height: 1000, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+  // The reading area shows block 120 at its top edge.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return this.dataset.chunk === undefined ? rect(0) : rect((Number(this.dataset.chunk) - 120) * 1000)
+  })
+  const { container } = render(<LargeDocumentReader workspaceId="workspace" pageId="test-book" pageTitle="大书" content={largeDocument(source)} onSaveSection={vi.fn()} onViewportChange={(position) => changes.push(position)} />)
+  await screen.findByText('阅读模式 · 按需加载')
+  fireEvent.scroll(container.querySelector('.large-note-scroll')!)
+  // Block 120 is the chapter that starts at the top edge, so the offset is its first character.
+  expect(changes.at(-1)!.anchor).toBe(source.indexOf('# 第 120 章'))
+})
