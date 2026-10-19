@@ -248,7 +248,9 @@ export function encodeExport(bundle: NotebookDataBundle, assetContents: Map<stri
 
 export function base64ToBytes(value: string) {
   const binary = atob(value)
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }
 
 export function bytesToBase64(value: Uint8Array) {

@@ -153,10 +153,13 @@ export function useWorkspaceData() {
         setDocuments((current) => ({ ...current, [pageId]: empty }))
         return empty
       }
+      const openStartedAt = performance.now()
       const assets = documentNeedsAssets(document)
         ? await repository.listAssets(pageId)
         : []
       const tiptapJson = await editorDocumentFromStorage(document, assets)
+      const openMs = performance.now() - openStartedAt
+      if (openMs > 250) recordDiagnosticEvent({ level: 'info', category: 'document', action: 'open', status: 'info', durationMs: openMs, message: `${isLargeDocument(tiptapJson) ? 'large' : 'rich'} · ${document.markdown?.length ?? 0} chars` })
       setDocuments((current) => current[pageId] === tiptapJson ? current : ({ ...current, [pageId]: tiptapJson }))
       return tiptapJson
     })()
@@ -476,27 +479,39 @@ export function useWorkspaceData() {
     const siblings = pageRecordsRef.current.filter((page) => page.sectionId === target.sectionId && page.parentPageId === target.parentPageId && !page.deletedAt)
     let sortOrder = Math.max(0, ...siblings.map((page) => page.sortOrder ?? 0)) + 1000
     const locked = privateSectionIds.has(target.sectionId) || Boolean(target.parentPageId && pageRecordsRef.current.find((page) => page.id === target.parentPageId)?.locked)
+    const stages = { prepare: 0, save: 0, links: 0 }
+    const importStartedAt = performance.now()
     for (const file of files) {
       const kind = textImportKind(file.name)
       if (!kind) { skipped.push({ name: file.name, reason: '不支持的格式' }); continue }
       if (file.data.byteLength > TEXT_IMPORT_MAX_BYTES) { skipped.push({ name: file.name, reason: '超过 5 MB' }); continue }
+      let mark = performance.now()
       const source = decodeImportedText(file.data)
       if (!source.trim()) { skipped.push({ name: file.name, reason: '空文件' }); continue }
       try {
         const title = importedTitle(file.name, source, kind)
         const { markdown, tiptapJson, preview } = prepareImportedDocument(source, kind, title)
+        stages.prepare += performance.now() - mark
         const now = new Date().toISOString()
         const id = crypto.randomUUID()
         const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId: target.sectionId, parentPageId: target.parentPageId, sortOrder, treeUpdatedAt: now, kind: 'document', title, preview, favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', ...(locked ? { locked: true } : {}) }
+        mark = performance.now()
         await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson, updatedAt: now })
+        stages.save += performance.now() - mark
+        mark = performance.now()
         await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now, wikiTitleResolver(pageRecordsRef.current)))
+        stages.links += performance.now() - mark
         createdIds.push(id)
         sortOrder += 1000
       } catch (error) {
         skipped.push({ name: file.name, reason: error instanceof Error ? error.message.slice(0, 60) : '无法解析' })
       }
     }
+    const reloadStartedAt = performance.now()
     if (createdIds.length) await reload()
+    const ms = (value: number) => `${Math.round(value)}ms`
+    recordDiagnosticEvent({ level: 'info', category: 'data', action: 'import-stages', status: 'info', durationMs: performance.now() - importStartedAt,
+      message: `prepare ${ms(stages.prepare)} · save ${ms(stages.save)} · links ${ms(stages.links)} · reload ${ms(performance.now() - reloadStartedAt)}` })
     recordDiagnosticEvent({ level: skipped.length ? 'warning' : 'info', category: 'data', action: 'import', status: 'success', message: `${createdIds.length} 个页面，跳过 ${skipped.length} 个` })
     return { createdIds, skipped }
   }, [privateSectionIds, reload])

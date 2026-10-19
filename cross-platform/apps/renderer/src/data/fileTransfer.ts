@@ -53,7 +53,15 @@ export async function runImport(context: FileTransferContext, files: ImportFile[
 
 export function chooseImport(context: FileTransferContext) {
   if (window.notebookDesktop) {
-    void window.notebookDesktop.files.pickOpen().then((files) => runImport(context, files.map((file) => ({ name: file.name, data: base64ToBytes(file.dataBase64) }))))
+    const pickStartedAt = performance.now()
+    void window.notebookDesktop.files.pickOpen().then((files) => {
+      const decodeStartedAt = performance.now()
+      const decoded = files.map((file) => ({ name: file.name, data: base64ToBytes(file.dataBase64) }))
+      const ms = (value: number) => `${Math.round(value)}ms`
+      recordDiagnosticEvent({ level: 'info', category: 'data', action: 'import-read', status: 'info', durationMs: performance.now() - pickStartedAt,
+        message: `${decoded.length} 个文件 · ${decoded.reduce((total, file) => total + file.data.byteLength, 0)} 字节 · 选择 ${ms(decodeStartedAt - pickStartedAt)} · 解码 ${ms(performance.now() - decodeStartedAt)}` })
+      return runImport(context, decoded)
+    })
   } else context.browserFileInput.current?.click()
 }
 

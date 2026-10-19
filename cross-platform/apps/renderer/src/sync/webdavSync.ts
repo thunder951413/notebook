@@ -157,7 +157,7 @@ function base64ToBytes(value: string): Uint8Array {
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
   return btoa(binary)
 }
 
