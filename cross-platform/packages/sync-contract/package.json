@@ -13,12 +13,12 @@
   "dependencies": {
     "@notebook/domain": "workspace:*",
     "@noble/hashes": "2.2.0",
-    "@tiptap/core": "3.28.0",
-    "@tiptap/extension-image": "3.28.0",
-    "@tiptap/extension-list": "3.28.0",
-    "@tiptap/extension-table": "3.28.0",
-    "@tiptap/markdown": "3.28.0",
-    "@tiptap/starter-kit": "3.28.0",
+    "@tiptap/core": "3.30.5",
+    "@tiptap/extension-image": "3.30.5",
+    "@tiptap/extension-list": "3.30.5",
+    "@tiptap/extension-table": "3.30.5",
+    "@tiptap/markdown": "3.30.5",
+    "@tiptap/starter-kit": "3.30.5",
     "zod": "4.4.3"
   },
   "devDependencies": {

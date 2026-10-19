@@ -20,3 +20,10 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - better-sqlite3@13.0.1
+
+overrides:
+  # plist@3.1.0 pins an xmldom range with known injection/DoS advisories.
+  '@xmldom/xmldom': 0.8.15
+  # One ProseMirror view for tiptap and the app: two copies break instanceof
+  # checks and carry an XSS advisory below 1.42.3.
+  prosemirror-view: 1.42.6
