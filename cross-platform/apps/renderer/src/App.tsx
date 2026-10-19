@@ -39,7 +39,8 @@ import { FullTextSearch, OPEN_FULL_TEXT_SEARCH_EVENT, findInDocument, openFullTe
 import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
-import { documentToMarkdown, htmlToDocument, markdownToDocument } from './editor/extensions'
+import { documentToMarkdown, htmlToDocument } from './editor/extensions'
+import { documentFromMarkdown } from './data/importedDocument'
 import { decryptBackup } from './crypto/encryptedBackup'
 import type { AccentColor } from './appearance/accent'
 import type { ThemePreference } from './appearance/theme'
@@ -555,7 +556,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     if (!currentSection) return
     const pageId = await createPage(currentSection.id)
     await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
-    await saveDocument(pageId, markdownToDocument(markdown))
+    await saveDocument(pageId, documentFromMarkdown(markdown))
     setActiveArea('notes')
     setActivePage(pageId)
   }
@@ -566,7 +567,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     const pageId = await createPage(sectionId, 'document', target?.parentPageId)
     if (target?.parentPageId) setExpandedPageIds((current) => current.has(target.parentPageId!) ? current : new Set([...current, target.parentPageId!]))
     await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
-    await saveDocument(pageId, markdownToDocument(markdown))
+    await saveDocument(pageId, documentFromMarkdown(markdown))
     return pageId
   }
 
@@ -581,12 +582,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       async createPage(title, markdown, sectionId, parentPageId) {
         const pageId = await planOps.current.createPage(sectionId, 'document', parentPageId)
         await planOps.current.updatePage(pageId, { title, preview: preview(markdown) })
-        await planOps.current.saveDocument(pageId, markdownToDocument(markdown))
+        await planOps.current.saveDocument(pageId, documentFromMarkdown(markdown))
         return pageId
       },
       async updatePage(pageId, change) {
         await planOps.current.updatePage(pageId, { ...(change.title !== undefined ? { title: change.title } : {}), ...(change.markdown !== undefined ? { preview: preview(change.markdown) } : {}) })
-        if (change.markdown !== undefined) await planOps.current.saveDocument(pageId, markdownToDocument(change.markdown))
+        if (change.markdown !== undefined) await planOps.current.saveDocument(pageId, documentFromMarkdown(change.markdown))
       },
       movePage: (pageId, sectionId, parentPageId, sortOrder) => planOps.current.movePageInTree(pageId, sectionId, parentPageId, sortOrder),
       setTags: (pageId, tags) => planOps.current.setPageTagNames(pageId, tags),
@@ -628,7 +629,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       const parsed = html ? new DOMParser().parseFromString(html, 'text/html') : undefined
       const title = parsed?.querySelector('h1')?.textContent?.trim() || parsed?.title.trim() || text.trim().split(/\r?\n/)[0]?.slice(0, 80) || '网页剪藏'
       const pageId = await createPage(currentSection.id)
-      const documentJson = html ? htmlToDocument(html) : markdownToDocument(text)
+      const documentJson = html ? htmlToDocument(html) : documentFromMarkdown(text)
       await updatePage(pageId, { title, preview: (parsed?.body.textContent ?? text).replace(/\s+/g, ' ').trim().slice(0, 180) })
       await saveDocument(pageId, documentJson)
       setActiveArea('notes')

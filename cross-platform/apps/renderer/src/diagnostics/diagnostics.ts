@@ -40,6 +40,7 @@ const SAFE_MESSAGE_EVENTS = new Set([
   'sync/entity-conflict',
   'sync/keep-local',
   'sync/outbox',
+  'sync/prepare',
   'sync/run',
   'sync/server-check',
   'sync/upload-batch',

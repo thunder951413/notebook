@@ -1,5 +1,5 @@
 import type { Page } from '@notebook/domain'
-import { markdownToDocument } from '../editor/extensions'
+import { documentFromMarkdown } from '../data/importedDocument'
 import { entryBody } from '../ai/inbox'
 import type { NotebookSummary, PageSummary } from '../model'
 import type { InboxFiling, InboxOutcome } from './InboxDialog'
@@ -59,7 +59,7 @@ export async function fileInbox(items: InboxFiling[], onProgress: (done: number,
       const asset = item.entry.attachment ? await ops.saveAsset(pageId, new File([item.entry.attachment.data as BlobPart], item.entry.attachment.name, { type: item.entry.attachment.mimeType })) : undefined
       const body = entryBody(item.entry, asset?.id)
       await ops.updatePage(pageId, { preview: preview(body) })
-      await ops.saveDocument(pageId, markdownToDocument(body))
+      await ops.saveDocument(pageId, documentFromMarkdown(body))
       if (item.tags.length) await ops.setPageTagNames(pageId, item.tags)
       if (target.parentPageId) expandPage(target.parentPageId)
       outcome.created.push({ entryId: item.entry.id, pageId })

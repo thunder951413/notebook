@@ -123,7 +123,7 @@ export function inboxMessages(entries: InboxEntry[], locations: InboxLocation[],
     `<${index + 1}> 来源：${entry.source}`,
     `暂定标题：${entry.title}`,
     entry.attachment ? `类型：${entry.kind === 'image' ? '图片' : `文件（${entry.attachment.mimeType}）`}，只能根据文件名判断` : '',
-    entry.markdown.trim() ? `内容：${entry.markdown.replace(/\s+/g, ' ').slice(0, EXCERPT)}${entry.markdown.length > EXCERPT ? '…' : ''}` : '',
+    entry.markdown.trim() ? `内容：${entry.markdown.slice(0, EXCERPT * 4).replace(/\s+/g, ' ').slice(0, EXCERPT)}${entry.markdown.length > EXCERPT ? '…' : ''}` : '',
   ].filter(Boolean).join('\n')).join('\n\n')
   return [
     {

@@ -758,10 +758,20 @@ async function runWebdavSync(repository: DexieNotebookRepository, workspaceId: s
     const settings = loadWebdavSettings()
     if (!settings.baseUrl || !settings.username) return { state: 'offline', skipped: 0, conflicts: 0 }
     onProgress?.('正在读取已保存的同步凭据…')
+    // Where a run spends its time before the first request; written once when
+    // any step was slow, so a stalled sync can be located from the log.
+    const prepareStages: Array<[string, number]> = []
+    const prepareOrder = ['凭据', '同步口令', '私密项检查', '待上传检查', '隔离区重试']
+    let prepareMark = performance.now()
+    const markPrepare = (label: string) => { const now = performance.now(); prepareStages.push([label, now - prepareMark]); prepareMark = now }
+    // A step that never returns would leave no trace above: name it after 15 s.
+    const stalledTimer = window.setTimeout(() => recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'prepare', status: 'info', message: `仍停留在「${prepareOrder[prepareStages.length] ?? '请求前'}」，已 ${Math.round(performance.now() - prepareMark)}ms` }), 15_000)
     const appPassword = await getWebdavAppPassword()
-    if (!appPassword) return { state: 'offline', skipped: 0, conflicts: 0 }
+    markPrepare('凭据')
+    if (!appPassword) { window.clearTimeout(stalledTimer); return { state: 'offline', skipped: 0, conflicts: 0 } }
     throwIfAborted(syncSignal)
     const connection = connectionFor(settings, appPassword, (await getWebdavSyncPassword()) ?? undefined)
+    markPrepare('同步口令')
     const transport = boundedTransport(webdavTransport(), syncSignal, alive)
     const deviceId = legacyDeviceId()
     const cipher = new WebdavPrivacyCipher(connection.syncPassword ?? '')
@@ -779,7 +789,9 @@ async function runWebdavSync(repository: DexieNotebookRepository, workspaceId: s
     // syncOutbox is maintained in the same transaction as every local edit. It
     // is the smallest reliable database change marker: no full-library hash or
     // table scan is required before deciding whether there is anything to push.
+    markPrepare('私密项检查')
     const hadLocalChanges = await repository.hasPendingSyncChanges(workspaceId)
+    markPrepare('待上传检查')
 
     // ---- Pull: adopt everything other devices published (journals are
     // append-only and shared, so pulls are always full increments — even a
@@ -791,6 +803,11 @@ async function runWebdavSync(repository: DexieNotebookRepository, workspaceId: s
     } catch (error) {
       throwIfAborted(syncSignal)
       recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'quarantine-retry', status: 'failed', message: error instanceof Error ? error.message.slice(0, 200) : String(error) })
+    }
+    markPrepare('隔离区重试')
+    window.clearTimeout(stalledTimer)
+    if (prepareStages.some(([, ms]) => ms > 1_000)) {
+      recordDiagnosticEvent({ level: 'warning', category: 'sync', action: 'prepare', status: 'info', message: prepareStages.map(([label, ms]) => `${label} ${Math.round(ms)}ms`).join(' · ') })
     }
     let conflicts = 0
     let conflictKeys = new Set<string>()

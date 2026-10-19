@@ -58,3 +58,13 @@ test('attachments are saved as assets and linked in the body', async () => {
   expect(ops.saveAsset).toHaveBeenCalledWith('page-1', expect.any(File))
   expect(ops.updatePage).toHaveBeenCalledWith('page-1', { preview: '图.png' })
 })
+
+test('a book-sized note is saved as a source handle instead of being parsed', async () => {
+  const saveDocument = vi.fn(async (_pageId: string, _document: Record<string, unknown>) => undefined)
+  const { value } = context({ saveDocument })
+  const body = '# 书\n\n' + '一段正文。\n\n'.repeat(40_000)
+  await fileInbox([filing('big', { entry: entry('big', body) })], () => undefined, value)
+  const saved = saveDocument.mock.calls[0]![1] as { type: string; markdown: string }
+  expect(saved.type).toBe('notebook-large-document')
+  expect(saved.markdown).toBe(body)
+})

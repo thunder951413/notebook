@@ -228,7 +228,7 @@ export function InboxDialog({ entries, onEntriesChange, pages, notebooks, tags, 
                 </div>
                 <div className="inbox-item-meta">
                   <span className="inbox-source">{entry.source}{entry.attachment ? ` · ${formatSize(entry.attachment.data.byteLength)}` : ''}</span>
-                  {entry.kind === 'note' && <span className="inbox-preview">{entry.markdown.replace(/\s+/g, ' ').slice(0, 80)}</span>}
+                  {entry.kind === 'note' && <span className="inbox-preview">{entry.markdown.slice(0, 400).replace(/\s+/g, ' ').slice(0, 80)}</span>}
                 </div>
                 <div className="inbox-item-fields">
                   <select aria-label="放到" value={choice.newFolder ? '__new__' : choice.locationKey} onChange={(event) => { const value = event.currentTarget.value; if (value !== '__new__') update(entry.id, { locationKey: value, newFolder: undefined }) }}>
