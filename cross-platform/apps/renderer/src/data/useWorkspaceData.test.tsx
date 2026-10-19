@@ -5,6 +5,55 @@ import * as webdavSync from '../sync/webdavSync'
 
 afterEach(() => vi.restoreAllMocks())
 
+test('chapter saves preserve unseen content, reject concurrent changes, and retain a recovery version', async () => {
+  const { result } = await renderLoadedWorkspace()
+  const first = '# 第一章\n\n原始正文\n\n'
+  const tail = '# 后续章节\n\n' + '未加载的正文。\n\n'.repeat(30_000)
+  const source = first + tail
+  let id = ''
+  await act(async () => {
+    id = (await result.current.importTextFiles([{ name: '章节测试.md', data: new TextEncoder().encode(source) }], { sectionId: 'product' })).createdIds[0]!
+    await result.current.loadDocument(id)
+  })
+  expect(result.current.documents[id]?.type).toBe('notebook-large-document')
+  let updated = ''
+  await act(async () => {
+    const saved = await result.current.saveDocumentSection(id, source, 0, first.length, '# 第一章\n\n修改完成')
+    updated = saved.markdown
+    expect(updated.slice(saved.end)).toBe(tail)
+  })
+  expect((await automationRepository.getPageDocument(id))?.markdown).toBe(updated)
+  expect((await automationRepository.getPageDocument(id))?.tiptapJson).toEqual({ type: 'doc', content: [] })
+  await act(async () => {
+    await expect(result.current.saveDocumentSection(id, source, 0, first.length, '过时的编辑')).rejects.toThrow('正文已有其他更新')
+  })
+  expect((await automationRepository.getPageDocument(id))?.markdown).toBe(updated)
+  const recovery = await automationRepository.db.revisions.get(`chapter-recovery:${id}`)
+  expect(recovery?.document.markdown).toContain('过时的编辑')
+  expect(recovery?.document.markdown?.endsWith(tail)).toBe(true)
+})
+
+test.each(['text-dialog', 'backup-entry'])('%s imports a full large Markdown note with a lazy editor cache', async (entry) => {
+  const { result } = await renderLoadedWorkspace()
+  const source = '# 大书\n\n' + '完整正文，保留段落。\n\n'.repeat(110_000) + '结束标记'
+  const file = { name: 'large.md', data: new TextEncoder().encode(source) }
+  let id: string | undefined
+  await act(async () => {
+    if (entry === 'text-dialog') {
+      const outcome = await result.current.importTextFiles([file], { sectionId: 'product' })
+      expect(outcome.skipped).toEqual([])
+      id = outcome.createdIds[0]
+    } else {
+      expect(await result.current.importFiles([file], 'product')).toBe(1)
+    }
+  })
+  id ??= result.current.pages.find((page) => page.title === 'large')?.id
+  expect(id).toBeDefined()
+  const stored = await automationRepository.getPageDocument(id!)
+  expect(stored?.markdown).toBe(source)
+  expect(stored?.tiptapJson).toEqual({ type: 'doc', content: [] })
+})
+
 // `referenceIndexRevision` only advances at the end of a full reload, so
 // waiting for it guarantees the startup load has finished.
 async function renderLoadedWorkspace() {

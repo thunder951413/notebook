@@ -1,4 +1,6 @@
 import { useMemo } from 'react'
+import { isLargeDocument } from '../data/largeDocument'
+import { useLargeDocumentIndex } from '../data/useLargeDocumentIndex'
 import { OUTLINE_JUMP_EVENT } from './outlineEvents'
 
 type ContentNode = { type?: string; attrs?: Record<string, unknown>; text?: string; content?: ContentNode[] }
@@ -23,11 +25,12 @@ function headings(document?: Record<string, unknown>) {
   return result
 }
 
-export function OutlineSidebar({ document }: { document?: Record<string, unknown> }) {
-  const items = useMemo(() => headings(document), [document])
+export function OutlineSidebar({ document, onClose }: { document?: Record<string, unknown>; onClose?: () => void }) {
+  const { index } = useLargeDocumentIndex(document)
+  const items = useMemo(() => isLargeDocument(document) ? index?.headings ?? [] : headings(document), [document, index])
 
   return <section className="right-panel-content outline-sidebar" aria-label="页面大纲">
-    <header><div><strong>页面大纲</strong><small>{items.length ? `${items.length} 个标题` : '正文中还没有标题'}</small></div></header>
+    <header><div><strong>页面大纲</strong><small>{items.length ? `${items.length} 个标题` : '正文中还没有标题'}</small></div>{onClose && <button aria-label="关闭大纲" onClick={onClose}>关闭</button>}</header>
     <div className="right-panel-scroll">
       {items.length === 0 && <p className="right-panel-empty">使用标题一、标题二或标题三后，会自动出现在这里。</p>}
       {items.map((item) => <button key={`${item.index}:${item.title}`} style={{ paddingInlineStart: `${12 + (item.level - 1) * 14}px` }} onClick={() => {

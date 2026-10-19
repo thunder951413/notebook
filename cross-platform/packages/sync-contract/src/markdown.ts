@@ -1,18 +1,22 @@
 import StarterKit from '@tiptap/starter-kit'
-import { TaskItem, TaskList } from '@tiptap/extension-list'
+import { TaskItem } from '@tiptap/extension-list'
 import { TableKit } from '@tiptap/extension-table'
 import Image from '@tiptap/extension-image'
 import { Markdown, MarkdownManager } from '@tiptap/markdown'
 import type { JSONContent } from '@tiptap/core'
 import type { PageDocument } from '@notebook/domain'
 import { notebookReferenceExtensions } from './references'
+import { NotebookMarkdownTable } from './markdownTable'
+import { NotebookMarkdownOrderedList, NotebookMarkdownTaskList } from './markdownList'
 
 function extensions(references = true) {
   return [
-    StarterKit,
-    TaskList,
+    StarterKit.configure({ orderedList: false }),
+    NotebookMarkdownOrderedList,
+    NotebookMarkdownTaskList,
     TaskItem.configure({ nested: true }),
-    TableKit,
+    TableKit.configure({ table: false }),
+    NotebookMarkdownTable,
     Image.configure({ allowBase64: false }),
     ...(references ? notebookReferenceExtensions : []),
     Markdown.configure({ markedOptions: { gfm: true, breaks: false } }),

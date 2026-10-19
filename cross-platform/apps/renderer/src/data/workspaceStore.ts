@@ -9,6 +9,7 @@ import { wikiTitleResolver } from './wikiLinkMaintenance'
 import { planNotebookPageRootMigration } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
 import { planPagePrivacyNormalization } from './privacyPlacement'
+import { LARGE_DOCUMENT_CHARACTERS, largeDocument } from './largeDocument'
 
 /**
  * The renderer's single repository instance and the library-wide maintenance
@@ -126,6 +127,10 @@ export function editorCacheVersion(document: PageDocument, assets: Asset[]) {
 }
 
 export async function editorDocumentFromStorage(document: PageDocument, assets: Asset[]) {
+  // Shared rich documents retain their authoritative collaborative tree.
+  if (!import.meta.env.VITE_NOTEBOOK_COLLAB_URL && document.markdown !== undefined && document.markdown.length >= LARGE_DOCUMENT_CHARACTERS) {
+    return largeDocument(document.markdown, assets)
+  }
   // Stored documents and editor caches written before the empty-list-item
   // repair may still contain list items without children.
   if (document.markdown === undefined || !isEmptyEditorCache(document.tiptapJson)) return repairDocumentStructure(document.tiptapJson)

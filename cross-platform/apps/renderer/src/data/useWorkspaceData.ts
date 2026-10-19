@@ -2,18 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Asset, Notebook, Page, PageDocument, Section } from '@notebook/domain'
 import { indexPageForRetrieval } from '../ai/client'
 import { decodeImport, encodeExport, type ImportFile } from './transfer'
-import { documentToMarkdown, htmlToDocument, markdownToDocument } from '../editor/extensions'
+import { documentToMarkdown, markdownToDocument } from '../editor/extensions'
 import type { NotebookSummary } from '../model'
 import { legacyDeviceId } from '../sync/legacySshSettings'
 import { normalizeReferenceTargetIds, renameWikiLinks } from '@notebook/sync-contract'
-import { decodeImportedText, importedTitle, plainTextToMarkdown, stripRepeatedTitle, TEXT_IMPORT_MAX_BYTES, textImportKind, type TextImportSkip } from './textImport'
+import { decodeImportedText, importedTitle, TEXT_IMPORT_MAX_BYTES, textImportKind, type TextImportSkip } from './textImport'
+import { prepareImportedDocument } from './importedDocument'
+import { isLargeDocument, largeDocument, replaceMarkdownSection } from './largeDocument'
 import { pageLinksFromMarkdown } from './referenceIndex'
 import { findTitleBacklinks, planWikiLinkRename, wikiTitleResolver } from './wikiLinkMaintenance'
 import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
-import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, isEmptyEditorCache, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
+import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
 import { seedNotebooks, seedSections, seedPages, tagMap, toPageSummary, demoSeedAllowed } from './workspaceSeed'
 import { useWorkspaceSync } from './useWorkspaceSync'
 import { usePageTreeMoves } from './usePageTreeMoves'
@@ -151,7 +153,7 @@ export function useWorkspaceData() {
         setDocuments((current) => ({ ...current, [pageId]: empty }))
         return empty
       }
-      const assets = document.markdown !== undefined && isEmptyEditorCache(document.tiptapJson)
+      const assets = document.markdown !== undefined
         ? await repository.listAssets(pageId)
         : []
       const tiptapJson = await editorDocumentFromStorage(document, assets)
@@ -172,7 +174,7 @@ export function useWorkspaceData() {
       loadedDocumentIds.current.add(pageId)
       const updatedAt = new Date().toISOString()
       const normalized = normalizeReferenceTargetIds(tiptapJson)
-      const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(normalized), tiptapJson: normalized, updatedAt }
+      const document: PageDocument = { pageId, schemaVersion: 3, markdown: documentToMarkdown(normalized), tiptapJson: isLargeDocument(normalized) ? { type: 'doc', content: [] } : normalized, updatedAt }
       await repository.stageDraft(document)
       await enqueuePageMutation(pageId, async () => {
         const page = await repository.getPage(pageId)
@@ -207,11 +209,41 @@ export function useWorkspaceData() {
     const startedAt = Date.now()
     try {
       const updatedAt = new Date().toISOString()
-      await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson, updatedAt })
+      await repository.stageDraft({ pageId, schemaVersion: 3, markdown: documentToMarkdown(tiptapJson), tiptapJson: isLargeDocument(tiptapJson) ? { type: 'doc', content: [] } : tiptapJson, updatedAt })
     } catch (error) {
       recordDocumentFailure('draft-stage', error, startedAt)
       throw error
     }
+  }, [])
+
+  const saveDocumentSection = useCallback(async (pageId: string, source: string, start: number, end: number, replacement: string) => {
+    const merged = replaceMarkdownSection(source, start, end, replacement)
+    await enqueuePageMutation(pageId, async () => {
+      const conflict = await db.transaction('rw', db.tables, async () => {
+        const page = await repository.getPage(pageId)
+        const stored = await repository.getPageDocument(pageId)
+        if (!page || page.deletedAt || !stored) throw new Error('笔记已被移走或删除，无法保存章节')
+        const current = stored.markdown ?? documentToMarkdown(stored.tiptapJson)
+        const updatedAt = new Date().toISOString()
+        if (current !== source && current !== merged.markdown) {
+          // A recovery version survives page switches; never overwrite an
+          // intervening sync/AI edit with our older whole-document snapshot.
+          await db.revisions.put({ id: `chapter-recovery:${pageId}`, pageId, pageIcon: page.icon ?? null,
+            document: { pageId, schemaVersion: 3, markdown: merged.markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt }, createdAt: updatedAt, reason: 'manual' })
+          return true
+        }
+        if (current !== merged.markdown) {
+          await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, { pageId, schemaVersion: 3, markdown: merged.markdown, tiptapJson: { type: 'doc', content: [] }, updatedAt })
+          await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, merged.markdown, updatedAt, wikiTitleResolver(pageRecordsRef.current)))
+        }
+        return false
+      })
+      if (conflict) throw new Error('正文已有其他更新，未覆盖。本次修改已保存在版本历史中，请返回阅读后重新打开章节。')
+      const assets = await repository.listAssets(pageId)
+      setDocuments((current) => ({ ...current, [pageId]: largeDocument(merged.markdown, assets) }))
+      setReferenceIndexRevision((current) => current + 1)
+    })
+    return merged
   }, [])
 
   const loadBacklinks = useCallback(async (pageId: string, options?: { indexedOnly?: boolean }) => {
@@ -417,11 +449,12 @@ export function useWorkspaceData() {
     for (const [index, file] of textFiles.entries()) {
       const now = new Date().toISOString()
       const id = crypto.randomUUID()
-      const source = new TextDecoder().decode(file.data)
-      const documentJson = /\.html?$/i.test(file.name) ? htmlToDocument(source) : markdownToDocument(source)
+      const source = decodeImportedText(file.data)
+      const { markdown, tiptapJson, preview } = prepareImportedDocument(source, textImportKind(file.name)!)
       const title = file.name.replace(/\.(md|markdown|txt|html?)$/i, '') || '导入页面'
-      const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId, sortOrder: firstOrder + index * 1000, treeUpdatedAt: now, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
-      await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown: /\.html?$/i.test(file.name) ? documentToMarkdown(documentJson) : source, tiptapJson: documentJson, updatedAt: now })
+      const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId, sortOrder: firstOrder + index * 1000, treeUpdatedAt: now, kind: 'document', title, preview, favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
+      await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson, updatedAt: now })
+      await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now, wikiTitleResolver(pageRecordsRef.current)))
     }
     const bundleFiles = files.filter((file) => !/\.(md|markdown|txt|html?)$/i.test(file.name))
     const decoded = bundleFiles.length ? await decodeImport(bundleFiles, WORKSPACE_ID) : undefined
@@ -451,12 +484,11 @@ export function useWorkspaceData() {
       if (!source.trim()) { skipped.push({ name: file.name, reason: '空文件' }); continue }
       try {
         const title = importedTitle(file.name, source, kind)
-        const documentJson = kind === 'html' ? htmlToDocument(source) : markdownToDocument(kind === 'text' ? plainTextToMarkdown(source) : stripRepeatedTitle(source, title))
-        const markdown = documentToMarkdown(documentJson)
+        const { markdown, tiptapJson, preview } = prepareImportedDocument(source, kind, title)
         const now = new Date().toISOString()
         const id = crypto.randomUUID()
-        const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId: target.sectionId, parentPageId: target.parentPageId, sortOrder, treeUpdatedAt: now, kind: 'document', title, preview: extractDocumentText(documentJson).slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', ...(locked ? { locked: true } : {}) }
-        await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson: documentJson, updatedAt: now })
+        const page: Page = { id, workspaceId: WORKSPACE_ID, sectionId: target.sectionId, parentPageId: target.parentPageId, sortOrder, treeUpdatedAt: now, kind: 'document', title, preview, favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', ...(locked ? { locked: true } : {}) }
+        await repository.savePage(page, { pageId: id, schemaVersion: 3, markdown, tiptapJson, updatedAt: now })
         await repository.replaceDerivedPageLinks(id, pageLinksFromMarkdown(id, markdown, now, wikiTitleResolver(pageRecordsRef.current)))
         createdIds.push(id)
         sortOrder += 1000
@@ -622,11 +654,12 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
+  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
 }
 
 
 function extractDocumentText(value: unknown): string {
+  if (isLargeDocument(value)) return value.markdown
   if (typeof value === 'string') return value
   if (Array.isArray(value)) return value.map(extractDocumentText).join(' ')
   if (!value || typeof value !== 'object') return ''

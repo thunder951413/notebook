@@ -50,6 +50,8 @@ import { describeIssues } from './sync/webdavIssues'
 import { lastSyncSuccess, relativeTime } from './sync/syncErrors'
 import { ActionMenu, ActionMenuDivider } from './ActionMenu'
 import { DocumentEditor } from './editor/DocumentEditor'
+import { LargeDocumentReader } from './editor/LargeDocumentReader'
+import { isLargeDocument } from './data/largeDocument'
 import { configureReferenceRuntime } from './editor/referenceRuntime'
 import { OPEN_REFERENCE_PICKER_EVENT } from './editor/referenceCommands'
 import { ancestorsOf, descendantCountsOf, descendantsOf, flattenPageTree } from './pageTree'
@@ -115,7 +117,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
+  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -489,14 +491,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const trashPage = async (pageId: string, alwaysConfirm = false): Promise<boolean> => {
     const page = accessiblePages.find((candidate) => candidate.id === pageId)
     if (!page) return false
-    // The stored link index answers instantly. The title scan can force a full
-    // search-index rebuild on a big library, so it only gets a short budget:
-    // deleting must never wait on it.
-    let backlinks = await loadBacklinks(pageId, { indexedOnly: true })
-    if (!backlinks.length) {
-      const scanned = await Promise.race([loadBacklinks(pageId).catch(() => undefined), new Promise<undefined>((resolve) => window.setTimeout(resolve, 400))])
-      if (scanned) backlinks = scanned
-    }
+    // Never start a full-text index build from a delete action. A timeout
+    // cannot interrupt synchronous indexing and leaves the scan running.
+    const backlinks = await loadBacklinks(pageId, { indexedOnly: true })
     const referencedBy = new Set(backlinks.map((link) => link.sourcePageId)).size
     const descendantCount = descendantsOf(accessiblePages, pageId).size
     const description = referencedBy > 0
@@ -1323,10 +1320,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             {!currentDocument ? <div className="document-loading" role="status" aria-live="polite">
               <span className="document-loading-spinner" />
               <strong>正在准备笔记…</strong>
-              <span>大型笔记会并行解析，完成后可正常编辑。</span>
+              <span>正在读取正文，大型笔记会按需显示。</span>
             </div> : <>
               {currentDocumentIsEmpty && currentPageChildren.length > 0 && <EmptyParentPageHint pages={currentPageChildren} onOpen={openRecentPage} />}
-              <DocumentEditor
+              {isLargeDocument(currentDocument) ? <LargeDocumentReader
+                key={`${currentPage.id}:${restoreToken}`}
+                workspaceId={WORKSPACE_ID} pageId={currentPage.id} pageTitle={currentPage.title}
+                content={currentDocument} loadAsset={getAssetContent} saveAsset={saveAsset} vimEnabled={vimEnabled}
+                onVimCommandModeChange={setVimCommandMode}
+                onSaveSection={(source, start, end, replacement) => saveDocumentSection(currentPage.id, source, start, end, replacement)}
+                viewportPosition={loadedReadingPosition?.pageId === currentPage.id ? loadedReadingPosition.position : undefined}
+                onViewportChange={(position) => recordViewportPosition(currentPage.id, position)}
+              /> : <DocumentEditor
               key={`${currentPage.id}:${restoreToken.startsWith(`${currentPage.id}:`) ? restoreToken : ''}`}
               workspaceId={WORKSPACE_ID}
               pageId={currentPage.id}
@@ -1341,7 +1346,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               onVimCommandModeChange={setVimCommandMode}
               viewportPosition={loadedReadingPosition?.pageId === currentPage.id ? loadedReadingPosition.position : undefined}
               onViewportChange={(position) => recordViewportPosition(currentPage.id, position)}
-              />
+              />}
             </>}
             </div>}
           </section>
@@ -1350,7 +1355,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         {!assistant && aiOpen && activeArea === 'notes' && hasActivePage && <aside className="right-sidebar open" aria-label="大纲与引用">
           <div className="right-sidebar-panel">
             <PanelResizer label="调整右侧面板宽度" value={aiWidth} min={240} max={460} onChange={setAiWidth} resetValue={280} side="left" />
-            {rightPanel === 'outline' && <Suspense fallback={null}><OutlineSidebar document={documents[currentPage.id]} /></Suspense>}
+            {rightPanel === 'outline' && <Suspense fallback={null}><OutlineSidebar document={documents[currentPage.id]} onClose={() => showRightPanel(false)} /></Suspense>}
             {rightPanel === 'backlinks' && <Suspense fallback={null}><BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} refreshKey={referenceIndexRevision} /></Suspense>}
           </div>
         </aside>}

@@ -1,6 +1,6 @@
 import StarterKit from '@tiptap/starter-kit'
-import { TaskItem, TaskList } from '@tiptap/extension-list'
-import { Table, TableKit, renderTableToMarkdown } from '@tiptap/extension-table'
+import { TaskItem } from '@tiptap/extension-list'
+import { TableKit, renderTableToMarkdown } from '@tiptap/extension-table'
 import { Mathematics } from '@tiptap/extension-mathematics'
 import Image from '@tiptap/extension-image'
 import { Markdown, MarkdownManager } from '@tiptap/markdown'
@@ -19,12 +19,13 @@ import swift from 'highlight.js/lib/languages/swift'
 import typescript from 'highlight.js/lib/languages/typescript'
 import xml from 'highlight.js/lib/languages/xml'
 import type { JSONContent } from '@tiptap/core'
+import { isLargeDocument } from '../data/largeDocument'
 import { generateHTML, generateJSON } from '@tiptap/html'
 import DOMPurify from 'dompurify'
 // KaTeX ships every family in woff2/woff/ttf triplicates (~1.1 MB of fonts).
 // Chromium only ever requests woff2, so reference just those @font-face rules.
 import './katex.woff2.css'
-import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, repairDocumentStructure, WikiLinkNode, type NotebookReferenceTarget } from '@notebook/sync-contract'
+import { BlockAnchor, BlockGroup, NotebookEmbed, NotebookLink, NotebookMarkdownTable, NotebookMarkdownOrderedList, NotebookMarkdownTaskList, repairDocumentStructure, WikiLinkNode, type NotebookReferenceTarget } from '@notebook/sync-contract'
 import { openReferencedTarget, openWikiLink, resolveNotebookReference, resolveWikiLink, subscribeToReferenceRuntime, WIKI_LINK_LISTENER_KEY } from './referenceRuntime'
 import { findReferencedFragment, referenceDynamicLabel } from './referenceContent'
 
@@ -448,7 +449,7 @@ const NotebookCodeBlock = CodeBlockLowlight.extend({
 })
 
 /** A literal "|" inside a table cell must be written as "\|", or the cell splits on the next load. */
-const NotebookTable = Table.extend({
+const NotebookTable = NotebookMarkdownTable.extend({
   renderMarkdown: (node, helpers) => renderTableToMarkdown(node, {
     ...helpers,
     renderChildren: (nodes, separator) => helpers.renderChildren(nodes, separator).replace(/(?<!\\)\|/g, '\\|'),
@@ -457,12 +458,13 @@ const NotebookTable = Table.extend({
 
 export function createContentExtensions(collaborative = false, loadAsset?: AssetLoader, currentPageId?: string) {
   return [
-    StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false }),
+    StarterKit.configure({ undoRedo: collaborative ? false : undefined, codeBlock: false, orderedList: false }),
+    NotebookMarkdownOrderedList,
     // The stock triple-enter exit rule counts the newline used to create an
     // empty fenced block, so a user's first blank line can unexpectedly leave
     // the block. ArrowDown at the end still provides an explicit way out.
     NotebookCodeBlock.configure({ lowlight, exitOnTripleEnter: false }),
-    TaskList,
+    NotebookMarkdownTaskList,
     TaskItem.configure({ nested: true }),
     TableKit.configure({ table: false }),
     NotebookTable.configure({ resizable: true }),
@@ -488,10 +490,12 @@ export function markdownToDocument(markdown: string) {
 }
 
 export function documentToMarkdown(document: Record<string, unknown>) {
+  if (isLargeDocument(document)) return document.markdown
   return getCanonicalMarkdownManager().serialize(repairDocumentStructure(document) as JSONContent)
 }
 
 export function documentToHtml(document: Record<string, unknown>) {
+  if (isLargeDocument(document)) return documentToHtml(markdownToDocument(document.markdown))
   return generateHTML(document as JSONContent, createContentExtensions())
 }
 

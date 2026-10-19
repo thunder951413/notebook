@@ -147,6 +147,9 @@ importers:
       lowlight:
         specifier: 3.3.0
         version: 3.3.0
+      marked:
+        specifier: 17.0.6
+        version: 17.0.6
       minisearch:
         specifier: 7.2.0
         version: 7.2.0

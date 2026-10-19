@@ -216,7 +216,9 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   const wikiSuggestRef = useRef(wikiSuggest)
   wikiSuggestRef.current = wikiSuggest
   const dismissedWikiTrigger = useRef<number | undefined>(undefined)
-  const [largeDocument, setLargeDocument] = useState(false)
+  // Apply viewport containment before the editor's first DOM mount. Waiting
+  // for onCreate first lays out every paragraph of an imported book.
+  const [largeDocument, setLargeDocument] = useState(() => typeof content === 'object' && content !== null && Array.isArray(content.content) && content.content.length > 120)
   onChangeRef.current = onChange
   onDraftRef.current = onDraft
   onViewportChangeRef.current = onViewportChange
