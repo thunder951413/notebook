@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
-import { Checkmark12Filled, LockClosed12Regular, Pin12Filled, Star12Filled } from '@fluentui/react-icons'
+import { Checkmark12Filled, FolderOpen20Regular, LockClosed12Regular, Pin12Filled, Star12Filled } from '@fluentui/react-icons'
 import type { PageSummary } from '../model'
 import { ActionMenu, ActionMenuDivider } from '../ActionMenu'
 import { dueDescription, relativeDateLabel, type ListSection } from './browse'
@@ -51,13 +51,20 @@ export interface NoteRowProps {
   notebookName: string
   timestamp: number
   now: number
+  /** Notes directly under this one; 0 for a plain note. */
+  childCount?: number
   onOpen: (page: PageSummary, focusEditor: boolean) => void
   onToggleTodo: (page: PageSummary) => void
   onPrefetch?: (pageId: string) => void
   menu: (page: PageSummary) => NoteMenuItem[]
 }
 
-const NoteRow = memo(function NoteRow({ page, density, selected, terms, showNotebook, notebookName, timestamp, now, onOpen, onToggleTodo, onPrefetch, menu }: NoteRowProps) {
+/** The row's second line: the body's start, or for a note with no body but sub-notes, how many there are. */
+export function notePreview(preview: string, childCount: number): string {
+  return preview.trim() || (childCount > 0 ? `${childCount} 个子笔记` : '没有更多内容')
+}
+
+const NoteRow = memo(function NoteRow({ page, density, selected, terms, showNotebook, notebookName, timestamp, now, childCount = 0, onOpen, onToggleTodo, onPrefetch, menu }: NoteRowProps) {
   const task = page.kind === 'task'
   const due = task ? dueDescription(page, now) : undefined
   const title = page.title.trim() || '无标题'
@@ -90,10 +97,11 @@ const NoteRow = memo(function NoteRow({ page, density, selected, terms, showNote
         {page.favorite && !task && <Pin12Filled className="note-row-pin" aria-label="已置顶" />}
         {page.important && task && <Star12Filled className="note-row-important" aria-label="重要" />}
         {page.locked && <LockClosed12Regular className="note-row-lock" aria-label="私密" />}
+        {childCount > 0 && !task && <span className="note-row-folder" title={`${childCount} 个子笔记`}><FolderOpen20Regular aria-hidden="true" />{childCount}</span>}
         {density === 'compact' && !task && <time className="note-row-time">{relativeDateLabel(timestamp, now)}</time>}
         {density === 'compact' && task && due && <span className={`note-row-due ${due.tone}`}>{due.label}</span>}
       </div>
-      {density === 'cards' && !task && <p className="note-row-preview">{highlightText(page.preview.trim() || '没有更多内容', terms)}</p>}
+      {density === 'cards' && !task && <p className="note-row-preview">{highlightText(notePreview(page.preview, childCount), terms)}</p>}
       {density === 'cards' && <div className="note-row-meta">{meta}</div>}
     </div>
   </div>}>{renderMenu(menu(page))}</ActionMenu>
@@ -111,6 +119,8 @@ export interface VirtualNoteListProps {
   onOpen: (page: PageSummary, focusEditor: boolean) => void
   onToggleTodo: (page: PageSummary) => void
   onDelete?: (page: PageSummary) => void
+  /** Direct sub-note count per page id. */
+  childCounts?: ReadonlyMap<string, number>
   /** Hover intent: load the note body before the click. */
   onPrefetch?: (pageId: string) => void
   menu: (page: PageSummary) => NoteMenuItem[]
@@ -124,7 +134,7 @@ export interface VirtualNoteListProps {
  * heights per density; the current section title floats above the rows and
  * is pushed up by the next one (iOS style).
  */
-export function VirtualNoteList({ sections, density, selectedId, terms, showNotebook, notebookName, timeOf, now, onOpen, onToggleTodo, onDelete, onPrefetch, menu, resetKey }: VirtualNoteListProps) {
+export function VirtualNoteList({ sections, density, selectedId, terms, showNotebook, notebookName, timeOf, now, onOpen, onToggleTodo, onDelete, childCounts, onPrefetch, menu, resetKey }: VirtualNoteListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState({ top: 0, height: 900 })
   const frame = useRef(0)
@@ -270,6 +280,7 @@ export function VirtualNoteList({ sections, density, selectedId, terms, showNote
               notebookName={notebookName(row.page)}
               timestamp={timeOf(row.page)}
               now={now}
+              childCount={childCounts?.get(row.page.id) ?? 0}
               onOpen={onOpen}
               onToggleTodo={onToggleTodo}
               onPrefetch={onPrefetch}

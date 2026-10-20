@@ -179,7 +179,11 @@ test('three panes: sidebar collections, note list and editor', async () => {
   expect(await within(notebookTree).findByRole('treeitem', { name: 'Notebook Next 产品愿景' })).toBeInTheDocument()
   const directoryHint = await screen.findByRole('note', { name: '目录页提示' })
   expect(within(directoryHint).getByText('这是一个目录页')).toBeInTheDocument()
-  expect(within(directoryHint).getByRole('navigation', { name: '子笔记快捷入口' })).toBeInTheDocument()
+  const childNav = within(directoryHint).getByRole('navigation', { name: '子笔记快捷入口' })
+  expect(within(childNav).getAllByRole('button').length).toBeGreaterThan(0)
+  expect(within(directoryHint).getByRole('button', { name: '添加正文…' })).toBeInTheDocument()
+  // The blank editor is not shown until the user chooses to write a body.
+  expect(document.querySelector('.document-editor-content')).toBeNull()
   fireEvent.click(within(productRoot).getByRole('button', { name: '折叠子页面' }))
   fireEvent.contextMenu(productRoot)
   const rootActions = await within(container).findByRole('dialog', { name: '产品设计页面操作' })

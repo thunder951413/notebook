@@ -67,7 +67,7 @@ import { BackupPasswordDialog } from './components/BackupPasswordDialog'
 import { ConfirmDialogHost, requestConfirm } from './components/confirmDialog'
 import { ToastHost, showToast } from './components/toast'
 import { CreateItemDialog } from './components/CreateItemDialog'
-import { EmptyParentPageHint } from './components/EmptyParentPageHint'
+import { EmptyParentPage } from './components/EmptyParentPageHint'
 import { ModePlaceholder } from './components/ModePlaceholder'
 import { ImportDialog, type ImportTarget } from './components/ImportDialog'
 import { AssistantView } from './ai-assistant/AssistantView'
@@ -293,6 +293,21 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     .filter((page) => page.kind !== 'task' && page.parentPageId === currentPage.id)
     .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0)), [accessiblePages, currentPage.id])
   const currentDocumentIsEmpty = useMemo(() => currentDocument ? documentToMarkdown(currentDocument).trim().length === 0 : false, [currentDocument])
+  // Notes with sub-notes, for the list's "N 个子笔记" and the empty-parent overview.
+  const directChildCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const page of accessiblePages) if (page.parentPageId && page.kind !== 'task') counts.set(page.parentPageId, (counts.get(page.parentPageId) ?? 0) + 1)
+    return counts
+  }, [accessiblePages])
+  // The note whose empty body the user chose to write in (the overview gives way to the editor).
+  const [composingPageId, setComposingPageId] = useState<string>()
+  const showChildOverview = currentDocumentIsEmpty && currentPageChildren.length > 0 && composingPageId !== currentPage.id
+  useEffect(() => { if (composingPageId && composingPageId !== currentPage.id) setComposingPageId(undefined) }, [composingPageId, currentPage.id])
+  useEffect(() => {
+    if (!composingPageId) return
+    const frame = window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.document-editor-content[contenteditable="true"], .document-editor-content [contenteditable="true"]')?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [composingPageId])
   const accessibleDocumentPageIds = useMemo(() => new Set(accessiblePages.filter((page) => page.kind !== 'task').map((page) => page.id)), [accessiblePages])
   const previousPageVisit = pageVisitTarget(pageHistory, -1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
   const nextPageVisit = pageVisitTarget(pageHistory, 1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
@@ -500,7 +515,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     const description = referencedBy > 0
       ? `“${page.title}”被 ${referencedBy} 篇页面引用${descendantCount ? `，并包含 ${descendantCount} 篇子页面` : ''}。移到回收站后，这些位置会显示为失效引用，但恢复页面即可重新生效。仍要继续吗？`
       : descendantCount ? `将“${page.title}”及其 ${descendantCount} 篇子页面一起移到回收站？` : `将“${page.title}”移到回收站？`
-    if ((alwaysConfirm || referencedBy > 0) && !(await requestConfirm({ title: '移到回收站', description, confirmLabel: '移到回收站', destructive: true }))) return false
+    if ((alwaysConfirm || referencedBy > 0 || descendantCount > 0) && !(await requestConfirm({ title: '移到回收站', description, confirmLabel: '移到回收站', destructive: true }))) return false
     await moveToTrash(pageId)
     if (pageId === currentPage.id) setActivePage(accessiblePages.find((candidate) => candidate.id !== pageId)?.id ?? '')
     return true
@@ -1174,6 +1189,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             onOpen={openFromList}
             onToggleTodo={toggleTodoFromList}
             onDelete={removeFromList}
+            childCounts={directChildCounts}
             onPrefetch={scheduleDocumentPrefetch}
             menu={listMenu}
             resetKey={`${scopeKey}|${searching ? 'search' : listOrder}`}
@@ -1278,8 +1294,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               <strong>正在准备笔记…</strong>
               <span>正在读取正文，大型笔记会按需显示。</span>
             </div> : <>
-              {currentDocumentIsEmpty && currentPageChildren.length > 0 && <EmptyParentPageHint pages={currentPageChildren} onOpen={openRecentPage} />}
-              {isLargeDocument(currentDocument) ? <LargeDocumentReader
+              {showChildOverview ? <EmptyParentPage title={currentPage.title} icon={currentPage.icon} pages={currentPageChildren} childCounts={directChildCounts} onOpen={openRecentPage} onCompose={() => setComposingPageId(currentPage.id)} /> : isLargeDocument(currentDocument) ? <LargeDocumentReader
                 key={`${currentPage.id}:${restoreToken}`}
                 workspaceId={WORKSPACE_ID} pageId={currentPage.id} pageTitle={currentPage.title}
                 content={currentDocument} loadAsset={getAssetContent} saveAsset={saveAsset} vimEnabled={vimEnabled}
