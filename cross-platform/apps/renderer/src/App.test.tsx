@@ -298,7 +298,7 @@ test('three panes: sidebar collections, note list and editor', async () => {
   expect(within(taskActions).getByRole('button', { name: '1 小时后提醒' })).toBeInTheDocument()
   fireEvent.keyDown(document, { key: 'Escape' })
   fireEvent.click(taskRow)
-  expect(await screen.findByLabelText('任务标题')).toHaveValue('完成跨平台编辑器验收')
+  expect(await screen.findByLabelText('待办事项')).toHaveValue('完成跨平台编辑器验收')
   fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
   expect(within(screen.getByRole('region', { name: '笔记列表' })).getByRole('heading', { name: '全部笔记' })).toBeInTheDocument()
 

@@ -67,7 +67,7 @@ export function notePreview(preview: string, childCount: number): string {
 const NoteRow = memo(function NoteRow({ page, density, selected, terms, showNotebook, notebookName, timestamp, now, childCount = 0, onOpen, onToggleTodo, onPrefetch, menu }: NoteRowProps) {
   const task = page.kind === 'task'
   const due = task ? dueDescription(page, now) : undefined
-  const title = page.title.trim() || '无标题'
+  const title = page.title.trim() || (task ? '新待办' : '无标题')
   const meta = <>
     {task ? due && <span className={`note-row-due ${due.tone}`}>{due.label}</span> : <time>{relativeDateLabel(timestamp, now)}</time>}
     {showNotebook && notebookName && <span className="note-row-notebook">{notebookName}</span>}

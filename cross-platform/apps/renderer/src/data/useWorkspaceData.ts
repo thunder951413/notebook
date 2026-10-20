@@ -299,7 +299,7 @@ export function useWorkspaceData() {
     const now = new Date().toISOString()
     const siblings = pageRecords.filter((item) => item.sectionId === sectionId && item.parentPageId === parentPageId && !item.deletedAt)
     const sortOrder = Math.max(0, ...siblings.map((item) => item.sortOrder ?? 0)) + 1000
-    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, kind, title: title?.trim() || (kind === 'task' ? '新任务' : '无标题页面'), preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
+    const page: Page = { id: crypto.randomUUID(), workspaceId: WORKSPACE_ID, sectionId, parentPageId, sortOrder, treeUpdatedAt: now, kind, title: title?.trim() || (kind === 'task' ? '' : '无标题页面'), preview: '', favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending', locked: privateSectionIds.has(sectionId) }
     const tiptapJson = emptyEditorDocument()
     const document: PageDocument = { pageId: page.id, schemaVersion: 3, markdown: '', tiptapJson, updatedAt: now }
     // Create the page and its canonical empty body together. Updating the local
