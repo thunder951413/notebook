@@ -1326,7 +1326,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         {!assistant && aiOpen && activeArea === 'notes' && hasActivePage && <aside className="right-sidebar open" aria-label="大纲与引用">
           <div className="right-sidebar-panel">
             <PanelResizer label="调整右侧面板宽度" value={aiWidth} min={240} max={460} onChange={setAiWidth} resetValue={280} side="left" />
-            {rightPanel === 'outline' && <Suspense fallback={null}><OutlineSidebar document={documents[currentPage.id]} onClose={() => showRightPanel(false)} /></Suspense>}
+            {rightPanel === 'outline' && <Suspense fallback={null}><OutlineSidebar pageId={currentPage.id} document={documents[currentPage.id]} onClose={() => showRightPanel(false)} /></Suspense>}
             {rightPanel === 'backlinks' && <Suspense fallback={null}><BacklinksSidebar pageId={currentPage.id} pages={accessiblePages} load={loadBacklinks} loadMentions={loadUnlinkedMentions} openPage={openRecentPage} refreshKey={referenceIndexRevision} /></Suspense>}
           </div>
         </aside>}

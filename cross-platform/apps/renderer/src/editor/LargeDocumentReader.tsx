@@ -9,7 +9,7 @@ import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } fr
 import { showToast } from '../components/toast'
 import { DocumentEditor, type DocumentEditorProps } from './DocumentEditor'
 import { createContentExtensions, documentToMarkdown } from './extensions'
-import { OUTLINE_JUMP_EVENT } from './outlineEvents'
+import { lastHeadingAbove, OUTLINE_JUMP_EVENT, outlineProbe, reportActiveHeading } from './outlineEvents'
 import { anchorAtProbe, scrollTopForAnchor, type BlockBox } from './readingAnchor'
 import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
 
@@ -105,6 +105,18 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
     // heights; pixel offsets do not. Measurements refine the nearby blocks.
     root.scrollTop = fraction * Math.max(0, root.scrollHeight - root.clientHeight)
   }, [index, props.viewportPosition, editing, body])
+
+  /** Tell the outline which heading the reading position is under. */
+  const reportCurrentHeading = () => {
+    const root = scroller.current
+    if (!root) return
+    const probe = Math.max(0, outlineProbe(0, root.clientHeight))
+    const offset = anchorAtProbe(index, boxOf(false), probe)
+    reportActiveHeading(props.pageId, lastHeadingAbove(index.headings.length, (number) => index.headings[number]!.start, offset))
+  }
+  const reportHeadingRef = useRef(reportCurrentHeading)
+  reportHeadingRef.current = reportCurrentHeading
+  useEffect(() => { if (!editing) reportHeadingRef.current() }, [index, editing, props.pageId])
 
   useEffect(() => {
     const onOutline = (event: Event) => {
@@ -209,7 +221,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
     {editing ? <>
       <div className="large-note-toolbar"><strong>编辑本章 · {editing.title}</strong><span role="status">{saveStatus}</span><button onClick={() => { void returnToReading() }}>保存并返回阅读</button></div>
       {saveError && <div className="large-note-save-error" role="alert">{saveError}{saveError.includes('版本历史') && <button onClick={() => setEditing(undefined)}>保留恢复版本，返回阅读</button>}</div>}
-      {editing.content ? <DocumentEditor {...props} content={editing.content} viewportPosition={undefined} onViewportChange={undefined}
+      {editing.content ? <DocumentEditor {...props} content={editing.content} viewportPosition={undefined} onViewportChange={undefined} trackOutline={false}
         onChange={(json) => saveChapter(documentToMarkdown(normalizeReferenceTargetIds(json)) + (editing.definitions ? '\n\n' + editing.definitions : ''))} />
         : <SourceChapterEditor source={editing.initial} onSave={saveChapter} />}
     </> : <div className="large-note-toolbar">
@@ -227,6 +239,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
         if (editing) return
         const root = event.currentTarget
         positionCallback.current?.({ scrollTop: root.scrollTop, fraction: root.scrollTop / Math.max(1, root.scrollHeight - root.clientHeight), anchor: anchorAtProbe(index, boxOf(false)) })
+        reportCurrentHeading()
       }}>
       {index.chunks.map((chunk, number) => <div key={number} data-chunk={number} className="large-note-chunk"
         ref={(element) => { if (element) shells.current.set(number, element); else shells.current.delete(number) }}

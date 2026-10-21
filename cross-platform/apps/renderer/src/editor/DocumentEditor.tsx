@@ -18,7 +18,7 @@ import { findWikiTrigger, wikiSuggestions, type WikiSuggestion, type WikiTrigger
 import { createVimState, isVimRedo, runVimKey } from './vimEngine'
 import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
 import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } from '../search/FullTextSearch'
-import { OUTLINE_JUMP_EVENT } from './outlineEvents'
+import { lastHeadingAbove, OUTLINE_JUMP_EVENT, outlineProbe, reportActiveHeading } from './outlineEvents'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
 
 export const initialContent = `
@@ -52,6 +52,8 @@ export interface DocumentEditorProps {
   onVimCommandModeChange?: (active: boolean) => void
   viewportPosition?: { scrollTop?: number; fraction: number; anchor?: number }
   onViewportChange?: (position: { scrollTop: number; fraction: number; anchor?: number }) => void
+  /** Report the heading under the reading position to the outline. Off for a chapter edited inside a larger note. */
+  trackOutline?: boolean
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
@@ -179,13 +181,13 @@ const VimBlockCursor = Extension.create({
   },
 })
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
   if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveAsset={saveAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} />
+  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveAsset={saveAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} trackOutline={trackOutline} />
 }
 
-function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange' | 'trackOutline'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const restoreTimers = useRef<number[]>([])
   const restoredViewportPage = useRef<string | undefined>(undefined)
@@ -645,6 +647,43 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     window.addEventListener(OUTLINE_JUMP_EVENT, jump)
     return () => window.removeEventListener(OUTLINE_JUMP_EVENT, jump)
   }, [editor])
+
+  // The outline marks the heading the reader is under. Heading elements are
+  // collected when the document changes, so a scroll only binary-searches them.
+  useEffect(() => {
+    const body = bodyRef.current
+    if (!editor || !body || !trackOutline) return
+    let elements: HTMLElement[] = []
+    let collected: unknown
+    let frame = 0
+    const collect = () => {
+      collected = editor.state.doc
+      elements = []
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name !== 'heading') return
+        const dom = editor.view.nodeDOM(pos)
+        elements.push(dom instanceof HTMLElement ? dom : body)
+      })
+    }
+    const report = () => {
+      frame = 0
+      if (editor.isDestroyed) return
+      if (collected !== editor.state.doc) collect()
+      const rect = body.getBoundingClientRect()
+      const probe = outlineProbe(rect.top, body.clientHeight)
+      reportActiveHeading(pageId, lastHeadingAbove(elements.length, (index) => elements[index]!.getBoundingClientRect().top, probe))
+    }
+    const schedule = () => { if (!frame) frame = window.requestAnimationFrame(report) }
+    collect()
+    schedule()
+    body.addEventListener('scroll', schedule, { passive: true })
+    editor.on('update', schedule)
+    return () => {
+      body.removeEventListener('scroll', schedule)
+      editor.off('update', schedule)
+      if (frame) window.cancelAnimationFrame(frame)
+    }
+  }, [editor, pageId, trackOutline])
 
   const firstNode = editor?.state.doc.firstChild
   const duplicateTitle = firstNode?.type.name === 'heading' && firstNode.attrs.level === 1 && firstNode.textContent.trim() === pageTitle.trim()

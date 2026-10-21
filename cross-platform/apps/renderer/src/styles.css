@@ -1393,6 +1393,8 @@ body:has(.theme-dark) > .vim-block-cursor-overlay { background: var(--accent-dar
 .backlinks-scan-action .fui-Button { justify-self: start; }
 .backlinks-scan-action small { color: #7b737e; font-size: 10px; line-height: 1.45; }
 .outline-sidebar .right-panel-scroll > button { align-items: center; }
+.outline-sidebar .right-panel-scroll > button.current { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.outline-sidebar .right-panel-scroll > button.current strong { color: var(--accent); font-weight: 650; }
 .outline-sidebar .right-panel-scroll > button > span { flex: none; width: 21px; color: #8a6aa6; font-size: 9px; font-weight: 700; }
 .ai-pane { height: 100%; display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; background: var(--surface-panel); }
 .ai-header { display: flex; justify-content: space-between; align-items: center; padding: 13px 12px 12px 14px; border-bottom: 1px solid #e8e4ea; }
