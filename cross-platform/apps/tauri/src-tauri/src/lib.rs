@@ -191,6 +191,31 @@ fn set_badge(app: AppHandle, count: i64) {
     }
 }
 
+/// The to-do line at the top of the menu bar menu.
+struct TrayTodos(MenuItem<tauri::Wry>);
+
+fn tray_todos_label(open: i64, overdue: i64, due_today: i64) -> String {
+    if open <= 0 {
+        return "没有未完成的待办".into();
+    }
+    let mut label = format!("待办 {open} 项未完成");
+    if overdue > 0 {
+        label.push_str(&format!(" · {overdue} 项逾期"));
+    }
+    if due_today > 0 {
+        label.push_str(&format!(" · 今天 {due_today} 项"));
+    }
+    label
+}
+
+/// Open, overdue and due-today todo counts for the menu bar menu.
+#[tauri::command]
+fn set_tray_todos(app: AppHandle, open: i64, overdue: i64, due_today: i64) {
+    if let Some(item) = app.try_state::<TrayTodos>() {
+        let _ = item.0.set_text(tray_todos_label(open, overdue, due_today));
+    }
+}
+
 #[tauri::command]
 fn app_info(app: AppHandle) -> serde_json::Value {
     serde_json::json!({
@@ -791,13 +816,17 @@ const TRAY_ICON: &[u8] = include_bytes!("../../../renderer/public/notebook-trayT
 #[cfg(not(target_os = "macos"))]
 const TRAY_ICON: &[u8] = include_bytes!("../icons/32x32.png");
 
-/// Menu bar icon (as in the Electron app): quick capture, open, check for
-/// updates, quit. Menu events go through the global `on_menu` handler.
+/// Menu bar icon (as in the Electron app): open todos, quick capture, open,
+/// check for updates, quit. Menu events go through the global `on_menu` handler.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    // The renderer fills in the counts once the library has loaded.
+    let todos = MenuItem::with_id(app, "open-tasks", "待办", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
+            &todos,
+            &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quick-capture", "快速记录", true, None::<&str>)?,
             &MenuItem::with_id(app, "inbox", "AI 收纳剪贴板…", true, None::<&str>)?,
             &MenuItem::with_id(app, "open-main", "打开 Notebook", true, None::<&str>)?,
@@ -818,6 +847,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    app.manage(TrayTodos(todos));
     Ok(())
 }
 
@@ -843,6 +873,10 @@ fn on_menu(app: &AppHandle, id: &str) {
             let _ = app.emit_to(MAIN, "notebook:quick-capture", ());
         }
         "inbox" => open_inbox(app, "menu"),
+        "open-tasks" => {
+            show_main(app);
+            let _ = app.emit_to(MAIN, "notebook:open-tasks", ());
+        }
         "command-palette" => {
             show_main(app);
             let _ = app.emit_to(MAIN, "notebook:command-palette", ());
@@ -973,6 +1007,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_ready,
             set_badge,
+            set_tray_todos,
             app_info,
             renderer_flush_complete,
             notify,
@@ -1047,12 +1082,19 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::text_stamp;
+    use super::{text_stamp, tray_todos_label};
 
     #[test]
     fn text_stamp_is_stable_and_not_negative() {
         assert_eq!(text_stamp("hello"), text_stamp("hello"));
         assert_ne!(text_stamp("hello"), text_stamp("hello!"));
         assert!(text_stamp("任意文字") >= 0);
+    }
+
+    #[test]
+    fn tray_todos_label_names_what_is_due() {
+        assert_eq!(tray_todos_label(0, 0, 0), "没有未完成的待办");
+        assert_eq!(tray_todos_label(12, 0, 0), "待办 12 项未完成");
+        assert_eq!(tray_todos_label(12, 1, 3), "待办 12 项未完成 · 1 项逾期 · 今天 3 项");
     }
 }

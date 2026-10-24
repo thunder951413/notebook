@@ -26,6 +26,8 @@ declare global {
       notifications: { show(title: string, body: string): Promise<boolean> }
       /** Dock badge (Tauri shell); absent in Electron. */
       badge?: { set(count: number): Promise<void> }
+      /** Todo counts shown in the menu bar menu (Tauri shell). */
+      tray?: { setTodos(todos: { open: number; overdue: number; dueToday: number }): Promise<void> }
       /** AI inbox (Tauri shell): files opened with the app, and its global shortcut. */
       inbox?: {
         take(): Promise<Array<{ name: string; dataBase64: string }>>
@@ -121,6 +123,8 @@ declare global {
         onQuickCapture(callback: () => void): () => void
         onCommandPalette(callback: () => void): () => void
         onUpdateCenter(callback: () => void): () => void
+        /** The todo line in the menu bar menu (Tauri shell). */
+        onOpenTasks?(callback: () => void): () => void
         /** Global shortcut, menu item or files opened with the app (Tauri shell). */
         onInbox?(callback: (source: 'shortcut' | 'menu' | 'open') => void): () => void
         onFlushRequested(callback: () => void | Promise<void>): () => void

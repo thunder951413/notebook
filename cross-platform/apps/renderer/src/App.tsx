@@ -830,6 +830,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     if (layout !== 'wide') setDrawerOpen(false)
     if (layout === 'narrow') setStackView('list')
   }
+  const chooseScopeRef = useRef(chooseScope)
+  chooseScopeRef.current = chooseScope
+  useEffect(() => window.notebookDesktop?.events.onOpenTasks?.(() => chooseScopeRef.current({ kind: 'tasks' })), [])
 
   // Keep the open note when it belongs to the new list; otherwise open the
   // list's first item (Apple Notes). Narrow layouts wait for a tap instead.

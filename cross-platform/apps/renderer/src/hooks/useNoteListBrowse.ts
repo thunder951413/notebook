@@ -7,7 +7,8 @@ import { buildSections, createdTime, isEmptyQuery, isOpenTodo, pageMatches, pars
 /**
  * Everything the note list shows, derived from the library and the chosen
  * scope: scoped pages, search hits or dated sections, counts, the to-do
- * digest and the list title. Keeps the Dock badge in step with due to-dos.
+ * digest and the list title. Keeps the Dock badge and the menu bar menu in
+ * step with the to-dos.
  */
 export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion }: {
   notebooks: NotebookSummary[]
@@ -77,6 +78,9 @@ export function useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashP
     : listScope.kind === 'notebook' ? `${scopeNotebook?.emoji ? `${scopeNotebook.emoji} ` : ''}${scopeNotebook?.name ?? '笔记本'}`
     : `#${listScope.name}`
   const openTodoCount = useMemo(() => taskPages.filter(isOpenTodo).length, [taskPages])
+  useEffect(() => {
+    void window.notebookDesktop?.tray?.setTodos({ open: openTodoCount, overdue: digest.overdue.length, dueToday: digest.dueToday.length }).catch(() => undefined)
+  }, [digest.dueToday.length, digest.overdue.length, openTodoCount])
   const recentCount = useMemo(() => recentlySynced(documentPages, nowMs).length, [documentPages, nowMs])
   const favoriteCount = useMemo(() => documentPages.filter((page) => page.favorite).length, [documentPages])
   const notebookCounts = useMemo(() => {

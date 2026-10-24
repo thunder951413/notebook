@@ -32,32 +32,45 @@ function distanceToSegment(px, py, x1, y1, x2, y2) {
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 }
 
-function createTemplatePng(size) {
-  const samples = 4
-  const points = [
-    [size * 0.17, size * 0.83, size * 0.17, size * 0.17],
-    [size * 0.17, size * 0.17, size * 0.83, size * 0.83],
-    [size * 0.83, size * 0.83, size * 0.83, size * 0.17],
+// Signed distance to a rounded square centred at (c, c) with half-size h and corner radius r.
+function distanceToRoundedSquare(px, py, c, h, r) {
+  const qx = Math.abs(px - c) - h + r
+  const qy = Math.abs(py - c) - h + r
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r
+}
+
+// The app icon in one colour, drawn in an 18pt box: a 14pt rounded square with
+// the round-capped N cut out of it, so it sits at the weight of system glyphs.
+function covered(x, y) {
+  const strokes = [
+    [6.3, 12.3, 6.3, 5.7],
+    [6.3, 5.7, 11.7, 12.3],
+    [11.7, 12.3, 11.7, 5.7],
   ]
-  const radius = size * 0.075
+  if (strokes.some(([x1, y1, x2, y2]) => distanceToSegment(x, y, x1, y1, x2, y2) <= 0.85)) return false
+  return distanceToRoundedSquare(x, y, 9, 7, 3.3) <= 0
+}
+
+function createTemplatePng(size) {
+  const samples = 5
   const rows = []
   for (let y = 0; y < size; y += 1) {
     const row = Buffer.alloc(1 + size * 4)
     row[0] = 0
     for (let x = 0; x < size; x += 1) {
-      let covered = 0
+      let hits = 0
       for (let sy = 0; sy < samples; sy += 1) {
         for (let sx = 0; sx < samples; sx += 1) {
-          const px = x + (sx + 0.5) / samples
-          const py = y + (sy + 0.5) / samples
-          if (points.some(([x1, y1, x2, y2]) => distanceToSegment(px, py, x1, y1, x2, y2) <= radius)) covered += 1
+          const px = (x + (sx + 0.5) / samples) * 18 / size
+          const py = (y + (sy + 0.5) / samples) * 18 / size
+          if (covered(px, py)) hits += 1
         }
       }
       const offset = 1 + x * 4
       row[offset] = 0
       row[offset + 1] = 0
       row[offset + 2] = 0
-      row[offset + 3] = Math.round(255 * covered / (samples * samples))
+      row[offset + 3] = Math.round(255 * hits / (samples * samples))
     }
     rows.push(row)
   }

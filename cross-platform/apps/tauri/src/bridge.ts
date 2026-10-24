@@ -59,6 +59,7 @@ const legacyUnavailable = () => Promise.reject(new Error('新版桌面应用不�
 const onQuickCapture = channel<null>('notebook:quick-capture')
 const onCommandPalette = channel<null>('notebook:command-palette')
 const onUpdateCenter = channel<null>('notebook:update-center')
+const onOpenTasks = channel<null>('notebook:open-tasks')
 const onInbox = channel<'shortcut' | 'menu' | 'open'>('notebook:inbox')
 const onUpdateState = channel<UpdateState>('notebook:update-state')
 const onAutomationRequest = channel<AutomationRequest>('notebook:automation-request')
@@ -68,6 +69,7 @@ const api: Desktop = Object.freeze({
   versions: Object.freeze({ electron: '', chrome: '' }),
   notifications: { show: (title: string, body: string) => call<boolean>('notify', { title, body }) },
   badge: { set: (count: number) => call<void>('set_badge', { count: Math.max(0, Math.round(count)) }) },
+  tray: { setTodos: ({ open, overdue, dueToday }: { open: number; overdue: number; dueToday: number }) => call<void>('set_tray_todos', { open, overdue, dueToday }) },
   legacy: { take: async () => (await call<LegacyImport | null>('legacy_import_take')) ?? undefined },
   external: { open: (url: string) => call<void>('open_external', { url }) },
   inputSource: { useAbc: () => call<boolean>('input_source_use_abc') },
@@ -148,6 +150,7 @@ const api: Desktop = Object.freeze({
     onQuickCapture: (callback: () => void) => onQuickCapture(() => callback()),
     onCommandPalette: (callback: () => void) => onCommandPalette(() => callback()),
     onUpdateCenter: (callback: () => void) => onUpdateCenter(() => callback()),
+    onOpenTasks: (callback: () => void) => onOpenTasks(() => callback()),
     onInbox: (callback: (source: 'shortcut' | 'menu' | 'open') => void) => onInbox((source) => callback(source)),
     onFlushRequested: (callback: () => void | Promise<void>) => {
       flushCallbacks.add(callback)
