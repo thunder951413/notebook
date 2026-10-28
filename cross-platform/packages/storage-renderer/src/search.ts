@@ -33,8 +33,12 @@ export const searchTokenize = (value: string) => {
 export interface SearchCacheEntry {
   pages: Page[]
   textByPage: Map<string, string>
+  /** Title, preview and body, normalized once for the exact-substring pass. */
+  haystackByPage: Map<string, string>
   index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
 }
+
+const searchHaystack = (page: Page, text: string) => `${page.title}\n${page.preview}\n${text}`.normalize('NFKC').toLocaleLowerCase()
 
 /**
  * Per-workspace search index. Building the MiniSearch index reads every page
@@ -65,10 +69,12 @@ export class SearchCache {
     if (page.deletedAt) {
       if (position >= 0) entry.pages.splice(position, 1)
       entry.textByPage.delete(page.id)
+      entry.haystackByPage.delete(page.id)
       return
     }
     const content = text ?? entry.textByPage.get(page.id) ?? ''
     entry.textByPage.set(page.id, content)
+    entry.haystackByPage.set(page.id, searchHaystack(page, content))
     if (position >= 0) entry.pages[position] = page
     else entry.pages.push(page)
     entry.index.add({ id: page.id, title: page.title, preview: page.preview, content })
@@ -97,9 +103,12 @@ export class SearchCache {
         }
         await yieldToEventLoop()
       }
+      const haystackByPage = new Map<string, string>()
       const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
       for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
-        index.addAll(pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE).map((page) => ({
+        const chunk = pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
+        for (const page of chunk) haystackByPage.set(page.id, searchHaystack(page, textByPage.get(page.id) ?? ''))
+        index.addAll(chunk.map((page) => ({
           id: page.id,
           title: page.title,
           preview: page.preview,
@@ -107,7 +116,7 @@ export class SearchCache {
         })))
         await yieldToEventLoop()
       }
-      const result = { pages, textByPage, index }
+      const result = { pages, textByPage, haystackByPage, index }
       if ((this.generations.get(workspaceId) ?? 0) === generation) this.cache.set(workspaceId, result)
       return result
     })()
@@ -120,8 +129,13 @@ export class SearchCache {
   }
 }
 
-export async function searchWorkspaceWith(db: NotebookRendererDatabase, searchIndex: SearchCache, workspaceId: string, query: string, limit = 50): Promise<Page[]> {
-  const { pages, textByPage, index } = await searchIndex.get(workspaceId, db)
+/**
+ * `signal` stops a superseded query (the user kept typing or deleting) at the
+ * next chunk instead of letting every stale full scan run to completion.
+ */
+export async function searchWorkspaceWith(db: NotebookRendererDatabase, searchIndex: SearchCache, workspaceId: string, query: string, limit = 50, signal?: AbortSignal): Promise<Page[]> {
+  const { pages, haystackByPage, index } = await searchIndex.get(workspaceId, db)
+  signal?.throwIfAborted()
   // A Chinese phrase yields both a full token and overlapping CJK bigrams.
   // MiniSearch's default OR combination can otherwise rank pages sharing one
   // common bigram above an exact title match. Keep exact substring matches at
@@ -131,8 +145,9 @@ export async function searchWorkspaceWith(db: NotebookRendererDatabase, searchIn
   const exactMatches: Page[] = []
   for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
     exactMatches.push(...pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
-      .filter((page) => `${page.title}\n${page.preview}\n${textByPage.get(page.id) ?? ''}`.normalize('NFKC').toLocaleLowerCase().includes(normalizedQuery)))
+      .filter((page) => haystackByPage.get(page.id)?.includes(normalizedQuery)))
     await yieldToEventLoop()
+    signal?.throwIfAborted()
   }
   const exactIds = exactMatches
     .sort((left, right) => {

@@ -95,8 +95,8 @@ export class DexieNotebookRepository extends TransferRepository implements Noteb
       })
     }).finally(() => this.searchIndex.invalidate(prepared[0]?.page.workspaceId ?? ''))
   }
-  async searchWorkspace(workspaceId: UUID, query: string, limit = 50): Promise<Page[]> {
-    return searchWorkspaceWith(this.db, this.searchIndex, workspaceId, query, limit)
+  async searchWorkspace(workspaceId: UUID, query: string, limit = 50, signal?: AbortSignal): Promise<Page[]> {
+    return searchWorkspaceWith(this.db, this.searchIndex, workspaceId, query, limit, signal)
   }
 
   /**

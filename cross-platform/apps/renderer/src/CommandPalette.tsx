@@ -29,7 +29,7 @@ export interface PaletteItem {
 interface CommandPaletteProps {
   open: boolean
   items: PaletteItem[]
-  searchPageIds?: (query: string) => Promise<string[]>
+  searchPageIds?: (query: string, signal?: AbortSignal) => Promise<string[]>
   onClose: () => void
 }
 
@@ -105,17 +105,19 @@ export function CommandPalette({ open, items, searchPageIds, onClose }: CommandP
       setContentPageIds([])
       return
     }
-    let cancelled = false
+    // Deleting one character at a time starts a search on every pause; abort
+    // the superseded one so stale full-body scans do not pile up.
+    const controller = new AbortController()
     setContentPageIds([])
     const timer = window.setTimeout(() => {
-      void searchPageIds(normalized).then((ids) => {
-        if (!cancelled) setContentPageIds(ids)
+      void searchPageIds(normalized, controller.signal).then((ids) => {
+        if (!controller.signal.aborted) setContentPageIds(ids)
       }).catch(() => {
-        if (!cancelled) setContentPageIds([])
+        if (!controller.signal.aborted) setContentPageIds([])
       })
     }, 160)
     return () => {
-      cancelled = true
+      controller.abort()
       window.clearTimeout(timer)
     }
   }, [open, query, searchPageIds])

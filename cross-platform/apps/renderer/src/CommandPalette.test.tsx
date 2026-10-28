@@ -27,7 +27,7 @@ test('merges full-text page matches into Cmd+P results', async () => {
   const search = within(palette).getByRole('textbox', { name: '搜索命令、页面和设置' })
   fireEvent.change(search, { target: { value: '正文深处的唯一短语' } })
 
-  await waitFor(() => expect(searchPageIds).toHaveBeenCalledWith('正文深处的唯一短语'))
+  await waitFor(() => expect(searchPageIds).toHaveBeenCalledWith('正文深处的唯一短语', expect.any(AbortSignal)))
   expect(await within(palette).findByRole('button', { name: /普通标题/ })).toBeInTheDocument()
   fireEvent.click(within(palette).getByRole('button', { name: /普通标题/ }))
   expect(run).toHaveBeenCalledOnce()

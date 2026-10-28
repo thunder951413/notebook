@@ -37,7 +37,7 @@ export interface CommandPaletteOptions {
   restorePage: (pageId: string) => Promise<unknown>
   purgePage: (pageId: string) => Promise<unknown>
   deleteNotebook: (notebookId: string) => Promise<unknown>
-  searchWorkspace: (query: string, limit?: number, includeLocked?: boolean) => Promise<Array<{ id: string }>>
+  searchWorkspace: (query: string, limit?: number, includeLocked?: boolean, signal?: AbortSignal) => Promise<Array<{ id: string }>>
   setCreateRequest: Dispatch<SetStateAction<'notebook' | 'rootPage' | undefined>>
   setReferenceHelpOpen: Dispatch<SetStateAction<boolean>>
   setVimEnabled: Dispatch<SetStateAction<boolean>>
@@ -58,9 +58,12 @@ export interface CommandPaletteOptions {
 export function useCommandPaletteItems(options: CommandPaletteOptions) {
   const { accessiblePages, accessibleTrashPages, currentPage, currentSection, currentNotebook, hasActivePage, activeArea, recentPageIds, notebooks } = options
 
-  const searchPalettePageIds = useCallback(async (searchTerm: string) => (
-    await options.searchWorkspace(searchTerm, 50, options.privacyUnlocked)
-  ).map((page) => page.id), [options])
+  // `options` is a fresh object on every App render; depending on it would
+  // restart the palette's full-text search whenever anything else re-rendered.
+  const { searchWorkspace, privacyUnlocked } = options
+  const searchPalettePageIds = useCallback(async (searchTerm: string, signal?: AbortSignal) => (
+    await searchWorkspace(searchTerm, 50, privacyUnlocked, signal)
+  ).map((page) => page.id), [privacyUnlocked, searchWorkspace])
 
   const paletteItems: PaletteItem[] = (() => {
     const commands: Array<PaletteItem | false | undefined> = [

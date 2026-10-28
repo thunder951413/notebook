@@ -540,8 +540,8 @@ export function useWorkspaceData() {
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }, [])
   const getAssetContent = useCallback((assetId: string) => repository.getAssetContent(assetId), [])
-  const searchWorkspace = useCallback(async (query: string, limit?: number, includeLocked = false) => {
-    const results = await repository.searchWorkspace(WORKSPACE_ID, query, includeLocked ? limit : undefined)
+  const searchWorkspace = useCallback(async (query: string, limit?: number, includeLocked = false, signal?: AbortSignal) => {
+    const results = await repository.searchWorkspace(WORKSPACE_ID, query, includeLocked ? limit : undefined, signal)
     const visible = includeLocked ? results : results.filter((page) => !page.locked && !privateSectionIds.has(page.sectionId ?? ''))
     return limit == null ? visible : visible.slice(0, limit)
   }, [privateSectionIds])
