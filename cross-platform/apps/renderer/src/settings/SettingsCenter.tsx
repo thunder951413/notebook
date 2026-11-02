@@ -19,9 +19,10 @@ import { AutomationWorkspaceReview } from '../automation/AutomationWorkspaceRevi
 import type { NotebookSummary, PageSummary } from '../model'
 import { AIProviderSettingsPanel } from './AIProviderSettings'
 import { lastSyncSuccess, relativeTime } from '../sync/syncErrors'
-import { fileManagerName } from '../shell/keys'
+import { credentialStoreName, fileManagerName } from '../shell/keys'
 
-type SettingsPage = 'general' | 'data' | 'services' | 'automation'
+export type SettingsPageId = 'general' | 'data' | 'services' | 'automation'
+type SettingsPage = SettingsPageId
 type SyncState = 'offline' | 'syncing' | 'synced' | 'conflict' | 'error'
 
 interface SettingsCenterProps {
@@ -797,8 +798,8 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>
             <SettingsSection title="安全" description="敏感信息不会写入笔记内容。">
               <SettingsRow title="隐私笔记本" description={!privacyAvailable ? '尚未导入隐私笔记本' : privacyUnlocked ? '当前已解锁；关闭应用后会重新锁定' : privacyConfigured ? '当前已锁定' : '需要为此设备设置新的隐私密码'}><Button disabled={!privacyAvailable} onClick={onPrivacyAction}>{privacyUnlocked ? '立即锁定' : privacyConfigured ? '解锁' : '设置密码'}</Button></SettingsRow>
-              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。当前 WebDAV v4 会把隐私笔记本及其页面、正文、历史、附件和内部关系严格保留在本机，不会明文上传；跨设备隐私同步将在统一的加密协议完成后启用。</p>
-              <p className="settings-note">Electron 桌面版使用操作系统凭据保存 WebDAV 应用密码与同步密码；普通浏览器只在当前标签会话保存，不写入 localStorage 或 IndexedDB。</p>
+              <p className="settings-note">隐私锁会从普通列表、搜索、任务、提醒和 AI 上下文中隐藏内容。在上方填写与其他设备相同的隐私同步密钥后，隐私笔记本的页面、正文、历史和附件以 AES-256-GCM 密文同步；未填写时这些内容只保留在本机，不会明文上传。</p>
+              <p className="settings-note">桌面版使用{credentialStoreName()}保存 WebDAV 应用密码与隐私同步密钥；普通浏览器只在当前标签会话保存，不写入 localStorage 或 IndexedDB。</p>
               <p className="settings-note">加密备份使用 AES-GCM；备份口令只在当前设备处理，无法由服务端找回。</p>
             </SettingsSection>
           </>}
@@ -808,7 +809,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
             </SettingsSection>
             <SettingsSection title="本地 AI 自动化接口" description="让外部 AI 搜索笔记并提交结构化修改提案；只监听 127.0.0.1，不接受局域网连接。">
               {!desktop
-                ? <div className="sync-settings-result error">外部 AI 接口仅在 Electron 桌面版可用。</div>
+                ? <div className="sync-settings-result error">外部 AI 接口仅在桌面版可用。</div>
                 : <>
                   <SettingsRow title="接口状态" description={automationState?.enabled ? `正在监听 ${automationState.baseUrl}` : '默认关闭；启动后仍需 Bearer Token'}>
                     <Switch checked={Boolean(automationState?.enabled)} disabled={automationBusy} onChange={(_, data) => void configureAutomation(data.checked)} label={automationState?.enabled ? '已启用' : '已关闭'} />

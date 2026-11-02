@@ -92,7 +92,7 @@ export function AIProviderSettingsPanel() {
     }
   }
 
-  if (!desktop) return <div className="sync-settings-result error">内置 AI 模型仅在 Electron 桌面版可用。</div>
+  if (!desktop) return <div className="sync-settings-result error">内置 AI 模型仅在桌面版可用。</div>
 
   return <>
     <div className="settings-row">

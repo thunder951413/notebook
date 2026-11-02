@@ -79,6 +79,7 @@ export function usePageNavigation(options: PageNavigationOptions) {
     current.setActivePage(page.id)
     current.setActiveSection(page.sectionId)
     if (notebook) { current.setActiveNotebook(notebook.id); current.setExpandedNotebook(notebook.id) }
+    current.onPageActivated?.()
   }, [])
 
   const navigatePageHistory = useCallback((direction: -1 | 1) => {

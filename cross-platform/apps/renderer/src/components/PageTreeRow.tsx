@@ -55,7 +55,7 @@ function PageTreeRowImpl({ page, depth, hasChildren, childCount, variant, select
     <ActionMenuDivider />
     <button onClick={() => actions.changeIcon(page)}>更换图标…</button>
     {page.icon && <button onClick={() => actions.updatePageProps(page, { icon: undefined })}>恢复默认图标</button>}
-    <button onClick={() => actions.updatePageProps(page, { favorite: !page.favorite })}>{page.favorite ? '取消收藏' : '收藏'}</button>
+    <button onClick={() => actions.updatePageProps(page, { favorite: !page.favorite })}>{page.favorite ? '取消置顶' : '置顶'}</button>
     {(!page.notebookRoot || variant === 'pages') && <button onClick={() => actions.duplicatePage(page)}>创建副本</button>}
     {page.parentPageId && <button onClick={() => actions.promoteToRoot(page, variant)}>提升为顶层页面</button>}
     {actions.importInto && <button onClick={() => actions.importInto?.(page)}>导入文件到此页面下…</button>}

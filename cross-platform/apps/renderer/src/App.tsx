@@ -103,6 +103,7 @@ import {
   type RightPanel,
 } from './persistence/localLayout'
 import { keyHint } from './shell/keys'
+import type { SettingsPageId } from './settings/SettingsCenter'
 
 
 const emptyPage: PageSummary = { id: '', sectionId: '', title: '未选择页面', preview: '', updatedLabel: '', tags: [], kind: 'document' }
@@ -177,7 +178,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [transferMessage, setTransferMessage] = useState<string>()
   const [restoreToken, setRestoreToken] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsPage, setSettingsPage] = useState<'general' | 'data' | 'services'>('general')
+  const [settingsPage, setSettingsPage] = useState<SettingsPageId>('general')
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const closeSettings = useCallback(() => {
     setSettingsOpen(false)
@@ -429,10 +430,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       setTransferMessage('请先创建一个可用的笔记本和分区')
       return
     }
-    setActiveArea('notes')
-    setActiveNotebook(target.notebookId)
-    setActiveSection(target.sectionId)
-    void createPage(target.sectionId).then(setActivePage)
+    void createPage(target.sectionId).then((pageId) => { showNewPageRef.current(pageId, target.sectionId); focusEditor() })
   }), [createPage, notebooks])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
   useDesktopMigrationAndUpdates(syncNow, () => { setSettingsPage('general'); setSettingsOpen(true) })
@@ -446,6 +444,25 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   }, [loadDocument])
   const stopDocumentPrefetch = useCallback(() => clearTimeout(documentPrefetchTimer.current), [])
   const clearDropTarget = useCallback(() => setPageDropTarget(undefined), [])
+
+  const revealEditor = () => {
+    if (layout !== 'wide') setDrawerOpen(false)
+    if (layout === 'narrow') setStackView('editor')
+  }
+  // A page that was just created may not be in the library snapshot yet, so
+  // it is shown by id and section rather than looked up like openRecentPage.
+  const showNewPage = (pageId: string, sectionId: string, reveal = true) => {
+    const owner = notebooks.find((notebook) => notebook.sections.some((section) => section.id === sectionId))
+    setActiveArea('notes')
+    setActiveSection(sectionId)
+    if (owner) { setActiveNotebook(owner.id); setExpandedNotebook(owner.id) }
+    setActivePage(pageId)
+    setAssistant(undefined)
+    setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
+    if (reveal) revealEditor()
+  }
+  const showNewPageRef = useRef(showNewPage)
+  showNewPageRef.current = showNewPage
 
   const navigation = usePageNavigation({
     accessiblePages,
@@ -467,8 +484,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setPageHistory,
     setExpandedPageIds,
     onPageActivated: () => {
-      if (layout !== 'wide') setDrawerOpen(false)
-      if (layout === 'narrow') setStackView('editor')
+      // A note opened from anywhere (palette, links, AI, history) is shown
+      // the way a tree click shows it: the assistant and the To-dos or Trash
+      // list give way, and compact layouts bring the editor forward.
+      setAssistant(undefined)
+      setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
+      revealEditor()
     },
   })
   const { toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget } = navigation
@@ -572,8 +593,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     const pageId = await createPage(currentSection.id)
     await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
     await saveDocument(pageId, documentFromMarkdown(markdown))
-    setActiveArea('notes')
-    setActivePage(pageId)
+    showNewPage(pageId, currentSection.id)
   }
 
   const createNoteFromAssistant = async (title: string, markdown: string, target?: { sectionId: string; parentPageId?: string }) => {
@@ -647,8 +667,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       const documentJson = html ? htmlToDocument(html) : documentFromMarkdown(text)
       await updatePage(pageId, { title, preview: (parsed?.body.textContent ?? text).replace(/\s+/g, ' ').trim().slice(0, 180) })
       await saveDocument(pageId, documentJson)
-      setActiveArea('notes')
-      setActivePage(pageId)
+      showNewPage(pageId, currentSection.id)
       setTransferMessage('已从剪贴板剪藏为 Markdown；网页字体、颜色和布局已移除')
     } catch (error) {
       setTransferMessage(error instanceof Error ? error.message : '无法读取剪贴板')
@@ -698,7 +717,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     syncNow,
     chooseImport: () => chooseImport(transferContext),
     runExport: () => runExport(transferContext),
-    trashPage,
+    trashPage: (pageId) => {
+      const page = accessiblePages.find((candidate) => candidate.id === pageId)
+      if (page) listHandlersRef.current.remove(page)
+    },
     restorePage,
     purgePage,
     deleteNotebook,
@@ -707,6 +729,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setReferenceHelpOpen,
     setVimEnabled,
     setAiWorkspaceOpen,
+    openAssistant: () => openAssistant(),
     setFocusMode,
     setSettingsPage,
     setSettingsOpen,
@@ -881,7 +904,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       void trashPage(page.id).then((trashed) => {
         if (!trashed) return
         if (page.id === activePage && neighbor) listHandlersRef.current.open(neighbor, false)
-        showToast(`已将“${page.title || '无标题'}”移到回收站`, { action: { label: '撤销', run: () => { void restorePage(page.id).then(() => setActivePage(page.id)) } } })
+        // Undo selects the page together with its own section; the neighbor
+        // that was opened meanwhile may live in another one.
+        showToast(`已将“${page.title || '无标题'}”移到回收站`, { action: { label: '撤销', run: () => { void restorePage(page.id).then(() => {
+          if (page.kind === 'task') { setActiveArea('tasks'); setActivePage(page.id) }
+          else showNewPage(page.id, page.sectionId, false)
+        }) } } })
       }).catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法移到回收站', { kind: 'error' }))
     },
     menu: (page) => listScope.kind === 'trash' ? [
@@ -1070,6 +1098,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                   </div>
                 )
               })}
+              {activeDrive && !activeDrive.sections.some((section) => pagesBySection.get(section.id)?.length) && <button type="button" className="sidebar-more sidebar-drive-empty" onClick={() => { setActiveNotebook(activeDrive.id); setCreateRequest('rootPage') }}>还没有页面 · 新建页面</button>}
               {activeDrive && <div className="sidebar-drive-tree" role="group" aria-label={activeDrive.name}>
                 {activeDrive && activeDrive.sections.map((section) => {
                   const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
@@ -1234,7 +1263,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           loadDocument={loadDocument}
           openPage={(pageId) => { setAssistant(undefined); setBrowse('tree'); openRecentPage(pageId) }}
           createNote={createNoteFromAssistant}
-          openAISettings={() => { setSettingsPage('services'); setSettingsOpen(true) }}
+          openAISettings={() => { setSettingsPage('automation'); setSettingsOpen(true) }}
           applyPlan={async (groups, onProgress) => {
             try { return await applyPlan(groups, planApi, onProgress) } finally { await reloadWorkspace() }
           }}
@@ -1251,7 +1280,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               </div>
               </>}
             </div>
-            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
+            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return
+              // Enter keeps the new title and returns to the text; Escape gives it up.
+              if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); focusEditor() }
+              else if (event.key === 'Escape') { event.currentTarget.value = currentPage.title; event.currentTarget.blur() }
+            }} onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
             <div className="editor-actions">
               {activeArea === 'notes' && hasActivePage && <>
                 <div className="page-utilities"><Suspense fallback={null}><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} currentMarkdown={documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} create={async (pageId) => { const current = documents[pageId]; if (current) await saveDocument(pageId, current); return createManualRevision(pageId) }} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></Suspense></div>
@@ -1260,7 +1294,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 <button type="button" className="toolbar-icon-button" aria-label="插入双链" title="插入双链" onClick={() => setReferencePickerOpen(true)}><Link20Regular /></button>
                 <button type="button" className={`vim-chip ${vimEnabled ? 'enabled' : ''} ${vimEnabled && vimCommandMode ? 'selected' : ''}`} aria-pressed={vimEnabled} title={vimEnabled ? vimCommandMode ? 'Vim NORMAL：i 进入编辑，点击关闭 Vim' : 'Vim INSERT：Esc 返回普通模式，点击关闭 Vim' : '启用 Vim 模式'} onClick={() => setVimEnabled((value) => { const next = !value; setVimCommandMode(next); return next })}>Vim</button>
               </>}
-              <button type="button" className="toolbar-icon-button" aria-label="AI" title="用 AI 处理这篇笔记（含子笔记）" onClick={() => openAssistant({ ...emptyScope(), pageIds: [currentPage.id] })}><Bot20Regular /></button>
+              {activeArea === 'notes' && hasActivePage && <button type="button" className="toolbar-icon-button" aria-label="AI" title="用 AI 处理这篇笔记（含子笔记）" onClick={() => openAssistant({ ...emptyScope(), pageIds: [currentPage.id] })}><Bot20Regular /></button>}
               <ActionMenu label="更多操作" trigger={<button type="button" className="toolbar-icon-button" aria-label="更多操作" title="更多操作"><MoreHorizontal20Regular /></button>}>
                 {activeArea === 'notes' && hasActivePage && <>
                   <button onClick={() => void updatePage(currentPage.id, { favorite: !currentPage.favorite })}>{currentPage.favorite ? '取消置顶' : '置顶'}</button>
@@ -1274,7 +1308,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 <button className={themePreference === 'light' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('light')}>浅色</button>
                 <button className={themePreference === 'dark' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('dark')}>深色</button>
                 <button className={themePreference === 'system' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('system')}>跟随系统</button>
-                {activeArea === 'notes' && hasActivePage && <>
+                {(activeArea === 'notes' || activeArea === 'tasks') && hasActivePage && <>
                   <ActionMenuDivider />
                   <button className="destructive-menu-item" onClick={() => listHandlersRef.current.remove(currentPage)}>移到回收站</button>
                 </>}
@@ -1283,7 +1317,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           </div>
           <section className="document-surface">
             {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>此笔记存在尚未处理的同步冲突</strong><span>本机内容未被覆盖。请到“设置 → 同步状态与修复”处理；继续编辑不会自动解决冲突。</span></div>}
-            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { void restorePage(currentPage.id).then(() => { chooseScope({ kind: 'all' }); setActivePage(currentPage.id) }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
+            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { const page = currentPage; void restorePage(page.id).then(() => {
+                  if (page.kind === 'task') { chooseScope({ kind: 'tasks' }); setActivePage(page.id) }
+                  else { chooseScope({ kind: 'all' }); showNewPage(page.id, page.sectionId) }
+                }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
                   if (!(await requestConfirm({ title: `永久删除“${currentPage.title}”？`, description: '永久删除后无法恢复，确定继续吗？', confirmLabel: '永久删除', destructive: true }))) return
                   try {
                     await purgePage(currentPage.id)
@@ -1393,7 +1430,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       /></Suspense>
       {referenceHelpOpen && <Suspense fallback={null}><ReferenceHelpDialog onClose={() => setReferenceHelpOpen(false)} /></Suspense>}
       {createRequest && <CreateItemDialog kind={createRequest} onClose={() => setCreateRequest(undefined)} onCreate={async (name) => {
-        if (createRequest === 'notebook') { const notebookId = await createNotebook(name); setActiveNotebook(notebookId); setExpandedNotebook(notebookId) }
+        if (createRequest === 'notebook') chooseScope({ kind: 'notebook', id: await createNotebook(name) })
         else {
           const created = await createSection(activeNotebook, name)
           setActiveSection(created.sectionId)
@@ -1418,7 +1455,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onFile={fileInboxItems}
         onOpenPage={(pageId) => { inbox.close(); setAssistant(undefined); setBrowse('tree'); openRecentPage(pageId) }}
         onClose={inbox.close}
-        openAISettings={() => { setSettingsPage('services'); setSettingsOpen(true) }}
+        openAISettings={() => { setSettingsPage('automation'); setSettingsOpen(true) }}
       />}
       {textImport && <ImportDialog
         files={textImport.files}

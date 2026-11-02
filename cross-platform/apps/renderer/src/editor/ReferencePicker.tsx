@@ -5,6 +5,7 @@ import { Document20Regular, Search20Regular } from '@fluentui/react-icons'
 import type { PageSummary } from '../model'
 import { createReferenceId, type NotebookReferenceTarget } from '@notebook/sync-contract'
 import { insertNotebookReference } from './referenceCommands'
+import { closeOnEscape } from '../components/dialogKeys'
 
 type ContentNode = { type?: string; attrs?: Record<string, unknown>; text?: string; content?: ContentNode[] }
 type Candidate = {
@@ -233,7 +234,7 @@ export function ReferencePicker({
   }
 
   return <div className="settings-backdrop reference-picker-backdrop" role="presentation">
-    <section className="settings-dialog reference-picker" role="dialog" aria-modal="true" aria-label="插入双链">
+    <section className="settings-dialog reference-picker" role="dialog" aria-modal="true" aria-label="插入双链" onKeyDown={closeOnEscape(onClose)}>
       <header><div><h2>插入双链</h2><p>可链接或嵌入整篇、单个内容块、连续内容；动态显示会随原文更新。</p></div><Button appearance="subtle" onClick={onClose}>取消</Button></header>
       <div className="reference-picker-options">
         <label><input type="radio" checked={embed} onChange={() => setEmbed(true)} /> 嵌入原文内容</label>
