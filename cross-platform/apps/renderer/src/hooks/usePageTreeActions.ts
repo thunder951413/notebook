@@ -4,10 +4,10 @@ import type { NotebookSummary, PageSummary } from '../model'
 import { descendantsOf } from '../pageTree'
 import { PAGE_TREE_DRAG_TYPE } from '../persistence/localLayout'
 import type { PageTreeDropTarget } from '../components/PageTreeRow'
+import type { OpenPageOptions } from './usePageNavigation'
 
 export interface PageTreeActionOptions {
   accessiblePages: PageSummary[]
-  notebooks: NotebookSummary[]
   currentSection: { id: string } | undefined
   currentNotebook: NotebookSummary | undefined
   expandedPageIds: Set<string>
@@ -19,9 +19,8 @@ export interface PageTreeActionOptions {
   promotePageToNotebookRoot: (pageId: string, targetRootPageId?: string, position?: 'before' | 'after') => Promise<string>
   reorderNotebookRoot: (pageId: string, targetRootPageId: string, position: 'before' | 'after') => Promise<string | undefined>
   setActivePage: Dispatch<SetStateAction<string>>
-  setActiveSection: Dispatch<SetStateAction<string>>
-  setActiveNotebook: Dispatch<SetStateAction<string>>
-  setExpandedNotebook: Dispatch<SetStateAction<string | undefined>>
+  /** Selects a page together with its notebook (App's `openPage`). */
+  openPage: (pageId: string, options?: OpenPageOptions) => void
   setExpandedPageIds: Dispatch<SetStateAction<Set<string>>>
   setPageDropTarget: Dispatch<SetStateAction<PageTreeDropTarget | undefined>>
   /** Receives failed drag-and-drop moves so hosts can surface them to the user. */
@@ -65,19 +64,15 @@ export function usePageTreeActions(options: PageTreeActionOptions) {
       : currentSection?.id
     if (!sectionId) return
     const id = await optionsRef.current.createPage(sectionId, 'document', parentPageId)
-    optionsRef.current.setActiveSection(sectionId)
     if (parentPageId) optionsRef.current.setExpandedPageIds((current) => new Set([...current, parentPageId]))
-    optionsRef.current.setActivePage(id)
+    optionsRef.current.openPage(id, { sectionId, kind: 'document', trash: false })
   }, [])
 
   const createTopLevelPage = useCallback(async (name = '无标题页面') => {
     const currentNotebook = optionsRef.current.currentNotebook
     if (!currentNotebook) return
     const created = await optionsRef.current.createSection(currentNotebook.id, name)
-    optionsRef.current.setActiveNotebook(currentNotebook.id)
-    optionsRef.current.setExpandedNotebook(currentNotebook.id)
-    optionsRef.current.setActiveSection(created.sectionId)
-    optionsRef.current.setActivePage(created.pageId)
+    optionsRef.current.openPage(created.pageId, { sectionId: created.sectionId, kind: 'document', trash: false })
   }, [])
 
   const setDropPosition = useCallback((event: ReactDragEvent<HTMLElement>, pageId: string) => {
@@ -89,21 +84,21 @@ export function usePageTreeActions(options: PageTreeActionOptions) {
   }, [])
 
   const movePageRelative = useCallback(async (sourceId: string, target: PageSummary, position: 'before' | 'inside' | 'after') => {
-    const { accessiblePages, notebooks } = optionsRef.current
+    const { accessiblePages } = optionsRef.current
     if (!sourceId || sourceId === target.id) return
     const source = accessiblePages.find((page) => page.id === sourceId)
     if (!source || descendantsOf(accessiblePages, sourceId).has(target.id)) return
-    const targetOwner = notebooks.find((notebook) => notebook.sections.some((section) => section.id === target.sectionId))
+    // The open page follows itself to its new place (notebook and list);
+    // moving another page leaves the selection alone.
+    const followMoved = (sectionId: string | undefined) => {
+      if (sectionId && sourceId === optionsRef.current.activePage) optionsRef.current.openPage(sourceId, { sectionId, kind: 'document', trash: false, reveal: false })
+    }
     if (source.notebookRoot && target.notebookRoot && position !== 'inside') {
-      const sectionId = await optionsRef.current.reorderNotebookRoot(sourceId, target.id, position)
-      if (sectionId) optionsRef.current.setActiveSection(sectionId)
-      if (targetOwner) { optionsRef.current.setActiveNotebook(targetOwner.id); optionsRef.current.setExpandedNotebook(targetOwner.id) }
+      followMoved(await optionsRef.current.reorderNotebookRoot(sourceId, target.id, position))
       return
     }
     if (!source.notebookRoot && target.notebookRoot && position !== 'inside') {
-      const sectionId = await optionsRef.current.promotePageToNotebookRoot(sourceId, target.id, position)
-      optionsRef.current.setActiveSection(sectionId)
-      if (targetOwner) { optionsRef.current.setActiveNotebook(targetOwner.id); optionsRef.current.setExpandedNotebook(targetOwner.id) }
+      followMoved(await optionsRef.current.promotePageToNotebookRoot(sourceId, target.id, position))
       return
     }
     const parentPageId = position === 'inside' ? target.id : target.parentPageId
@@ -126,8 +121,7 @@ export function usePageTreeActions(options: PageTreeActionOptions) {
     }
     await optionsRef.current.movePageInTree(sourceId, sectionId, parentPageId, sortOrder)
     if (parentPageId) optionsRef.current.setExpandedPageIds((current) => new Set([...current, parentPageId!]))
-    optionsRef.current.setActiveSection(sectionId)
-    if (targetOwner) { optionsRef.current.setActiveNotebook(targetOwner.id); optionsRef.current.setExpandedNotebook(targetOwner.id) }
+    followMoved(sectionId)
   }, [])
 
   const dropPage = useCallback(async (event: ReactDragEvent<HTMLElement>, target: PageSummary) => {

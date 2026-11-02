@@ -1,36 +1,41 @@
 import { useCallback, useRef } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { NotebookSummary, PageSummary } from '../model'
+import type { PageSummary } from '../model'
 import type { PageVisitHistory } from '../pageVisitHistory'
 import { pageVisitTarget } from '../pageVisitHistory'
 
+/** How a page is opened; see `openPage` in App. */
+export interface OpenPageOptions {
+  /** The page's section, for a page that is not in the library snapshot yet or has just moved. */
+  sectionId?: string
+  /** The page's kind when it is not in the snapshot yet. */
+  kind?: 'document' | 'task'
+  /** Whether the page is in the Trash; by default looked up in the snapshot. */
+  trash?: boolean
+  /** Bring the editor forward on compact layouts (default true). */
+  reveal?: boolean
+  /** Put the cursor in the note's text. */
+  focus?: boolean
+}
+
 export interface PageNavigationOptions {
   accessiblePages: PageSummary[]
-  accessibleTrashPages: PageSummary[]
   accessibleDocumentPageIds: Set<string>
   activeArea: string
-  activeSection: string
   navigationOpen: boolean
   pageHistory: PageVisitHistory
-  notebooks: NotebookSummary[]
-  setActiveArea: Dispatch<SetStateAction<string>>
-  setActivePage: Dispatch<SetStateAction<string>>
-  setActiveSection: Dispatch<SetStateAction<string>>
-  setActiveNotebook: Dispatch<SetStateAction<string>>
-  setExpandedNotebook: Dispatch<SetStateAction<string | undefined>>
   setNavOpen: Dispatch<SetStateAction<boolean>>
   setPagesOpen: Dispatch<SetStateAction<boolean>>
-  setQuery: Dispatch<SetStateAction<string>>
   setPageHistory: Dispatch<SetStateAction<PageVisitHistory>>
   setExpandedPageIds: Dispatch<SetStateAction<Set<string>>>
-  /** Lets compact layouts close their drawer or switch to the editor. */
-  onPageActivated?: () => void
+  /** The one way a page is selected: App's `openPage`. */
+  openPage: (pageId: string, options?: OpenPageOptions) => void
 }
 
 /**
- * Navigation actions shared by the rail, page tree, history buttons and the
- * command palette. All of them resolve a target page through the accessible
- * page set and keep notebook/section/page state consistent.
+ * Navigation actions shared by the page tree, history buttons, links and the
+ * command palette. Selecting the page itself is App's `openPage`; this adds
+ * history, tree expansion and pane toggling around it.
  *
  * Callbacks read the latest options through a ref so their identity stays
  * stable across renders; tree rows and rail buttons can therefore be memoized.
@@ -39,25 +44,6 @@ export function usePageNavigation(options: PageNavigationOptions) {
   const optionsRef = useRef(options)
   optionsRef.current = options
   const historyNavigationTarget = useRef<string | undefined>(undefined)
-
-  const selectArea = useCallback((area: 'notes' | 'tasks' | 'trash') => {
-    const current = optionsRef.current
-    current.setActiveArea(area)
-    current.setQuery('')
-    if (area === 'notes') {
-      const firstPage = current.accessiblePages.find((page) => page.kind !== 'task' && page.sectionId === current.activeSection)
-      if (firstPage) current.setActivePage(firstPage.id)
-      return
-    }
-    if (area === 'tasks') {
-      current.setPagesOpen(true)
-      const firstTask = current.accessiblePages.find((page) => page.kind === 'task')
-      if (firstTask) current.setActivePage(firstTask.id)
-      return
-    }
-    current.setPagesOpen(true)
-    if (current.accessibleTrashPages[0]) current.setActivePage(current.accessibleTrashPages[0].id)
-  }, [])
 
   const toggleNavigation = useCallback(() => {
     const current = optionsRef.current
@@ -70,16 +56,11 @@ export function usePageNavigation(options: PageNavigationOptions) {
     if (current.activeArea === 'notes') current.setNavOpen(true)
   }, [])
 
+  /** Opens a page from the library by id; ids it cannot see are ignored. */
   const openRecentPage = useCallback((pageId: string) => {
     const current = optionsRef.current
-    const page = current.accessiblePages.find((candidate) => candidate.id === pageId)
-    if (!page) return
-    const notebook = current.notebooks.find((candidate) => candidate.sections.some((section) => section.id === page.sectionId))
-    current.setActiveArea('notes')
-    current.setActivePage(page.id)
-    current.setActiveSection(page.sectionId)
-    if (notebook) { current.setActiveNotebook(notebook.id); current.setExpandedNotebook(notebook.id) }
-    current.onPageActivated?.()
+    if (!current.accessiblePages.some((candidate) => candidate.id === pageId)) return
+    current.openPage(pageId)
   }, [])
 
   const navigatePageHistory = useCallback((direction: -1 | 1) => {
@@ -91,24 +72,15 @@ export function usePageNavigation(options: PageNavigationOptions) {
     openRecentPage(result.pageId)
   }, [openRecentPage])
 
-  const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean, _closeOnNarrow: 'navigation' | 'pages') => {
+  const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean) => {
     const current = optionsRef.current
-    // A page from the notebook tree is a note, even when To-dos or Trash was
-    // the last thing selected; otherwise the editor kept showing the To-dos
-    // placeholder ("选择一项待办").
-    current.setActiveArea('notes')
-    current.setActivePage(page.id)
-    current.setActiveSection(page.sectionId)
-    const owner = current.notebooks.find((notebook) => notebook.sections.some((section) => section.id === page.sectionId))
-    if (owner) {
-      current.setActiveNotebook(owner.id)
-      current.setExpandedNotebook(owner.id)
-    }
     if (hasChildren) {
       current.setExpandedPageIds((currentIds) => currentIds.has(page.id) ? currentIds : new Set([...currentIds, page.id]))
     }
-    current.onPageActivated?.()
+    // A page from the notebook tree is a note, even when To-dos or Trash was
+    // the last thing selected; openPage leaves those lists.
+    current.openPage(page.id, { sectionId: page.sectionId, kind: 'document', trash: false })
   }, [])
 
-  return { selectArea, toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget }
+  return { toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget }
 }

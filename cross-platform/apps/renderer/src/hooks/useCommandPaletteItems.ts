@@ -6,6 +6,7 @@ import type { NotebookSummary, PageSummary } from '../model'
 import type { LegacySyncMode } from '../sync/legacySshSync'
 import { keyHint } from '../shell/keys'
 import type { SettingsPageId } from '../settings/SettingsCenter'
+import type { OpenPageOptions } from './usePageNavigation'
 
 export const syncLabels = { offline: '仅保存在本机', syncing: '正在同步', synced: '同步完成', conflict: '同步冲突', error: '同步失败' } as const
 
@@ -29,7 +30,8 @@ export interface CommandPaletteOptions {
   createPageFromMarkdown: (title: string, markdown: string) => Promise<void>
   clipFromClipboard: () => Promise<void>
   selectArea: (area: 'notes' | 'tasks' | 'trash') => void
-  openRecentPage: (pageId: string) => void
+  /** Selects a page with its notebook and list (App's `openPage`). */
+  openPage: (pageId: string, options?: OpenPageOptions) => void
   toggleNavigation: () => void
   syncNow: (options?: { signal?: AbortSignal; force?: boolean; mode?: LegacySyncMode; scope?: { pageId: string } }) => Promise<boolean>
   chooseImport: () => void
@@ -48,9 +50,7 @@ export interface CommandPaletteOptions {
   setFocusMode: Dispatch<SetStateAction<boolean>>
   setSettingsPage: Dispatch<SetStateAction<SettingsPageId>>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
-  setActiveArea: Dispatch<SetStateAction<string>>
   setActivePage: Dispatch<SetStateAction<string>>
-  setPagesOpen: Dispatch<SetStateAction<boolean>>
 }
 
 /**
@@ -70,7 +70,7 @@ export function useCommandPaletteItems(options: CommandPaletteOptions) {
 
   const paletteItems: PaletteItem[] = (() => {
     const commands: Array<PaletteItem | false | undefined> = [
-      currentSection && activeArea === 'notes' && { id: 'command:new-page', group: 'command', title: '新建页面', subtitle: currentSection.name, keywords: '笔记 新建 markdown', run: () => { void options.createPage(currentSection.id).then(options.setActivePage) } },
+      currentSection && activeArea === 'notes' && { id: 'command:new-page', group: 'command', title: '新建页面', subtitle: currentSection.name, keywords: '笔记 新建 markdown', run: () => { void options.createPage(currentSection.id).then((id) => options.openPage(id, { sectionId: currentSection.id, kind: 'document', trash: false, focus: true })) } },
       currentSection && activeArea === 'notes' && { id: 'command:daily-note', group: 'command', title: '打开今天的日记', subtitle: '同一天只创建一篇', keywords: '每日笔记 日记 journal daily', run: () => { void options.openDailyNote() } },
       currentSection && activeArea === 'notes' && { id: 'command:template-meeting', group: 'command', title: '从模板新建会议记录', subtitle: '议题、结论、行动项', keywords: '模板 template meeting', run: () => { void options.createPageFromMarkdown('会议记录', `## 会议信息
 
@@ -102,7 +102,7 @@ export function useCommandPaletteItems(options: CommandPaletteOptions) {
 - [ ]
 `) } },
       currentSection && activeArea === 'notes' && { id: 'command:web-clip', group: 'command', title: '从剪贴板剪藏网页', subtitle: '保留正文结构，移除网页字体、颜色和布局', keywords: '网页剪藏 clipboard html markdown', run: () => { void options.clipFromClipboard() } },
-      currentSection && { id: 'command:new-task', group: 'command', title: '新建任务', subtitle: currentSection.name, keywords: '待办 todo', run: () => { options.selectArea('tasks'); void options.createPage(currentSection.id, 'task').then(options.setActivePage) } },
+      currentSection && { id: 'command:new-task', group: 'command', title: '新建任务', subtitle: currentSection.name, keywords: '待办 todo', run: () => { void options.createPage(currentSection.id, 'task').then((id) => options.openPage(id, { sectionId: currentSection.id, kind: 'task', trash: false })) } },
       { id: 'command:new-notebook', group: 'command', title: '新建笔记本', keywords: '工作区', run: () => options.setCreateRequest('notebook') },
       currentNotebook && (!currentNotebook.locked || options.privacyUnlocked) && { id: 'command:new-section', group: 'command', title: '新建顶层页面', subtitle: currentNotebook.name, keywords: '根页面 文件夹 分类', run: () => options.setCreateRequest('rootPage') },
       { id: 'command:sync', group: 'command', title: options.syncState === 'syncing' ? '正在同步' : '立即同步', subtitle: syncLabels[options.syncState], keywords: '坚果云 webdav 推送 拉取 上传 下载', run: () => { if (options.syncState !== 'syncing') void options.syncNow({ force: true }) } },
@@ -121,7 +121,7 @@ export function useCommandPaletteItems(options: CommandPaletteOptions) {
       { id: 'command:export', group: 'command', title: '导出完整备份', keywords: '备份 zip', run: () => { void options.runExport() } },
       // Not marked dangerous: the move can be undone from the toast, and trashPage asks itself when links or sub-pages are affected.
       hasActivePage && activeArea !== 'trash' && { id: 'command:delete-page', group: 'command', title: '将当前页面移到回收站', subtitle: currentPage.title, keywords: '删除 笔记 任务', run: () => options.trashPage(currentPage.id) },
-      hasActivePage && activeArea === 'trash' && { id: 'command:restore-page', group: 'command', title: '恢复当前页面', subtitle: currentPage.title, keywords: '撤销 删除', run: () => { void options.restorePage(currentPage.id).then(() => { options.selectArea('notes'); options.setActivePage(currentPage.id) }) } },
+      hasActivePage && activeArea === 'trash' && { id: 'command:restore-page', group: 'command', title: '恢复当前页面', subtitle: currentPage.title, keywords: '撤销 删除', run: () => { void options.restorePage(currentPage.id).then(() => options.openPage(currentPage.id, { sectionId: currentPage.sectionId, kind: currentPage.kind === 'task' ? 'task' : 'document', trash: false })) } },
       hasActivePage && activeArea === 'trash' && { id: 'command:purge-page', group: 'command', title: '永久删除当前页面', subtitle: currentPage.title, keywords: '彻底 清除', dangerous: true, confirmDescription: `“${currentPage.title}”及其历史和附件引用将被永久删除，无法恢复。`, confirmLabel: '永久删除', run: () => { void options.purgePage(currentPage.id).then(() => options.setActivePage(accessibleTrashPages.find((page) => page.id !== currentPage.id)?.id ?? accessiblePages[0]?.id ?? '')) } },
       currentNotebook && activeArea === 'notes' && (!currentNotebook.locked || options.privacyUnlocked) && { id: 'command:delete-notebook', group: 'command', title: '删除当前笔记本及全部内容', subtitle: currentNotebook.name, keywords: '工作区 永久', dangerous: true, confirmDescription: `“${currentNotebook.name}”中的全部分区、页面、任务、附件和历史版本都会被删除，无法撤销。`, confirmLabel: '删除整个笔记本', run: () => { void options.deleteNotebook(currentNotebook.id) } },
     ]
@@ -134,8 +134,7 @@ export function useCommandPaletteItems(options: CommandPaletteOptions) {
       keywords: `${page.preview} ${page.tags.join(' ')}`,
       recent: recentOrder.has(page.id),
       run: () => {
-        if (page.kind === 'task') { options.selectArea('tasks'); options.setActivePage(page.id) }
-        else options.openRecentPage(page.id)
+        options.openPage(page.id)
       },
     }))
     const openSettings = (page: SettingsPageId) => { options.setSettingsPage(page); options.setSettingsOpen(true) }

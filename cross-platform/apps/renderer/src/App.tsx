@@ -36,7 +36,7 @@ import { useNoteListBrowse } from './hooks/useNoteListBrowse'
 import { useLifecycleSync } from './hooks/useLifecycleSync'
 import { useDesktopMigrationAndUpdates } from './hooks/useDesktopMigrationAndUpdates'
 import { FullTextSearch, OPEN_FULL_TEXT_SEARCH_EVENT, findInDocument, openFullTextSearch } from './search/FullTextSearch'
-import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
+import { useWorkspaceData, WORKSPACE_ID, automationRepository, STARTUP_NOTEBOOK_ID, STARTUP_PAGE_ID } from './data/useWorkspaceData'
 import type { ImportFile } from './data/transfer'
 import { useReminders } from './tasks/useReminders'
 import { documentToMarkdown, htmlToDocument } from './editor/extensions'
@@ -88,7 +88,7 @@ import './shell/shell.css'
 import { PrivacyPasswordDialog } from './components/PrivacyPasswordDialog'
 import { RenameItemDialog } from './components/RenameItemDialog'
 import { syncLabels, useCommandPaletteItems } from './hooks/useCommandPaletteItems'
-import { usePageNavigation } from './hooks/usePageNavigation'
+import { usePageNavigation, type OpenPageOptions } from './hooks/usePageNavigation'
 import { usePageTreeActions } from './hooks/usePageTreeActions'
 import { chooseImport, runEncryptedExport, runExport, runImport, saveCurrentDocument, type FileTransferContext } from './data/fileTransfer'
 import {
@@ -142,9 +142,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   }), [pages])
   const documentPrefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [activeArea, setActiveArea] = useState('notes')
+  // The notebook shown as the sidebar's drive; it follows the open note. The
+  // section is not stored: it is always the open page's own (see currentSection).
   const [activeNotebook, setActiveNotebook] = useState(STARTUP_NOTEBOOK_ID)
-  const [expandedNotebook, setExpandedNotebook] = useState<string | undefined>(STARTUP_NOTEBOOK_ID)
-  const [activeSection, setActiveSection] = useState(STARTUP_SECTION_ID)
   const [activePage, setActivePage] = useState(() => new URLSearchParams(location.hash.slice(1)).get('page') ?? STARTUP_PAGE_ID)
   const [pageHistory, setPageHistory] = useState(emptyPageVisitHistory)
   const activePageRef = useRef(activePage)
@@ -235,6 +235,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       )))
   }, [automationProposals, notebooks, pages])
   useReminders(accessiblePages, (pageId, patch) => updatePage(pageId, patch))
+  const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, recentCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
 
   useEffect(() => {
     useAbcInputSourceForVimNormal(vimEnabled, vimCommandMode)
@@ -267,7 +268,16 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     }
     return map
   }, [accessiblePages])
-  const sectionPages = useMemo(() => pagesBySection.get(activeSection) ?? emptyPageList, [activeSection, pagesBySection])
+  const currentPage = useMemo(() => [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0] ?? emptyPage, [activePage, accessiblePages, accessibleTrashPages])
+  const hasCurrentPage = Boolean(currentPage.id)
+  const currentNotebook = notebooks.find((notebook) => notebook.id === activeNotebook) ?? notebooks[0]
+  // The notebook that holds the open page, for the breadcrumb and the list
+  // scope; activeNotebook can differ while an empty notebook is chosen.
+  const pageNotebook = hasCurrentPage ? notebookBySection.get(currentPage.sectionId) : undefined
+  // Where new notes and to-dos go: the open page's section, else the chosen notebook's first.
+  const currentSection = (pageNotebook?.sections.find((section) => section.id === currentPage.sectionId)) ?? currentNotebook?.sections[0]
+  const activeSection = currentSection?.id ?? ''
+  const sectionPages = useMemo(() => pagesBySection.get(currentPage.sectionId) ?? emptyPageList, [currentPage.sectionId, pagesBySection])
   // Per-section descendant counts, merged into one map. Rows render the badge
   // from this instead of walking the subtree on every render.
   const pageDescendantCounts = useMemo(() => {
@@ -278,13 +288,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return merged
   }, [pagesBySection])
 
-  const currentPage = useMemo(() => [...accessiblePages, ...accessibleTrashPages].find((page) => page.id === activePage) ?? accessiblePages[0] ?? accessibleTrashPages[0] ?? emptyPage, [activePage, accessiblePages, accessibleTrashPages])
-  const hasCurrentPage = Boolean(currentPage.id)
   const currentDocument = documents[currentPage.id]
-  const currentNotebook = notebooks.find((notebook) => notebook.id === activeNotebook) ?? notebooks[0]
-  const currentSection = notebooks.flatMap((notebook) => notebook.sections).find((section) => section.id === activeSection)
+  // A chosen notebook that does not hold the open note (an empty one) shows
+  // its own empty state instead of a note from elsewhere.
+  const pageOutsideNotebook = listScope.kind === 'notebook' && pageNotebook?.id !== listScope.id
   const hasActivePage = hasCurrentPage && (activeArea === 'notes'
-    ? accessiblePages.some((page) => page.id === currentPage.id && page.kind !== 'task' && page.sectionId === activeSection)
+    ? !pageOutsideNotebook && accessiblePages.some((page) => page.id === currentPage.id && page.kind !== 'task')
     : activeArea === 'tasks'
       ? accessiblePages.some((page) => page.id === currentPage.id && page.kind === 'task')
       : accessibleTrashPages.some((page) => page.id === currentPage.id))
@@ -424,14 +433,52 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [focusMode])
 
+  const revealEditor = () => {
+    if (layout !== 'wide') setDrawerOpen(false)
+    if (layout === 'narrow') setStackView('editor')
+  }
+  /**
+   * The one way a page gets selected: from the list, tree, palette, links,
+   * search, AI, history, a new note, undo or restore. The area (notes, to-dos,
+   * trash) and the notebook follow from the page; the list leaves a scope the
+   * page cannot appear in; the assistant gives way; compact layouts bring the
+   * editor forward. A page that was just created (or moved) may not be in the
+   * library snapshot yet, so callers pass what they know about it.
+   */
+  const openPageNow = (pageId: string, options: OpenPageOptions = {}) => {
+    const known = accessiblePages.find((page) => page.id === pageId)
+    const inTrash = options.trash ?? (!known && accessibleTrashPages.some((page) => page.id === pageId))
+    const page = known ?? accessibleTrashPages.find((candidate) => candidate.id === pageId)
+    const kind = options.kind ?? page?.kind ?? 'document'
+    const sectionId = options.sectionId ?? page?.sectionId
+    const owner = sectionId ? notebookBySection.get(sectionId) : undefined
+    const area = inTrash ? 'trash' : kind === 'task' ? 'tasks' : 'notes'
+    setActiveArea(area)
+    setActivePage(pageId)
+    setAssistant(undefined)
+    if (area === 'notes' && owner) setActiveNotebook(owner.id)
+    setScope((current) => {
+      if (area === 'notes') {
+        if (current.kind === 'tasks' || current.kind === 'trash') return { kind: 'all' }
+        if (current.kind === 'notebook' && owner && current.id !== owner.id) return { kind: 'notebook', id: owner.id }
+      } else if (area === 'tasks' && (current.kind === 'trash' || current.kind === 'notebook')) return { kind: 'tasks' }
+      return current
+    })
+    if (options.reveal !== false) revealEditor()
+    if (options.focus && kind !== 'task' && !inTrash) focusEditor()
+  }
+  const openPageRef = useRef(openPageNow)
+  openPageRef.current = openPageNow
+  const openPage = useCallback((pageId: string, options?: OpenPageOptions) => openPageRef.current(pageId, options), [])
+
   useEffect(() => window.notebookDesktop?.events.onQuickCapture(() => {
     const target = findQuickCaptureTarget(notebooks)
     if (!target) {
       setTransferMessage('请先创建一个可用的笔记本和分区')
       return
     }
-    void createPage(target.sectionId).then((pageId) => { showNewPageRef.current(pageId, target.sectionId); focusEditor() })
-  }), [createPage, notebooks])
+    void createPage(target.sectionId).then((pageId) => openPage(pageId, { sectionId: target.sectionId, kind: 'document', trash: false, focus: true }))
+  }), [createPage, notebooks, openPage])
   useEffect(() => window.notebookDesktop?.events.onCommandPalette(() => setCommandPaletteOpen(true)), [])
   useDesktopMigrationAndUpdates(syncNow, () => { setSettingsPage('general'); setSettingsOpen(true) })
 
@@ -445,52 +492,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const stopDocumentPrefetch = useCallback(() => clearTimeout(documentPrefetchTimer.current), [])
   const clearDropTarget = useCallback(() => setPageDropTarget(undefined), [])
 
-  const revealEditor = () => {
-    if (layout !== 'wide') setDrawerOpen(false)
-    if (layout === 'narrow') setStackView('editor')
-  }
-  // A page that was just created may not be in the library snapshot yet, so
-  // it is shown by id and section rather than looked up like openRecentPage.
-  const showNewPage = (pageId: string, sectionId: string, reveal = true) => {
-    const owner = notebooks.find((notebook) => notebook.sections.some((section) => section.id === sectionId))
-    setActiveArea('notes')
-    setActiveSection(sectionId)
-    if (owner) { setActiveNotebook(owner.id); setExpandedNotebook(owner.id) }
-    setActivePage(pageId)
-    setAssistant(undefined)
-    setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
-    if (reveal) revealEditor()
-  }
-  const showNewPageRef = useRef(showNewPage)
-  showNewPageRef.current = showNewPage
 
   const navigation = usePageNavigation({
     accessiblePages,
-    accessibleTrashPages,
     accessibleDocumentPageIds,
     activeArea,
-    activeSection,
     navigationOpen,
     pageHistory,
-    notebooks,
-    setActiveArea,
-    setActivePage,
-    setActiveSection,
-    setActiveNotebook,
-    setExpandedNotebook,
     setNavOpen,
     setPagesOpen,
-    setQuery,
     setPageHistory,
     setExpandedPageIds,
-    onPageActivated: () => {
-      // A note opened from anywhere (palette, links, AI, history) is shown
-      // the way a tree click shows it: the assistant and the To-dos or Trash
-      // list give way, and compact layouts bring the editor forward.
-      setAssistant(undefined)
-      setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
-      revealEditor()
-    },
+    openPage,
   })
   const { toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget } = navigation
   useEffect(() => {
@@ -504,7 +517,6 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   const treeActions = usePageTreeActions({
     accessiblePages,
-    notebooks,
     currentSection,
     currentNotebook,
     expandedPageIds,
@@ -516,9 +528,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     promotePageToNotebookRoot,
     reorderNotebookRoot,
     setActivePage,
-    setActiveSection,
-    setActiveNotebook,
-    setExpandedNotebook,
+    openPage,
     setExpandedPageIds,
     setPageDropTarget,
     onMoveError: (message) => showToast(message, { kind: 'error' }),
@@ -557,14 +567,14 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     },
     changeIcon: (page) => setIconPickerPage(page),
     updatePageProps: (page, patch) => { void updatePage(page.id, patch) },
-    duplicatePage: (page) => { void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) }) },
+    duplicatePage: (page) => { void duplicatePage(page.id).then((id) => openPage(id, { sectionId: page.sectionId, kind: 'document', trash: false })) },
     promoteToRoot: (page, variant) => {
       if (variant === 'pages') {
-        const roots = sectionPages.filter((item) => !item.parentPageId && item.id !== page.id)
+        const roots = (pagesBySection.get(page.sectionId) ?? emptyPageList).filter((item) => !item.parentPageId && item.id !== page.id)
         void movePageInTree(page.id, page.sectionId, undefined, Math.max(0, ...roots.map((item) => item.sortOrder ?? 0)) + 1000)
         return
       }
-      void promotePageToNotebookRoot(page.id).then((sectionId) => { setActivePage(page.id); setActiveSection(sectionId) })
+      void promotePageToNotebookRoot(page.id).then((sectionId) => openPage(page.id, { sectionId, kind: 'document', trash: false }))
     },
     requestMove: (page) => setMovePageRequest(page),
     trashPage: (page) => { void trashPage(page.id, true) },
@@ -593,7 +603,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     const pageId = await createPage(currentSection.id)
     await updatePage(pageId, { title, preview: markdown.replace(/[#>*_`\-[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180) })
     await saveDocument(pageId, documentFromMarkdown(markdown))
-    showNewPage(pageId, currentSection.id)
+    openPage(pageId, { sectionId: currentSection.id, kind: 'document', trash: false })
   }
 
   const createNoteFromAssistant = async (title: string, markdown: string, target?: { sectionId: string; parentPageId?: string }) => {
@@ -625,7 +635,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         if (change.markdown !== undefined) await planOps.current.saveDocument(pageId, documentFromMarkdown(change.markdown))
       },
       movePage: (pageId, sectionId, parentPageId, sortOrder) => planOps.current.movePageInTree(pageId, sectionId, parentPageId, sortOrder),
-      setTags: (pageId, tags) => planOps.current.setPageTagNames(pageId, tags),
+      setTags: (pageId, tagNames) => planOps.current.setPageTagNames(pageId, tagNames),
       trash: (pageId) => planOps.current.moveToTrash(pageId),
       snapshot: async (pageId) => { await planOps.current.createManualRevision(pageId) },
     }
@@ -667,7 +677,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       const documentJson = html ? htmlToDocument(html) : documentFromMarkdown(text)
       await updatePage(pageId, { title, preview: (parsed?.body.textContent ?? text).replace(/\s+/g, ' ').trim().slice(0, 180) })
       await saveDocument(pageId, documentJson)
-      showNewPage(pageId, currentSection.id)
+      openPage(pageId, { sectionId: currentSection.id, kind: 'document', trash: false })
       setTransferMessage('已从剪贴板剪藏为 Markdown；网页字体、颜色和布局已移除')
     } catch (error) {
       setTransferMessage(error instanceof Error ? error.message : '无法读取剪贴板')
@@ -712,7 +722,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     createPageFromMarkdown,
     clipFromClipboard,
     selectArea: (area) => chooseScope(area === 'notes' ? { kind: 'all' } : { kind: area }),
-    openRecentPage,
+    openPage,
     toggleNavigation,
     syncNow,
     chooseImport: () => chooseImport(transferContext),
@@ -733,9 +743,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setFocusMode,
     setSettingsPage,
     setSettingsOpen,
-    setActiveArea,
     setActivePage,
-    setPagesOpen,
   })
   const { paletteItems, searchPalettePageIds } = palette
 
@@ -746,14 +754,9 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       documents,
       loadDocument,
       openPage: (target) => {
-        const page = accessiblePages.find((candidate) => candidate.id === target.pageId)
-        if (!page) return
-        const notebook = notebooks.find((candidate) => candidate.sections.some((section) => section.id === page.sectionId))
-        setActiveArea('notes')
-        setActivePage(page.id)
+        if (!accessiblePages.some((candidate) => candidate.id === target.pageId)) return
         setReferenceNavigationTarget(target)
-        setActiveSection(page.sectionId)
-        if (notebook) { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id) }
+        openPage(target.pageId)
       },
       createPageForTitle: async (title) => {
         // A link to a note that does not exist yet: create it next to the
@@ -763,42 +766,27 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         if (!sectionId) { showToast('请先创建一个笔记本', { kind: 'error' }); return }
         try {
           const pageId = await createPage(sectionId, 'document', undefined, title)
-          const notebook = notebooks.find((candidate) => candidate.sections.some((section) => section.id === sectionId))
-          setActiveArea('notes')
-          setActiveSection(sectionId)
-          setActivePage(pageId)
-          if (notebook) { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id) }
+          openPage(pageId, { sectionId, kind: 'document', trash: false })
           showToast(`已创建笔记“${title}”`)
         } catch (error) {
           showToast(error instanceof Error ? error.message : '无法创建笔记', { kind: 'error' })
         }
       },
     })
-  }, [accessiblePages, createPage, documents, loadDocument, notebooks, pages])
+  }, [accessiblePages, createPage, documents, loadDocument, notebooks, openPage, pages])
 
-  const activateNotebook = (notebookId: string) => {
-    const notebook = notebooks.find((candidate) => candidate.id === notebookId)
-    if (!notebook) return
-    setActiveArea('notes')
-    setExpandedNotebook(notebook.id)
-    setActiveNotebook(notebook.id)
-    const firstSection = notebook.sections[0]
-    if (!firstSection) return
-    setActiveSection(firstSection.id)
-    const firstPage = pages.find((page) => page.kind !== 'task' && page.sectionId === firstSection.id)
-    if (firstPage) setActivePage(firstPage.id)
-  }
+  // Choosing a notebook, wherever it happens, is the same as clicking it in the sidebar.
+  const activateNotebook = (notebookId: string) => chooseScope({ kind: 'notebook', id: notebookId })
 
+  // The chosen notebook was deleted (or never existed): fall back to the first one.
   useEffect(() => {
     if (notebooks.some((notebook) => notebook.id === activeNotebook) || !notebooks[0]) return
     const notebook = notebooks[0]
     setActiveNotebook(notebook.id)
-    setExpandedNotebook(notebook.id)
+    if (pages.some((page) => page.id === activePageRef.current)) return
     const firstSection = notebook.sections[0]
-    if (!firstSection) return
-    setActiveSection(firstSection.id)
-    const page = pages.find((candidate) => candidate.kind !== 'task' && candidate.sectionId === firstSection.id)
-    setActivePage(page?.id ?? '')
+    const page = firstSection && pages.find((candidate) => candidate.kind !== 'task' && candidate.sectionId === firstSection.id)
+    setActivePage(page ? page.id : '')
   }, [activeNotebook, notebooks, pages])
 
   const requestPrivacyAccess = (notebookId?: string) => {
@@ -831,7 +819,6 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     return () => { cancelled = true }
   }, [query])
 
-  const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, recentCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
 
   const focusEditor = () => requestAnimationFrame(() => requestAnimationFrame(() => {
     document.querySelector<HTMLElement>('.document-editor-content')?.focus({ preventScroll: true })
@@ -846,7 +833,6 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setBrowse(next.kind === 'notebook' ? 'tree' : 'list')
     if (next.kind === 'notebook') {
       setActiveNotebook(next.id)
-      setExpandedNotebook(next.id)
     }
     const area = next.kind === 'tasks' ? 'tasks' : next.kind === 'trash' ? 'trash' : 'notes'
     setActiveArea(area)
@@ -878,19 +864,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     menu: (_page: PageSummary): NoteMenuItem[] => [],
   })
   listHandlersRef.current = {
-    open: (page, focus) => {
-      if (listScope.kind === 'trash') setActiveArea('trash')
-      else if (page.kind === 'task') setActiveArea('tasks')
-      else {
-        setActiveArea('notes')
-        setActiveSection(page.sectionId)
-        const owner = notebookBySection.get(page.sectionId)
-        if (owner) setActiveNotebook(owner.id)
-      }
-      setActivePage(page.id)
-      if (layout === 'narrow') setStackView('editor')
-      if (focus && page.kind !== 'task') focusEditor()
-    },
+    open: (page, focus) => openPage(page.id, { trash: listScope.kind === 'trash', focus }),
     toggleTodo: (page) => {
       const completedAt = page.completedAt ? undefined : new Date().toISOString()
       void updatePage(page.id, { completedAt }).then(() => {
@@ -904,12 +878,8 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       void trashPage(page.id).then((trashed) => {
         if (!trashed) return
         if (page.id === activePage && neighbor) listHandlersRef.current.open(neighbor, false)
-        // Undo selects the page together with its own section; the neighbor
-        // that was opened meanwhile may live in another one.
-        showToast(`已将“${page.title || '无标题'}”移到回收站`, { action: { label: '撤销', run: () => { void restorePage(page.id).then(() => {
-          if (page.kind === 'task') { setActiveArea('tasks'); setActivePage(page.id) }
-          else showNewPage(page.id, page.sectionId, false)
-        }) } } })
+        // The snapshot may still list the page in the Trash when the restore resolves.
+        showToast(`已将“${page.title || '无标题'}”移到回收站`, { action: { label: '撤销', run: () => { void restorePage(page.id).then(() => openPage(page.id, { sectionId: page.sectionId, kind: page.kind === 'task' ? 'task' : 'document', trash: false, reveal: false })) } } })
       }).catch((error: unknown) => showToast(error instanceof Error ? error.message : '无法移到回收站', { kind: 'error' }))
     },
     menu: (page) => listScope.kind === 'trash' ? [
@@ -929,7 +899,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       { label: '移到回收站', destructive: true, run: () => listHandlersRef.current.remove(page) },
     ] : [
       { label: page.favorite ? '取消置顶' : '置顶', run: () => { void updatePage(page.id, { favorite: !page.favorite }) } },
-      { label: '创建副本', run: () => { void duplicatePage(page.id).then((id) => { setActivePage(id); setActiveSection(page.sectionId) }) } },
+      { label: '创建副本', run: () => { void duplicatePage(page.id).then((id) => openPage(id, { sectionId: page.sectionId, kind: 'document', trash: false })) } },
       { label: '移动到…', run: () => setMovePageRequest(page) },
       'divider',
       { label: '移到回收站', destructive: true, run: () => listHandlersRef.current.remove(page) },
@@ -946,25 +916,15 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
       if (listScope.kind === 'tasks') {
         const sectionId = activeSection || findQuickCaptureTarget(notebooks)?.sectionId
         if (!sectionId) { showToast('请先创建一个笔记本', { kind: 'error' }); return }
-        const id = await createPage(sectionId, 'task')
-        setActiveArea('tasks')
-        setActivePage(id)
+        openPage(await createPage(sectionId, 'task'), { sectionId, kind: 'task', trash: false })
       } else if (listScope.kind === 'notebook' && scopeNotebook) {
         await createTopLevelPage()
-        setActiveArea('notes')
         focusEditor()
       } else {
         const target = findQuickCaptureTarget(notebooks)
         if (!target) { setCreateRequest('notebook'); return }
-        const id = await createPage(target.sectionId)
-        if (listScope.kind === 'trash') chooseScope({ kind: 'all' })
-        setActiveArea('notes')
-        setActiveNotebook(target.notebookId)
-        setActiveSection(target.sectionId)
-        setActivePage(id)
-        focusEditor()
+        openPage(await createPage(target.sectionId), { sectionId: target.sectionId, kind: 'document', trash: false, focus: true })
       }
-      if (layout === 'narrow') setStackView('editor')
     } catch (error) {
       showToast(error instanceof Error ? error.message : '无法新建', { kind: 'error' })
     }
@@ -986,15 +946,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const toggleSidebar = () => { if (layout === 'wide') setNavOpen((value) => !value); else setDrawerOpen((value) => !value) }
   // Notebooks work like drives: pick one, and its pages fill the tree below,
   // starting at the left edge instead of being indented under the notebook.
-  const activeDrive = notebooks.find((notebook) => notebook.id === expandedNotebook && (!notebook.locked || privacyUnlocked))
+  const activeDrive = notebooks.find((notebook) => notebook.id === activeNotebook && (!notebook.locked || privacyUnlocked))
   const listVisible = !assistant && (layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list')
   const showList = () => { setBrowse('list'); setPagesOpen(true) }
-  const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean, closeOnNarrow: 'navigation' | 'pages') => {
+  const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean) => {
     setBrowse('tree')
-    setAssistant(undefined)
-    // Leaving To-dos or Trash: the list (when shown again) should list notes.
-    setScope((current) => current.kind === 'tasks' || current.kind === 'trash' ? { kind: 'all' } : current)
-    activateTreePage(page, hasChildren, closeOnNarrow)
+    activateTreePage(page, hasChildren)
   }, [activateTreePage])
 
   // Shortcuts per platform: shell/keys.ts.
@@ -1073,7 +1030,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           onAssistant={() => { if (layout !== 'wide') setDrawerOpen(false); openAssistant() }}
           notebooks={<div className="sidebar-tree" role="tree" aria-label="笔记本" onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setPageDropTarget(undefined) }}>
               {notebooks.map((notebook) => {
-                const expanded = expandedNotebook === notebook.id && (!notebook.locked || privacyUnlocked)
+                const expanded = activeNotebook === notebook.id && (!notebook.locked || privacyUnlocked)
                 return (
                   <div key={notebook.id} className="notebook-drive">
                     <ActionMenu openOnContext label={`${notebook.name}笔记本操作`} trigger={<button type="button" className={`sidebar-item notebook-item ${expanded ? 'selected' : ''} ${notebook.locked ? 'private' : ''}`} aria-pressed={expanded} aria-label={notebook.locked && !privacyUnlocked ? `${notebook.name}（已锁定）` : notebook.name} onClick={() => {
@@ -1086,7 +1043,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                       {notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen16Regular /> : <LockClosed16Regular />}</span>}
                       {(!notebook.locked || privacyUnlocked) && <span className="sidebar-count">{notebookCounts.get(notebook.id) ?? 0}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button>{notebook.sections[0] && <button onClick={() => { pendingImportTarget.current = { sectionId: notebook.sections[0]!.id }; chooseImport(transferContext) }}>导入 Markdown / 文本…</button>}<ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button>{notebook.sections[0] && <button onClick={() => { pendingImportTarget.current = { sectionId: notebook.sections[0]!.id }; chooseImport(transferContext) }}>导入 Markdown / 文本…</button>}<ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
                       if (!(await requestConfirm({ title: `删除笔记本“${notebook.name}”？`, description: '将删除其中全部页面、任务、附件和历史版本，此操作无法撤销。', confirmLabel: '删除笔记本', destructive: true }))) return
                       try {
                         await deleteNotebook(notebook.id)
@@ -1280,7 +1237,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               </div>
               </>}
             </div>
-            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? currentNotebook?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => setActivePage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onKeyDown={(event) => {
+            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? (hasActivePage ? pageNotebook : currentNotebook)?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => openPage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return
               // Enter keeps the new title and returns to the text; Escape gives it up.
               if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); focusEditor() }
@@ -1317,10 +1274,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           </div>
           <section className="document-surface">
             {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>此笔记存在尚未处理的同步冲突</strong><span>本机内容未被覆盖。请到“设置 → 同步状态与修复”处理；继续编辑不会自动解决冲突。</span></div>}
-            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { const page = currentPage; void restorePage(page.id).then(() => {
-                  if (page.kind === 'task') { chooseScope({ kind: 'tasks' }); setActivePage(page.id) }
-                  else { chooseScope({ kind: 'all' }); showNewPage(page.id, page.sectionId) }
-                }) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
+            {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { const page = currentPage; void restorePage(page.id).then(() => openPage(page.id, { sectionId: page.sectionId, kind: page.kind === 'task' ? 'task' : 'document', trash: false })) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
                   if (!(await requestConfirm({ title: `永久删除“${currentPage.title}”？`, description: '永久删除后无法恢复，确定继续吗？', confirmLabel: '永久删除', destructive: true }))) return
                   try {
                     await purgePage(currentPage.id)
@@ -1328,7 +1282,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                   } catch (error) {
                     showToast(error instanceof Error ? error.message : '无法永久删除页面', { kind: 'error' })
                   }
-                })() }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (hasActivePage ? <Suspense fallback={null}><TaskDetail key={currentPage.id} task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /></Suspense> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title={taskPages.length ? '选择一项待办' : '还没有待办'} description={taskPages.length ? '从列表中选择，或按 ⌘N 新建。' : '记下要做的事，可以设置截止时间和提醒。'} actionLabel="新建待办" onAction={() => { void createInScope() }} />) : !notebooks.length ? <ModePlaceholder icon={<Document20Regular />} title="还没有笔记本" description="新建一个笔记本，或在设置中连接坚果云恢复已有笔记。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : !hasActivePage ? <ModePlaceholder icon={<Document20Regular />} title={documentPages.length ? '选择一篇笔记' : '这里还没有笔记'} description={documentPages.length ? '从列表中选择，或按 ⌘N 新建。' : '新建第一篇笔记，开始记录想法、会议或资料。'} actionLabel="新建笔记" onAction={() => { void createInScope() }} /> : <div key={currentPage.id} className="document-transition">
+                })() }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (hasActivePage ? <Suspense fallback={null}><TaskDetail key={currentPage.id} task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /></Suspense> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title={taskPages.length ? '选择一项待办' : '还没有待办'} description={taskPages.length ? `从列表中选择，或按 ${keyHint('newNote')} 新建。` : '记下要做的事，可以设置截止时间和提醒。'} actionLabel="新建待办" onAction={() => { void createInScope() }} />) : !notebooks.length ? <ModePlaceholder icon={<Document20Regular />} title="还没有笔记本" description="新建一个笔记本，或在设置中连接坚果云恢复已有笔记。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : !hasActivePage ? (scopeNotebook && !notebookCounts.get(scopeNotebook.id) ? <ModePlaceholder icon={<Document20Regular />} title="这个笔记本还没有页面" description="新建一个页面开始记录，之后可以在边栏里为它添加子页面。" actionLabel="新建页面" onAction={() => { void createInScope() }} /> : <ModePlaceholder icon={<Document20Regular />} title={documentPages.length ? '选择一篇笔记' : '这里还没有笔记'} description={documentPages.length ? `从列表中选择，或按 ${keyHint('newNote')} 新建。` : '新建第一篇笔记，开始记录想法、会议或资料。'} actionLabel="新建笔记" onAction={() => { void createInScope() }} />) : <div key={currentPage.id} className="document-transition">
             {!currentDocument ? <div className="document-loading" role="status" aria-live="polite">
               <span className="document-loading-spinner" />
               <strong>正在准备笔记…</strong>
@@ -1416,9 +1370,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onClose={() => setFullTextQuery(undefined)}
         onOpen={(hit) => {
           setFullTextQuery(undefined)
-          if (hit.page.kind === 'task') { setActiveArea('tasks'); setActivePage(hit.page.id) }
-          else openRecentPage(hit.page.id)
-          if (layout === 'narrow') setStackView('editor')
+          openPage(hit.page.id)
           findInDocument({ pageId: hit.page.id, terms: hit.terms })
         }}
       />}
@@ -1433,9 +1385,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         if (createRequest === 'notebook') chooseScope({ kind: 'notebook', id: await createNotebook(name) })
         else {
           const created = await createSection(activeNotebook, name)
-          setActiveSection(created.sectionId)
-          setActivePage(created.pageId)
-          setExpandedNotebook(activeNotebook)
+          openPage(created.pageId, { sectionId: created.sectionId, kind: 'document', trash: false })
         }
         setCreateRequest(undefined)
       }} />}

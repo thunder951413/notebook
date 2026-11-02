@@ -42,7 +42,12 @@ test('three panes: sidebar collections, note list and editor', async () => {
   fireEvent.click(within(screen.getByRole('region', { name: '笔记列表' })).getByRole('button', { name: '新建笔记' }))
   await waitFor(() => expect(screen.getByLabelText('页面标题')).toHaveValue('无标题页面'))
   expect(await screen.findByLabelText('页面正文')).toBeInTheDocument()
-  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('treeitem', { name: 'Notebook Next 产品愿景' }))
+  // The sidebar's notebook follows the open note: the new one lives in the
+  // quick-capture notebook, so the team notebook is chosen to reach its tree.
+  const navigation = screen.getByRole('navigation', { name: '导航' })
+  expect(within(navigation).getByRole('button', { name: '我的笔记本' })).toHaveAttribute('aria-pressed', 'true')
+  fireEvent.click(within(navigation).getByRole('button', { name: '产品团队' }))
+  fireEvent.click(await within(navigation).findByRole('treeitem', { name: 'Notebook Next 产品愿景' }))
   await waitFor(() => expect(screen.getByLabelText('页面标题')).toHaveValue('Notebook Next 产品愿景'), { timeout: 5000 })
   const backPageButton = screen.getByRole('button', { name: '后退到上一笔记' })
   const forwardPageButton = screen.getByRole('button', { name: '前进到下一笔记' })
@@ -366,3 +371,24 @@ test('⌘⇧F opens full-text search and the note list offers it while searching
   expect(await screen.findByRole('dialog', { name: '全文搜索' })).toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: '全文搜索' })).toHaveValue('迁移')
 }, 30_000)
+
+test('a new notebook opens empty and its first page lands in it', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: query.includes('1301px'), media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }) })
+  const { container } = render(<FluentProvider theme={webLightTheme}><App /></FluentProvider>)
+  await screen.findByLabelText('页面正文')
+  const navigation = screen.getByRole('navigation', { name: '导航' })
+  fireEvent.click(within(navigation).getByRole('button', { name: '新建笔记本' }))
+  const dialog = screen.getByRole('dialog', { name: '新建笔记本' })
+  fireEvent.change(within(dialog).getByRole('textbox', { name: '笔记本名称' }), { target: { value: '读书笔记' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: '创建' }))
+
+  // The new notebook is chosen right away; the editor says how to begin
+  // instead of keeping a note from another notebook.
+  await waitFor(() => expect(within(navigation).getByRole('button', { name: '读书笔记' })).toHaveAttribute('aria-pressed', 'true'), { timeout: 5000 })
+  expect(await screen.findByText('这个笔记本还没有页面', undefined, { timeout: 5000 })).toBeInTheDocument()
+  expect(screen.queryByLabelText('页面标题')).not.toBeInTheDocument()
+  fireEvent.click(within(container.querySelector('.document-surface') as HTMLElement).getByRole('button', { name: '新建页面' }))
+  await waitFor(() => expect(screen.getByLabelText('页面标题')).toHaveValue('无标题页面'), { timeout: 5000 })
+  expect(container.querySelector('.breadcrumb')).toHaveTextContent('读书笔记')
+})

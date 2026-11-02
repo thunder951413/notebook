@@ -82,7 +82,7 @@
 | 列表与搜索 | 虚拟列表、拼音懒加载、可中止的全文检索、悬停预取，性能考虑到位。 |
 | 大文档 | 有专门的阅读器、分章编辑和 worker 索引，已经有效避开导入和打开时的卡死。 |
 | **App.tsx** | **最大的风险。** 1,500 行、约 60 个 `useState`，集中了导航、对话框、AI、同步修复、快捷键。这次修的几个流程问题都出在这里。 |
-| 选择状态 | `activeArea`、`scope`、`browse`、`stackView`、`navOpen/pagesOpen`、`drawerOpen`、`activeNotebook/Section/Page` 彼此重叠，要靠每个入口手动同步。`hasActivePage` 依赖 `activeSection === page.sectionId`，任何入口漏设分区就会显示空白。 |
+| 选择状态 | 原先 `activeArea`、`scope`、`browse`、`stackView`、`navOpen/pagesOpen`、`drawerOpen`、`activeNotebook/Section/Page` 彼此重叠，要靠每个入口手动同步；`hasActivePage` 依赖 `activeSection === page.sectionId`，任何入口漏设分区就会显示空白。**已在第 5 节收敛。** |
 | 对话框 | 都是手写的 `settings-backdrop`，没有共用外壳：焦点不困在对话框内，`aria-modal` 有的有有的没有，这次补上 Esc 也只能逐个加。 |
 | AI 界面 | 三套界面（助手、校订台、收纳），提案审阅又在设置里出现一次（`AutomationWorkspaceReview`），概念和代码都有重复。 |
 | 重复代码 | 从 Markdown 生成预览的正则在 App.tsx 里复制了 3 份；新建并写入正文的流程也有 3 份（模板、AI 建笔记、`planApi`）。 |
@@ -90,7 +90,7 @@
 
 ## 4. 建议的后续工作（未做）
 
-1. **选择状态收敛（优先）**：用一个 reducer 管 `{ scope, pageId }`，分区和笔记本从页面推出来，删掉 `activeSection` 这个独立状态。所有打开、新建、恢复都走一个 `open(pageId, { reveal })`。这能从根上消掉 2.1、2.2、2.4 这一类问题。
+1. ~~选择状态收敛~~：已完成，见第 5 节。
 2. **拆 App.tsx**：对话框宿主、列表处理器、编辑器工具栏、同步状态菜单各自成为组件或 hook。
 3. **共用对话框外壳**：统一提供焦点困住、Esc、点背景关闭和 `aria-modal`，替换掉 7 个手写对话框。
 4. **AI 入口合并**：把校订台作为 AI 助手里的一个标签页，或者至少在边栏给它一个入口；设置里的提案审阅指向同一个界面。
@@ -102,3 +102,15 @@
 - `pnpm typecheck`、`pnpm lint`：通过。
 - 渲染层 `pnpm test`：379 个通过，包括新增的 `components/dialogKeys.test.tsx`。`App.test.tsx` 按新行为更新了：命令面板删除后用撤销恢复，“置顶”文案。
 - 没有在真实窗口中验证，原因是沙箱不允许绑定本地端口。
+
+## 6. 选择状态收敛（同日完成）
+
+按第 4 节第 1 条做了：
+
+- **一个笔记本状态**：`activeNotebook` 和 `expandedNotebook` 原来总是一起设置，现在合并成一个，表示边栏当前展开的笔记本，它跟着打开的笔记走。从“全部笔记”列表打开别的笔记本里的笔记，边栏也会切到那个笔记本，以前只有页面树和链接会这样。
+- **分区不再单独存储**：`currentSection` 由打开的页面推出来；没有打开的页面时，用所选笔记本的第一个分区。`hasActivePage` 不再要求“页面所在分区等于 `activeSection`”，所以“漏设分区导致编辑区空白”这类问题不会再出现。面包屑里的笔记本名也改为取页面自己所在的笔记本。
+- **一个打开入口**：App 里的 `openPage(pageId, { sectionId, kind, trash, reveal, focus })` 是唯一选中页面的地方。区域（笔记、待办、回收站）和笔记本都由页面推出；列表会离开页面不可能出现的集合；AI 助手会让开；窄布局会切到编辑器。以下入口都改为调用它：列表、页面树、命令面板、双链、全文检索、AI、前进后退、面包屑、新建（含模板、日记、剪藏、快速记录、待办）、复制、移动、撤销删除、恢复。`usePageNavigation` 和 `usePageTreeActions` 不再接收 section 或 notebook 的 setter；只有被移动的正是当前页面时，选中状态才会跟过去。
+- **选了空笔记本**：编辑区显示“这个笔记本还没有页面”，并提供“新建页面”，不再继续显示别的笔记本里的笔记。
+- 顺带清掉了已经没人用的 `selectArea`；“按 ⌘N 新建”这类提示改为按平台显示快捷键。
+
+验证：类型检查和 lint 通过；渲染层测试 380 个连续 4 次全部通过。新增测试“新建笔记本 → 空状态 → 新建页面落在该笔记本”。原有三栏测试改为先选中“产品团队”，再点它的页面树，因为边栏现在跟着刚新建的笔记切到了“快速记录”所在的笔记本。仍未在真实窗口中走查。
