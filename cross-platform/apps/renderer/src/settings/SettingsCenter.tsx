@@ -20,6 +20,7 @@ import type { NotebookSummary, PageSummary } from '../model'
 import { AIProviderSettingsPanel } from './AIProviderSettings'
 import { lastSyncSuccess, relativeTime } from '../sync/syncErrors'
 import { credentialStoreName, fileManagerName } from '../shell/keys'
+import type { EditorFont } from '../shell/preferences'
 
 export type SettingsPageId = 'general' | 'data' | 'services' | 'automation'
 type SettingsPage = SettingsPageId
@@ -29,6 +30,7 @@ interface SettingsCenterProps {
   initialPage?: SettingsPage
   theme: 'light' | 'dark'
   accentColor: AccentColor
+  editorFont?: EditorFont
   syncState: SyncState
   syncError?: string
   syncProgress?: string
@@ -48,6 +50,7 @@ interface SettingsCenterProps {
   themePreference: ThemePreference
   onThemePreferenceChange: (preference: ThemePreference) => void
   onAccentColorChange: (color: AccentColor) => void
+  onEditorFontChange?: (font: EditorFont) => void
   onSyncNow: (mode?: LegacySyncMode) => Promise<boolean>
   onImport: () => void
   onExportPage: (format: 'md' | 'html') => void
@@ -131,7 +134,7 @@ function trapDialogKey(event: KeyboardEvent, container: HTMLElement, onClose: ()
   }
 }
 
-export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, syncState, syncError, syncProgress, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal, syncRepair }: SettingsCenterProps) {
+export function SettingsCenter({ initialPage = 'general', theme, themePreference, accentColor, editorFont = 'sans', syncState, syncError, syncProgress, currentPageTitle, transferMessage, dataRoot, desktop, aiService, collaborationService, privacyAvailable, privacyConfigured, privacyUnlocked, automationProposals, automationNotebooks, automationPages, onClose, onThemePreferenceChange, onAccentColorChange, onEditorFontChange, onSyncNow, onImport, onExportPage, onPrint, onExportWorkspace, onExportEncrypted, onResetHistory, onChooseDataRoot, onPrivacyAction, onMigrateFromSsh, onApplyAutomationProposal, onRejectAutomationProposal, syncRepair }: SettingsCenterProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const qrDialogRef = useRef<HTMLElement>(null)
@@ -617,6 +620,7 @@ export function SettingsCenter({ initialPage = 'general', theme, themePreference
           {page === 'general' && <>
             <SettingsSection title="外观" description="主题设置按当前设备保存。">
               <SettingsRow title="颜色主题" description={themePreference === 'system' ? `当前跟随系统（${theme === 'dark' ? '深色' : '浅色'}）` : `当前使用${theme === 'dark' ? '深色' : '浅色'}模式`}><div className="settings-action-grid"><Button appearance={themePreference === 'light' ? 'primary' : 'subtle'} onClick={() => onThemePreferenceChange('light')}>浅色</Button><Button appearance={themePreference === 'dark' ? 'primary' : 'subtle'} onClick={() => onThemePreferenceChange('dark')}>深色</Button><Button appearance={themePreference === 'system' ? 'primary' : 'subtle'} onClick={() => onThemePreferenceChange('system')}>跟随系统</Button></div></SettingsRow>
+              {onEditorFontChange && <SettingsRow title="正文字体" description={editorFont === 'serif' ? '书刊衬线（适合沉浸式长文阅读与写作）' : '现代无衬线（清晰利落，适合日常记录）'}><div className="settings-action-grid"><Button appearance={editorFont === 'sans' ? 'primary' : 'subtle'} onClick={() => onEditorFontChange('sans')}>现代无衬线</Button><Button appearance={editorFont === 'serif' ? 'primary' : 'subtle'} onClick={() => onEditorFontChange('serif')}>书刊衬线</Button></div></SettingsRow>}
               <div className="accent-setting">
                 <div><strong>高亮色</strong><span>用于选中项、主按钮、链接和编辑器焦点</span></div>
                 <div className="accent-options" role="radiogroup" aria-label="高亮色">

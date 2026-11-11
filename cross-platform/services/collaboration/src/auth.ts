@@ -11,6 +11,22 @@ const bearerToken = (header: string | null) => {
   return header.slice('Bearer '.length).trim() || undefined
 }
 
+const LOCAL_ORIGIN_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', 'tauri.localhost'])
+
+export function assertAllowedOrigin(origin: string | null | undefined, isUnauthenticatedLocalDev: boolean) {
+  if (!isUnauthenticatedLocalDev || !origin) return
+  if (origin === 'tauri://localhost') return
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    throw new Error('Untrusted WebSocket origin')
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !LOCAL_ORIGIN_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('Cross-origin WebSocket access is not allowed without NOTEBOOK_JWT_SECRET')
+  }
+}
+
 export async function authenticateRequest(
   authorization: string | null,
   secret: string | undefined,
@@ -24,6 +40,7 @@ export async function authenticateRequest(
   }
   if (!token) throw new Error('Missing bearer token')
   const verified = await jwtVerify(token, new TextEncoder().encode(secret), {
+    algorithms: ['HS256'],
     audience: 'notebook-collaboration',
     issuer: 'notebook-api',
   })

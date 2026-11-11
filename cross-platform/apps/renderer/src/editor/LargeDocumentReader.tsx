@@ -7,6 +7,7 @@ import { useLargeDocumentIndex } from '../data/useLargeDocumentIndex'
 import { flushPendingEdits, registerFlushHandler } from '../data/flushCoordinator'
 import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } from '../search/FullTextSearch'
 import { showToast } from '../components/toast'
+import { markSaveErrorToasted, reportAutosaveFailure } from './autosaveError'
 import { DocumentEditor, type DocumentEditorProps } from './DocumentEditor'
 import { createContentExtensions, documentToMarkdown } from './extensions'
 import { lastHeadingAbove, OUTLINE_JUMP_EVENT, outlineProbe, reportActiveHeading } from './outlineEvents'
@@ -22,7 +23,7 @@ type EditSession = { source: string; start: number; end: number; title: string; 
 
 export function LargeDocumentReader(props: Props) {
   const { index, error, document } = useLargeDocumentIndex(props.content)
-  if (!index || !document) return <div className="document-loading" role="status">{error ?? '正在准备章节…'}</div>
+  if (!index || !document) return <>{props.header}<div className="document-loading" role="status">{error ?? '正在准备章节…'}</div></>
   return <IndexedReader {...props} content={document as LargeDocument} index={index} />
 }
 
@@ -202,6 +203,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
         const message = error instanceof Error ? error.message : '保存失败，请重试'
         setSaveError(message); setSaveStatus('尚未保存')
         showToast(message, { kind: 'error', durationMs: 8_000 })
+        markSaveErrorToasted(error)
         throw error
       }
     })
@@ -221,7 +223,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
     {editing ? <>
       <div className="large-note-toolbar"><strong>编辑本章 · {editing.title}</strong><span role="status">{saveStatus}</span><button onClick={() => { void returnToReading() }}>保存并返回阅读</button></div>
       {saveError && <div className="large-note-save-error" role="alert">{saveError}{saveError.includes('版本历史') && <button onClick={() => setEditing(undefined)}>保留恢复版本，返回阅读</button>}</div>}
-      {editing.content ? <DocumentEditor {...props} content={editing.content} viewportPosition={undefined} onViewportChange={undefined} trackOutline={false}
+      {editing.content ? <DocumentEditor {...props} header={undefined} content={editing.content} viewportPosition={undefined} onViewportChange={undefined} trackOutline={false}
         onChange={(json) => saveChapter(documentToMarkdown(normalizeReferenceTargetIds(json)) + (editing.definitions ? '\n\n' + editing.definitions : ''))} />
         : <SourceChapterEditor source={editing.initial} onSave={saveChapter} />}
     </> : <div className="large-note-toolbar">
@@ -241,6 +243,7 @@ function IndexedReader({ content, index, onSaveSection, ...props }: Props & { in
         positionCallback.current?.({ scrollTop: root.scrollTop, fraction: root.scrollTop / Math.max(1, root.scrollHeight - root.clientHeight), anchor: anchorAtProbe(index, boxOf(false)) })
         reportCurrentHeading()
       }}>
+      {props.header}
       {index.chunks.map((chunk, number) => <div key={number} data-chunk={number} className="large-note-chunk"
         ref={(element) => { if (element) shells.current.set(number, element); else shells.current.delete(number) }}
         style={{ minHeight: heights.current.get(number) ?? chunk.height }}>
@@ -323,11 +326,11 @@ function SourceChapterEditor({ source, onSave }: { source: string; onSave: (text
     saved.current = value
   }, [])
   useEffect(() => {
-    const timer = setTimeout(() => { void commit().catch(() => undefined) }, 450)
+    const timer = setTimeout(() => { void commit().catch(reportAutosaveFailure) }, 450)
     return () => clearTimeout(timer)
   }, [text, commit])
   useEffect(() => registerFlushHandler(commit), [commit])
-  useEffect(() => () => { void commit().catch(() => undefined) }, [commit])
+  useEffect(() => () => { void commit().catch(reportAutosaveFailure) }, [commit])
   return <div className="large-note-source-editor"><p>本章内容较长，使用 Markdown 文本编辑，保存后恢复阅读排版。</p>
     <textarea aria-label="本章 Markdown 正文" value={text} onChange={(event) => { latest.current = event.target.value; setText(event.target.value) }} /></div>
 }

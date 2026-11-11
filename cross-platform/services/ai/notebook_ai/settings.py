@@ -18,7 +18,11 @@ class Settings(BaseSettings):
 
     @property
     def origins(self) -> list[str]:
-        return [value.strip() for value in self.allowed_origins.split(",") if value.strip()]
+        items = [value.strip() for value in self.allowed_origins.split(",") if value.strip()]
+        # Never permit sandboxed `Origin: null` frames unless an explicit API token or JWT secret is configured.
+        if not self.api_token and not self.jwt_secret:
+            return [item for item in items if item.lower() != "null"]
+        return items
 
     @property
     def chat_models(self) -> set[str]:

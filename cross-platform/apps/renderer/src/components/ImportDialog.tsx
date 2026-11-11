@@ -61,7 +61,7 @@ export function ImportDialog({ files, pages, notebooks, initialTarget, onClose, 
     }
   }
   return <div className="settings-backdrop" role="presentation">
-    <section className="settings-dialog create-item-dialog import-dialog" role="dialog" aria-label="导入笔记" onKeyDown={closeOnEscape(onClose)}>
+    <section className="settings-dialog create-item-dialog import-dialog" role="dialog" aria-modal="true" aria-label="导入笔记" onKeyDown={closeOnEscape(onClose)}>
       <div><h2>导入笔记</h2><Button appearance="subtle" onClick={onClose}>{result ? '完成' : '取消'}</Button></div>
       <ul className="import-file-list" aria-label="要导入的文件">
         {rows.map(({ file, problem }) => <li key={file.name} className={problem ? 'skipped' : undefined}>

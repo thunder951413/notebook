@@ -1,14 +1,19 @@
-import { useState, type ReactNode, type Ref } from 'react'
+import { useRef, useState, type ReactNode, type Ref } from 'react'
 import {
   Add16Regular,
+  ArrowCollapseAll16Regular,
   ArrowSync20Regular,
   CheckmarkCircle20Regular,
   Delete20Regular,
+  Dismiss12Regular,
   DocumentMultiple20Regular,
+  Filter16Regular,
+  MyLocation16Regular,
   NumberSymbol16Regular,
   PanelLeft20Regular,
   Sparkle20Regular,
   Pin20Regular,
+  Search16Regular,
   Settings20Regular,
 } from '@fluentui/react-icons'
 import { keyHint } from './keys'
@@ -74,6 +79,12 @@ export interface SidebarProps {
   onSettings: () => void
   onHide: () => void
   onNewNotebook: () => void
+  onCollapseAll?: () => void
+  canCollapseAll?: boolean
+  onLocateActive?: () => void
+  canLocateActive?: boolean
+  treeFilter?: string
+  onTreeFilterChange?: (value: string) => void
   resizer?: ReactNode
   assistantOpen?: boolean
   onAssistant?: () => void
@@ -83,9 +94,12 @@ export interface SidebarProps {
  * Source list in the frosted window material (Apple Notes / Mail): smart
  * collections, notebooks with their page trees, tags, and the sync state.
  */
-export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, settingsRef, onSettings, onHide, onNewNotebook, resizer, assistantOpen = false, onAssistant }: SidebarProps) {
+export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, settingsRef, onSettings, onHide, onNewNotebook, onCollapseAll, canCollapseAll = false, onLocateActive, canLocateActive = false, treeFilter = '', onTreeFilterChange, resizer, assistantOpen = false, onAssistant }: SidebarProps) {
   const [allTags, setAllTags] = useState(false)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const filterInputRef = useRef<HTMLInputElement>(null)
   const shownTags = allTags ? tags : tags.slice(0, 8)
+  const showFilterBar = filterOpen || Boolean(treeFilter.trim())
   return <nav className="app-sidebar" aria-label="导航">
     <div className="sidebar-titlebar" data-tauri-drag-region>
       <button type="button" className="toolbar-icon-button" aria-label="隐藏边栏" title={`隐藏边栏（${keyHint('sidebar')}）`} onClick={onHide}><PanelLeft20Regular /></button>
@@ -99,8 +113,64 @@ export function Sidebar({ scope, onScope, counts, tags, notebooks, syncStatus, s
         <SidebarItem icon={<Delete20Regular />} label="回收站" count={counts.trash || undefined} selected={!assistantOpen && scope.kind === 'trash'} onClick={() => onScope({ kind: 'trash' })} />
         {onAssistant && <SidebarItem icon={<Sparkle20Regular />} label="AI 助手" selected={assistantOpen} onClick={onAssistant} />}
       </div>
-      <div className="sidebar-group" role="group" aria-label="笔记本">
-        <div className="sidebar-group-title"><span>笔记本</span><button type="button" className="sidebar-group-action" aria-label="新建笔记本" title="新建笔记本" onClick={onNewNotebook}><Add16Regular /></button></div>
+      <div className="sidebar-group sidebar-notebooks-group" role="group" aria-label="笔记本">
+        <div className="sidebar-group-title">
+          <span>笔记本</span>
+          <div className="sidebar-group-actions">
+            {onTreeFilterChange && <button
+              type="button"
+              className={`sidebar-group-action ${showFilterBar ? 'active' : ''}`}
+              aria-label="筛选目录"
+              aria-pressed={showFilterBar}
+              title="筛选目录"
+              onClick={() => {
+                if (showFilterBar) {
+                  onTreeFilterChange('')
+                  setFilterOpen(false)
+                } else {
+                  setFilterOpen(true)
+                  requestAnimationFrame(() => filterInputRef.current?.focus())
+                }
+              }}
+            ><Filter16Regular /></button>}
+            {onLocateActive && canLocateActive && <button
+              type="button"
+              className="sidebar-group-action"
+              aria-label="定位当前笔记"
+              title="在目录中定位当前笔记"
+              onClick={onLocateActive}
+            ><MyLocation16Regular /></button>}
+            {onCollapseAll && <button
+              type="button"
+              className="sidebar-group-action"
+              aria-label="收起全部目录"
+              title="收起全部展开的目录"
+              disabled={!canCollapseAll}
+              onClick={onCollapseAll}
+            ><ArrowCollapseAll16Regular /></button>}
+            <button type="button" className="sidebar-group-action" aria-label="新建笔记本" title="新建笔记本" onClick={onNewNotebook}><Add16Regular /></button>
+          </div>
+        </div>
+        {showFilterBar && onTreeFilterChange && <div className="sidebar-tree-filter">
+          <Search16Regular aria-hidden="true" />
+          <input
+            ref={filterInputRef}
+            type="text"
+            value={treeFilter}
+            spellCheck={false}
+            placeholder="筛选目录或页面…"
+            aria-label="筛选笔记本与目录"
+            onChange={(event) => onTreeFilterChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                onTreeFilterChange('')
+                setFilterOpen(false)
+              }
+            }}
+          />
+          {treeFilter && <button type="button" className="search-clear" aria-label="清除目录筛选" onClick={() => { onTreeFilterChange(''); filterInputRef.current?.focus() }}><Dismiss12Regular /></button>}
+        </div>}
         {notebooks}
       </div>
       {tags.length > 0 && <div className="sidebar-group" role="group" aria-label="标签">

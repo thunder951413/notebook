@@ -1,16 +1,18 @@
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Button,
-  Input,
 } from '@fluentui/react-components'
 import {
+  Add16Regular,
   ArrowLeft20Regular,
   ArrowReply20Regular,
   ArrowRight20Regular,
   ArrowSortDownLines20Regular,
   Bot20Regular,
   CheckmarkCircle20Regular,
+  ChevronDown12Regular,
   ChevronLeft20Regular,
+  ChevronRight12Regular,
   ChevronRight16Regular,
   Compose20Regular,
   Delete20Regular,
@@ -28,7 +30,7 @@ import {
 } from '@fluentui/react-icons'
 import type { PageSummary } from './model'
 import { AIWorkspace, AttachmentPanel, BacklinksSidebar, CommandPalette, OutlineSidebar, ReferenceHelpDialog, ReferencePicker, SettingsCenter, TaskDetail, VersionHistory } from './app/lazyPanels'
-import { layoutForWidth, readPreference, writePreference, type ShellLayout } from './shell/preferences'
+import { EDITOR_FONT_KEY, layoutForWidth, readPreference, writePreference, type EditorFont, type ShellLayout } from './shell/preferences'
 import { useSyncCompletedFlash } from './hooks/useSyncCompletedFlash'
 import { useReadingPositions } from './hooks/useReadingPositions'
 import { useShellShortcuts } from './hooks/useShellShortcuts'
@@ -56,7 +58,8 @@ import { isLargeDocument } from './data/largeDocument'
 import { configureReferenceRuntime } from './editor/referenceRuntime'
 import { OPEN_REFERENCE_PICKER_EVENT } from './editor/referenceCommands'
 import { ancestorsOf, descendantCountsOf, descendantsOf, flattenPageTree } from './pageTree'
-import { useAbcInputSourceForVimNormal } from './editor/vimInputSource'
+import { isDocumentEmpty } from './editor/documentEmpty'
+import { syncAbcInputSourceForVimNormal } from './editor/vimInputSource'
 import { referenceTargetElement } from './editor/referenceContent'
 import type { NotebookReferenceTarget } from '@notebook/sync-contract'
 import { findQuickCaptureTarget } from './workspaceNavigation'
@@ -92,11 +95,9 @@ import { usePageNavigation, type OpenPageOptions } from './hooks/usePageNavigati
 import { usePageTreeActions } from './hooks/usePageTreeActions'
 import { chooseImport, runEncryptedExport, runExport, runImport, saveCurrentDocument, type FileTransferContext } from './data/fileTransfer'
 import {
-  EXPANDED_PAGES_KEY,
   LAYOUT_KEY,
   RECENT_PAGES_KEY,
   VIM_MODE_KEY,
-  readExpandedPageIds,
   readLayout,
   readRecentPageIds,
   readVimEnabled,
@@ -119,7 +120,7 @@ export interface AppProps {
 }
 
 export function App({ theme = 'light', themePreference = 'system', accentColor = 'purple', onAccentColorChange, onThemePreferenceChange }: AppProps) {
-  const { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
+  const { emptyTrash, notebooks, pages, trashPages, documents, setActiveDocument, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames } = useWorkspaceData()
   const {
     proposals: automationProposals,
     createAutomationAgentProposal,
@@ -207,7 +208,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const [privacyPrompt, setPrivacyPrompt] = useState<{ mode: 'setup' | 'unlock'; notebookId?: string }>()
   const [referencePickerOpen, setReferencePickerOpen] = useState(false)
   const [referenceHelpOpen, setReferenceHelpOpen] = useState(false)
-  const [expandedPageIds, setExpandedPageIds] = useState<Set<string>>(readExpandedPageIds)
+  const [expandedPageIds, setExpandedPageIds] = useState<Set<string>>(() => new Set())
+  const [expandedNotebookId, setExpandedNotebookId] = useState<string | undefined>(() => {
+    const initial = readScope()
+    return initial.kind === 'notebook' ? initial.id : STARTUP_NOTEBOOK_ID
+  })
+  const [treeFilter, setTreeFilter] = useState('')
+  const [paperScrolled, setPaperScrolled] = useState(false)
+  const [editorFont, setEditorFont] = useState<EditorFont>(() => readPreference(EDITOR_FONT_KEY, 'sans', ['sans', 'serif'] as const))
+  const changeEditorFont = useCallback((next: EditorFont) => {
+    setEditorFont(next)
+    writePreference(EDITOR_FONT_KEY, next)
+  }, [])
   const [pageDropTarget, setPageDropTarget] = useState<PageTreeDropTarget>()
   const [referenceNavigationTarget, setReferenceNavigationTarget] = useState<NotebookReferenceTarget>()
   // Three-pane browsing (sidebar → note list → editor), as on the phone.
@@ -234,11 +246,12 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           : publicPageIds.has(change.after.pageId)
       )))
   }, [automationProposals, notebooks, pages])
-  useReminders(accessiblePages, (pageId, patch) => updatePage(pageId, patch))
+  const handleReminderUpdate = useCallback((pageId: string, patch: { reminderAt?: string }) => updatePage(pageId, patch), [updatePage])
+  useReminders(accessiblePages, handleReminderUpdate)
   const { notebookBySection, notebookName, documentPages, taskPages, scopeNotebook, listScope, searching, listOrder, listSections, listPages, listTerms, listTimeOf, tags, digest, banner, bannerItems, scopeTitle, openTodoCount, recentCount, favoriteCount, notebookCounts, scopeSubtitle } = useNoteListBrowse({ notebooks, accessiblePages, accessibleTrashPages, scope, privacyUnlocked, query, searchAll, notesOrder, tasksOrder, grouped, nowMs, pinyinVersion })
 
   useEffect(() => {
-    useAbcInputSourceForVimNormal(vimEnabled, vimCommandMode)
+    syncAbcInputSourceForVimNormal(vimEnabled, vimCommandMode)
   }, [vimCommandMode, vimEnabled])
   // Operation feedback used to be visible only inside the settings dialog;
   // surface it as a toast wherever it was produced.
@@ -302,7 +315,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const currentPageChildren = useMemo(() => accessiblePages
     .filter((page) => page.kind !== 'task' && page.parentPageId === currentPage.id)
     .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0)), [accessiblePages, currentPage.id])
-  const currentDocumentIsEmpty = useMemo(() => currentDocument ? documentToMarkdown(currentDocument).trim().length === 0 : false, [currentDocument])
+  const currentDocumentIsEmpty = useMemo(() => currentDocument ? isDocumentEmpty(currentDocument) : false, [currentDocument])
   // Notes with sub-notes, for the list's "N 个子笔记" and the empty-parent overview.
   const directChildCounts = useMemo(() => {
     const counts = new Map<string, number>()
@@ -322,15 +335,31 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   const previousPageVisit = pageVisitTarget(pageHistory, -1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
   const nextPageVisit = pageVisitTarget(pageHistory, 1, (pageId) => accessibleDocumentPageIds.has(pageId)).pageId
 
-  useEffect(() => {
-    if (!activePage) return
+  const revealedAnchorKeyRef = useRef('')
+  const effectiveExpandedPageIds = useMemo(() => {
+    if (activeArea !== 'notes' || !activePage) return expandedPageIds
     const ancestors = ancestorsOf(sectionPages, activePage)
-    if (!ancestors.length || ancestors.every((id) => expandedPageIds.has(id))) return
-    setExpandedPageIds((current) => new Set([...current, ...ancestors]))
-  }, [activePage, expandedPageIds, sectionPages])
+    const key = `${activePage}:${ancestors.join('/')}`
+    if (revealedAnchorKeyRef.current === key) return expandedPageIds
+    const next = new Set(ancestors)
+    if (expandedPageIds.has(activePage)) next.add(activePage)
+    return next
+  }, [activeArea, activePage, expandedPageIds, sectionPages])
   useEffect(() => {
-    globalThis.localStorage?.setItem(EXPANDED_PAGES_KEY, JSON.stringify([...expandedPageIds]))
-  }, [expandedPageIds])
+    if (activeArea !== 'notes' || !activePage) return
+    const ancestors = ancestorsOf(sectionPages, activePage)
+    const key = `${activePage}:${ancestors.join('/')}`
+    if (revealedAnchorKeyRef.current === key) return
+    revealedAnchorKeyRef.current = key
+    setExpandedPageIds((current) => {
+      const next = new Set(ancestors)
+      if (current.has(activePage)) next.add(activePage)
+      return next
+    })
+  }, [activeArea, activePage, sectionPages])
+  useEffect(() => {
+    setPaperScrolled(false)
+  }, [currentPage.id])
 
   // Switching away from a note is the natural moment to upload its edits;
   // the sync policy keeps automatic uploads at least a minute apart.
@@ -343,9 +372,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
   // Opening a note is deliberately local: fetching/pushing on every page
   // switch causes substantial WebDAV traffic for normal navigation.
   useEffect(() => {
+    setActiveDocument(hasCurrentPage ? currentPage.id : undefined)
     if (!hasCurrentPage) return
     void loadDocument(currentPage.id)
-  }, [currentPage.id, hasCurrentPage, loadDocument])
+  }, [currentPage.id, hasCurrentPage, loadDocument, setActiveDocument])
   useEffect(() => () => clearTimeout(documentPrefetchTimer.current), [])
   const { loadedReadingPosition, flushDirtyReadingPositions, recordViewportPosition } = useReadingPositions({ activeArea, pageId: currentPage.id, hasCurrentPage, loadReadingPosition, saveReadingPosition })
 
@@ -456,7 +486,16 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setActiveArea(area)
     setActivePage(pageId)
     setAssistant(undefined)
-    if (area === 'notes' && owner) setActiveNotebook(owner.id)
+    if (area === 'notes' && owner) {
+      setActiveNotebook(owner.id)
+      if (!options.keepSidebarCollapsed) setExpandedNotebookId(owner.id)
+      else setExpandedNotebookId((current) => current ? owner.id : undefined)
+      if (!options.preserveTreeExpansion && sectionId) {
+        const inSection = pagesBySection.get(sectionId) ?? emptyPageList
+        const hasChildren = inSection.some((candidate) => candidate.parentPageId === pageId)
+        setExpandedPageIds(new Set(hasChildren ? [...ancestorsOf(inSection, pageId), pageId] : ancestorsOf(inSection, pageId)))
+      }
+    }
     setScope((current) => {
       if (area === 'notes') {
         if (current.kind === 'tasks' || current.kind === 'trash') return { kind: 'all' }
@@ -497,6 +536,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     accessiblePages,
     accessibleDocumentPageIds,
     activeArea,
+    activePage,
     navigationOpen,
     pageHistory,
     setNavOpen,
@@ -519,7 +559,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     accessiblePages,
     currentSection,
     currentNotebook,
-    expandedPageIds,
+    expandedPageIds: effectiveExpandedPageIds,
     activePage,
     pageDropTarget,
     createPage,
@@ -783,6 +823,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     if (notebooks.some((notebook) => notebook.id === activeNotebook) || !notebooks[0]) return
     const notebook = notebooks[0]
     setActiveNotebook(notebook.id)
+    setExpandedNotebookId((current) => current && !notebooks.some((candidate) => candidate.id === current) ? notebook.id : current)
     if (pages.some((page) => page.id === activePageRef.current)) return
     const firstSection = notebook.sections[0]
     const page = firstSection && pages.find((candidate) => candidate.kind !== 'task' && candidate.sectionId === firstSection.id)
@@ -833,6 +874,18 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     setBrowse(next.kind === 'notebook' ? 'tree' : 'list')
     if (next.kind === 'notebook') {
       setActiveNotebook(next.id)
+      setExpandedNotebookId(next.id)
+      const targetNotebook = notebooks.find((notebook) => notebook.id === next.id)
+      const activeSectionInNotebook = targetNotebook?.sections.find((section) => section.id === currentPage.sectionId)
+      if (activeSectionInNotebook) {
+        const inSection = pagesBySection.get(activeSectionInNotebook.id) ?? emptyPageList
+        const hasChildren = inSection.some((candidate) => candidate.parentPageId === currentPage.id)
+        setExpandedPageIds(new Set(hasChildren ? [...ancestorsOf(inSection, currentPage.id), currentPage.id] : ancestorsOf(inSection, currentPage.id)))
+      } else {
+        setExpandedPageIds(new Set())
+      }
+    } else {
+      setExpandedNotebookId(undefined)
     }
     const area = next.kind === 'tasks' ? 'tasks' : next.kind === 'trash' ? 'trash' : 'notes'
     setActiveArea(area)
@@ -864,7 +917,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     menu: (_page: PageSummary): NoteMenuItem[] => [],
   })
   listHandlersRef.current = {
-    open: (page, focus) => openPage(page.id, { trash: listScope.kind === 'trash', focus }),
+    open: (page, focus) => openPage(page.id, { trash: listScope.kind === 'trash', focus, keepSidebarCollapsed: listScope.kind !== 'notebook' }),
     toggleTodo: (page) => {
       const completedAt = page.completedAt ? undefined : new Date().toISOString()
       void updatePage(page.id, { completedAt }).then(() => {
@@ -944,9 +997,23 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
 
   const sidebarVisible = layout === 'wide' ? navOpen : drawerOpen
   const toggleSidebar = () => { if (layout === 'wide') setNavOpen((value) => !value); else setDrawerOpen((value) => !value) }
-  // Notebooks work like drives: pick one, and its pages fill the tree below,
-  // starting at the left edge instead of being indented under the notebook.
-  const activeDrive = notebooks.find((notebook) => notebook.id === activeNotebook && (!notebook.locked || privacyUnlocked))
+  const normalizedTreeFilter = treeFilter.trim().toLocaleLowerCase()
+  const collapseAllDirectories = useCallback(() => {
+    setTreeFilter('')
+    setExpandedPageIds(new Set())
+    setExpandedNotebookId(undefined)
+  }, [])
+  const locateActivePageInTree = useCallback(() => {
+    if (activeArea !== 'notes' || !hasActivePage || !pageNotebook) return
+    setTreeFilter('')
+    setExpandedNotebookId(pageNotebook.id)
+    const inSection = pagesBySection.get(currentPage.sectionId) ?? emptyPageList
+    const hasChildren = inSection.some((candidate) => candidate.parentPageId === currentPage.id)
+    setExpandedPageIds(new Set(hasChildren ? [...ancestorsOf(inSection, currentPage.id), currentPage.id] : ancestorsOf(inSection, currentPage.id)))
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('.sidebar-notebook-tree .page-tree-row.selected')?.scrollIntoView?.({ block: 'nearest' })
+    })
+  }, [activeArea, currentPage.id, currentPage.sectionId, hasActivePage, pageNotebook, pagesBySection])
   const listVisible = !assistant && (layout === 'narrow' ? stackView === 'list' : pagesOpen && browse === 'list')
   const showList = () => { setBrowse('list'); setPagesOpen(true) }
   const onTreeActivate = useCallback((page: PageSummary, hasChildren: boolean) => {
@@ -989,8 +1056,88 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
     }
   }
 
+  const paperHeader = activeArea === 'notes' && hasActivePage ? (
+    <header className="paper-header">
+      {!currentPage.icon && (
+        <div className="paper-header-affordances">
+          <button
+            type="button"
+            className="paper-add-icon"
+            onClick={() => setIconPickerPage(currentPage)}
+          >
+            <Add16Regular aria-hidden="true" />
+            <span>添加图标</span>
+          </button>
+        </div>
+      )}
+      <div className="paper-title-row">
+        {currentPage.icon && (
+          <button
+            type="button"
+            className="paper-icon-button"
+            aria-label={`更换图标（当前：${currentPage.icon}）`}
+            title="更换页面图标"
+            onClick={() => setIconPickerPage(currentPage)}
+          >
+            {currentPage.icon}
+          </button>
+        )}
+        <input
+          key={`${currentPage.id}:${currentPage.title}`}
+          type="text"
+          className="paper-title-input"
+          defaultValue={currentPage.title}
+          placeholder="无标题页面"
+          aria-label="页面标题"
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return
+            // Enter / ArrowDown keeps the new title and moves into the prose; Escape reverts.
+            if (event.key === 'Enter' || event.key === 'ArrowDown') {
+              event.preventDefault()
+              event.currentTarget.blur()
+              focusEditor()
+            } else if (event.key === 'Escape') {
+              event.currentTarget.value = currentPage.title
+              event.currentTarget.blur()
+            }
+          }}
+          onBlur={(event) => {
+            const title = event.currentTarget.value.trim()
+            if (title && title !== currentPage.title) void updatePage(currentPage.id, { title })
+          }}
+        />
+      </div>
+      {(currentPage.updatedLabel || currentPageChildren.length > 0 || currentPage.tags.length > 0) && (
+        <div className="paper-meta">
+          {currentPage.updatedLabel && <span className="paper-meta-item">更新于 {currentPage.updatedLabel}</span>}
+          {currentPageChildren.length > 0 && <span className="paper-meta-item">{currentPageChildren.length} 篇子笔记</span>}
+          {currentPage.tags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              className="paper-tag"
+              onClick={() => chooseScope({ kind: 'tag', name: tag })}
+            >
+              #{tag}
+            </button>
+          ))}
+        </div>
+      )}
+    </header>
+  ) : undefined
+
+  const filteredNotebooks = normalizedTreeFilter
+    ? notebooks.filter((notebook) => {
+        if (notebook.name.toLocaleLowerCase().includes(normalizedTreeFilter)) return true
+        if (notebook.locked && !privacyUnlocked) return false
+        return notebook.sections.some((section) =>
+          (pagesBySection.get(section.id) ?? emptyPageList).some((page) => page.title.toLocaleLowerCase().includes(normalizedTreeFilter)),
+        )
+      })
+    : notebooks
+
   return (
-    <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`}>
+    <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`} data-editor-font={editorFont}>
       <input ref={importInput} hidden type="file" accept=".md,.markdown,.txt,.html,.htm,.json,.zip,.nbx,application/json,application/zip" multiple onChange={(event) => { const selected = [...(event.target.files ?? [])]; void Promise.all(selected.map(async (file) => ({ name: file.name, data: new Uint8Array(await file.arrayBuffer()) }))).then((files) => runImport(transferContext, files)); event.target.value = '' }} />
       {aiWorkspaceOpen ? <Suspense fallback={null}><AIWorkspace
         currentPage={currentPage}
@@ -1015,7 +1162,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onCreateAgentProposal={createAutomationAgentProposal}
         onApplyProposal={applyAutomationProposal}
         onRejectProposal={rejectAutomationProposal}
-      /></Suspense> : <div className={`workspace-grid shell layout-${layout} ${sidebarVisible ? 'sidebar-open' : 'sidebar-closed'} ${listVisible ? 'list-open' : 'list-closed'} ${layout === 'narrow' ? `stack-${stackView}` : ''} ${assistant ? 'assistant-open' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--list-width': `${listWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
+      /></Suspense> : <div className={`workspace-grid shell layout-${layout} ${sidebarVisible ? 'sidebar-open' : 'sidebar-closed'} ${listVisible ? 'list-open' : 'list-closed'} ${!assistant && aiOpen && activeArea === 'notes' && hasActivePage ? 'inspector-open' : ''} ${layout === 'narrow' ? `stack-${stackView}` : ''} ${assistant ? 'assistant-open' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--list-width': `${listWidth}px`, '--ai-pane-width': `${aiWidth}px` } as CSSProperties}>
         {layout !== 'wide' && drawerOpen && <div className="drawer-scrim" onClick={() => setDrawerOpen(false)} />}
         <Sidebar
           scope={layout !== 'narrow' && !listVisible ? { kind: 'notebook', id: '' } : listScope}
@@ -1026,24 +1173,38 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
           onSettings={() => { setSettingsPage('general'); setSettingsOpen(true) }}
           onHide={toggleSidebar}
           onNewNotebook={() => setCreateRequest('notebook')}
+          onCollapseAll={collapseAllDirectories}
+          canCollapseAll={Boolean(expandedNotebookId) || effectiveExpandedPageIds.size > 0 || Boolean(normalizedTreeFilter)}
+          onLocateActive={locateActivePageInTree}
+          canLocateActive={activeArea === 'notes' && hasActivePage && Boolean(pageNotebook)}
+          treeFilter={treeFilter}
+          onTreeFilterChange={setTreeFilter}
           assistantOpen={Boolean(assistant)}
-          onAssistant={() => { if (layout !== 'wide') setDrawerOpen(false); openAssistant() }}
+          onAssistant={() => { if (layout !== 'wide') setDrawerOpen(false); setExpandedNotebookId(undefined); openAssistant() }}
           notebooks={<div className="sidebar-tree" role="tree" aria-label="笔记本" onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setPageDropTarget(undefined) }}>
-              {notebooks.map((notebook) => {
-                const expanded = activeNotebook === notebook.id && (!notebook.locked || privacyUnlocked)
+              {filteredNotebooks.length === 0 && <p className="sidebar-filter-empty">没有匹配的目录或页面</p>}
+              {filteredNotebooks.map((notebook) => {
+                const unlocked = !notebook.locked || privacyUnlocked
+                const notebookNameMatches = Boolean(normalizedTreeFilter) && notebook.name.toLocaleLowerCase().includes(normalizedTreeFilter)
+                const expanded = unlocked && (normalizedTreeFilter ? true : expandedNotebookId === notebook.id)
+                const hasPages = unlocked && notebook.sections.some((section) => pagesBySection.get(section.id)?.length)
                 return (
-                  <div key={notebook.id} className="notebook-drive">
+                  <div key={notebook.id} className={`notebook-drive ${expanded ? 'expanded' : ''}`}>
                     <ActionMenu openOnContext label={`${notebook.name}笔记本操作`} trigger={<button type="button" className={`sidebar-item notebook-item ${expanded ? 'selected' : ''} ${notebook.locked ? 'private' : ''}`} aria-pressed={expanded} aria-label={notebook.locked && !privacyUnlocked ? `${notebook.name}（已锁定）` : notebook.name} onClick={() => {
                       if (notebook.locked && !privacyUnlocked) { requestPrivacyAccess(notebook.id); return }
-                      if (expanded) { setBrowse('tree'); return }
+                      if (!normalizedTreeFilter && expandedNotebookId === notebook.id) {
+                        setExpandedNotebookId(undefined)
+                        return
+                      }
                       chooseScope({ kind: 'notebook', id: notebook.id })
                     }}>
+                      <span className="notebook-chevron" aria-hidden="true">{expanded ? <ChevronDown12Regular /> : <ChevronRight12Regular />}</span>
                       <span className="sidebar-item-icon notebook-emoji">{notebook.emoji || '📒'}</span>
                       <span className="sidebar-item-label">{notebook.name}</span>
                       {notebook.locked && <span className="notebook-lock-state" title={privacyUnlocked ? '已解锁' : '已锁定'}>{privacyUnlocked ? <LockOpen16Regular /> : <LockClosed16Regular />}</span>}
-                      {(!notebook.locked || privacyUnlocked) && <span className="sidebar-count">{notebookCounts.get(notebook.id) ?? 0}</span>}
+                      {unlocked && <span className="sidebar-count">{notebookCounts.get(notebook.id) ?? 0}</span>}
                     </button>}>
-                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button>{notebook.sections[0] && <button onClick={() => { pendingImportTarget.current = { sectionId: notebook.sections[0]!.id }; chooseImport(transferContext) }}>导入 Markdown / 文本…</button>}<ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
+                      {notebook.locked && !privacyUnlocked ? <button onClick={() => requestPrivacyAccess(notebook.id)}>解锁笔记本</button> : <><button onClick={() => setRenameRequest({ kind: 'notebook', id: notebook.id, name: notebook.name })}>重命名笔记本</button><button onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebookId(notebook.id); setCreateRequest('rootPage') }}>新建顶层页面</button>{notebook.sections[0] && <button onClick={() => { pendingImportTarget.current = { sectionId: notebook.sections[0]!.id }; chooseImport(transferContext) }}>导入 Markdown / 文本…</button>}<ActionMenuDivider /><button className="destructive-menu-item" onClick={() => { void (async () => {
                       if (!(await requestConfirm({ title: `删除笔记本“${notebook.name}”？`, description: '将删除其中全部页面、任务、附件和历史版本，此操作无法撤销。', confirmLabel: '删除笔记本', destructive: true }))) return
                       try {
                         await deleteNotebook(notebook.id)
@@ -1052,39 +1213,43 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                       }
                     })() }}>删除笔记本及全部内容</button></>}
                     </ActionMenu>
+                    {expanded && <div className="sidebar-notebook-tree" role="group" aria-label={notebook.name}>
+                      {!hasPages && !normalizedTreeFilter && <button type="button" className="sidebar-more sidebar-drive-empty" onClick={() => { setActiveNotebook(notebook.id); setExpandedNotebookId(notebook.id); setCreateRequest('rootPage') }}>还没有页面 · 新建页面</button>}
+                      {notebook.sections.map((section) => {
+                        const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
+                        const sectionMatchingIds = normalizedTreeFilter && !notebookNameMatches
+                          ? new Set(pagesInSection.filter((page) => page.title.toLocaleLowerCase().includes(normalizedTreeFilter)).map((page) => page.id))
+                          : undefined
+                        if (sectionMatchingIds && sectionMatchingIds.size === 0) return null
+                        const treeRows = flattenPageTree(pagesInSection, effectiveExpandedPageIds, sectionMatchingIds)
+                        if (treeRows.length === 0) return null
+                        return <div key={section.id} className="sidebar-page-tree">
+                          {treeRows.map(({ page, depth, hasChildren }) => <PageTreeRow
+                            key={page.id}
+                            page={page}
+                            depth={depth}
+                            hasChildren={hasChildren}
+                            childCount={pageDescendantCounts.get(page.id) ?? 0}
+                            pagesInSection={pagesInSection}
+                            variant="navigation"
+                            selected={activePage === page.id}
+                            expanded={effectiveExpandedPageIds.has(page.id) || Boolean(sectionMatchingIds)}
+                            dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
+                            actions={rowActions}
+                            onActivate={onTreeActivate}
+                            onToggleExpanded={togglePageExpanded}
+                            onPrefetch={scheduleDocumentPrefetch}
+                            onPrefetchStop={stopDocumentPrefetch}
+                            onDropPosition={setDropPosition}
+                            onDrop={dropPage}
+                            onDragEnd={clearDropTarget}
+                          />)}
+                        </div>
+                      })}
+                    </div>}
                   </div>
                 )
               })}
-              {activeDrive && !activeDrive.sections.some((section) => pagesBySection.get(section.id)?.length) && <button type="button" className="sidebar-more sidebar-drive-empty" onClick={() => { setActiveNotebook(activeDrive.id); setCreateRequest('rootPage') }}>还没有页面 · 新建页面</button>}
-              {activeDrive && <div className="sidebar-drive-tree" role="group" aria-label={activeDrive.name}>
-                {activeDrive && activeDrive.sections.map((section) => {
-                  const pagesInSection = pagesBySection.get(section.id) ?? emptyPageList
-                  const treeRows = flattenPageTree(pagesInSection, expandedPageIds)
-                  if (treeRows.length === 0) return null
-                  return <div key={section.id} className="sidebar-page-tree">
-                    {treeRows.map(({ page, depth, hasChildren }) => <PageTreeRow
-                      key={page.id}
-                      page={page}
-                      depth={depth}
-                      hasChildren={hasChildren}
-                      childCount={pageDescendantCounts.get(page.id) ?? 0}
-                      pagesInSection={pagesInSection}
-                      variant="navigation"
-                      selected={activePage === page.id}
-                      expanded={expandedPageIds.has(page.id)}
-                      dropTarget={pageDropTarget?.id === page.id ? pageDropTarget : undefined}
-                      actions={rowActions}
-                      onActivate={onTreeActivate}
-                      onToggleExpanded={togglePageExpanded}
-                      onPrefetch={scheduleDocumentPrefetch}
-                      onPrefetchStop={stopDocumentPrefetch}
-                      onDropPosition={setDropPosition}
-                      onDrop={dropPage}
-                      onDragEnd={clearDropTarget}
-                    />)}
-                  </div>
-                })}
-              </div>}
             </div>}
           syncStatus={<ActionMenu label="同步状态详情" trigger={<button type="button" className={`sidebar-sync ${showSyncCompleted ? 'synced just-finished' : syncDot}`} aria-label={`同步状态：${syncLabels[syncState]}`}>
               <span className="sync-dot" aria-hidden="true" />
@@ -1225,7 +1390,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
             try { return await applyPlan(groups, planApi, onProgress) } finally { await reloadWorkspace() }
           }}
         /></main> : <main className="content-pane">
-          <div className="editor-toolbar" data-tauri-drag-region>
+          <div className={`editor-toolbar ${paperScrolled ? 'scrolled' : ''}`} data-tauri-drag-region>
             <div className="toolbar-leading" data-tauri-drag-region>
               {layout === 'narrow' && <button type="button" className="toolbar-back" onClick={() => setStackView('list')}><ChevronLeft20Regular /><span>{scopeTitle}</span></button>}
               {layout !== 'narrow' && !listVisible && !sidebarVisible && <button type="button" className="toolbar-icon-button" aria-label="显示边栏" title={`显示边栏（${keyHint('sidebar')}）`} onClick={toggleSidebar}><PanelLeft20Regular /></button>}
@@ -1237,15 +1402,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               </div>
               </>}
             </div>
-            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? (hasActivePage ? pageNotebook : currentNotebook)?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => openPage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? hasActivePage ? <Input key={`${currentPage.id}:${currentPage.title}`} className="breadcrumb-title-input" defaultValue={currentPage.title} aria-label="页面标题" onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing) return
-              // Enter keeps the new title and returns to the text; Escape gives it up.
-              if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); focusEditor() }
-              else if (event.key === 'Escape') { event.currentTarget.value = currentPage.title; event.currentTarget.blur() }
-            }} onBlur={(event) => { const title = event.currentTarget.value.trim(); if (title && title !== currentPage.title) void updatePage(currentPage.id, { title }) }} /> : <span>未选择页面</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
+            <div className="breadcrumb" data-tauri-drag-region><span>{activeArea === 'notes' ? (hasActivePage ? pageNotebook : currentNotebook)?.name ?? '工作区' : '我的知识库'}</span>{activeArea === 'notes' && hasActivePage && currentPageAncestors.map((ancestor) => <Fragment key={ancestor.id}><ChevronRight16Regular /><button className="breadcrumb-page" title={ancestor.title} onClick={() => openPage(ancestor.id)}>{ancestor.title}</button></Fragment>)}<ChevronRight16Regular />{activeArea === 'notes' ? <span className="breadcrumb-current">{hasActivePage ? (currentPage.title || '无标题页面') : '未选择页面'}</span> : <span>{activeArea === 'tasks' ? '所有任务' : '已删除页面'}</span>}</div>
             <div className="editor-actions">
               {activeArea === 'notes' && hasActivePage && <>
-                <div className="page-utilities"><Suspense fallback={null}><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} currentMarkdown={documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} create={async (pageId) => { const current = documents[pageId]; if (current) await saveDocument(pageId, current); return createManualRevision(pageId) }} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></Suspense></div>
+                <div className="page-utilities"><Suspense fallback={null}><AttachmentPanel pageId={currentPage.id} loadAssets={loadAssets} saveAsset={saveAsset} openAsset={openAsset} /><VersionHistory pageId={currentPage.id} getCurrentMarkdown={() => documents[currentPage.id] ? documentToMarkdown(documents[currentPage.id]!) : ''} load={loadRevisions} create={async (pageId) => { const current = documents[pageId]; if (current) await saveDocument(pageId, current); return createManualRevision(pageId) }} restore={(revisionId) => restoreRevision(revisionId).then((pageId) => { setRestoreToken(`${pageId}:${Date.now()}`) })} /></Suspense></div>
                 <button type="button" className={`toolbar-icon-button ${aiOpen && rightPanel === 'outline' ? 'selected' : ''}`} aria-label="大纲" title="大纲" aria-pressed={aiOpen && rightPanel === 'outline'} onClick={() => { if (aiOpen && rightPanel === 'outline') showRightPanel(false); else { setRightPanel('outline'); showRightPanel(true) } }}><TextBulletListSquare20Regular /></button>
                 <button type="button" className={`toolbar-icon-button ${aiOpen && rightPanel === 'backlinks' ? 'selected' : ''}`} aria-label="引用" title="被哪些笔记引用" aria-pressed={aiOpen && rightPanel === 'backlinks'} onClick={() => { if (aiOpen && rightPanel === 'backlinks') showRightPanel(false); else { setRightPanel('backlinks'); showRightPanel(true) } }}><ArrowReply20Regular /></button>
                 <button type="button" className="toolbar-icon-button" aria-label="插入双链" title="插入双链" onClick={() => setReferencePickerOpen(true)}><Link20Regular /></button>
@@ -1265,6 +1425,10 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                 <button className={themePreference === 'light' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('light')}>浅色</button>
                 <button className={themePreference === 'dark' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('dark')}>深色</button>
                 <button className={themePreference === 'system' ? 'selected' : undefined} onClick={() => onThemePreferenceChange?.('system')}>跟随系统</button>
+                <ActionMenuDivider />
+                <span className="action-menu-heading">正文字体</span>
+                <button className={editorFont === 'sans' ? 'selected' : undefined} onClick={() => changeEditorFont('sans')}>现代无衬线</button>
+                <button className={editorFont === 'serif' ? 'selected' : undefined} onClick={() => changeEditorFont('serif')}>书刊衬线</button>
                 {(activeArea === 'notes' || activeArea === 'tasks') && hasActivePage && <>
                   <ActionMenuDivider />
                   <button className="destructive-menu-item" onClick={() => listHandlersRef.current.remove(currentPage)}>移到回收站</button>
@@ -1272,7 +1436,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               </ActionMenu>
             </div>
           </div>
-          <section className="document-surface">
+          <section className="document-surface" onScroll={(event) => setPaperScrolled(event.currentTarget.scrollTop > 8)}>
             {currentPage.syncStatus === 'conflict' && <div className="sync-conflict-banner" role="alert"><strong>此笔记存在尚未处理的同步冲突</strong><span>本机内容未被覆盖。请到“设置 → 同步状态与修复”处理；继续编辑不会自动解决冲突。</span></div>}
             {activeArea === 'trash' ? (accessibleTrashPages.length ? <div className="trash-detail"><Delete20Regular /><h2>{currentPage.title}</h2><p>页面仍保留在本机，可以恢复到原分区或永久删除。</p><div><Button appearance="primary" onClick={() => { const page = currentPage; void restorePage(page.id).then(() => openPage(page.id, { sectionId: page.sectionId, kind: page.kind === 'task' ? 'task' : 'document', trash: false })) }}>恢复页面</Button><Button appearance="secondary" onClick={() => { void (async () => {
                   if (!(await requestConfirm({ title: `永久删除“${currentPage.title}”？`, description: '永久删除后无法恢复，确定继续吗？', confirmLabel: '永久删除', destructive: true }))) return
@@ -1283,24 +1447,26 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
                     showToast(error instanceof Error ? error.message : '无法永久删除页面', { kind: 'error' })
                   }
                 })() }}>永久删除</Button></div></div> : <ModePlaceholder icon={<Delete20Regular />} title="回收站是空的" description="移到回收站的页面会显示在这里。" />) : activeArea === 'tasks' ? (hasActivePage ? <Suspense fallback={null}><TaskDetail key={currentPage.id} task={currentPage} loadSteps={loadTaskSteps} saveSteps={saveTaskSteps} updateTask={(patch) => updatePage(currentPage.id, patch)} /></Suspense> : <ModePlaceholder icon={<CheckmarkCircle20Regular />} title={taskPages.length ? '选择一项待办' : '还没有待办'} description={taskPages.length ? `从列表中选择，或按 ${keyHint('newNote')} 新建。` : '记下要做的事，可以设置截止时间和提醒。'} actionLabel="新建待办" onAction={() => { void createInScope() }} />) : !notebooks.length ? <ModePlaceholder icon={<Document20Regular />} title="还没有笔记本" description="新建一个笔记本，或在设置中连接坚果云恢复已有笔记。" actionLabel="新建笔记本" onAction={() => setCreateRequest('notebook')} /> : !hasActivePage ? (scopeNotebook && !notebookCounts.get(scopeNotebook.id) ? <ModePlaceholder icon={<Document20Regular />} title="这个笔记本还没有页面" description="新建一个页面开始记录，之后可以在边栏里为它添加子页面。" actionLabel="新建页面" onAction={() => { void createInScope() }} /> : <ModePlaceholder icon={<Document20Regular />} title={documentPages.length ? '选择一篇笔记' : '这里还没有笔记'} description={documentPages.length ? `从列表中选择，或按 ${keyHint('newNote')} 新建。` : '新建第一篇笔记，开始记录想法、会议或资料。'} actionLabel="新建笔记" onAction={() => { void createInScope() }} />) : <div key={currentPage.id} className="document-transition">
-            {!currentDocument ? <div className="document-loading" role="status" aria-live="polite">
+            {!currentDocument ? <>{paperHeader}<div className="document-loading" role="status" aria-live="polite">
               <span className="document-loading-spinner" />
               <strong>正在准备笔记…</strong>
               <span>正在读取正文，大型笔记会按需显示。</span>
-            </div> : <>
-              {showChildOverview ? <EmptyParentPage title={currentPage.title} icon={currentPage.icon} pages={currentPageChildren} childCounts={directChildCounts} onOpen={openRecentPage} onCompose={() => setComposingPageId(currentPage.id)} /> : isLargeDocument(currentDocument) ? <LargeDocumentReader
+            </div></> : <>
+              {showChildOverview ? <div className="paper-overview-scroll" onScroll={(event) => setPaperScrolled(event.currentTarget.scrollTop > 8)}>{paperHeader}<EmptyParentPage embeddedHeader title={currentPage.title} icon={currentPage.icon} pages={currentPageChildren} childCounts={directChildCounts} onOpen={openRecentPage} onCompose={() => setComposingPageId(currentPage.id)} /></div> : isLargeDocument(currentDocument) ? <LargeDocumentReader
                 key={`${currentPage.id}:${restoreToken}`}
                 workspaceId={WORKSPACE_ID} pageId={currentPage.id} pageTitle={currentPage.title}
+                header={paperHeader}
                 content={currentDocument} loadAsset={getAssetContent} saveAsset={saveAsset} vimEnabled={vimEnabled}
                 onVimCommandModeChange={setVimCommandMode}
                 onSaveSection={(source, start, end, replacement) => saveDocumentSection(currentPage.id, source, start, end, replacement)}
                 viewportPosition={loadedReadingPosition?.pageId === currentPage.id ? loadedReadingPosition.position : undefined}
-                onViewportChange={(position) => recordViewportPosition(currentPage.id, position)}
+                onViewportChange={(position) => { setPaperScrolled((position.scrollTop ?? 0) > 8); recordViewportPosition(currentPage.id, position) }}
               /> : <DocumentEditor
               key={`${currentPage.id}:${restoreToken.startsWith(`${currentPage.id}:`) ? restoreToken : ''}`}
               workspaceId={WORKSPACE_ID}
               pageId={currentPage.id}
               pageTitle={currentPage.title}
+              header={paperHeader}
               content={currentDocument}
               onDraft={(json) => stageDocument(currentPage.id, json)}
               onChange={(json) => saveDocument(currentPage.id, json)}
@@ -1310,7 +1476,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
               vimEnabled={vimEnabled}
               onVimCommandModeChange={setVimCommandMode}
               viewportPosition={loadedReadingPosition?.pageId === currentPage.id ? loadedReadingPosition.position : undefined}
-              onViewportChange={(position) => recordViewportPosition(currentPage.id, position)}
+              onViewportChange={(position) => { setPaperScrolled((position.scrollTop ?? 0) > 8); recordViewportPosition(currentPage.id, position) }}
               />}
             </>}
             </div>}
@@ -1331,6 +1497,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         theme={theme}
         themePreference={themePreference}
         accentColor={accentColor}
+        editorFont={editorFont}
         syncState={syncState}
         syncError={syncError}
         syncProgress={syncProgress}
@@ -1351,6 +1518,7 @@ export function App({ theme = 'light', themePreference = 'system', accentColor =
         onClose={closeSettings}
         onThemePreferenceChange={(preference) => onThemePreferenceChange?.(preference)}
         onAccentColorChange={(color) => onAccentColorChange?.(color)}
+        onEditorFontChange={changeEditorFont}
         onSyncNow={async (mode) => Boolean(await syncNow({ force: true, mode }))}
         onMigrateFromSsh={async () => migrateSshToWebdav(automationRepository, WORKSPACE_ID)}
         syncRepair={syncRepair}

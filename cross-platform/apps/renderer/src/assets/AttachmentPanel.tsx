@@ -21,7 +21,15 @@ export function AttachmentPanel({ pageId, loadAssets, saveAsset, openAsset }: At
   const [error, setError] = useState<string>()
   const reload = () => void loadAssets(pageId).then(setAssets)
   useEffect(() => {
-    void loadAssets(pageId).then(setAssets)
+    let cancelled = false
+    void loadAssets(pageId).then((items) => {
+      if (!cancelled) setAssets(items)
+    }).catch(() => {
+      if (!cancelled) setAssets([])
+    })
+    return () => {
+      cancelled = true
+    }
   }, [loadAssets, pageId])
 
   const addFiles = async (files: File[]) => {

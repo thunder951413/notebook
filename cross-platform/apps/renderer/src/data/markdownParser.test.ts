@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { markdownToEditorCache } from '@notebook/sync-contract'
-import { mergeParsedMarkdownChunks, splitMarkdownForParallelParsing } from './markdownParser'
+import { LARGE_MARKDOWN_THRESHOLD, mergeParsedMarkdownChunks, PARALLEL_CHUNK_TARGET, splitMarkdownForParallelParsing } from './markdownParser'
 
 test('parallel Markdown chunks preserve block semantics when merged', () => {
   const source = [
@@ -62,4 +62,13 @@ test('does not split inside fenced code or display math', () => {
   expect(chunks.length).toBeGreaterThan(1)
   expect(chunks.some((chunk) => chunk.includes('```text\n代码块第一段\n\n代码块第二段\n```'))).toBe(true)
   expect(chunks.some((chunk) => chunk.includes('$$\na + b\n\n= c\n$$'))).toBe(true)
+})
+
+test('activates worker chunking thresholds for medium-large 30k-199k notes', () => {
+  expect(LARGE_MARKDOWN_THRESHOLD).toBe(30_000)
+  expect(PARALLEL_CHUNK_TARGET).toBe(15_000)
+  const mediumLarge = Array.from({ length: 120 }, (_, i) => `## 章节 ${i}\n\n${'内容段落文字。'.repeat(60)}\n`).join('\n')
+  expect(mediumLarge.length).toBeGreaterThan(LARGE_MARKDOWN_THRESHOLD)
+  expect(mediumLarge.length).toBeLessThan(200_000)
+  expect(splitMarkdownForParallelParsing(mediumLarge).length).toBeGreaterThan(2)
 })

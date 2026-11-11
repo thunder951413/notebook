@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { BackupPasswordDialog } from './BackupPasswordDialog'
 import { CreateItemDialog } from './CreateItemDialog'
 import { MovePageDialog } from './MovePageDialog'
 
@@ -28,5 +29,14 @@ describe('dialogs close on Escape', () => {
     window.removeEventListener('keydown', windowListener)
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(windowListener).not.toHaveBeenCalled()
+  })
+
+  it('marks modal dialogs with aria-modal="true"', () => {
+    const { unmount } = render(<CreateItemDialog kind="notebook" onClose={() => {}} onCreate={async () => {}} />)
+    expect(screen.getByRole('dialog', { name: '新建笔记本' })).toHaveAttribute('aria-modal', 'true')
+    unmount()
+
+    render(<BackupPasswordDialog mode="create" onClose={() => {}} onSubmit={async () => {}} />)
+    expect(screen.getByRole('dialog', { name: '创建加密备份' })).toHaveAttribute('aria-modal', 'true')
   })
 })

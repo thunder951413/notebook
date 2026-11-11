@@ -187,16 +187,35 @@ export class SyncRepository extends ContentRepository {
 
   protected async createConflictCopy(workspaceId: string, pageId: string, remote: Record<string, unknown>): Promise<string> {
     const source = await this.db.pages.get(pageId)
+    const markdown = typeof remote.markdown === 'string' ? remote.markdown : legacyTiptapToCanonicalMarkdown(remote.tiptapJson as Record<string, unknown>)
+    const firstLine = markdown.split('\n').map((line) => line.replace(/^#+\s*/, '').trim()).find(Boolean)
+    const baseTitle = source?.title?.trim() || firstLine?.slice(0, 60) || '未命名笔记'
+    const conflictPrefix = `${baseTitle}（冲突副本`
+    const sectionPages = source?.sectionId
+      ? await this.db.pages.where('sectionId').equals(source.sectionId).toArray()
+      : (await this.db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((candidate) => candidate.sectionId === undefined)
+    const candidates = sectionPages.filter((candidate) =>
+      candidate.workspaceId === workspaceId
+      && !candidate.deletedAt
+      && candidate.id !== pageId
+      && candidate.title.startsWith(conflictPrefix))
+    if (candidates.length) {
+      const candidateDocuments = await this.db.documents.bulkGet(candidates.map((candidate) => candidate.id))
+      const remoteTrimmed = markdown.trim()
+      for (let index = 0; index < candidates.length; index += 1) {
+        const doc = candidateDocuments[index]
+        if (!doc) continue
+        const existingMarkdown = typeof doc.markdown === 'string' ? doc.markdown : legacyTiptapToCanonicalMarkdown(doc.tiptapJson)
+        if (existingMarkdown.trim() === remoteTrimmed) return candidates[index]!.id
+      }
+    }
     const now = new Date().toISOString()
     const copyId = crypto.randomUUID()
-    const markdown = typeof remote.markdown === 'string' ? remote.markdown : legacyTiptapToCanonicalMarkdown(remote.tiptapJson as Record<string, unknown>)
     const assets = source ? await this.db.assets.where('pageId').equals(pageId).toArray() : []
     const referenced = assets.filter((asset) => markdown.includes(`notebook-asset:${asset.id}`))
     const assetIds = new Map(referenced.map((asset) => [asset.id, crypto.randomUUID()]))
     const date = new Date()
     const stamp = `${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-    const firstLine = markdown.split('\n').map((line) => line.replace(/^#+\s*/, '').trim()).find(Boolean)
-    const baseTitle = source?.title?.trim() || firstLine?.slice(0, 60) || '未命名笔记'
     const page: Page = {
       ...(source ?? { workspaceId, kind: 'document' as const, favorite: false }),
       id: copyId,
@@ -212,12 +231,13 @@ export class SyncRepository extends ContentRepository {
       legacyMetadata: undefined,
       syncStatus: 'pending',
     }
+    const remappedMarkdown = remapAssetReferences(markdown, assetIds) as string
     const document: PageDocument = {
       ...(remote as unknown as PageDocument),
       pageId: copyId,
       schemaVersion: Math.max(3, Number(remote.schemaVersion) || 3),
-      markdown: remapAssetReferences(markdown, assetIds) as string,
-      tiptapJson: markdownToEditorCache(remapAssetReferences(markdown, assetIds) as string) as Record<string, unknown>,
+      markdown: remappedMarkdown,
+      tiptapJson: markdownToEditorCache(remappedMarkdown) as Record<string, unknown>,
       yjsState: undefined,
       updatedAt: now,
     }
@@ -464,8 +484,16 @@ export class SyncRepository extends ContentRepository {
         ...(setAside.length ? { quarantined: setAside.map((item) => ({ entityType: item.entityType, entityId: item.entityId, reason: item.reason })) } : {}),
       }
     })
-      .then((result) => {
-        this.searchIndex.invalidate(workspaceId)
+      .then(async (result) => {
+        // Search covers page titles, previews and bodies: refresh only the
+        // pages this pull wrote (and the conflict copies it created) instead
+        // of discarding the index, which made the next search rebuild it all.
+        const pageIds = [
+          ...changes.filter((change) => change.entityType === 'page' || change.entityType === 'document').map((change) => change.entityId),
+          ...(result.resolved ?? []).flatMap((item) => item.copyPageId ? [item.copyPageId] : []),
+        ]
+        // A failed refresh must not fail the sync that already committed.
+        await this.searchIndex.refresh(workspaceId, pageIds, this.db).catch(() => this.searchIndex.invalidate(workspaceId))
         return result
       })
   }

@@ -187,7 +187,7 @@ export function CommandPalette({ open, items, searchPageIds, onClose }: CommandP
 
   return <div className="command-palette-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <section className="command-palette" role="dialog" aria-modal="true" aria-label="命令面板">
-      {confirmItem ? <div className="command-confirmation" role="alertdialog" aria-label="确认危险操作">
+      {confirmItem ? <div className="command-confirmation" role="alertdialog" aria-modal="true" aria-label="确认危险操作" onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setConfirmItem(undefined); window.requestAnimationFrame(() => inputRef.current?.focus()) } }}>
         <div className="command-confirmation-icon">!</div>
         <h2>{confirmItem.title}</h2>
         <p>{confirmItem.confirmDescription ?? '这项操作会修改或删除数据，请确认是否继续。'}</p>

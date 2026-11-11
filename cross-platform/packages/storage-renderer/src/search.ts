@@ -4,6 +4,10 @@ import type { NotebookRendererDatabase } from './database'
 import { extractText } from './util'
 
 export const SEARCH_INDEX_CHUNK_SIZE = 24
+/** Text indexed between two yields while building, so a few book-sized notes do not block input together. */
+const SEARCH_INDEX_CHUNK_CHARACTERS = 200_000
+/** Past this many changed pages a full rebuild is cheaper than refreshing them one by one. */
+const SEARCH_REFRESH_LIMIT = 300
 const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 export const normalizeSearch = (value: string) => value.trim().toLocaleLowerCase()
@@ -32,24 +36,100 @@ export const searchTokenize = (value: string) => {
 
 export interface SearchCacheEntry {
   pages: Page[]
-  textByPage: Map<string, string>
-  /** Title, preview and body, normalized once for the exact-substring pass. */
+  /** Body text, normalized once for the exact-substring pass and metadata-only updates. */
   haystackByPage: Map<string, string>
   index: MiniSearch<{ id: string; title: string; preview: string; content: string }>
 }
 
-const searchHaystack = (page: Page, text: string) => `${page.title}\n${page.preview}\n${text}`.normalize('NFKC').toLocaleLowerCase()
+const normalizeHaystack = (value: string) => value.normalize('NFKC').toLocaleLowerCase()
+const pageHeaderHaystack = (page: Page) => normalizeHaystack(`${page.title}\n${page.preview}`)
+
+/**
+ * What the repository needs from full-text search. `SearchCache` keeps the
+ * index on the calling thread; `WorkerSearchIndex` (searchWorker.ts) keeps it
+ * in a Web Worker, so building it never blocks typing.
+ */
+export interface SearchIndex {
+  upsert(page: Page, text?: string): void
+  remove(workspaceId: string, pageId: string): void
+  refresh(workspaceId: string, pageIds: Iterable<string>, db: NotebookRendererDatabase): Promise<void>
+  invalidate(workspaceId: string): void
+  close(): void
+  search(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number, signal?: AbortSignal): Promise<Page[]>
+  candidates(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number): Promise<Page[]>
+  hits(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number, signal?: AbortSignal): Promise<SearchHit[]>
+}
+
+type QueuedMutation = (entry: SearchCacheEntry) => Promise<void> | void
 
 /**
  * Per-workspace search index. Building the MiniSearch index reads every page
  * and document, so the result is cached and invalidated only when a workspace
- * mutation lands. Pending builds are shared so concurrent queries do not
- * duplicate the work.
+ * mutation lands. Pending builds and refreshes are shared so concurrent queries
+ * wait for a consistent index without duplicating work.
  */
-export class SearchCache {
+export class SearchCache implements SearchIndex {
   private readonly cache = new Map<string, SearchCacheEntry>()
   private readonly pending = new Map<string, Promise<SearchCacheEntry>>()
   private readonly generations = new Map<string, number>()
+  /**
+   * Edits and refreshes that land while a build or refresh is running. They are
+   * applied in arrival order once the in-flight operation completes; discarding
+   * the build instead restarted it on every autosave.
+   */
+  private readonly queued = new Map<string, QueuedMutation[]>()
+
+  private queue(workspaceId: string, apply: QueuedMutation) {
+    const list = this.queued.get(workspaceId) ?? []
+    list.push(apply)
+    this.queued.set(workspaceId, list)
+  }
+
+  private async drainQueued(workspaceId: string, entry: SearchCacheEntry, generation: number) {
+    while ((this.generations.get(workspaceId) ?? 0) === generation) {
+      const list = this.queued.get(workspaceId)
+      const next = list?.shift()
+      if (!next) {
+        this.queued.delete(workspaceId)
+        return
+      }
+      await next(entry)
+    }
+  }
+
+  private applyUpsert(entry: SearchCacheEntry, page: Page, text?: string) {
+    if (entry.index.has(page.id)) entry.index.discard(page.id)
+    const position = entry.pages.findIndex((candidate) => candidate.id === page.id)
+    if (page.deletedAt) {
+      if (position >= 0) entry.pages.splice(position, 1)
+      entry.haystackByPage.delete(page.id)
+      return
+    }
+    const content = text !== undefined ? normalizeHaystack(text) : (entry.haystackByPage.get(page.id) ?? '')
+    entry.haystackByPage.set(page.id, content)
+    if (position >= 0) entry.pages[position] = page
+    else entry.pages.push(page)
+    entry.index.add({ id: page.id, title: page.title, preview: page.preview, content })
+  }
+
+  private applyRemove(entry: SearchCacheEntry, pageId: string) {
+    if (entry.index.has(pageId)) entry.index.discard(pageId)
+    const position = entry.pages.findIndex((candidate) => candidate.id === pageId)
+    if (position >= 0) entry.pages.splice(position, 1)
+    entry.haystackByPage.delete(pageId)
+  }
+
+  search(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number, signal?: AbortSignal) {
+    return searchWorkspaceWith(db, this, workspaceId, query, limit, signal)
+  }
+
+  candidates(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number) {
+    return searchWorkspaceCandidatesWith(db, this, workspaceId, query, limit)
+  }
+
+  hits(db: NotebookRendererDatabase, workspaceId: string, query: string, limit?: number, signal?: AbortSignal) {
+    return searchWorkspaceHitsWith(db, this, workspaceId, query, limit, signal)
+  }
 
   /**
    * Keeps a built index current after one page changed (an autosave), instead
@@ -59,73 +139,156 @@ export class SearchCache {
   upsert(page: Page, text?: string) {
     const workspaceId = page.workspaceId
     if (this.pending.has(workspaceId)) {
-      this.invalidate(workspaceId)
+      this.queue(workspaceId, (entry) => this.applyUpsert(entry, page, text))
       return
     }
     const entry = this.cache.get(workspaceId)
     if (!entry) return
-    if (entry.index.has(page.id)) entry.index.discard(page.id)
-    const position = entry.pages.findIndex((candidate) => candidate.id === page.id)
-    if (page.deletedAt) {
-      if (position >= 0) entry.pages.splice(position, 1)
-      entry.textByPage.delete(page.id)
-      entry.haystackByPage.delete(page.id)
+    this.applyUpsert(entry, page, text)
+  }
+
+  /** Drops one page from a built index (the page was purged). */
+  remove(workspaceId: string, pageId: string) {
+    if (this.pending.has(workspaceId)) {
+      this.queue(workspaceId, (entry) => this.applyRemove(entry, pageId))
       return
     }
-    const content = text ?? entry.textByPage.get(page.id) ?? ''
-    entry.textByPage.set(page.id, content)
-    entry.haystackByPage.set(page.id, searchHaystack(page, content))
-    if (position >= 0) entry.pages[position] = page
-    else entry.pages.push(page)
-    entry.index.add({ id: page.id, title: page.title, preview: page.preview, content })
+    const entry = this.cache.get(workspaceId)
+    if (!entry) return
+    this.applyRemove(entry, pageId)
+  }
+
+  /**
+   * Brings a built index up to date for pages whose page or document record
+   * was written outside the editor (a sync). Only those pages are re-read,
+   * so a pull no longer forces the next search to rebuild the whole index on
+   * the main thread. Without a built index there is nothing to keep current.
+   */
+  async refresh(workspaceId: string, pageIds: Iterable<string>, db: NotebookRendererDatabase) {
+    const ids = [...new Set(pageIds)]
+    if (!ids.length || (!this.cache.has(workspaceId) && !this.pending.has(workspaceId))) return
+    if (ids.length > SEARCH_REFRESH_LIMIT) {
+      this.invalidate(workspaceId)
+      return
+    }
+    const generation = this.generations.get(workspaceId) ?? 0
+    const step = async (entry: SearchCacheEntry) => {
+      const pages = await db.pages.bulkGet(ids)
+      const documents = await db.documents.bulkGet(ids)
+      // The index was rebuilt or dropped while reading: it is already current or will be.
+      if ((this.generations.get(workspaceId) ?? 0) !== generation || this.cache.get(workspaceId) !== entry) return
+      ids.forEach((pageId, position) => {
+        const page = pages[position]
+        if (!page || page.workspaceId !== workspaceId) { this.applyRemove(entry, pageId); return }
+        const document = documents[position]
+        this.applyUpsert(entry, page, document ? document.markdown ?? extractText(document.tiptapJson) : '')
+      })
+    }
+    const existing = this.pending.get(workspaceId)
+    if (existing) {
+      let stepError: unknown
+      this.queue(workspaceId, async (entry) => {
+        try {
+          await step(entry)
+        } catch (error) {
+          stepError = error
+          this.invalidate(workspaceId)
+        }
+      })
+      await existing
+      if (stepError !== undefined) throw stepError
+      return
+    }
+    const entry = this.cache.get(workspaceId)
+    if (!entry) return
+    let refreshError: unknown
+    let run: Promise<SearchCacheEntry> | undefined
+    run = (async () => {
+      try {
+        await step(entry)
+        await this.drainQueued(workspaceId, entry, generation)
+        return entry
+      } catch (error) {
+        refreshError = error
+        this.invalidate(workspaceId)
+        return entry
+      }
+    })().finally(() => {
+      if (this.pending.get(workspaceId) === run) {
+        this.pending.delete(workspaceId)
+      }
+    })
+    this.pending.set(workspaceId, run)
+    await run
+    if (refreshError !== undefined) throw refreshError
   }
 
   invalidate(workspaceId: string) {
     this.cache.delete(workspaceId)
     this.pending.delete(workspaceId)
+    this.queued.delete(workspaceId)
     this.generations.set(workspaceId, (this.generations.get(workspaceId) ?? 0) + 1)
   }
 
+  close() {
+    for (const workspaceId of new Set([...this.cache.keys(), ...this.pending.keys(), ...this.queued.keys()])) {
+      this.invalidate(workspaceId)
+    }
+    this.cache.clear()
+    this.pending.clear()
+    this.queued.clear()
+    this.generations.clear()
+  }
+
   async get(workspaceId: string, db: NotebookRendererDatabase): Promise<SearchCacheEntry> {
-    const cached = this.cache.get(workspaceId)
-    if (cached) return cached
     const pending = this.pending.get(workspaceId)
     if (pending) return pending
+    const cached = this.cache.get(workspaceId)
+    if (cached) return cached
     const generation = this.generations.get(workspaceId) ?? 0
-    const build = (async () => {
+    let build: Promise<SearchCacheEntry> | undefined
+    build = (async () => {
       const pages = (await db.pages.where('workspaceId').equals(workspaceId).toArray()).filter((page) => !page.deletedAt)
       const pageIds = new Set(pages.map((page) => page.id))
       const documents = (await db.documents.toArray()).filter((document) => pageIds.has(document.pageId))
-      const textByPage = new Map<string, string>()
+      const haystackByPage = new Map<string, string>()
       for (let offset = 0; offset < documents.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
         for (const document of documents.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)) {
-          textByPage.set(document.pageId, document.markdown ?? extractText(document.tiptapJson))
+          haystackByPage.set(document.pageId, normalizeHaystack(document.markdown ?? extractText(document.tiptapJson)))
         }
         await yieldToEventLoop()
       }
-      const haystackByPage = new Map<string, string>()
+      documents.length = 0
       const index = new MiniSearch<{ id: string; title: string; preview: string; content: string }>({ fields: ['title', 'preview', 'content'], storeFields: ['id'], tokenize: searchTokenize })
-      for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
-        const chunk = pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
-        for (const page of chunk) haystackByPage.set(page.id, searchHaystack(page, textByPage.get(page.id) ?? ''))
-        index.addAll(chunk.map((page) => ({
-          id: page.id,
-          title: page.title,
-          preview: page.preview,
-          content: textByPage.get(page.id) ?? '',
-        })))
-        await yieldToEventLoop()
+      // Yield after a number of pages or an amount of text, whichever comes
+      // first: tokenizing is proportional to text, and one imported book can
+      // outweigh thousands of ordinary notes.
+      let pagesSinceYield = 0
+      let charactersSinceYield = 0
+      for (const page of pages) {
+        const content = haystackByPage.get(page.id) ?? ''
+        index.add({ id: page.id, title: page.title, preview: page.preview, content })
+        pagesSinceYield += 1
+        charactersSinceYield += content.length
+        if (pagesSinceYield >= SEARCH_INDEX_CHUNK_SIZE || charactersSinceYield >= SEARCH_INDEX_CHUNK_CHARACTERS) {
+          await yieldToEventLoop()
+          pagesSinceYield = 0
+          charactersSinceYield = 0
+        }
       }
-      const result = { pages, textByPage, haystackByPage, index }
-      if ((this.generations.get(workspaceId) ?? 0) === generation) this.cache.set(workspaceId, result)
+      const result = { pages, haystackByPage, index }
+      if ((this.generations.get(workspaceId) ?? 0) === generation) {
+        this.cache.set(workspaceId, result)
+        await this.drainQueued(workspaceId, result, generation)
+      }
       return result
-    })()
+    })().finally(() => {
+      if (this.pending.get(workspaceId) === build) {
+        this.pending.delete(workspaceId)
+      }
+    })
     this.pending.set(workspaceId, build)
-    try {
-      return await build
-    } finally {
-      if (this.pending.get(workspaceId) === build) this.pending.delete(workspaceId)
-    }
+    return build
   }
 }
 
@@ -145,7 +308,7 @@ export async function searchWorkspaceWith(db: NotebookRendererDatabase, searchIn
   const exactMatches: Page[] = []
   for (let offset = 0; offset < pages.length; offset += SEARCH_INDEX_CHUNK_SIZE) {
     exactMatches.push(...pages.slice(offset, offset + SEARCH_INDEX_CHUNK_SIZE)
-      .filter((page) => haystackByPage.get(page.id)?.includes(normalizedQuery)))
+      .filter((page) => pageHeaderHaystack(page).includes(normalizedQuery) || Boolean(haystackByPage.get(page.id)?.includes(normalizedQuery))))
     await yieldToEventLoop()
     signal?.throwIfAborted()
   }
@@ -252,13 +415,18 @@ export function searchSnippet(text: string, terms: string[], radius = 48) {
 }
 
 /** Ranked full-text hits with highlighted excerpts. */
-export async function searchWorkspaceHitsWith(db: NotebookRendererDatabase, searchIndex: SearchCache, workspaceId: string, query: string, limit = 30): Promise<SearchHit[]> {
+export async function searchWorkspaceHitsWith(db: NotebookRendererDatabase, searchIndex: SearchCache, workspaceId: string, query: string, limit = 30, signal?: AbortSignal): Promise<SearchHit[]> {
   const terms = searchQueryTerms(query)
   if (!terms.length) return []
-  const pages = await searchWorkspaceWith(db, searchIndex, workspaceId, terms.join(' '), limit)
-  const { textByPage } = await searchIndex.get(workspaceId, db)
-  return pages.map((page) => {
-    const text = markdownToPlainText(textByPage.get(page.id) ?? '')
+  const pages = await searchWorkspaceWith(db, searchIndex, workspaceId, terms.join(' '), limit, signal)
+  if (!pages.length) return []
+  const { haystackByPage } = await searchIndex.get(workspaceId, db)
+  const documents = await db.documents.bulkGet(pages.map((page) => page.id))
+  signal?.throwIfAborted()
+  return pages.map((page, index) => {
+    const document = documents[index]
+    const raw = document ? (document.markdown ?? extractText(document.tiptapJson)) : (haystackByPage.get(page.id) ?? '')
+    const text = markdownToPlainText(raw)
     const found = matchedTerms(`${page.title}\n${text}`, terms)
     return { page, snippet: found.length ? searchSnippet(text, found) : (page.preview || text.slice(0, 140)), terms: found }
   })

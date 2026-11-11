@@ -307,10 +307,12 @@ test('three panes: sidebar collections, note list and editor', async () => {
   fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /全部笔记/ }))
   expect(within(screen.getByRole('region', { name: '笔记列表' })).getByRole('heading', { name: '全部笔记' })).toBeInTheDocument()
 
-  // Opening a page from the notebook tree hides the (duplicate) note list;
-  // choosing All notes brings it back. Coming from To-dos, the tree page
-  // opens as a note rather than the To-dos placeholder.
+  // Switching to To-dos folds notebook trees shut; expanding a notebook opens
+  // its inline accordion, and clicking a page from the tree hides the duplicate
+  // note list and leaves To-dos.
   fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: /待办/ }))
+  expect(container.querySelector('.sidebar-page-tree')).toBeNull()
+  fireEvent.click(within(screen.getByRole('navigation', { name: '导航' })).getByRole('button', { name: '产品团队' }))
   fireEvent.click(container.querySelector('.sidebar-page-tree [role="treeitem"]') as HTMLElement)
   expect(container.querySelector('.workspace-grid')).toHaveClass('list-closed')
   expect(screen.queryByText('选择一项待办')).not.toBeInTheDocument()
@@ -392,3 +394,54 @@ test('a new notebook opens empty and its first page lands in it', async () => {
   await waitFor(() => expect(screen.getByLabelText('页面标题')).toHaveValue('无标题页面'), { timeout: 5000 })
   expect(container.querySelector('.breadcrumb')).toHaveTextContent('读书笔记')
 })
+
+test('focus accordion, directory micro-tools and editorial font toggle keep navigation calm', async () => {
+  window.localStorage.clear()
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: query.includes('1301px'), media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }) })
+  const { container } = render(<FluentProvider theme={webLightTheme}><App /></FluentProvider>)
+  await screen.findByLabelText('页面正文')
+
+  const navigation = screen.getByRole('navigation', { name: '导航' })
+  const teamButton = within(navigation).getByRole('button', { name: '产品团队' })
+  const personalButton = within(navigation).getByRole('button', { name: '我的笔记本' })
+
+  // Startup focuses only the active note's notebook and ancestor branch.
+  expect(teamButton).toHaveAttribute('aria-pressed', 'true')
+  expect(personalButton).toHaveAttribute('aria-pressed', 'false')
+  await waitFor(() => expect(within(navigation).getByRole('treeitem', { name: 'Notebook Next 产品愿景' })).toBeInTheDocument())
+
+  // Switching to another notebook folds the previous one; clicking again folds it shut.
+  fireEvent.click(personalButton)
+  expect(personalButton).toHaveAttribute('aria-pressed', 'true')
+  expect(teamButton).toHaveAttribute('aria-pressed', 'false')
+  fireEvent.click(personalButton)
+  expect(personalButton).toHaveAttribute('aria-pressed', 'false')
+  expect(container.querySelector('.sidebar-notebook-tree')).toBeNull()
+
+  // Locate Active re-expands the open note's notebook and ancestor chain; Collapse All shuts everything.
+  fireEvent.click(teamButton)
+  await waitFor(() => expect(within(navigation).getByRole('treeitem', { name: 'Notebook Next 产品愿景' })).toBeInTheDocument())
+  fireEvent.click(within(navigation).getByRole('button', { name: '收起全部目录' }))
+  expect(container.querySelector('.sidebar-notebook-tree')).toBeNull()
+  fireEvent.click(within(navigation).getByRole('button', { name: '定位当前笔记' }))
+  await waitFor(() => expect(within(navigation).getByRole('treeitem', { name: 'Notebook Next 产品愿景' })).toBeInTheDocument())
+
+  // Inline directory filter narrows visible pages and clears on Escape.
+  fireEvent.click(within(navigation).getByRole('button', { name: '筛选目录' }))
+  const filterInput = within(navigation).getByRole('textbox', { name: '筛选笔记本与目录' })
+  fireEvent.change(filterInput, { target: { value: '迁移' } })
+  expect(within(navigation).getByRole('treeitem', { name: '旧版本数据迁移' })).toBeInTheDocument()
+  expect(within(navigation).queryByRole('treeitem', { name: 'AI 工作流设计' })).not.toBeInTheDocument()
+  fireEvent.keyDown(filterInput, { key: 'Escape' })
+  expect(within(navigation).queryByRole('textbox', { name: '筛选笔记本与目录' })).not.toBeInTheDocument()
+
+  // Editorial font toggle switches between sans and serif.
+  const appShell = container.querySelector('.app-shell') as HTMLElement
+  expect(appShell).toHaveAttribute('data-editor-font', 'sans')
+  const editorActions = container.querySelector('.editor-actions') as HTMLElement
+  fireEvent.click(within(editorActions).getByRole('button', { name: '更多操作' }))
+  const moreMenu = screen.getByRole('dialog', { name: '更多操作' })
+  fireEvent.click(within(moreMenu).getByRole('button', { name: '书刊衬线' }))
+  expect(appShell).toHaveAttribute('data-editor-font', 'serif')
+}, 30_000)

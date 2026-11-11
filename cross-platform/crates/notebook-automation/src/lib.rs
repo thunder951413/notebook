@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -22,6 +23,7 @@ use serde_json::{json, Value};
 
 pub const LOOPBACK_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 47831;
+pub const MAX_ACTIVE_CONNECTIONS: usize = 32;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 8;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -276,12 +278,22 @@ impl AutomationServer {
         let actual = server.server_addr().to_ip().map(|address| address.port()).unwrap_or(port);
         let context = RequestContext { token: self.token.clone(), pending: self.pending.clone(), forwarder: self.forwarder.clone(), recorder: self.recorder.clone() };
         let listener = server.clone();
+        let active_connections = Arc::new(AtomicUsize::new(0));
         let thread = std::thread::Builder::new()
             .name("notebook-automation".into())
             .spawn(move || {
                 for request in listener.incoming_requests() {
+                    let Some(guard) = ActiveConnectionGuard::try_acquire(&active_connections, MAX_ACTIVE_CONNECTIONS) else {
+                        let (_, body) = failure(503, "busy", "自动化接口并发连接过多，请稍后重试");
+                        (context.recorder)("warning", "request", "failed", "HTTP 503 · connection limit".into());
+                        respond_json(request, 503, &body);
+                        continue;
+                    };
                     let context = context.clone();
-                    std::thread::spawn(move || context.handle(request));
+                    std::thread::spawn(move || {
+                        let _guard = guard;
+                        context.handle(request);
+                    });
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -295,6 +307,74 @@ impl Drop for AutomationServer {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+struct ActiveConnectionGuard(Arc<AtomicUsize>);
+
+impl ActiveConnectionGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        let mut current = counter.load(Ordering::Relaxed);
+        while current < limit {
+            match counter.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return Some(Self(counter.clone())),
+                Err(actual) => current = actual,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn respond_json(request: tiny_http::Request, status: u16, body: &Value) {
+    let text = body.to_string();
+    let headers = [
+        tiny_http::Header::from_bytes("content-type", "application/json; charset=utf-8").unwrap(),
+        tiny_http::Header::from_bytes("cache-control", "no-store").unwrap(),
+        tiny_http::Header::from_bytes("x-content-type-options", "nosniff").unwrap(),
+    ];
+    let mut response = tiny_http::Response::from_string(text).with_status_code(status);
+    for header in headers {
+        response.add_header(header);
+    }
+    let _ = request.respond(response);
+}
+
+/// Validates the HTTP `Host` header (ignoring optional `:port`) for DNS-rebinding
+/// defense-in-depth. Only `127.0.0.1`, `localhost`, and `[::1]` are allowed.
+pub(crate) fn is_valid_host_header(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let (host, port) = if let Some(rest) = trimmed.strip_prefix('[') {
+        let Some((ipv6, remainder)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match remainder.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if remainder.is_empty() => None,
+            None => return false,
+        };
+        (format!("[{ipv6}]"), port)
+    } else if let Some((host, port)) = trimmed.rsplit_once(':') {
+        if host.contains(':') {
+            return false;
+        }
+        (host.to_string(), Some(port))
+    } else {
+        (trimmed.to_string(), None)
+    };
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    matches!(host.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "[::1]")
 }
 
 #[derive(Clone)]
@@ -315,17 +395,7 @@ impl RequestContext {
         let level = if status >= 500 { "error" } else if status >= 400 { "warning" } else { "info" };
         let action = operation.unwrap_or("request");
         (self.recorder)(level, action, if status < 400 { "success" } else { "failed" }, format!("HTTP {status} · {} ms", started.elapsed().as_millis()));
-        let text = body.to_string();
-        let headers = [
-            tiny_http::Header::from_bytes("content-type", "application/json; charset=utf-8").unwrap(),
-            tiny_http::Header::from_bytes("cache-control", "no-store").unwrap(),
-            tiny_http::Header::from_bytes("x-content-type-options", "nosniff").unwrap(),
-        ];
-        let mut response = tiny_http::Response::from_string(text).with_status_code(status);
-        for header in headers {
-            response.add_header(header);
-        }
-        let _ = request.respond(response);
+        respond_json(request, status, &body);
     }
 
     fn header(request: &tiny_http::Request, name: &'static str) -> Option<String> {
@@ -333,20 +403,45 @@ impl RequestContext {
     }
 
     fn process(&self, request: &mut tiny_http::Request) -> Result<(u16, Value, &'static str), (u16, Value)> {
+        let host_headers: Vec<String> = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("Host"))
+            .map(|header| header.value.as_str().to_string())
+            .collect();
+        let host_refs: Vec<&str> = host_headers.iter().map(String::as_str).collect();
+        let origin = Self::header(request, "Origin");
+        let authorization = Self::header(request, "Authorization");
+        let method = request.method().as_str().to_ascii_uppercase();
+        let raw_url = request.url().to_string();
+        self.process_parts(&method, &raw_url, &host_refs, origin.as_deref(), authorization.as_deref(), request.as_reader())
+    }
+
+    fn process_parts(
+        &self,
+        method: &str,
+        raw_url: &str,
+        host_headers: &[&str],
+        origin: Option<&str>,
+        authorization: Option<&str>,
+        reader: &mut dyn Read,
+    ) -> Result<(u16, Value, &'static str), (u16, Value)> {
+        if host_headers.len() > 1 || host_headers.first().is_some_and(|host| !is_valid_host_header(host)) {
+            return Err(failure(403, "forbidden", "不允许非本地 Host 请求头"));
+        }
         // Browsers always send Origin on cross-site requests; a local tool never needs it.
-        if Self::header(request, "Origin").is_some() {
+        if origin.is_some() {
             return Err(failure(403, "forbidden", "浏览器跨站请求不被允许"));
         }
-        let authorization = Self::header(request, "Authorization").unwrap_or_default();
+        let authorization = authorization.unwrap_or_default();
         let presented = authorization.strip_prefix("Bearer ").unwrap_or("");
         if presented.is_empty() || !constant_time_equal(presented, &self.token.lock().unwrap()) {
             return Err(failure(401, "unauthorized", "缺少或无效的 Bearer Token"));
         }
-        let method = request.method().as_str().to_ascii_uppercase();
-        let (operation, mut payload) = route(&method, request.url()).ok_or_else(|| failure(404, "not_found", "接口不存在"))?;
+        let (operation, mut payload) = route(method, raw_url).ok_or_else(|| failure(404, "not_found", "接口不存在"))?;
         if operation == "create-proposal" {
             let mut body = Vec::new();
-            request.as_reader().take(MAX_BODY_BYTES as u64 + 1).read_to_end(&mut body).map_err(|_| failure(400, "request_error", "无法读取请求正文"))?;
+            reader.take(MAX_BODY_BYTES as u64 + 1).read_to_end(&mut body).map_err(|_| failure(400, "request_error", "无法读取请求正文"))?;
             if body.len() > MAX_BODY_BYTES {
                 return Err(failure(413, "request_error", "请求正文超过 2 MB 限制"));
             }

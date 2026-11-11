@@ -3,6 +3,7 @@ import { Button } from '@fluentui/react-components'
 import DOMPurify from 'dompurify'
 import { ArrowUp20Filled, Copy20Regular, DocumentAdd20Regular, Filter20Regular, Search20Regular, Sparkle20Regular, Stop20Filled } from '@fluentui/react-icons'
 import type { NotebookSummary, PageSummary } from '../model'
+import { closeOnEscape } from '../components/dialogKeys'
 import { flattenPageTree } from '../pageTree'
 import { documentToHtml, markdownToDocument } from '../editor/extensions'
 import { readAIProviderSettings } from '../ai/providerSettings'
@@ -493,9 +494,9 @@ function ExportNoteDialog({ items, pages, notebooks, defaultSectionId, onClose, 
     try { await onSave(title.trim() || 'AI 回答', exportMarkdown(items), target) } catch (cause) { setError(cause instanceof Error ? cause.message : '无法生成笔记'); setBusy(false) }
   }
   return <div className="settings-backdrop" role="presentation">
-    <section className="settings-dialog create-item-dialog" role="dialog" aria-label="生成笔记">
+    <section className="settings-dialog create-item-dialog" role="dialog" aria-modal="true" aria-label="生成笔记" onKeyDown={closeOnEscape(onClose)}>
       <div><h2>把 {items.length} 条回复生成笔记</h2><Button appearance="subtle" onClick={onClose}>取消</Button></div>
-      <label className="dialog-field"><span>标题</span><input aria-label="标题" value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
+      <label className="dialog-field"><span>标题</span><input autoFocus aria-label="标题" value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
       <label className="dialog-field"><span>放到</span><select aria-label="放到" value={targetKey} onChange={(event) => setTargetKey(event.currentTarget.value)}>{targets.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
       <p className="settings-note">每条回复以对应的问题为小标题，末尾附上来源笔记的链接。</p>
       {error && <p role="alert">{error}</p>}

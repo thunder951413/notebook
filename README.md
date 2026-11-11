@@ -1,9 +1,9 @@
 # Notebook Next
 
-Notebook Next 是本地优先的 Markdown 桌面笔记应用。`next` 分支维护桌面外壳、两者共用的渲染层、共享数据模型、坚果云 WebDAV 同步协议和旧数据迁移工具；旧 Swift/macOS 应用不在本分支中。
+Notebook Next 是本地优先的 Markdown 桌面笔记应用。`main` 分支维护桌面外壳、两者共用的渲染层、共享数据模型、坚果云 WebDAV 同步协议和旧数据迁移工具；旧 Swift/macOS 应用已归档移除。
 
 > **桌面主壳是 Tauri（`cross-platform/apps/tauri`，Notebook.app 3.x）。Electron 外壳（`cross-platform/apps/desktop`，notebook-next 2.x）已废弃，进入淘汰期：**
-> 只修复严重问题，不再增加功能，CI 默认不再打包；代码暂时保留以便回退，计划在 Tauri 版覆盖 Windows/Linux 后删除。
+> 只修复严重问题，不再增加功能，CI 默认不再打包；代码暂时保留以便回退，计划在 Tauri 版完整覆盖 Linux 打包后删除。
 > 两个外壳的功能差距与迁移方法见 [桌面版迁移到 Tauri](docs/DESKTOP_TAURI_2026-10-13.md)。
 
 坚果云 WebDAV 是当前正式、推荐的跨设备同步方式。SSH/SFTP 只保留为旧仓库迁移与故障恢复兼容工具，不建议继续作为日常同步后端。
@@ -19,7 +19,7 @@ Notebook Next 是本地优先的 Markdown 桌面笔记应用。`next` 分支维�
 - 本地优先编辑、版本历史、回收站、提醒、任务、导入导出和隐私笔记本访问锁。
 - 即时崩溃草稿、退出前保存握手、原子数据目录切换和 Markdown-only 历史压缩。
 - 通过坚果云 WebDAV 与 Android 共享笔记、附件、版本和阅读位置。
-- 桌面发行：Tauri 版（macOS Apple Silicon，`desktop-v*` 标签发布）；已废弃的 Electron 版仍可手动打包 Windows NSIS/portable、Linux AppImage、macOS dmg/zip。
+- 桌面发行：Tauri 版支持 macOS Apple Silicon 与 Windows x64（`desktop-v*` 标签草稿上传校验后原子发布）；已废弃的 Electron 版仍可手动打包 Linux AppImage 等回退产物。
 
 ## 目录
 
@@ -72,13 +72,13 @@ Electron 数据目录与旧 SwiftData 数据库不兼容，旧数据必须通过
 
 ## 桌面发行
 
-- **Tauri（默认）**：每次推送到 `next` 都在 CI 中构建 Notebook.app 并作为工作流产物上传；推送 `desktop-v<版本>` 标签发布 `Notebook-macos-arm64.zip`，应用内自动更新读取该 Release。
+- **Tauri（默认）**：每次推送到 `main` 都在 CI 中构建 Notebook.app 并作为工作流产物上传；推送 `desktop-v<版本>` 标签会在验证 macOS (`Notebook-macos-arm64.zip`) 与 Windows (`Notebook-windows-x64-setup.exe`) 及其 `.sha256` 校验文件齐全后原子发布 Release，应用内自动更新强制校验 SHA-256 后安装。
 - **Electron（已废弃）**：只在手动运行 “Electron (deprecated)” 工作流或推送 `v*` 标签时为 Windows、Linux 和 macOS 打包。
 
 项目没有 Apple Developer 账号，因此 macOS 产物有意保持未签名、未公证；下载后如被系统隔离，可在终端对解压出的应用执行：
 
 ```bash
-xattr -rc /Applications/Notebook.app
+xattr -cr /Applications/Notebook.app
 ```
 
 然后从 Finder 打开。该命令只应对从本项目 Release 下载并核对过 SHA-256 的应用执行。

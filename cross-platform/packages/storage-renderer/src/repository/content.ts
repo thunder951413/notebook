@@ -69,10 +69,15 @@ export class ContentRepository extends RepositoryCore {
   async saveEditorCache(pageId: UUID, sourceVersion: string, tiptapJson: Record<string, unknown>) {
     const byteSize = new Blob([JSON.stringify(tiptapJson)]).size
     await this.db.editorCaches.put({ pageId, sourceVersion, tiptapJson, byteSize, accessedAt: new Date().toISOString() })
-    const records = await this.db.editorCaches.orderBy('accessedAt').toArray()
-    let total = records.reduce((sum, item) => sum + item.byteSize, 0)
+    const entries: Array<{ pageId: string; byteSize: number; accessedAt: string }> = []
+    let total = 0
+    await this.db.editorCaches.orderBy('accessedAt').each((item) => {
+      entries.push({ pageId: item.pageId, byteSize: item.byteSize, accessedAt: item.accessedAt })
+      total += item.byteSize
+    })
+    if (total <= MAX_EDITOR_CACHE_BYTES) return
     const expired: string[] = []
-    for (const item of records) {
+    for (const item of entries) {
       if (total <= MAX_EDITOR_CACHE_BYTES) break
       expired.push(item.pageId)
       total -= item.byteSize
@@ -187,6 +192,28 @@ export class ContentRepository extends RepositoryCore {
     })
   }
   listPageTags(pageId: UUID) { return this.db.pageTags.where('pageId').equals(pageId).toArray() }
+  async listWorkspacePageTags(workspaceId: UUID): Promise<Record<string, string[]>> {
+    const tags = (await this.db.tags.where('workspaceId').equals(workspaceId).toArray())
+      .filter((tag) => !tag.deletedAt)
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+    if (!tags.length) return {}
+    const tagOrder = new Map(tags.map((tag, index) => [tag.id, index]))
+    const rows = await this.db.pageTags.where('tagId').anyOf([...tagOrder.keys()]).toArray()
+    const grouped = new Map<string, Set<string>>()
+    for (const row of rows) {
+      let set = grouped.get(row.pageId)
+      if (!set) {
+        set = new Set<string>()
+        grouped.set(row.pageId, set)
+      }
+      set.add(row.tagId)
+    }
+    const result: Record<string, string[]> = {}
+    for (const [pageId, ids] of grouped) {
+      result[pageId] = [...ids].sort((left, right) => (tagOrder.get(left) ?? 0) - (tagOrder.get(right) ?? 0))
+    }
+    return result
+  }
   getReadingPosition(pageId: UUID) { return this.db.readingPositions.where('pageId').equals(pageId).first() }
   async saveReadingPosition(position: ReadingPosition) {
     await this.db.transaction('rw', [this.db.pages, this.db.readingPositions, this.db.syncOutbox, this.db.syncVersions], async () => {
@@ -373,7 +400,7 @@ export class ContentRepository extends RepositoryCore {
       await this.db.tombstones.put(tombstone)
       await this.deletePageRows(pageId)
     })
-    this.searchIndex.upsert({ ...page, deletedAt: effectiveDeletedAt })
+    this.searchIndex.remove(page.workspaceId, pageId)
   }
 
   async listTags(workspaceId: UUID): Promise<Tag[]> {

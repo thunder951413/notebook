@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { useAbcInputSourceForVimNormal } from './vimInputSource'
+import { syncAbcInputSourceForVimNormal, useAbcInputSourceForVimNormal } from './vimInputSource'
 
-describe('useAbcInputSourceForVimNormal', () => {
-  it('requests ABC when Vim enters NORMAL mode on macOS', () => {
+describe('syncAbcInputSourceForVimNormal', () => {
+  it('requests ABC when Vim enters NORMAL mode on macOS and preserves legacy alias', () => {
+    expect(useAbcInputSourceForVimNormal).toBe(syncAbcInputSourceForVimNormal)
     const useAbc = vi.fn().mockResolvedValue(true)
-    expect(useAbcInputSourceForVimNormal(true, true, { platform: 'darwin', inputSource: { useAbc } })).toBe(true)
+    expect(syncAbcInputSourceForVimNormal(true, true, { platform: 'darwin', inputSource: { useAbc } })).toBe(true)
     expect(useAbc).toHaveBeenCalledOnce()
   })
 

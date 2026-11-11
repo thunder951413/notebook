@@ -1,4 +1,4 @@
-import type { Asset, Page, PageDocument } from '@notebook/domain'
+import type { Asset, Notebook, Page, PageDocument, Section } from '@notebook/domain'
 import { documentToMarkdown } from '../editor/extensions'
 import { DexieNotebookRepository, NotebookRendererDatabase } from '@notebook/storage-renderer'
 import { DEFAULT_WORKSPACE_ID } from '../sync/syncSettings'
@@ -52,10 +52,10 @@ export const ANDROID_DEFAULT_NOTEBOOK_ID = 'personal'
  * most sections) and sync that back, so the phone agrees.
  */
 export async function adoptOrphanPhoneSections(): Promise<number> {
-  const notebooks = await repository.listNotebooks(WORKSPACE_ID)
-  if (!notebooks.length || notebooks.some((notebook) => notebook.id === ANDROID_DEFAULT_NOTEBOOK_ID)) return 0
   const orphans = (await db.sections.where('notebookId').equals(ANDROID_DEFAULT_NOTEBOOK_ID).toArray()).filter((section) => !section.deletedAt)
   if (!orphans.length) return 0
+  const notebooks = await repository.listNotebooks(WORKSPACE_ID)
+  if (!notebooks.length || notebooks.some((notebook) => notebook.id === ANDROID_DEFAULT_NOTEBOOK_ID)) return 0
   const candidates = notebooks.filter((notebook) => !notebook.locked)
   if (!candidates.length) return 0
   const sectionCounts = await Promise.all(candidates.map(async (notebook) => ({ notebook, sections: await repository.listSections(notebook.id) })))
@@ -70,8 +70,31 @@ export async function adoptOrphanPhoneSections(): Promise<number> {
   return orphans.length
 }
 
-export async function ensureNotebookPageRoots() {
-  if (notebookRootMigration) return notebookRootMigration
+async function applyNotebookPageRootMigration(sections: Section[], pages: Page[]): Promise<Page[]> {
+  const now = new Date().toISOString()
+  const migration = planNotebookPageRootMigration(sections, pages, WORKSPACE_ID, now, () => crypto.randomUUID())
+  if (!migration.roots.length && !migration.reparented.length) return pages
+  for (const root of migration.roots) {
+    await repository.savePage(root, {
+      pageId: root.id,
+      schemaVersion: 3,
+      markdown: '',
+      tiptapJson: emptyEditorDocument(),
+      updatedAt: now,
+    })
+  }
+  for (const page of migration.reparented) await repository.savePage(page)
+  const reparentedById = new Map(migration.reparented.map((page) => [page.id, page]))
+  return [...pages.map((page) => reparentedById.get(page.id) ?? page), ...migration.roots]
+}
+
+export async function ensureNotebookPageRoots(snapshot?: { sections: Section[]; pages: Page[] }): Promise<Page[]> {
+  if (snapshot) return applyNotebookPageRootMigration(snapshot.sections, snapshot.pages)
+  if (notebookRootMigration) {
+    await notebookRootMigration
+    return []
+  }
+  let updated: Page[] = []
   notebookRootMigration = (async () => {
     const notebooks = await repository.listNotebooks(WORKSPACE_ID)
     const sections = (await Promise.all(notebooks.map((notebook) => repository.listSections(notebook.id)))).flat()
@@ -82,24 +105,29 @@ export async function ensureNotebookPageRoots() {
       pages.push(...batch.items)
       cursor = batch.nextCursor
     } while (cursor)
-    const now = new Date().toISOString()
-    const migration = planNotebookPageRootMigration(sections, pages, WORKSPACE_ID, now, () => crypto.randomUUID())
-    for (const root of migration.roots) {
-      await repository.savePage(root, {
-        pageId: root.id,
-        schemaVersion: 3,
-        markdown: '',
-        tiptapJson: emptyEditorDocument(),
-        updatedAt: now,
-      })
-    }
-    for (const page of migration.reparented) await repository.savePage(page)
+    updated = await applyNotebookPageRootMigration(sections, pages)
   })().finally(() => { notebookRootMigration = undefined })
-  return notebookRootMigration
+  await notebookRootMigration
+  return updated
 }
 
-export async function ensurePagePrivacyMatchesNotebook() {
-  if (pagePrivacyNormalization) return pagePrivacyNormalization
+async function applyPagePrivacyNormalization(notebooks: Notebook[], sections: Section[], pages: Page[]): Promise<Page[]> {
+  const changedAt = new Date().toISOString()
+  const changed = planPagePrivacyNormalization(pages, sections, notebooks, changedAt)
+  if (!changed.length) return pages
+  for (const page of changed) await repository.savePage(page)
+  recordDiagnosticEvent({ level: 'info', category: 'privacy', action: 'normalize-page-placement', status: 'success', message: `${changed.length} pages` })
+  const changedById = new Map(changed.map((page) => [page.id, page]))
+  return pages.map((page) => changedById.get(page.id) ?? page)
+}
+
+export async function ensurePagePrivacyMatchesNotebook(snapshot?: { notebooks: Notebook[]; sections: Section[]; pages: Page[] }): Promise<Page[]> {
+  if (snapshot) return applyPagePrivacyNormalization(snapshot.notebooks, snapshot.sections, snapshot.pages)
+  if (pagePrivacyNormalization) {
+    await pagePrivacyNormalization
+    return []
+  }
+  let updated: Page[] = []
   pagePrivacyNormalization = (async () => {
     const notebooks = await repository.listNotebooks(WORKSPACE_ID)
     const sections = (await Promise.all(notebooks.map((notebook) => repository.listSections(notebook.id)))).flat()
@@ -110,12 +138,10 @@ export async function ensurePagePrivacyMatchesNotebook() {
       pages.push(...batch.items)
       cursor = batch.nextCursor
     } while (cursor)
-    const changedAt = new Date().toISOString()
-    const changed = planPagePrivacyNormalization(pages, sections, notebooks, changedAt)
-    for (const page of changed) await repository.savePage(page)
-    if (changed.length) recordDiagnosticEvent({ level: 'info', category: 'privacy', action: 'normalize-page-placement', status: 'success', message: `${changed.length} pages` })
+    updated = await applyPagePrivacyNormalization(notebooks, sections, pages)
   })().finally(() => { pagePrivacyNormalization = undefined })
-  return pagePrivacyNormalization
+  await pagePrivacyNormalization
+  return updated
 }
 
 export function editorCacheVersion(document: PageDocument, assets: Asset[]) {
@@ -157,6 +183,10 @@ export async function rebuildReferenceIndex() {
     const markdown = document.markdown ?? documentToMarkdown(document.tiptapJson)
     await repository.replaceDerivedPageLinks(page.id, pageLinksFromMarkdown(page.id, markdown, document.updatedAt, resolveTitle))
   }
+}
+
+export function hasPendingPageMutation(pageId: string) {
+  return pageMutationQueues.has(pageId)
 }
 
 export function enqueuePageMutation<T>(pageId: string, mutation: () => Promise<T>): Promise<T> {

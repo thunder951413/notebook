@@ -216,10 +216,11 @@ async function encryptPrivateNote(note: MarkdownNoteEnvelope, secret: string): P
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource, additionalData: encoder.encode(note.noteID) as BufferSource }, await privacyKey(secret, salt, ['encrypt']), encoder.encode(cleartext) as BufferSource))
+  const encryptedContentHash = sha256Hex(ciphertext)
   return cacheValue(encryptedNoteCache, cacheKey, {
     schemaVersion: 3, noteID: note.noteID,
     metadata: { ...note.metadata, title: '隐私笔记', preview: '', locked: true, legacyMetadata: undefined },
-    currentContentHash: note.currentContentHash, contentObjects: {}, history: [], assets: [], taskSteps: [], tagIDs: [], linkedPageIDs: [],
+    currentContentHash: encryptedContentHash, contentObjects: {}, history: [], assets: [], taskSteps: [], tagIDs: [], linkedPageIDs: [],
     privacyEncryption: { version: 1, algorithm: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iterations: PRIVACY_ITERATIONS, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(ciphertext) },
   })
 }
@@ -288,9 +289,14 @@ export async function encodeMarkdownRepository(
     tagIdsByPage.set(pageTag.pageId, values)
   }
 
+  const privateNotebookIds = new Set(safe.notebooks.filter((notebook) => notebook.locked).map((notebook) => notebook.id))
+  const privateSectionIds = new Set(safe.sections.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id))
+  const isPrivatePage = (page: NotebookDataBundle['pages'][number]) => Boolean(page.locked || (page.sectionId && privateSectionIds.has(page.sectionId)))
+
   for (const page of safe.pages.filter((item) => validPageIds.has(item.id))) {
     const document = documentsByPage.get(page.id)
     if (!document) continue
+    const privatePage = isPrivatePage(page)
     const currentMarkdown = markdownOf(document)
     const currentContentHash = sha256Hex(currentMarkdown)
     // D1 fast path: a page whose remote signature still matches is skipped
@@ -301,7 +307,7 @@ export async function encodeMarkdownRepository(
     const [reusedVersionText, reusedHash, reusedHistoryText] = reusableSignature?.split(':') ?? []
     const reusedVersion = Number(reusedVersionText)
     const reusedHistoryCount = Number(reusedHistoryText)
-    const reusable = !page.deletedAt && page.syncStatus === 'synced' && reusedHash === currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)
+    const reusable = !privatePage && !page.deletedAt && page.syncStatus === 'synced' && reusedHash === currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)
     const assets: MarkdownAssetReference[] = []
     const presentations = imagePresentations(document)
     for (const asset of assetsByPage.get(page.id) ?? []) {
@@ -345,16 +351,21 @@ export async function encodeMarkdownRepository(
       // identity remains in Markdown and is never sourced from a stale cache.
       linkedPageIDs: [...new Set(extractNotebookReferences(currentMarkdown).map((reference) => reference.pageId))],
     }
-    if (page.locked && !privacySecret) throw new Error(`隐私笔记 ${page.title} 无法安全同步：缺少 SSH 加密密码`)
-    const storedEnvelope = page.locked ? await encryptPrivateNote(envelope, privacySecret!) : envelope
+    if (privatePage && !privacySecret) throw new Error(`隐私笔记 ${page.title} 无法安全同步：缺少 SSH 加密密码`)
+    const storedEnvelope = privatePage ? await encryptPrivateNote(envelope, privacySecret!) : envelope
+    if (privatePage && !page.deletedAt && page.syncStatus === 'synced' && reusedHash === storedEnvelope.currentContentHash && Number.isFinite(reusedVersion) && Number.isFinite(reusedHistoryCount)) {
+      pageVersions.set(page.id, reusedVersion)
+      indexEntries.push({ noteID: page.id, version: reusedVersion, contentHash: storedEnvelope.currentContentHash, historyCount: reusedHistoryCount })
+      continue
+    }
     files.set(`notes/${page.id}.json`, encoder.encode(JSON.stringify(storedEnvelope)))
     const version = Math.max(page.legacyVersion ?? 0, Date.parse(page.updatedAt), 1)
     pageVersions.set(page.id, version)
-    if (!page.deletedAt) indexEntries.push({ noteID: page.id, version, contentHash: currentContentHash, historyCount: history.length })
+    if (!page.deletedAt) indexEntries.push({ noteID: page.id, version, contentHash: storedEnvelope.currentContentHash, historyCount: storedEnvelope.history.length })
   }
 
   files.set('notes/assets_manifest.json', encoder.encode(JSON.stringify({ schemaVersion: 3, deviceID: deviceId, entries: [...manifests.values()] })))
-  if (safe.pages.some((page) => page.locked)) {
+  if (safe.pages.some(isPrivatePage)) {
     if (!privacySecret) throw new Error('隐私笔记无法安全同步：缺少 SSH 加密密码')
     files.set('notes/privacy.json', encoder.encode(JSON.stringify(await createPrivacyKeyCheck(privacySecret))))
   }
@@ -390,8 +401,18 @@ export async function importMarkdownRepository(input: { library: LegacyLibraryEn
   const library = importLegacyLibrary(input.library, workspaceId)
   const now = new Date().toISOString()
   const index = new Map(input.index?.entries.map((entry) => [entry.noteID, entry.contentHash]) ?? [])
+  const encryptedIds = new Set<string>()
+  for (const note of input.notes) {
+    if ('privacyEncryption' in note) {
+      encryptedIds.add(note.noteID)
+      const expectedContentHash = index.get(note.noteID)
+      if (expectedContentHash && expectedContentHash !== note.currentContentHash) {
+        throw new Error(`笔记 ${note.noteID} 与索引中的内容哈希不一致`)
+      }
+    }
+  }
   const notes = await Promise.all(input.notes.map((note) => decryptPrivateNote(note, input.privacySecret)))
-  for (const note of notes) validateMarkdownNote(note, index.get(note.noteID))
+  for (const note of notes) validateMarkdownNote(note, encryptedIds.has(note.noteID) ? undefined : index.get(note.noteID))
   const pages = normalizePageHierarchy(notes.map((note) => ({ ...note.metadata, workspaceId, syncStatus: 'synced' as const })))
   const documents = notes.map((note) => {
     const markdown = note.contentObjects[note.currentContentHash]!

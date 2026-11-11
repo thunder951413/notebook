@@ -8,20 +8,21 @@ import { legacyDeviceId } from '../sync/legacySshSettings'
 import { normalizeReferenceTargetIds, renameWikiLinks } from '@notebook/sync-contract'
 import { decodeImportedText, importedTitle, TEXT_IMPORT_MAX_BYTES, textImportKind, type TextImportSkip } from './textImport'
 import { prepareImportedDocument } from './importedDocument'
-import { isLargeDocument, largeDocument, replaceMarkdownSection } from './largeDocument'
+import { isLargeDocument, LARGE_DOCUMENT_CHARACTERS, largeDocument, replaceMarkdownSection } from './largeDocument'
 import { pageLinksFromMarkdown } from './referenceIndex'
 import { findTitleBacklinks, planWikiLinkRename, wikiTitleResolver } from './wikiLinkMaintenance'
 import { showToast } from '../components/toast'
 import { applyPendingPatch, replaceById, withRecords, withoutIds } from './pageState'
 import { notebookRootSectionId, withoutNotebookRootMarker } from './notebookPageRoots'
 import { recordDiagnosticEvent, rendererErrorDetails } from '../diagnostics/diagnostics'
-import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, documentLoadPromises, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, documentNeedsAssets, rebuildReferenceIndex, enqueuePageMutation } from './workspaceStore'
+import { adoptOrphanPhoneSections, restoreBatchIds, treePageIds, WORKSPACE_ID, repository, db, REFERENCE_INDEX_VERSION_KEY, emptyEditorDocument, recordDocumentFailure, ensureNotebookPageRoots, ensurePagePrivacyMatchesNotebook, editorDocumentFromStorage, documentNeedsAssets, rebuildReferenceIndex, enqueuePageMutation, hasPendingPageMutation } from './workspaceStore'
 import { seedNotebooks, seedSections, seedPages, tagMap, toPageSummary, demoSeedAllowed } from './workspaceSeed'
 import { useWorkspaceSync } from './useWorkspaceSync'
 import { usePageTreeMoves } from './usePageTreeMoves'
 
 export { WORKSPACE_ID, STARTUP_NOTEBOOK_ID, STARTUP_SECTION_ID, STARTUP_PAGE_ID, automationRepository } from './workspaceStore'
 
+export const MAX_LOADED_DOCUMENTS = 32
 let lastDocumentSaveDiagnosticAt = 0
 
 export function useWorkspaceData() {
@@ -34,6 +35,9 @@ export function useWorkspaceData() {
   const [referenceIndexRevision, setReferenceIndexRevision] = useState(0)
   const documentsRef = useRef(documents)
   const loadedDocumentIds = useRef(new Set<string>())
+  const inFlightLoads = useRef(new Map<string, Promise<Record<string, unknown>>>())
+  const pinnedDocumentId = useRef<string | undefined>(undefined)
+  const mountedRef = useRef(true)
   // Latest-record mirrors for callbacks that must not depend on state identity.
   const sectionRecordsRef = useRef(sectionRecords)
   const pageRecordsRef = useRef(pageRecords)
@@ -45,13 +49,100 @@ export function useWorkspaceData() {
   const privateSectionIds = useMemo(() => new Set(sectionRecords.filter((section) => privateNotebookIds.has(section.notebookId)).map((section) => section.id)), [privateNotebookIds, sectionRecords])
 
   useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  useEffect(() => {
     documentsRef.current = documents
   }, [documents])
 
+  const pruneLoadedDocumentSet = useCallback((protectId?: string) => {
+    const evicted: string[] = []
+    if (loadedDocumentIds.current.size > MAX_LOADED_DOCUMENTS) {
+      for (const candidate of loadedDocumentIds.current) {
+        if (loadedDocumentIds.current.size <= MAX_LOADED_DOCUMENTS) break
+        if (
+          candidate === protectId
+          || candidate === pinnedDocumentId.current
+          || hasPendingPageMutation(candidate)
+          || inFlightLoads.current.has(candidate)
+        ) continue
+        loadedDocumentIds.current.delete(candidate)
+        evicted.push(candidate)
+      }
+    }
+    return evicted
+  }, [])
+
+  const putLoadedDocument = useCallback((pageId: string, tiptapJson: Record<string, unknown>) => {
+    loadedDocumentIds.current.delete(pageId)
+    loadedDocumentIds.current.add(pageId)
+    const evicted = pruneLoadedDocumentSet(pageId)
+    const apply = (current: Record<string, Record<string, unknown>>) => {
+      if (current[pageId] === tiptapJson && evicted.length === 0 && Object.keys(current).length <= loadedDocumentIds.current.size) {
+        return current
+      }
+      const next = { ...current, [pageId]: tiptapJson }
+      for (const id of evicted) delete next[id]
+      for (const id of Object.keys(next)) {
+        if (
+          !loadedDocumentIds.current.has(id)
+          && id !== pageId
+          && id !== pinnedDocumentId.current
+          && !hasPendingPageMutation(id)
+        ) {
+          delete next[id]
+        }
+      }
+      return next
+    }
+    documentsRef.current = apply(documentsRef.current)
+    if (!mountedRef.current) return
+    setDocuments((current) => {
+      const next = apply(current)
+      documentsRef.current = next
+      return next
+    })
+  }, [pruneLoadedDocumentSet])
+
+  const dropLoadedDocuments = useCallback((ids: ReadonlySet<string>) => {
+    let removed = false
+    for (const id of ids) {
+      if (hasPendingPageMutation(id)) continue
+      if (loadedDocumentIds.current.delete(id)) removed = true
+    }
+    if (!removed && ![...ids].some((id) => id in documentsRef.current)) return
+    const apply = (current: Record<string, Record<string, unknown>>) => {
+      let changed = false
+      const next = { ...current }
+      for (const id of ids) {
+        if (hasPendingPageMutation(id) || !(id in next)) continue
+        delete next[id]
+        changed = true
+      }
+      return changed ? next : current
+    }
+    documentsRef.current = apply(documentsRef.current)
+    if (!mountedRef.current) return
+    setDocuments((current) => {
+      const next = apply(current)
+      documentsRef.current = next
+      return next
+    })
+  }, [])
+
+  const setActiveDocument = useCallback((pageId: string | undefined) => {
+    pinnedDocumentId.current = pageId
+    if (pageId && loadedDocumentIds.current.has(pageId)) {
+      loadedDocumentIds.current.delete(pageId)
+      loadedDocumentIds.current.add(pageId)
+    }
+  }, [])
+
   const reload = useCallback(async () => {
     await adoptOrphanPhoneSections().catch((error: unknown) => recordDiagnosticEvent({ level: 'error', category: 'sync', action: 'adopt-phone-sections', status: 'failed', ...rendererErrorDetails(error) }))
-    await ensureNotebookPageRoots()
-    await ensurePagePrivacyMatchesNotebook()
+    pruneLoadedDocumentSet()
     const documentIds = [...loadedDocumentIds.current]
     const loadEveryPage = async () => {
       const items: Page[] = []
@@ -63,31 +154,86 @@ export function useWorkspaceData() {
       } while (cursor)
       return items
     }
-    const [loadedNotebooks, loadedPages, loadedDocuments] = await Promise.all([
-      repository.listNotebooks(WORKSPACE_ID), loadEveryPage(),
+    const [loadedNotebooks, rawPages, loadedDocuments] = await Promise.all([
+      repository.listNotebooks(WORKSPACE_ID),
+      loadEveryPage(),
       Promise.all(documentIds.map(async (pageId) => {
-        const [document, assets] = await Promise.all([repository.getPageDocument(pageId), repository.listAssets(pageId)])
-        if (!document) return { document, assets }
+        const document = await repository.getPageDocument(pageId)
+        if (!document) return { document, assets: [] as Asset[] }
+        const assets = documentNeedsAssets(document) ? await repository.listAssets(pageId) : []
         return { document: { ...document, tiptapJson: await editorDocumentFromStorage(document, assets) }, assets }
       })),
     ])
     const loadedSections = (await Promise.all(loadedNotebooks.map((item) => repository.listSections(item.id)))).flat()
-    setNotebookRecords(loadedNotebooks)
-    setSectionRecords(loadedSections)
+    const pagesWithRoots = await ensureNotebookPageRoots({ sections: loadedSections, pages: rawPages })
+    const loadedPages = await ensurePagePrivacyMatchesNotebook({ notebooks: loadedNotebooks, sections: loadedSections, pages: pagesWithRoots })
     const livePages = loadedPages.filter((page) => !page.deletedAt)
-    setPageRecords(livePages)
-    setTrashRecords(loadedPages.filter((page) => page.deletedAt))
     // Callers that chain several mutations (AI organizing) read the mirror
     // before React has re-rendered.
+    sectionRecordsRef.current = loadedSections
     pageRecordsRef.current = livePages
     const tags = await repository.listTags(WORKSPACE_ID)
     const names = new Map(tags.map((tag) => [tag.id, tag.name]))
-    const associations = await Promise.all(livePages.map(async (page) => [page.id, (await repository.listPageTags(page.id)).flatMap((item) => names.get(item.tagId) ?? [])] as const))
-    setPageTags(Object.fromEntries(associations))
+    const tagNameSet = new Set(tags.map((tag) => tag.name))
+    const livePageIds = new Set(livePages.map((page) => page.id))
+    const repoWithBulkTags = repository as unknown as {
+      listWorkspacePageTags?: (workspaceId: string) => Promise<Record<string, string[]> | Array<{ pageId: string; tagId: string }>>
+      db?: { pageTags?: { toArray?: () => Promise<Array<{ pageId: string; tagId: string }>> } }
+    }
+    let nextPageTags: Record<string, string[]>
+    if (typeof repoWithBulkTags.listWorkspacePageTags === 'function') {
+      const bulk = await repoWithBulkTags.listWorkspacePageTags(WORKSPACE_ID)
+      nextPageTags = {}
+      if (Array.isArray(bulk)) {
+        for (const item of bulk) {
+          if (!livePageIds.has(item.pageId)) continue
+          const tagName = names.get(item.tagId)
+          if (!tagName) continue
+          const bucket = nextPageTags[item.pageId]
+          if (bucket) bucket.push(tagName)
+          else nextPageTags[item.pageId] = [tagName]
+        }
+      } else {
+        for (const [pageId, values] of Object.entries(bulk)) {
+          if (!livePageIds.has(pageId)) continue
+          const resolved = values.flatMap((value) => {
+            const mapped = names.get(value) ?? (tagNameSet.has(value) ? value : undefined)
+            return mapped ? [mapped] : []
+          })
+          if (resolved.length) nextPageTags[pageId] = resolved
+        }
+      }
+    } else if (typeof repoWithBulkTags.db?.pageTags?.toArray === 'function') {
+      const rows = await repoWithBulkTags.db.pageTags.toArray()
+      nextPageTags = {}
+      for (const item of rows) {
+        if (!livePageIds.has(item.pageId)) continue
+        const tagName = names.get(item.tagId)
+        if (!tagName) continue
+        const bucket = nextPageTags[item.pageId]
+        if (bucket) bucket.push(tagName)
+        else nextPageTags[item.pageId] = [tagName]
+      }
+    } else {
+      const associations = await Promise.all(livePages.map(async (page) => [page.id, (await repository.listPageTags(page.id)).flatMap((item) => names.get(item.tagId) ?? [])] as const))
+      nextPageTags = Object.fromEntries(associations)
+    }
+    if (!mountedRef.current) return
+    setNotebookRecords(loadedNotebooks)
+    setSectionRecords(loadedSections)
+    setPageRecords(livePages)
+    setTrashRecords(loadedPages.filter((page) => page.deletedAt))
+    setPageTags(nextPageTags)
     if (documentIds.length) {
       setDocuments((current) => {
-        const next = { ...current }
+        const next: Record<string, Record<string, unknown>> = {}
+        for (const id of Object.keys(current)) {
+          if (loadedDocumentIds.current.has(id) || id === pinnedDocumentId.current || hasPendingPageMutation(id)) {
+            next[id] = current[id]!
+          }
+        }
         documentIds.forEach((pageId, index) => {
+          if (!loadedDocumentIds.current.has(pageId) && pageId !== pinnedDocumentId.current && !hasPendingPageMutation(pageId)) return
           const { document } = loadedDocuments[index]!
           if (document) next[pageId] = document.tiptapJson
           // A legacy/seed page may not have a persisted body yet. Keep the
@@ -95,11 +241,12 @@ export function useWorkspaceData() {
           // loading placeholder during an overlapping library refresh.
           else if (!next[pageId]) next[pageId] = emptyEditorDocument()
         })
+        documentsRef.current = next
         return next
       })
     }
     setReferenceIndexRevision((current) => current + 1)
-  }, [])
+  }, [pruneLoadedDocumentSet])
 
   useEffect(() => {
     let cancelled = false
@@ -142,15 +289,19 @@ export function useWorkspaceData() {
   const trashPages = useMemo(() => trashRecords.map((page) => ({ ...toPageSummary(page), locked: page.locked || privateSectionIds.has(page.sectionId ?? '') })), [privateSectionIds, trashRecords])
 
   const loadDocument = useCallback(async (pageId: string) => {
-    loadedDocumentIds.current.add(pageId)
-    if (documentsRef.current[pageId]) return documentsRef.current[pageId]
-    const inFlight = documentLoadPromises.get(pageId)
+    const cached = documentsRef.current[pageId]
+    if (loadedDocumentIds.current.has(pageId) && cached) {
+      loadedDocumentIds.current.delete(pageId)
+      loadedDocumentIds.current.add(pageId)
+      return cached
+    }
+    const inFlight = inFlightLoads.current.get(pageId)
     if (inFlight) return inFlight
     const operation = (async () => {
       const document = await repository.getPageDocument(pageId)
       if (!document) {
         const empty = emptyEditorDocument()
-        setDocuments((current) => ({ ...current, [pageId]: empty }))
+        putLoadedDocument(pageId, empty)
         return empty
       }
       const openStartedAt = performance.now()
@@ -160,20 +311,21 @@ export function useWorkspaceData() {
       const tiptapJson = await editorDocumentFromStorage(document, assets)
       const openMs = performance.now() - openStartedAt
       if (openMs > 250) recordDiagnosticEvent({ level: 'info', category: 'document', action: 'open', status: 'info', durationMs: openMs, message: `${isLargeDocument(tiptapJson) ? 'large' : 'rich'} · ${document.markdown?.length ?? 0} chars` })
-      setDocuments((current) => current[pageId] === tiptapJson ? current : ({ ...current, [pageId]: tiptapJson }))
+      putLoadedDocument(pageId, tiptapJson)
       return tiptapJson
     })()
-    documentLoadPromises.set(pageId, operation)
+    inFlightLoads.current.set(pageId, operation)
     try {
       return await operation
     } finally {
-      if (documentLoadPromises.get(pageId) === operation) documentLoadPromises.delete(pageId)
+      if (inFlightLoads.current.get(pageId) === operation) inFlightLoads.current.delete(pageId)
     }
-  }, [])
+  }, [putLoadedDocument])
 
   const saveDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
     const startedAt = Date.now()
     try {
+      loadedDocumentIds.current.delete(pageId)
       loadedDocumentIds.current.add(pageId)
       const updatedAt = new Date().toISOString()
       const normalized = normalizeReferenceTargetIds(tiptapJson)
@@ -189,13 +341,13 @@ export function useWorkspaceData() {
         if (stored?.markdown !== undefined && stored.markdown === document.markdown) {
           const draft = await repository.db?.drafts.get(pageId)
           if (draft && draft.document.updatedAt === updatedAt) await repository.db?.drafts.delete(pageId)
-          setDocuments((current) => current[pageId] === normalized ? current : ({ ...current, [pageId]: normalized }))
+          putLoadedDocument(pageId, normalized)
           return
         }
         await repository.savePage({ ...page, updatedAt, syncStatus: 'pending' }, document)
         await repository.replaceDerivedPageLinks(pageId, pageLinksFromMarkdown(pageId, document.markdown!, updatedAt, wikiTitleResolver(pageRecordsRef.current)))
         setReferenceIndexRevision((current) => current + 1)
-        setDocuments((current) => ({ ...current, [pageId]: normalized }))
+        putLoadedDocument(pageId, normalized)
         if (Date.now() - lastDocumentSaveDiagnosticAt > 30_000) {
           lastDocumentSaveDiagnosticAt = Date.now()
           recordDiagnosticEvent({ level: 'info', category: 'page', action: 'autosave', status: 'success' })
@@ -206,7 +358,7 @@ export function useWorkspaceData() {
       recordDocumentFailure('autosave', error, startedAt)
       throw error
     }
-  }, [privateSectionIds])
+  }, [privateSectionIds, putLoadedDocument])
 
   const stageDocument = useCallback(async (pageId: string, tiptapJson: Record<string, unknown>) => {
     const startedAt = Date.now()
@@ -243,11 +395,11 @@ export function useWorkspaceData() {
       })
       if (conflict) throw new Error('正文已有其他更新，未覆盖。本次修改已保存在版本历史中，请返回阅读后重新打开章节。')
       const assets = await repository.listAssets(pageId)
-      setDocuments((current) => ({ ...current, [pageId]: largeDocument(merged.markdown, assets) }))
+      putLoadedDocument(pageId, largeDocument(merged.markdown, assets))
       setReferenceIndexRevision((current) => current + 1)
     })
     return merged
-  }, [])
+  }, [putLoadedDocument])
 
   const loadBacklinks = useCallback(async (pageId: string, options?: { indexedOnly?: boolean }) => {
     const indexed = await repository.listBacklinks(pageId)
@@ -306,12 +458,11 @@ export function useWorkspaceData() {
     // React state directly avoids a full-library reload and ensures a new page
     // opens as an editor immediately rather than showing a loading placeholder.
     await repository.savePage(page, document)
-    loadedDocumentIds.current.add(page.id)
     setPageRecords((current) => [page, ...current])
-    setDocuments((current) => ({ ...current, [page.id]: tiptapJson }))
+    putLoadedDocument(page.id, tiptapJson)
     recordDiagnosticEvent({ level: 'info', category: 'page', action: 'create', status: 'success', message: kind })
     return page.id
-  }, [pageRecords, privateSectionIds])
+  }, [pageRecords, privateSectionIds, putLoadedDocument])
 
   const createNotebook = useCallback(async (name: string) => {
     const now = new Date().toISOString()
@@ -340,11 +491,10 @@ export function useWorkspaceData() {
     const tiptapJson = emptyEditorDocument()
     await repository.saveSection(section)
     await repository.savePage(root, { pageId: root.id, schemaVersion: 3, markdown: '', tiptapJson, updatedAt: now })
-    loadedDocumentIds.current.add(root.id)
-    setDocuments((current) => ({ ...current, [root.id]: tiptapJson }))
+    putLoadedDocument(root.id, tiptapJson)
     await reload()
     return { sectionId: section.id, pageId: root.id }
-  }, [reload, sectionRecords])
+  }, [putLoadedDocument, reload, sectionRecords])
 
   const renameNotebook = useCallback(async (notebookId: string, name: string) => {
     const notebook = notebookRecords.find((item) => item.id === notebookId)
@@ -394,11 +544,15 @@ export function useWorkspaceData() {
         const fresh = renameWikiLinks(stored.markdown, oldTitle, newTitle)
         if (!fresh.count) return
         const updatedAt = new Date().toISOString()
-        const tiptapJson = normalizeReferenceTargetIds(markdownToDocument(fresh.markdown))
+        const large = fresh.markdown.length >= LARGE_DOCUMENT_CHARACTERS
+        const tiptapJson = large ? { type: 'doc', content: [] } : normalizeReferenceTargetIds(markdownToDocument(fresh.markdown))
         await repository.savePage({ ...current, updatedAt, syncStatus: 'pending' }, { pageId: current.id, schemaVersion: 3, markdown: fresh.markdown, tiptapJson, updatedAt })
         await repository.replaceDerivedPageLinks(current.id, pageLinksFromMarkdown(current.id, fresh.markdown, updatedAt, wikiTitleResolver(pagesAfterRename)))
         setPageRecords((records) => records.map((page) => page.id === current.id ? { ...page, updatedAt, syncStatus: 'pending' } : page))
-        if (loadedDocumentIds.current.has(current.id)) setDocuments((loaded) => ({ ...loaded, [current.id]: tiptapJson }))
+        if (loadedDocumentIds.current.has(current.id)) {
+          const editorDoc = large ? largeDocument(fresh.markdown, await repository.listAssets(current.id)) : tiptapJson
+          putLoadedDocument(current.id, editorDoc)
+        }
         updatedPages += 1
       })
     }
@@ -407,7 +561,7 @@ export function useWorkspaceData() {
       showToast(`已更新 ${updatedPages} 篇笔记中指向“${newTitle}”的链接`)
     }
     return updatedPages
-  }, [])
+  }, [putLoadedDocument])
 
   const updatePage = useCallback(async (pageId: string, patch: Partial<Page>) => {
     const renamed = await enqueuePageMutation(pageId, async () => {
@@ -582,15 +736,20 @@ export function useWorkspaceData() {
     setPageRecords((current) => withRecords(current, restored))
     setReferenceIndexRevision((current) => current + 1)
   }, [])
-  const purgePage = useCallback(async (pageId: string) => {
+    const purgePage = useCallback(async (pageId: string) => {
     const page = trashRecordsRef.current.find((item) => item.id === pageId) ?? await repository.getPage(pageId)
     const rootSectionId = page ? notebookRootSectionId(page) : undefined
     if (rootSectionId) {
+      const removedIds = new Set([
+        ...pageRecordsRef.current.filter((item) => item.sectionId === rootSectionId).map((item) => item.id),
+        ...trashRecordsRef.current.filter((item) => item.sectionId === rootSectionId).map((item) => item.id),
+      ])
       await repository.deleteSection(rootSectionId, new Date().toISOString(), legacyDeviceId())
       // The section cascade purges every page that lives in it, trashed or not.
       setPageRecords((current) => current.filter((item) => item.sectionId !== rootSectionId))
       setSectionRecords((current) => current.filter((item) => item.id !== rootSectionId))
       setTrashRecords((current) => current.filter((item) => item.sectionId !== rootSectionId))
+      dropLoadedDocuments(removedIds)
       recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success' })
       setReferenceIndexRevision((current) => current + 1)
       return
@@ -598,10 +757,11 @@ export function useWorkspaceData() {
     const ids = new Set(treePageIds(trashRecordsRef.current, pageId))
     const deletedAt = new Date().toISOString()
     for (const id of [...ids].reverse()) await repository.purgePage(id, deletedAt, legacyDeviceId())
+    dropLoadedDocuments(ids)
     recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'purge', status: 'success', message: `${ids.size} 个页面` })
     setTrashRecords((current) => withoutIds(current, ids))
     setReferenceIndexRevision((current) => current + 1)
-  }, [])
+  }, [dropLoadedDocuments])
   /**
    * Permanently deletes the given trashed pages (children first). A trashed
    * section root takes its section with it only when nothing else lives there;
@@ -632,12 +792,13 @@ export function useWorkspaceData() {
       if (!stillUsed) emptiedSections.add(sectionId)
     }
     for (const sectionId of emptiedSections) await repository.deleteSection(sectionId, deletedAt, legacyDeviceId())
+    dropLoadedDocuments(purged)
     recordDiagnosticEvent({ level: 'warning', category: 'page', action: 'empty-trash', status: 'success', message: `${purged.size} 个页面` })
     setTrashRecords((current) => withoutIds(current, purged))
     if (emptiedSections.size) setSectionRecords((current) => current.filter((item) => !emptiedSections.has(item.id)))
     setReferenceIndexRevision((current) => current + 1)
     return purged.size
-  }, [])
+  }, [dropLoadedDocuments])
   const loadRevisions = useCallback((pageId: string) => repository.listRevisions(pageId), [])
   const createManualRevision = useCallback((pageId: string) => repository.createManualRevision(pageId), [])
   /** The stored modification time (for "changed since the plan was made" checks). */
@@ -656,7 +817,13 @@ export function useWorkspaceData() {
     await reload()
     return result
   }, [reload])
-  const restoreRevision = useCallback(async (revisionId: string) => { const document = await repository.restoreRevision(revisionId); setDocuments((current) => ({ ...current, [document.pageId]: document.tiptapJson })); await reload(); return document.pageId }, [reload])
+  const restoreRevision = useCallback(async (revisionId: string) => {
+    const document = await repository.restoreRevision(revisionId)
+    const assets = documentNeedsAssets(document) ? await repository.listAssets(document.pageId) : []
+    putLoadedDocument(document.pageId, await editorDocumentFromStorage(document, assets))
+    await reload()
+    return document.pageId
+  }, [putLoadedDocument, reload])
   const loadReadingPosition = useCallback((pageId: string) => repository.getReadingPosition(pageId), [])
   const saveReadingPosition = useCallback(async (pageId: string, viewportOffsetFraction: number, anchorUtf16Offset?: number) => {
     await repository.saveReadingPosition({
@@ -670,7 +837,7 @@ export function useWorkspaceData() {
       deviceId: legacyDeviceId(),
     })
   }, [])
-  return { emptyTrash, notebooks, pages, trashPages, documents, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
+  return { emptyTrash, notebooks, pages, trashPages, documents, setActiveDocument, referenceIndexRevision, syncState, syncError, syncProgress, syncIssues, syncNow, requestBoundarySync, reloadWorkspace: reload, loadDocument, saveDocument, saveDocumentSection, stageDocument, loadBacklinks, loadUnlinkedMentions, createPage, createNotebook, createSection, renameNotebook, deleteNotebook, renameSection, deleteSection, duplicatePage, updatePage, movePageInTree, promotePageToNotebookRoot, reorderNotebookRoot, loadTaskSteps, saveTaskSteps, importFiles, importTextFiles, exportWorkspace, loadAssets, saveAsset, openAsset, getAssetContent, searchWorkspace, searchWorkspaceHits, searchWorkspaceCandidates, moveToTrash, restorePage, purgePage, loadRevisions, createManualRevision, resetRevisionHistory, restoreRevision, loadReadingPosition, saveReadingPosition, getPageUpdatedAt, setPageTagNames }
 }
 
 

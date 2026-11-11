@@ -1,5 +1,7 @@
 /** Shell layout breakpoints and small persisted list preferences. */
 export type ShellLayout = 'wide' | 'medium' | 'narrow'
+export type EditorFont = 'sans' | 'serif'
+export const EDITOR_FONT_KEY = 'notebook-editor-font'
 /** wide: docked sidebar; medium: sidebar drawer; narrow: list and editor stack like a phone. */
 export const layoutForWidth = (width: number): ShellLayout => width < 760 ? 'narrow' : width < 1100 ? 'medium' : 'wide'
 

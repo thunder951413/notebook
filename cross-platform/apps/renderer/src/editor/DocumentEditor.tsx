@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useEditor, EditorContent } from '@tiptap/react'
 import Placeholder from '@tiptap/extension-placeholder'
 import Collaboration from '@tiptap/extension-collaboration'
@@ -20,6 +20,7 @@ import { highlightSearchTerms, SearchHighlight } from './searchHighlight'
 import { FIND_IN_DOCUMENT_EVENT, takePendingFind, type FindInDocumentDetail } from '../search/FullTextSearch'
 import { lastHeadingAbove, OUTLINE_JUMP_EVENT, outlineProbe, reportActiveHeading } from './outlineEvents'
 import { INSERT_ASSET_EVENT, insertAssetIntoEditor, type InsertAssetDetail } from '../assets/assetCommands'
+import { reportAutosaveFailure, reportDraftFailure } from './autosaveError'
 
 export const initialContent = `
   <h1>Notebook Next 产品愿景</h1>
@@ -54,6 +55,8 @@ export interface DocumentEditorProps {
   onViewportChange?: (position: { scrollTop: number; fraction: number; anchor?: number }) => void
   /** Report the heading under the reading position to the outline. Off for a chapter edited inside a larger note. */
   trackOutline?: boolean
+  /** Optional editorial header rendered inside the scrollable paper body. */
+  header?: ReactNode
 }
 
 const statusLabels = { loading: '正在载入离线副本', offline: '离线可编辑', connecting: '正在连接协作', connected: '实时协作已连接', error: '协作服务不可用 · 已离线保存' }
@@ -181,13 +184,13 @@ const VimBlockCursor = Extension.create({
   },
 })
 
-export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true }: DocumentEditorProps) {
+export function DocumentEditor({ workspaceId, pageId, pageTitle, content = initialContent, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true, header }: DocumentEditorProps) {
   const session = useCollaborativeDocument(workspaceId, pageId)
-  if (!session || session.status === 'loading') return <div className="editor-loading">正在载入离线副本…</div>
-  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveAsset={saveAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} trackOutline={trackOutline} />
+  if (!session || session.status === 'loading') return <>{header}<div className="editor-loading">正在载入离线副本…</div></>
+  return <ReadyDocumentEditor session={session} pageId={pageId} pageTitle={pageTitle} content={content} onChange={onChange} onDraft={onDraft} forceRestore={forceRestore} loadAsset={loadAsset} saveAsset={saveAsset} vimEnabled={vimEnabled} onVimCommandModeChange={onVimCommandModeChange} viewportPosition={viewportPosition} onViewportChange={onViewportChange} trackOutline={trackOutline} header={header} />
 }
 
-function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange' | 'trackOutline'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
+function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, onDraft, forceRestore, loadAsset, saveAsset, vimEnabled = false, onVimCommandModeChange, viewportPosition, onViewportChange, trackOutline = true, header }: Pick<DocumentEditorProps, 'pageId' | 'pageTitle' | 'content' | 'onChange' | 'onDraft' | 'forceRestore' | 'loadAsset' | 'saveAsset' | 'vimEnabled' | 'onVimCommandModeChange' | 'viewportPosition' | 'onViewportChange' | 'trackOutline' | 'header'> & { session: NonNullable<ReturnType<typeof useCollaborativeDocument>> }) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const restoreTimers = useRef<number[]>([])
   const restoredViewportPage = useRef<string | undefined>(undefined)
@@ -238,11 +241,11 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   if (!draftScheduler.current) {
     draftScheduler.current = createTrailingDebounce(DRAFT_DEBOUNCE_MS, () => {
       const json = latestJson.current
-      if (json) void Promise.resolve(onDraftRef.current?.(json)).catch(() => undefined)
+      if (json) void Promise.resolve(onDraftRef.current?.(json)).catch(reportDraftFailure)
     })
   }
   if (!commitScheduler.current) {
-    commitScheduler.current = createTrailingDebounce(SAVE_DEBOUNCE_MS, () => { void commitNow().catch(() => undefined) })
+    commitScheduler.current = createTrailingDebounce(SAVE_DEBOUNCE_MS, () => { void commitNow().catch(reportAutosaveFailure) })
   }
   const changeVimMode = (mode: 'normal' | 'insert') => {
     vimModeRef.current = mode
@@ -559,7 +562,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
     // content storage has not already accepted — no redundant pending marks.
     draftScheduler.current?.cancel()
     commitScheduler.current?.cancel()
-    void commitNow().catch(() => undefined)
+    void commitNow().catch(reportAutosaveFailure)
   }, [])
 
   useEffect(() => registerFlushHandler(() => commitNow()), [])
@@ -799,7 +802,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
           fraction: body.scrollTop / Math.max(1, body.scrollHeight - body.clientHeight),
         })
       }}
-    ><EditorContent editor={editor} /></div>
+    >{header}<EditorContent editor={editor} /></div>
     {slashMenu && <div className="slash-command-menu" role="menu" style={slashMenu}>
       <strong>插入内容</strong>
       {([

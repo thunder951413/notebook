@@ -19,6 +19,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 
+from urllib.parse import urlparse
 import requests
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -44,9 +45,18 @@ class WebdavConnection(BaseModel):
     @field_validator("baseUrl")
     @classmethod
     def base_url_is_http(cls, value: str) -> str:
-        if not re.match(r"^https?://", value) or any(character.isspace() for character in value):
+        trimmed = value.strip()
+        if not re.match(r"^https?://", trimmed) or any(character.isspace() for character in trimmed):
             raise ValueError("WebDAV 服务器地址不正确")
-        return value.strip()
+        parsed = urlparse(trimmed)
+        host = (parsed.hostname or "").lower()
+        if not host or parsed.username or parsed.password:
+            raise ValueError("WebDAV 服务器地址不正确")
+        if host in {"169.254.169.254", "metadata.google.internal", "fd00:ec2::254"} or host.startswith("169.254."):
+            raise ValueError("WebDAV 服务器地址不允许访问链路本地或元数据服务")
+        if parsed.scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("非本机 WebDAV 服务器必须使用 https://")
+        return trimmed
 
     @model_validator(mode="after")
     def require_credentials(self) -> "WebdavConnection":
@@ -197,9 +207,7 @@ def _session(settings: WebdavConnection) -> requests.Session:
 
 
 def _fail(response: requests.Response, context: str) -> None:
-    detail = response.text.strip()[:300]
-    suffix = f"（HTTP {response.status_code}）" if not detail else f"（HTTP {response.status_code}：{detail}）"
-    raise RuntimeError(f"{context}{suffix}")
+    raise RuntimeError(f"{context}（HTTP {response.status_code}）")
 
 
 def _ensure_directory(session: requests.Session, settings: WebdavConnection, path: str) -> None:

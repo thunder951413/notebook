@@ -1,5 +1,5 @@
 import { memo, type CSSProperties, type DragEvent as ReactDragEvent } from 'react'
-import { ChevronDown16Regular, ChevronRight16Regular, Star16Filled } from '@fluentui/react-icons'
+import { ChevronDown12Regular, ChevronRight12Regular, Star16Filled } from '@fluentui/react-icons'
 import type { PageSummary } from '../model'
 import { PAGE_TREE_DRAG_TYPE } from '../persistence/localLayout'
 import { ActionMenu, ActionMenuDivider } from '../ActionMenu'
@@ -69,8 +69,9 @@ function PageTreeRowImpl({ page, depth, hasChildren, childCount, variant, select
     aria-level={ariaLevel}
     aria-selected={selected}
     aria-expanded={hasChildren ? expanded : undefined}
+    data-depth={depth}
     draggable
-    className={`page-tree-row ${variant === 'navigation' ? 'unified-page-row' : ''} ${selected ? 'selected' : ''} ${dropTarget?.id === page.id ? `drop-${dropTarget.position}` : ''}`}
+    className={`page-tree-row ${variant === 'navigation' ? 'unified-page-row' : ''} ${page.icon ? 'has-custom-icon' : 'no-custom-icon'} ${selected ? 'selected' : ''} ${dropTarget?.id === page.id ? `drop-${dropTarget.position}` : ''}`}
     style={{ '--page-depth': depth } as CSSProperties}
     onPointerEnter={() => onPrefetch(page.id)}
     onPointerLeave={onPrefetchStop}
@@ -89,8 +90,8 @@ function PageTreeRowImpl({ page, depth, hasChildren, childCount, variant, select
     onDrop={(event) => onDrop(event, page)}
     onDragEnd={onDragEnd}
   >
-    <button type="button" className={`page-tree-toggle ${hasChildren ? '' : 'empty'}`} tabIndex={-1} aria-label={hasChildren ? expanded ? '折叠子页面' : '展开子页面' : undefined} onClick={(event) => { event.stopPropagation(); if (hasChildren) onToggleExpanded(page.id) }}>{hasChildren ? expanded ? <ChevronDown16Regular /> : <ChevronRight16Regular /> : <span />}</button>
-    <PageTreeIconButton page={page} hasChildren={hasChildren} expanded={expanded} onChange={() => actions.changeIcon(page)} />
+    <button type="button" className={`page-tree-toggle ${hasChildren ? '' : 'empty'}`} tabIndex={-1} aria-label={hasChildren ? expanded ? '折叠子页面' : '展开子页面' : undefined} onClick={(event) => { event.stopPropagation(); if (hasChildren) onToggleExpanded(page.id) }}>{hasChildren ? expanded ? <ChevronDown12Regular /> : <ChevronRight12Regular /> : <span className="page-tree-leaf-dot" aria-hidden="true" />}</button>
+    {page.icon && <PageTreeIconButton page={page} hasChildren={hasChildren} expanded={expanded} onChange={() => actions.changeIcon(page)} />}
     <span className="page-tree-title" title={page.title}>{page.title || '无标题页面'}</span>
     {page.favorite && <Star16Filled className="favorite" />}
     {hasChildren && childCount > 0 && <span className="page-tree-child-count">{childCount}</span>}

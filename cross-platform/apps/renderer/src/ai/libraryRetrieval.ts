@@ -1,6 +1,7 @@
 import MiniSearch from 'minisearch'
 import type { AIContextBundle, AIContextItem } from '@notebook/sync-contract'
 import type { PageSummary } from '../model'
+import { isLargeDocument } from '../data/largeDocument'
 import { documentToMarkdown } from '../editor/extensions'
 
 const DEFAULT_MAX_PAGES = 16
@@ -65,6 +66,102 @@ function serializeNode(node: DocumentNode) {
   }
 }
 
+function splitMarkdownDocument(
+  page: Pick<PageSummary, 'id' | 'title' | 'updatedLabel'>,
+  source: string,
+  targetCharacters: number,
+): NotebookRetrievalChunk[] {
+  const headings: string[] = []
+  const chunks: NotebookRetrievalChunk[] = []
+  let buffer: string[] = []
+  let bufferHeading: string[] = []
+  let blockLines: string[] = []
+  let fence: { marker: string; length: number } | undefined
+  let mathBlock = false
+  const currentHeadingPath = () => headings.filter(Boolean)
+
+  const flush = () => {
+    const markdown = buffer.join('\n\n').trim()
+    if (markdown) {
+      chunks.push({
+        id: `${page.id}:chunk:${chunks.length}`,
+        pageId: page.id,
+        pageTitle: page.title,
+        headingPath: bufferHeading,
+        markdown,
+        score: 0,
+      })
+    }
+    buffer = []
+    bufferHeading = currentHeadingPath()
+  }
+
+  const pushBlock = (raw: string) => {
+    const markdown = raw.trim()
+    if (!markdown) return
+    const currentLength = buffer.reduce((total, value) => total + value.length + 2, 0)
+    if (buffer.length && currentLength + markdown.length > targetCharacters) flush()
+    if (!buffer.length) bufferHeading = currentHeadingPath()
+    buffer.push(markdown)
+    if (markdown.length >= targetCharacters) flush()
+  }
+
+  const commitBlockLines = () => {
+    if (!blockLines.length) return
+    const text = blockLines.join('\n')
+    blockLines = []
+    pushBlock(text)
+  }
+
+  let offset = 0
+  while (offset <= source.length) {
+    const newline = source.indexOf('\n', offset)
+    const rawLine = newline < 0 ? source.slice(offset) : source.slice(offset, newline)
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    offset = newline < 0 ? source.length + 1 : newline + 1
+
+    const fenceMatch = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/)
+    if (fenceMatch) {
+      const marker = fenceMatch[1]![0]!
+      const length = fenceMatch[1]!.length
+      if (!fence) fence = { marker, length }
+      else if (fence.marker === marker && length >= fence.length) fence = undefined
+      blockLines.push(line)
+      continue
+    }
+    if (!fence && line.trim() === '$$') {
+      mathBlock = !mathBlock
+      blockLines.push(line)
+      continue
+    }
+    if (fence || mathBlock) {
+      blockLines.push(line)
+      continue
+    }
+    if (line.trim() === '') {
+      commitBlockLines()
+      continue
+    }
+    const headingMatch = line.match(/^[ \t]{0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$/)
+    if (headingMatch && (headingMatch[2] !== undefined || line.trim().length === headingMatch[1]!.length)) {
+      commitBlockLines()
+      if (buffer.length) flush()
+      const level = headingMatch[1]!.length
+      const headingText = (headingMatch[2] ?? '').replace(/[ \t]+#+[ \t]*$/, '').trim()
+      headings.splice(level - 1)
+      headings[level - 1] = headingText || `H${level}`
+      bufferHeading = currentHeadingPath()
+      pushBlock(line.trim())
+      continue
+    }
+    blockLines.push(line)
+  }
+
+  commitBlockLines()
+  flush()
+  return chunks
+}
+
 /**
  * Splits the editor document by its existing top-level Markdown blocks. This
  * reuses the Tiptap schema and serializer instead of maintaining another
@@ -76,6 +173,9 @@ export function splitNotebookDocument(
   document: Record<string, unknown>,
   targetCharacters = TARGET_CHUNK_CHARACTERS,
 ): NotebookRetrievalChunk[] {
+  if (isLargeDocument(document)) {
+    return splitMarkdownDocument(page, document.markdown, targetCharacters)
+  }
   const nodes = Array.isArray((document as DocumentNode).content) ? (document as DocumentNode).content! : []
   const headings: string[] = []
   const chunks: NotebookRetrievalChunk[] = []

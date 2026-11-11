@@ -1,6 +1,7 @@
 import { MAX_AUTOSAVE_REVISIONS_PER_PAGE, MAX_PINNED_REVISIONS_PER_PAGE, NotebookRendererDatabase } from '../database'
 import type { SyncOutboxItem } from '../database'
-import { SearchCache } from '../search'
+import type { SearchIndex } from '../search'
+import { createSearchIndex } from '../searchWorker'
 
 /** Publication order: containers before what they contain. Deletes run in reverse. */
 const SYNC_DEPENDENCY_RANK: Record<string, number> = {
@@ -15,9 +16,16 @@ const SYNC_DEPENDENCY_RANK: Record<string, number> = {
  * Layers: core → content → sync → transfer → DexieNotebookRepository.
  */
 export class RepositoryCore {
-  protected readonly searchIndex = new SearchCache()
+  protected readonly searchIndex: SearchIndex
 
-  constructor(readonly db = new NotebookRendererDatabase()) {}
+  constructor(readonly db = new NotebookRendererDatabase()) {
+    this.searchIndex = createSearchIndex(db)
+  }
+
+  close(): void {
+    this.searchIndex.close()
+    this.db.close()
+  }
 
   protected versionId(workspaceId: string, entityType: string, entityId: string) { return `${workspaceId}:${entityType}:${entityId}` }
 

@@ -22,6 +22,7 @@ cross-platform/**/*.db
 cross-platform/**/*.egg-info/
 !cross-platform/**/.env.example
 *.profraw
+*.xcodeproj/
 *.xcuserstate
 xcuserdata/
 

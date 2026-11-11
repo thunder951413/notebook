@@ -48,7 +48,7 @@ crates/notebook-automation/  本地自动化 HTTP 接口（127.0.0.1 + Bearer To
 | Vim 模式切换 ABC 输入法 | ✓ | ✓ | |
 | 本地 AI 自动化接口（`/v1/pages`、`/v1/proposals`） | ✓ | ✓（本次补齐） | 同一路由、令牌、错误码；令牌存钥匙串，配置在 `automation-api.v1.json` |
 | 菜单栏图标（快速记录 / 打开 / 检查更新 / 退出） | ✓ | ✓（本次补齐） | |
-| Windows / Linux 安装包 | ✓ | ✗ | Tauri 版目前只发布 macOS arm64；跨平台是删除 Electron 的前提 |
+| Windows / Linux 安装包 | ✓ | Windows ✓ / Linux 构建已兼容，待发包 | Tauri 版已支持 macOS arm64 与 Windows x64 安装包；Linux 打包补齐后即可删除 Electron |
 | 更换数据目录 | ✓ | ✗（不计划） | 数据在 WebKit IndexedDB，由系统管理 |
 | 旧版 SSH/SFTP 同步 | ✓ | ✗（不计划） | 只用于旧仓库迁移；需要时临时用 Electron 版导入后改用 WebDAV |
 
@@ -67,9 +67,9 @@ crates/notebook-automation/  本地自动化 HTTP 接口（127.0.0.1 + Bearer To
 
 ## 自动更新
 
-- 发布：推送标签 `desktop-v<版本>`（或在 Actions 里手动运行 “Desktop (Tauri)” 并填写版本），`.github/workflows/desktop-tauri.yml` 在 macOS 上构建，发布 `Notebook-macos-arm64.zip` 和 `.sha256`。
-- 应用启动 20 秒后检查一次，之后每 6 小时检查；发现新版本自动下载并校验 SHA-256，下载完成后弹出“重启并更新”。设置 → 常规 里也能手动检查。
-- 仓库是私有的：需要在 设置 → 常规 → 更新 里填写一个有 repo 读取权限的 GitHub 令牌（存在钥匙串里）。
+- 发布：推送标签 `desktop-v<版本>`（或在 Actions 里手动运行 “Desktop (Tauri)” 并填写版本），`.github/workflows/desktop-tauri.yml` 在 macOS 和 Windows 上构建草稿产物，待双端安装包及 `.sha256` 校验文件全部齐备后原子公开 Release。
+- 应用启动 20 秒后检查一次，之后每 6 小时检查；发现新版本必须同时具备对应平台安装包与 `.sha256` 校验值，下载后强制校验 SHA-256，校验通过才弹出“重启并更新”。设置 → 常规 里也能手动检查。
+- 公开仓库无需配置令牌即可检查更新；若派生仓库设为私有，可在 设置 → 常规 → 更新 里填写具有 `repo` 读取权限的 GitHub 令牌（保存在系统凭据存储中）。
 - 应用没有 Apple 签名。应用内更新用自己的下载器（文件不带隔离标记），解压后执行 `xattr -cr`，退出后由一个小脚本替换 /Applications 里的 Notebook.app 并重新打开；替换失败会还原旧版本。
 - 手动下载安装：解压，拖到“应用程序”，执行 `xattr -cr /Applications/Notebook.app`。
 

@@ -1,8 +1,10 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import type { AutomationProposal, Page } from '@notebook/domain'
+import * as extensions from '../editor/extensions'
 import {
   isPublicAutomationPage,
   externalProposalView,
+  prepareProposalDocument,
   validateAcceptedStructuralDependencies,
   validateAutomationMarkdown,
   validateProposalOperations,
@@ -99,4 +101,15 @@ test('requires implicit descendant moves to be accepted with their parent', () =
   }
   expect(() => validateAcceptedStructuralDependencies(proposal, new Set(['move-parent']), [parent, child])).toThrow('全部子页面')
   expect(() => validateAcceptedStructuralDependencies(proposal, new Set(['move-parent', 'move-child']), [parent, child])).not.toThrow()
+})
+
+test('stores an empty editor cache without main-thread Markdown parsing for >=200k char proposals', () => {
+  const parseSpy = vi.spyOn(extensions, 'markdownToDocument')
+  const largeMarkdown = '# 超大提案\n\n摘要开头内容。\n\n' + '章节正文段落。\n\n'.repeat(25_000)
+  expect(largeMarkdown.length).toBeGreaterThanOrEqual(200_000)
+  const prepared = prepareProposalDocument(largeMarkdown)
+  expect(parseSpy).not.toHaveBeenCalled()
+  expect(prepared.tiptapJson).toEqual({ type: 'doc', content: [] })
+  expect(prepared.preview).toContain('超大提案')
+  parseSpy.mockRestore()
 })

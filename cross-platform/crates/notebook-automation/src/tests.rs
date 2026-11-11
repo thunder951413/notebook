@@ -125,6 +125,78 @@ fn ports_and_tokens() {
 }
 
 #[test]
+fn validates_host_header_and_connection_limit_without_sockets() {
+    for allowed in ["127.0.0.1", "127.0.0.1:47831", "localhost", "LOCALHOST:8080", "[::1]", "[::1]:47831"] {
+        assert!(is_valid_host_header(allowed), "{allowed} should be accepted");
+    }
+    for rejected in [
+        "",
+        "evil.example",
+        "evil.example:47831",
+        "127.0.0.1.evil.example",
+        "localhost.evil.example:47831",
+        "::1",
+        "[::1",
+        "[::1]:bad",
+        "127.0.0.1:99999",
+        "0.0.0.0:47831",
+    ] {
+        assert!(!is_valid_host_header(rejected), "{rejected} should be rejected");
+    }
+
+    // Exercise RequestContext::process_parts directly without opening a TCP socket.
+    let (tx, rx) = mpsc::channel::<BridgeRequest>();
+    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending_responder = pending.clone();
+    std::thread::spawn(move || {
+        for req in rx {
+            if let Some(sender) = pending_responder.lock().unwrap().remove(&req.id) {
+                let _ = sender.try_send(BridgeResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!({ "ok": true })),
+                    error: None,
+                });
+            }
+        }
+    });
+    let token = new_token();
+    let bearer = format!("Bearer {token}");
+    let context = RequestContext {
+        token: Arc::new(Mutex::new(token)),
+        pending,
+        forwarder: Arc::new(EchoRenderer { ready: AtomicBool::new(true), sender: Mutex::new(tx) }),
+        recorder: Arc::new(|_, _, _, _| {}),
+    };
+
+    // Valid loopback Host headers (and omitted Host) succeed.
+    assert_eq!(context.process_parts("GET", "/v1/openapi.json", &["127.0.0.1:47831"], None, Some(&bearer), &mut std::io::empty()).unwrap().0, 200);
+    assert_eq!(context.process_parts("GET", "/v1/openapi.json", &["localhost:47831"], None, Some(&bearer), &mut std::io::empty()).unwrap().0, 200);
+    assert_eq!(context.process_parts("GET", "/v1/openapi.json", &["[::1]:47831"], None, Some(&bearer), &mut std::io::empty()).unwrap().0, 200);
+    assert_eq!(context.process_parts("GET", "/v1/openapi.json", &[], None, Some(&bearer), &mut std::io::empty()).unwrap().0, 200);
+
+    // DNS-rebinding / non-loopback / duplicate Host headers return 403 forbidden.
+    for bad_hosts in [&["rebind.attacker.example:47831"][..], &["127.0.0.1.evil.com"][..], &["127.0.0.1", "evil.com"][..]] {
+        let err = context.process_parts("GET", "/v1/openapi.json", bad_hosts, None, Some(&bearer), &mut std::io::empty()).unwrap_err();
+        assert_eq!(err.0, 403);
+        assert_eq!(err.1["error"]["code"], "forbidden");
+    }
+
+    // ActiveConnectionGuard enforces MAX_ACTIVE_CONNECTIONS and decrements on drop.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut guards: Vec<_> = (0..MAX_ACTIVE_CONNECTIONS)
+        .map(|_| ActiveConnectionGuard::try_acquire(&counter, MAX_ACTIVE_CONNECTIONS).expect("within limit"))
+        .collect();
+    assert_eq!(counter.load(Ordering::Acquire), MAX_ACTIVE_CONNECTIONS);
+    assert!(ActiveConnectionGuard::try_acquire(&counter, MAX_ACTIVE_CONNECTIONS).is_none(), "33rd connection must be rejected");
+    guards.pop();
+    assert_eq!(counter.load(Ordering::Acquire), MAX_ACTIVE_CONNECTIONS - 1);
+    assert!(ActiveConnectionGuard::try_acquire(&counter, MAX_ACTIVE_CONNECTIONS).is_some(), "slot released on drop");
+    drop(guards);
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn forwards_authenticated_requests_and_maps_renderer_errors() {
     let harness = Harness::new();
     let state = harness.server.configure(true, 0).unwrap();

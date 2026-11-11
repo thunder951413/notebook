@@ -1,6 +1,5 @@
 import type { AutomationProposal, NotebookRepository, Page, PageDocument, UUID, Tombstone, PageRevision } from '@notebook/domain'
 import { legacyTiptapToCanonicalMarkdown } from '@notebook/sync-contract'
-import { searchWorkspaceCandidatesWith, searchWorkspaceHitsWith, searchWorkspaceWith } from './search'
 import { TransferRepository } from './repository/transfer'
 
 export type { RemoteSyncChange, RemoteApplyResult, RemoteQuarantineInput } from './remotePayload'
@@ -96,7 +95,7 @@ export class DexieNotebookRepository extends TransferRepository implements Noteb
     }).finally(() => this.searchIndex.invalidate(prepared[0]?.page.workspaceId ?? ''))
   }
   async searchWorkspace(workspaceId: UUID, query: string, limit = 50, signal?: AbortSignal): Promise<Page[]> {
-    return searchWorkspaceWith(this.db, this.searchIndex, workspaceId, query, limit, signal)
+    return this.searchIndex.search(this.db, workspaceId, query, limit, signal)
   }
 
   /**
@@ -106,11 +105,11 @@ export class DexieNotebookRepository extends TransferRepository implements Noteb
    * set before presenting an exact semantic such as an unlinked mention.
    */
   async searchWorkspaceCandidates(workspaceId: UUID, query: string, limit = 200): Promise<Page[]> {
-    return searchWorkspaceCandidatesWith(this.db, this.searchIndex, workspaceId, query, limit)
+    return this.searchIndex.candidates(this.db, workspaceId, query, limit)
   }
 
   /** Full-text hits with excerpts for the search panel (title, preview and body). */
-  async searchWorkspaceHits(workspaceId: UUID, query: string, limit = 30) {
-    return searchWorkspaceHitsWith(this.db, this.searchIndex, workspaceId, query, limit)
+  async searchWorkspaceHits(workspaceId: UUID, query: string, limit = 30, signal?: AbortSignal) {
+    return this.searchIndex.hits(this.db, workspaceId, query, limit, signal)
   }
 }

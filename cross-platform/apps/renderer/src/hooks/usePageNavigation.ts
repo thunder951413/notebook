@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import type { PageSummary } from '../model'
+import { ancestorsOf } from '../pageTree'
 import type { PageVisitHistory } from '../pageVisitHistory'
 import { pageVisitTarget } from '../pageVisitHistory'
 
@@ -16,12 +17,17 @@ export interface OpenPageOptions {
   reveal?: boolean
   /** Put the cursor in the note's text. */
   focus?: boolean
+  /** Keep the caller's explicit `expandedPageIds` update instead of replacing it from `openPage`. */
+  preserveTreeExpansion?: boolean
+  /** Keep notebooks collapsed in the sidebar if none are currently expanded (e.g. browsing smart lists). */
+  keepSidebarCollapsed?: boolean
 }
 
 export interface PageNavigationOptions {
   accessiblePages: PageSummary[]
   accessibleDocumentPageIds: Set<string>
   activeArea: string
+  activePage: string
   navigationOpen: boolean
   pageHistory: PageVisitHistory
   setNavOpen: Dispatch<SetStateAction<boolean>>
@@ -74,12 +80,18 @@ export function usePageNavigation(options: PageNavigationOptions) {
 
   const activateTreePage = useCallback((page: PageSummary, hasChildren: boolean) => {
     const current = optionsRef.current
-    if (hasChildren) {
-      current.setExpandedPageIds((currentIds) => currentIds.has(page.id) ? currentIds : new Set([...currentIds, page.id]))
-    }
+    const inSection = current.accessiblePages.filter((candidate) => candidate.kind !== 'task' && candidate.sectionId === page.sectionId)
+    const ancestors = ancestorsOf(inSection, page.id)
+    current.setExpandedPageIds((currentIds) => {
+      if (hasChildren) {
+        if (current.activePage === page.id && currentIds.has(page.id)) return new Set(ancestors)
+        return new Set([...ancestors, page.id])
+      }
+      return new Set(ancestors)
+    })
     // A page from the notebook tree is a note, even when To-dos or Trash was
     // the last thing selected; openPage leaves those lists.
-    current.openPage(page.id, { sectionId: page.sectionId, kind: 'document', trash: false })
+    current.openPage(page.id, { sectionId: page.sectionId, kind: 'document', trash: false, preserveTreeExpansion: true })
   }, [])
 
   return { toggleNavigation, openRecentPage, navigatePageHistory, activateTreePage, historyNavigationTarget }

@@ -84,15 +84,15 @@ jobs:
           cat Notebook-macos-arm64.zip.sha256
           # Source maps for mapping crash stacks in the diagnostics log.
           (cd cross-platform/apps/tauri/dist-maps && zip -q -r "$GITHUB_WORKSPACE/Notebook-sourcemaps.zip" .)
-      - name: Publish GitHub Release
+      - name: Stage GitHub Release (Draft)
         if: ${{ github.event_name == 'push' || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
+          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载、校验 SHA-256 并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+            gh release create "$TAG" --draft --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
           gh release upload "$TAG" Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 Notebook-sourcemaps.zip --repo "$GITHUB_REPOSITORY" --clobber
 
@@ -123,9 +123,6 @@ jobs:
         working-directory: cross-platform
         run: pnpm install --frozen-lockfile
       - name: Rust tests
-        # Not a gate yet: the sync crates were written on the Mac. Read the
-        # result, fix what Windows shows, then remove continue-on-error.
-        continue-on-error: true
         working-directory: cross-platform
         run: |
           cargo test --manifest-path crates/notebook-sync/Cargo.toml
@@ -150,13 +147,33 @@ jobs:
             Notebook-windows-x64-setup.exe
             Notebook-windows-x64-setup.exe.sha256
           retention-days: 3
-      - name: Publish GitHub Release
+      - name: Stage GitHub Release (Draft)
         if: ${{ github.event_name == 'push' || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
+          notes=$'Notebook 桌面版（Tauri）\n\n已安装的应用会自动下载、校验 SHA-256 并安装此更新。\n\nMac（Apple 芯片）首次手动安装：解压 Notebook-macos-arm64.zip，把 Notebook.app 拖到“应用程序”，然后在终端执行：\n\n    xattr -cr /Applications/Notebook.app\n\n应用未经 Apple 签名，所以需要这一步。\n\nWindows 首次安装：运行 Notebook-windows-x64-setup.exe（安装到当前用户，无需管理员）。应用未签名，SmartScreen 提示时点“更多信息”→“仍要运行”。'
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+            gh release create "$TAG" --draft --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Notebook 桌面版 $VERSION" --notes "$notes" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
           gh release upload "$TAG" Notebook-windows-x64-setup.exe Notebook-windows-x64-setup.exe.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    needs: [macos, windows]
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify checksums and publish Release atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.version || github.ref_name }}"
+          version="${version#desktop-v}"
+          version="${version#v}"
+          tag="desktop-v$version"
+          assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for required in Notebook-macos-arm64.zip Notebook-macos-arm64.zip.sha256 Notebook-windows-x64-setup.exe Notebook-windows-x64-setup.exe.sha256; do
+            echo "$assets" | grep -Fxq "$required" || { echo "Missing required release asset: $required" >&2; exit 1; }
+          done
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false

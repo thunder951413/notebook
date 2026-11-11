@@ -118,13 +118,13 @@ export function normalizeReferenceTargetIds(
     if (node.type === 'blockAnchor') {
       const current = typeof node.attrs?.anchorId === 'string' ? node.attrs.anchorId : ''
       const anchorId = current && !blockIds.has(current) ? current : makeId('b')
-      node.attrs = { ...(node.attrs ?? {}), anchorId }
+      node.attrs = { ...node.attrs, anchorId }
       blockIds.add(anchorId)
     }
     if (node.type === 'blockGroup') {
       const current = typeof node.attrs?.groupId === 'string' ? node.attrs.groupId : ''
       const groupId = current && !groupIds.has(current) ? current : makeId('g')
-      node.attrs = { ...(node.attrs ?? {}), groupId }
+      node.attrs = { ...node.attrs, groupId }
       groupIds.add(groupId)
     }
     node.content?.forEach(visit)

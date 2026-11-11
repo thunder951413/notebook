@@ -1,6 +1,6 @@
 import { SignJWT } from 'jose'
 import { expect, test } from 'vitest'
-import { assertDocumentAccess, authenticateRequest } from './auth'
+import { assertAllowedOrigin, assertDocumentAccess, authenticateRequest } from './auth'
 
 test('local development identity is scoped to the requested workspace', async () => {
   const identity = await authenticateRequest(null, undefined, true, 'workspace-under-test')
@@ -26,4 +26,14 @@ test('validates signed collaboration claims and workspace document names', async
 test('only permits anonymous access for explicit local development', async () => {
   await expect(authenticateRequest(null, undefined, true)).resolves.toMatchObject({ role: 'owner' })
   await expect(authenticateRequest(null, undefined, false)).rejects.toThrow(/required/)
+})
+
+test('blocks cross-site browser origins when running unauthenticated on loopback', () => {
+  expect(() => assertAllowedOrigin(undefined, true)).not.toThrow()
+  expect(() => assertAllowedOrigin('http://127.0.0.1:5173', true)).not.toThrow()
+  expect(() => assertAllowedOrigin('tauri://localhost', true)).not.toThrow()
+  expect(() => assertAllowedOrigin('https://tauri.localhost', true)).not.toThrow()
+  expect(() => assertAllowedOrigin('https://evil.example', true)).toThrow(/Cross-origin/)
+  expect(() => assertAllowedOrigin('null', true)).toThrow(/Untrusted/)
+  expect(() => assertAllowedOrigin('https://evil.example', false)).not.toThrow()
 })

@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { afterEach, expect, test, vi } from 'vitest'
 import type { Page, PageDocument } from '@notebook/domain'
-import { DexieNotebookRepository, MAX_AUTOSAVE_REVISIONS_PER_PAGE, NotebookRendererDatabase } from './index'
+import { DexieNotebookRepository, MAX_AUTOSAVE_REVISIONS_PER_PAGE, MAX_EDITOR_CACHE_BYTES, NotebookRendererDatabase } from './index'
 
 const opened: NotebookRendererDatabase[] = []
 const makeRepository = () => {
@@ -1463,4 +1463,110 @@ test('trashing publishes a recoverable page upsert, only a purge publishes a del
   await repository.purgePage('page-sync-trash', '2026-01-06T00:00:00.000Z')
   const purged = (await repository.listOutbox('workspace-a')).find((item) => item.entityType === 'page' && item.entityId === 'page-sync-trash')
   expect(purged?.operation).toBe('delete')
+})
+
+test('a sync pull refreshes the changed pages in the search index instead of rebuilding it', async () => {
+  const repository = makeRepository()
+  const kept = { ...page('search-kept', 'Kept note'), syncStatus: 'synced' as const }
+  const changed = { ...page('search-changed', 'Old heading'), syncStatus: 'synced' as const }
+  await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 1, entityType: 'page', entityId: kept.id, version: 1, operation: 'upsert', payload: kept },
+    { cursor: 2, entityType: 'page', entityId: changed.id, version: 1, operation: 'upsert', payload: changed },
+  ], 2)
+  expect((await repository.searchWorkspace('workspace-a', 'heading')).map((result) => result.id)).toEqual([changed.id])
+  const fullReads = vi.spyOn(repository.db.documents, 'toArray')
+
+  // A pull with nothing new, then one that renames a page and adds a body.
+  await repository.applyRemoteChanges('workspace-a', [], 2)
+  await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 3, entityType: 'page', entityId: changed.id, version: 2, operation: 'upsert', payload: { ...changed, title: 'Fresh title', preview: 'Fresh preview' } },
+    { cursor: 4, entityType: 'document', entityId: changed.id, version: 1, operation: 'upsert', payload: { pageId: changed.id, schemaVersion: 1, markdown: 'remote body about zeppelins', tiptapJson: { type: 'doc', content: [] }, updatedAt: changed.updatedAt } },
+  ], 4)
+  expect((await repository.searchWorkspace('workspace-a', 'heading')).map((result) => result.id)).toEqual([])
+  expect((await repository.searchWorkspace('workspace-a', 'fresh')).map((result) => result.id)).toEqual([changed.id])
+  expect((await repository.searchWorkspace('workspace-a', 'zeppelins')).map((result) => result.id)).toEqual([changed.id])
+
+  // A remote permanent delete leaves the index too.
+  await repository.applyRemoteChanges('workspace-a', [{ cursor: 5, entityType: 'page', entityId: changed.id, version: 3, operation: 'delete', payload: {} }], 5)
+  expect((await repository.searchWorkspace('workspace-a', 'fresh')).map((result) => result.id)).toEqual([])
+  expect((await repository.searchWorkspace('workspace-a', 'kept')).map((result) => result.id)).toEqual([kept.id])
+  expect(fullReads).not.toHaveBeenCalled()
+})
+
+test('evicts oldest editor caches by byte budget without materializing all ASTs into an array', async () => {
+  const repository = makeRepository()
+  await repository.db.editorCaches.bulkPut([
+    { pageId: 'oldest-cache', sourceVersion: 'v1', tiptapJson: { type: 'doc' }, byteSize: Math.floor(MAX_EDITOR_CACHE_BYTES * 0.6), accessedAt: '2026-01-01T00:00:00.000Z' },
+    { pageId: 'newer-cache', sourceVersion: 'v1', tiptapJson: { type: 'doc' }, byteSize: Math.floor(MAX_EDITOR_CACHE_BYTES * 0.6), accessedAt: '2026-01-02T00:00:00.000Z' },
+  ])
+  const fullArrayRead = vi.spyOn(repository.db.editorCaches, 'toArray')
+  await repository.saveEditorCache('fresh-cache', 'v1', { type: 'doc', content: [{ type: 'paragraph' }] })
+  expect(fullArrayRead).not.toHaveBeenCalled()
+  expect(await repository.getEditorCache('oldest-cache', 'v1')).toBeUndefined()
+  expect(await repository.getEditorCache('newer-cache', 'v1')).toEqual({ type: 'doc' })
+  expect(await repository.getEditorCache('fresh-cache', 'v1')).toEqual({ type: 'doc', content: [{ type: 'paragraph' }] })
+})
+
+test('lists workspace page tags in bulk while excluding deleted and other-workspace tags', async () => {
+  const repository = makeRepository()
+  expect(await repository.listWorkspacePageTags('workspace-a')).toEqual({})
+
+  const [tagB, tagA] = await repository.ensureTags('workspace-a', ['Beta', 'Alpha'], '2026-01-01T00:00:00.000Z')
+  const [deletedTag] = await repository.ensureTags('workspace-a', ['Deleted'], '2026-01-01T00:00:00.000Z')
+  await repository.db.tags.update(deletedTag!.id, { deletedAt: '2026-01-02T00:00:00.000Z' })
+  const [otherWorkspaceTag] = await repository.ensureTags('workspace-b', ['Other'], '2026-01-01T00:00:00.000Z')
+
+  const first = page('tagged-1', 'First')
+  const second = page('tagged-2', 'Second')
+  const other = { ...page('tagged-other', 'Other'), workspaceId: 'workspace-b' }
+  await repository.savePage(first)
+  await repository.savePage(second)
+  await repository.savePage(other)
+  await repository.savePageTags(first.id, [tagB!.id, tagA!.id, deletedTag!.id])
+  await repository.savePageTags(second.id, [tagB!.id])
+  await repository.savePageTags(other.id, [otherWorkspaceTag!.id])
+
+  expect(await repository.listWorkspacePageTags('workspace-a')).toEqual({
+    [first.id]: [tagA!.id, tagB!.id],
+    [second.id]: [tagB!.id],
+  })
+  expect(await repository.listWorkspacePageTags('workspace-b')).toEqual({
+    [other.id]: [otherWorkspaceTag!.id],
+  })
+})
+
+test('deduplicates conflict copies when the same conflicting remote body is encountered again', async () => {
+  const repository = makeRepository()
+  const value = { ...page('dedup-conflict-page', '研究笔记'), syncStatus: 'synced' as const }
+  await repository.savePage(value, syncedDocument(value.id, '共同基线'))
+  await repository.db.syncVersions.bulkPut([
+    { id: `workspace-a:page:${value.id}`, version: 2, webdavParentVersion: true },
+    { id: `workspace-a:document:${value.id}`, version: 2, webdavParentVersion: true },
+  ])
+  await repository.savePage(
+    { ...value, syncStatus: 'pending', updatedAt: '2026-01-03T00:00:00.000Z' },
+    syncedDocument(value.id, '本机持续修改的正文', '2026-01-03T00:00:00.000Z'),
+  )
+
+  const firstPull = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 1, entityType: 'document', entityId: value.id, version: 2, operation: 'upsert', payload: syncedDocument(value.id, '另一台设备写下的冲突内容') as unknown as Record<string, unknown> },
+  ], 1, undefined, true, false, { autoResolve: true })
+  const firstCopyId = firstPull.resolved?.[0]?.copyPageId
+  expect(firstCopyId).toBeDefined()
+  expect(await repository.db.pages.count()).toBe(2)
+
+  // Another peer / observer branch replays or re-encounters the exact same conflicting body.
+  const secondPull = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 2, entityType: 'document', entityId: value.id, version: 3, operation: 'upsert', payload: syncedDocument(value.id, '另一台设备写下的冲突内容\n') as unknown as Record<string, unknown> },
+  ], 2, undefined, true, false, { autoResolve: true })
+  expect(secondPull.resolved?.[0]?.copyPageId).toBe(firstCopyId)
+  expect(await repository.db.pages.count()).toBe(2)
+
+  // A genuinely different conflicting remote body still creates a separate conflict copy.
+  const thirdPull = await repository.applyRemoteChanges('workspace-a', [
+    { cursor: 3, entityType: 'document', entityId: value.id, version: 4, operation: 'upsert', payload: syncedDocument(value.id, '第三台设备的全新不同正文') as unknown as Record<string, unknown> },
+  ], 3, undefined, true, false, { autoResolve: true })
+  expect(thirdPull.resolved?.[0]?.copyPageId).toBeDefined()
+  expect(thirdPull.resolved?.[0]?.copyPageId).not.toBe(firstCopyId)
+  expect(await repository.db.pages.count()).toBe(3)
 })

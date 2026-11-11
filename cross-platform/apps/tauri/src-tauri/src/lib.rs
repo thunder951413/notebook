@@ -527,8 +527,12 @@ fn storage_info(app: AppHandle) -> serde_json::Value {
 // Secrets. AI keys never return to the web view.
 
 fn guard_secret_key(key: &str) -> CommandResult<()> {
-    if key.starts_with("ai-provider-key:") {
+    let trimmed = key.trim();
+    if key.starts_with("ai-provider-key:") || trimmed.starts_with("ai-provider-key:") {
         return Err("AI API Key 只能通过专用安全接口访问".into());
+    }
+    if key == "automation-api-token" || trimmed == "automation-api-token" {
+        return Err("自动化接口令牌只能通过专用安全接口访问".into());
     }
     Ok(())
 }
@@ -749,21 +753,22 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::select_all(app, Some("全选"))?,
         ],
     )?;
-    let view_menu = Submenu::with_items(
-        app,
-        "显示",
-        true,
-        &[
-            &MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?,
-            &MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?,
-            &MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?,
-            &separator()?,
-            &PredefinedMenuItem::fullscreen(app, Some("进入全屏幕"))?,
-            &separator()?,
-            &MenuItem::with_id(app, "reload", "重新载入", true, Some("CmdOrCtrl+R"))?,
-            &MenuItem::with_id(app, "devtools", "开发者工具", true, Some("CmdOrCtrl+Alt+I"))?,
-        ],
-    )?;
+    let view_menu = {
+        let zoom_reset = MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?;
+        let zoom_in = MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?;
+        let zoom_out = MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?;
+        let sep_first = separator()?;
+        let fullscreen = PredefinedMenuItem::fullscreen(app, Some("进入全屏幕"))?;
+        let sep_second = separator()?;
+        let reload = MenuItem::with_id(app, "reload", "重新载入", true, Some("CmdOrCtrl+R"))?;
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        let devtools = MenuItem::with_id(app, "devtools", "开发者工具", true, Some("CmdOrCtrl+Alt+I"))?;
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        let items: &[&dyn tauri::menu::IsMenuItem<tauri::Wry>] = &[&zoom_reset, &zoom_in, &zoom_out, &sep_first, &fullscreen, &sep_second, &reload, &devtools];
+        #[cfg(not(any(debug_assertions, feature = "devtools")))]
+        let items: &[&dyn tauri::menu::IsMenuItem<tauri::Wry>] = &[&zoom_reset, &zoom_in, &zoom_out, &sep_first, &fullscreen, &sep_second, &reload];
+        Submenu::with_items(app, "显示", true, items)?
+    };
     let window_menu = Submenu::with_items(
         app,
         "窗口",
@@ -794,19 +799,20 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "quit", "退出 Notebook", true, Some("CmdOrCtrl+Q"))?,
         ],
     )?;
-    let view_menu = Submenu::with_items(
-        app,
-        "显示",
-        true,
-        &[
-            &MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?,
-            &MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?,
-            &MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?,
-            &separator()?,
-            &MenuItem::with_id(app, "reload", "重新载入", true, Some("F5"))?,
-            &MenuItem::with_id(app, "devtools", "开发者工具", true, Some("CmdOrCtrl+Alt+I"))?,
-        ],
-    )?;
+    let view_menu = {
+        let zoom_reset = MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?;
+        let zoom_in = MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?;
+        let zoom_out = MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?;
+        let sep = separator()?;
+        let reload = MenuItem::with_id(app, "reload", "重新载入", true, Some("F5"))?;
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        let devtools = MenuItem::with_id(app, "devtools", "开发者工具", true, Some("CmdOrCtrl+Alt+I"))?;
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        let items: &[&dyn tauri::menu::IsMenuItem<tauri::Wry>] = &[&zoom_reset, &zoom_in, &zoom_out, &sep, &reload, &devtools];
+        #[cfg(not(any(debug_assertions, feature = "devtools")))]
+        let items: &[&dyn tauri::menu::IsMenuItem<tauri::Wry>] = &[&zoom_reset, &zoom_in, &zoom_out, &sep, &reload];
+        Submenu::with_items(app, "显示", true, items)?
+    };
     Menu::with_items(app, &[&file_menu, &view_menu])
 }
 
@@ -890,6 +896,7 @@ fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         "reload" => reload_renderer(app),
+        #[cfg(any(debug_assertions, feature = "devtools"))]
         "devtools" => {
             if let Some(window) = main_window(app) {
                 window.open_devtools();
@@ -1082,7 +1089,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{text_stamp, tray_todos_label};
+    use super::{guard_secret_key, text_stamp, tray_todos_label};
 
     #[test]
     fn text_stamp_is_stable_and_not_negative() {
@@ -1096,5 +1103,15 @@ mod tests {
         assert_eq!(tray_todos_label(0, 0, 0), "没有未完成的待办");
         assert_eq!(tray_todos_label(12, 0, 0), "待办 12 项未完成");
         assert_eq!(tray_todos_label(12, 1, 3), "待办 12 项未完成 · 1 项逾期 · 今天 3 项");
+    }
+
+    #[test]
+    fn guards_ai_keys_and_automation_token_from_generic_secret_commands() {
+        assert!(guard_secret_key("ai-provider-key:openai").is_err());
+        assert!(guard_secret_key("  ai-provider-key:custom:abc").is_err());
+        assert!(guard_secret_key("automation-api-token").is_err());
+        assert!(guard_secret_key(" automation-api-token ").is_err());
+        assert!(guard_secret_key("webdav-password").is_ok());
+        assert!(guard_secret_key("github-release-token").is_ok());
     }
 }

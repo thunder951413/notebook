@@ -1,6 +1,6 @@
 import { OutgoingMessage, Server, type ServerConfiguration } from '@hocuspocus/server'
 import { SQLite } from '@hocuspocus/extension-sqlite'
-import { assertDocumentAccess, authenticateRequest, type CollaborationIdentity } from './auth'
+import { assertAllowedOrigin, assertDocumentAccess, authenticateRequest, type CollaborationIdentity } from './auth'
 
 interface CollaborationServerOptions {
   host: string
@@ -16,6 +16,7 @@ export function createCollaborationServer(options: CollaborationServerOptions) {
   if (!options.jwtSecret && !localDevelopment) throw new Error('NOTEBOOK_JWT_SECRET is required outside local development')
 
   const authenticate = async (token: string, headers: Headers, documentName: string) => {
+    assertAllowedOrigin(headers.get('origin'), localDevelopment && !options.jwtSecret)
     const requestedWorkspaceId = documentName.split(':')[0] || 'local-workspace'
     // Browser providers authenticate inside the WebSocket protocol. Retain
     // HTTP bearer headers for native clients, without overriding a sent token.

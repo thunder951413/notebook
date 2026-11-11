@@ -2,9 +2,7 @@
 
 ## 状态
 
-接口与纯函数组装器已经实现，具体 AI 服务接入尚未启用。后续 AI 功能应调用
-`@notebook/sync-contract` 导出的 `buildAIContextBundle`，不能在 React 组件或网络
-客户端中另写一套双链展开逻辑。
+已启用。`@notebook/sync-contract` 导出的 `buildAIContextBundle` 用于桌面端 AI 审阅工作台（`AIWorkspace`）的单页/双链有界引用图展开（80k 字符预算），桌面端 AI 助手与 Android 端则在此基础上补充了按目录树顺序组织的多笔记摘要/问答上下文拼装（严格剔除锁定隐私笔记）。
 
 ## 目标
 

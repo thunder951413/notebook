@@ -1,9 +1,13 @@
 [package]
 name = "notebook"
-version = "3.6.0"
+version = "3.7.0"
 description = "Notebook desktop (Tauri)"
 edition = "2021"
 rust-version = "1.85"
+
+[features]
+default = []
+devtools = ["tauri/devtools"]
 
 [lib]
 name = "notebook_lib"
@@ -14,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "devtools", "image-png", "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "image-png", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"

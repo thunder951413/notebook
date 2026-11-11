@@ -522,3 +522,122 @@ fn parses_chinese_hrefs_and_etags_from_multistatus() {
     assert_eq!(items[1].name, "00000000-0000-4000-8000-000000000001.head.json");
     assert_eq!(strong_etag(items[1].etag.as_deref()), Some("abc".into()));
 }
+
+#[test]
+fn compact_journal_evicts_revisions_beyond_256_and_2mib_while_preserving_state_entities() {
+    let mut entries = Vec::new();
+    let mut seq = 1u64;
+
+    // Older non-revision state entities (pages, folders, tombstones) must never be evicted.
+    let mut page1_old = row("page", "page-1", 0, serde_json::json!({ "title": "old" }));
+    page1_old.insert("seq".into(), seq.into());
+    entries.push(page1_old);
+    seq += 1;
+
+    let mut folder1 = row("folder", "folder-1", 0, serde_json::json!({ "name": "工作" }));
+    folder1.insert("seq".into(), seq.into());
+    entries.push(folder1);
+    seq += 1;
+
+    let mut page1_new = row("page", "page-1", 1, serde_json::json!({ "title": "latest" }));
+    page1_new.insert("seq".into(), seq.into());
+    entries.push(page1_new);
+    seq += 1;
+
+    let mut deleted_page = row("page", "page-deleted", 2, serde_json::json!({}));
+    deleted_page.insert("op".into(), "delete".into());
+    deleted_page.insert("seq".into(), seq.into());
+    entries.push(deleted_page);
+    seq += 1;
+
+    // 300 distinct revision entries: seq 5..=304 (44 oldest should be evicted, newest 256 kept).
+    let first_rev_seq = seq;
+    for index in 0..300 {
+        let mut rev = row("revision", &format!("rev-{index}"), 0, serde_json::json!({ "note": index }));
+        rev.insert("seq".into(), seq.into());
+        entries.push(rev);
+        seq += 1;
+    }
+
+    let compacted = compact_journal(entries);
+    assert_eq!(compacted.state_entries, 3, "page-1 (deduped), folder-1, and page-deleted remain intact");
+    assert_eq!(compacted.history_entries, 256, "at most MAX_REVISION_ENTRIES (256) revisions are retained");
+    assert_eq!(compacted.entries.len(), 3 + 256);
+
+    // Entries remain sorted by original monotonic seq.
+    let seqs: Vec<u64> = compacted.entries.iter().map(entry_seq).collect();
+    let mut sorted_seqs = seqs.clone();
+    sorted_seqs.sort_unstable();
+    assert_eq!(seqs, sorted_seqs);
+
+    // Verify all 3 state entries survived with latest state, and oldest 44 revisions (seq 5..=48) were evicted.
+    let rev_seqs: Vec<u64> = compacted
+        .entries
+        .iter()
+        .filter(|e| text_field(e, "type") == "revision")
+        .map(entry_seq)
+        .collect();
+    assert_eq!(rev_seqs.len(), 256);
+    assert_eq!(*rev_seqs.first().unwrap(), first_rev_seq + 44);
+    assert_eq!(*rev_seqs.last().unwrap(), first_rev_seq + 299);
+    let page1 = compacted.entries.iter().find(|e| text_field(e, "id") == "page-1").unwrap();
+    assert_eq!(page1["payload"]["title"], "latest");
+    assert!(compacted.entries.iter().any(|e| text_field(e, "id") == "folder-1"));
+    assert!(compacted.entries.iter().any(|e| text_field(e, "id") == "page-deleted" && text_field(e, "op") == "delete"));
+
+    // Byte cap check: 40 revisions of ~80 KiB each (~3.2 MiB > 2 MiB) evict older ones under MAX_REVISION_BYTES.
+    let mut byte_heavy = Vec::new();
+    let mut keep_page = row("page", "keep-me", 0, serde_json::json!({ "title": "safe" }));
+    keep_page.insert("seq".into(), 1.into());
+    byte_heavy.push(keep_page);
+    let chunk = "x".repeat(80 * 1024);
+    for i in 0..40u64 {
+        let mut rev = row("revision", &format!("big-rev-{i}"), 0, serde_json::json!({ "body": chunk }));
+        rev.insert("seq".into(), (i + 2).into());
+        byte_heavy.push(rev);
+    }
+    let byte_compacted = compact_journal(byte_heavy);
+    assert_eq!(byte_compacted.state_entries, 1);
+    assert!(byte_compacted.history_entries < 40 && byte_compacted.history_entries >= 24);
+    assert_eq!(entry_seq(byte_compacted.entries.last().unwrap()), 41, "newest revision is kept");
+}
+
+#[tokio::test]
+async fn per_device_push_lock_serializes_same_device_and_clamps_retry_after() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Retry-After clamp relaxed to 1..=60s and jitter applied to RETRY_DELAYS_MS.
+    assert_eq!(retry_delay_ms(0, None, 0), 2_000);
+    assert_eq!(retry_delay_ms(1, None, 125), 6_125);
+    assert_eq!(retry_delay_ms(2, None, 399), 15_399);
+    assert_eq!(retry_delay_ms(0, Some(0), 50), 1_050);
+    assert_eq!(retry_delay_ms(0, Some(45), 100), 45_100);
+    assert_eq!(retry_delay_ms(0, Some(120), 250), 60_000);
+
+    // Trailing slash / case differences map to the exact same per-device async Mutex.
+    let lock_a = append_lock_for("https://dav.jianguoyun.com/dav/", "notebook_backup", DEV1);
+    let lock_b = append_lock_for("https://dav.jianguoyun.com/dav", "notebook_backup", &DEV1.to_uppercase());
+    let lock_other = append_lock_for("https://dav.jianguoyun.com/dav/", "notebook_backup", DEV2);
+    assert!(Arc::ptr_eq(&lock_a, &lock_b));
+    assert!(!Arc::ptr_eq(&lock_a, &lock_other));
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let lock = append_lock_for("https://dav.jianguoyun.com/dav/", "notebook_backup", DEV1);
+        let active = active.clone();
+        let max_concurrent = max_concurrent.clone();
+        handles.push(tokio::spawn(async move {
+            let _guard = lock.lock().await;
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_concurrent.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    assert_eq!(max_concurrent.load(Ordering::SeqCst), 1, "concurrent pushes for the same device never overlap");
+}

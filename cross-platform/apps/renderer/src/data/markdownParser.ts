@@ -6,8 +6,8 @@ type ParseReply = {
   error?: string
 }
 
-const LARGE_MARKDOWN_THRESHOLD = 200_000
-const PARALLEL_CHUNK_TARGET = 90_000
+export const LARGE_MARKDOWN_THRESHOLD = 30_000
+export const PARALLEL_CHUNK_TARGET = 15_000
 const MAX_PARSER_WORKERS = 4
 const REFERENCE_DEFINITION = /^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+/m
 const pending = new Map<number, {

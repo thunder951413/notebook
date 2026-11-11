@@ -7,6 +7,8 @@ export interface EmptyParentPageProps {
   pages: PageSummary[]
   /** Direct children per page id, for the "N 个子笔记" of children that are folders themselves. */
   childCounts: ReadonlyMap<string, number>
+  /** Omit the standalone title block when rendered beneath the paper header. */
+  embeddedHeader?: boolean
   onOpen: (pageId: string) => void
   /** Start writing a body: the overview gives way to the editor. */
   onCompose: () => void
@@ -16,16 +18,16 @@ export interface EmptyParentPageProps {
  * What a note with no body but sub-notes shows instead of a blank editor: its
  * sub-notes, as a list. Writing a body stays one click away.
  */
-export function EmptyParentPage({ title, icon, pages, childCounts, onOpen, onCompose }: EmptyParentPageProps) {
+export function EmptyParentPage({ title, icon, pages, childCounts, embeddedHeader = false, onOpen, onCompose }: EmptyParentPageProps) {
   const name = title.trim() || '无标题'
-  return <aside className="empty-parent-page" role="note" aria-label="目录页提示">
-    <header className="empty-parent-page-head">
+  return <aside className={`empty-parent-page ${embeddedHeader ? 'embedded' : ''}`} role="note" aria-label="目录页提示">
+    {embeddedHeader ? <p className="empty-parent-page-caption"><strong>这是一个目录页</strong> · {pages.length} 个子笔记</p> : <header className="empty-parent-page-head">
       <span className="empty-parent-page-icon" aria-hidden="true">{icon || <FolderOpen20Regular />}</span>
       <div>
         <h2>{name}</h2>
         <p><strong>这是一个目录页</strong> · {pages.length} 个子笔记</p>
       </div>
-    </header>
+    </header>}
     <nav aria-label="子笔记快捷入口">
       <ul>
         {pages.map((page) => {

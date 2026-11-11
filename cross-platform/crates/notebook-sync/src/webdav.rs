@@ -13,7 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{LazyLock, Mutex};
+use std::hash::{BuildHasher, Hasher};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -30,8 +31,8 @@ const MAX_LOG_BYTES: usize = 100 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 100 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
 const MAX_HEAD_BYTES: usize = 64 * 1024;
-const MAX_REVISION_ENTRIES: usize = MAX_ENTRIES;
-const MAX_REVISION_BYTES: usize = MAX_LOG_BYTES;
+const MAX_REVISION_ENTRIES: usize = 256;
+const MAX_REVISION_BYTES: usize = 2 * 1024 * 1024;
 
 static DEVICE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^[0-9a-f-]{36}$").unwrap());
 static HASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{64}$").unwrap());
@@ -245,6 +246,21 @@ impl<T: Clone> SyncCache<T> {
 static OBJECT_PRESENCE: LazyLock<Mutex<SyncCache<bool>>> = LazyLock::new(|| Mutex::new(SyncCache::new(4096)));
 static DIRECTORIES: LazyLock<Mutex<SyncCache<bool>>> = LazyLock::new(|| Mutex::new(SyncCache::new(1024)));
 static HEADS: LazyLock<Mutex<SyncCache<(String, JournalHead)>>> = LazyLock::new(|| Mutex::new(SyncCache::new(256)));
+static APPEND_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Per-`(base_url, remote_path, device_id)` async mutex serializing in-process
+/// read-modify-write journal pushes and rebuilds.
+fn append_lock_for(base_url: &str, root: &str, device: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let normalized_base = validated_base_url(base_url)
+        .map(|url| url.as_str().trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| base_url.trim().trim_end_matches('/').to_string());
+    let key = format!("{normalized_base}|{root}|{}", device.to_ascii_lowercase());
+    let mut locks = APPEND_LOCKS.lock().unwrap();
+    if locks.len() > 256 {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+    locks.entry(key).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+}
 
 fn invalidate_all(namespace: &str) {
     DIRECTORIES.lock().unwrap().invalidate(namespace);
@@ -345,6 +361,16 @@ pub fn recent_request_count() -> usize {
 // ---------------------------------------------------------------------------
 // Minimal WebDAV client
 
+const RETRY_DELAYS_MS: [u64; 3] = [2_000, 6_000, 15_000];
+
+fn retry_delay_ms(attempt: usize, retry_after_secs: Option<u64>, jitter_seed: u64) -> u64 {
+    let jitter_ms = jitter_seed % 400;
+    match retry_after_secs {
+        Some(secs) => (secs.clamp(1, 60) * 1_000 + jitter_ms).min(60_000),
+        None => RETRY_DELAYS_MS[attempt.min(RETRY_DELAYS_MS.len() - 1)] + jitter_ms,
+    }
+}
+
 pub struct DavItem {
     pub name: String,
     pub etag: Option<String>,
@@ -383,15 +409,14 @@ impl Dav {
 
     /// Sends one request. 坚果云 answers 503 (and some servers 429) when the
     /// account's request quota is momentarily exhausted; those are retried a
-    /// few times with backoff, honouring Retry-After, so one throttled object
-    /// does not fail the whole sync.
+    /// few times with jittered backoff, honouring Retry-After (clamped to 1..=60s),
+    /// so one throttled object does not fail the whole sync.
     async fn send(&self, method: Method, url: String, depth: Option<&str>, body: Option<Vec<u8>>, content_type: Option<&str>) -> DavResult<reqwest::Response> {
-        const BACKOFF_SECS: [u64; 3] = [2, 6, 15];
         let mut attempt = 0;
         loop {
             let response = self.send_once(method.clone(), url.clone(), depth, body.clone(), content_type).await?;
             let status = response.status().as_u16();
-            if !(status == 429 || status == 503) || attempt >= BACKOFF_SECS.len() {
+            if !(status == 429 || status == 503) || attempt >= RETRY_DELAYS_MS.len() {
                 return Ok(response);
             }
             let retry_after = response
@@ -399,9 +424,10 @@ impl Dav {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok());
-            let wait = retry_after.unwrap_or(BACKOFF_SECS[attempt]).clamp(1, 20);
+            let jitter_seed = std::collections::hash_map::RandomState::new().build_hasher().finish();
+            let wait_ms = retry_delay_ms(attempt, retry_after, jitter_seed);
             attempt += 1;
-            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
         }
     }
 
@@ -1017,6 +1043,8 @@ pub async fn append_journal(http: &reqwest::Client, connection: &Connection, dev
     }
     let dav = Dav::new(http, connection)?;
     let root = safe_remote_path(&connection.remote_path)?;
+    let push_lock = append_lock_for(&connection.base_url, &root, device);
+    let _push_guard = push_lock.lock().await;
     let path = journal_path(&root, device);
     let existing = match dav.get_text(&path, MAX_LOG_BYTES + 1).await {
         Ok((text, _)) => {
@@ -1107,6 +1135,8 @@ pub async fn rebuild_journal(http: &reqwest::Client, connection: &Connection, de
     }
     let dav = Dav::new(http, connection)?;
     let root = safe_remote_path(&connection.remote_path)?;
+    let push_lock = append_lock_for(&connection.base_url, &root, device);
+    let _push_guard = push_lock.lock().await;
     let (journal_path, head_path) = (journal_path(&root, device), journal_head_path(&root, device));
     let read = |result: DavResult<(Vec<u8>, Option<String>)>| match result {
         Ok((bytes, _)) => Ok(Some(bytes)),

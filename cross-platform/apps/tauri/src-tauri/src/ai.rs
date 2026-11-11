@@ -45,6 +45,23 @@ pub struct ChatResponse {
     pub usage: Usage,
 }
 
+fn is_blocked_metadata_host(base: &url::Url) -> bool {
+    match base.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_link_local() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => {
+            let segments = ip.segments();
+            let is_aws_imdsv2 = segments == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254];
+            let is_mapped_link_local = ip.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local() || v4.is_unspecified());
+            is_aws_imdsv2 || is_mapped_link_local || ip.is_unicast_link_local() || ip.is_unspecified()
+        }
+        Some(url::Host::Domain(domain)) => {
+            let host = domain.trim_end_matches('.').to_ascii_lowercase();
+            host == "metadata.google.internal" || host.ends_with(".metadata.google.internal") || host == "metadata.goog"
+        }
+        None => true,
+    }
+}
+
 pub fn validated_base_url(provider: &str, value: &str) -> Result<url::Url, String> {
     let base = url::Url::parse(value.trim()).map_err(|_| "AI 服务地址不正确".to_string())?;
     if base.scheme() != "https" {
@@ -55,6 +72,9 @@ pub fn validated_base_url(provider: &str, value: &str) -> Result<url::Url, Strin
     }
     if base.query().is_some() || base.fragment().is_some() {
         return Err("AI 服务地址不能包含查询参数或锚点".into());
+    }
+    if is_blocked_metadata_host(&base) {
+        return Err("AI 服务地址不能指向云元数据或链路本地地址".into());
     }
     let host = base.host_str().unwrap_or("");
     let default_port = base.port().is_none_or(|port| port == 443);
@@ -191,6 +211,23 @@ mod tests {
         assert!(validated_base_url("deepseek", "https://api.deepseek.com").is_ok());
         assert!(validated_base_url("deepseek", "https://api.openai.com").is_err());
         assert!(validated_base_url("custom", "https://proxy.example.com/v1").is_ok());
+    }
+
+    #[test]
+    fn rejects_cloud_metadata_and_link_local_hosts_for_custom_endpoints() {
+        for blocked in [
+            "https://169.254.169.254/v1",
+            "https://169.254.170.2/v2/credentials",
+            "https://169.254.0.1/v1",
+            "https://metadata.google.internal/computeMetadata/v1",
+            "https://metadata.google.internal./computeMetadata/v1",
+            "https://[fd00:ec2::254]/latest/meta-data",
+            "https://[::ffff:169.254.169.254]/v1",
+            "https://0.0.0.0/v1",
+        ] {
+            assert!(validated_base_url("custom", blocked).is_err(), "{blocked} must be rejected");
+        }
+        assert!(validated_base_url("custom", "https://127.0.0.1:8443/v1").is_ok());
     }
 
     #[test]

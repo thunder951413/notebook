@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { largeDocument } from '../data/largeDocument'
 import { markdownToDocument } from '../editor/extensions'
 import {
   retrieveNotebookLibrary,
@@ -82,4 +83,37 @@ test('stops retrieval before loading documents when the request is cancelled', a
     signal: controller.signal,
   })).rejects.toMatchObject({ name: 'AbortError' })
   expect(loadDocument).not.toHaveBeenCalled()
+})
+
+test('indexes and retrieves chunks from a book-sized largeDocument (>200k chars)', async () => {
+  const filler = '普通背景段落，用于填充大型书籍正文内容。\n\n'.repeat(12_000)
+  const bookMarkdown = [
+    '# 内核手册',
+    '',
+    filler,
+    '## 设备树章节',
+    '',
+    '### 关键寄存器',
+    '',
+    '通过 `fdt_open_into` 扩容设备树缓冲区并设置保留内存区域。',
+  ].join('\n')
+  expect(bookMarkdown.length).toBeGreaterThan(200_000)
+  const doc = largeDocument(bookMarkdown)
+  const splitChunks = splitNotebookDocument(pages[0]!, doc)
+  expect(splitChunks.length).toBeGreaterThan(10)
+  expect(splitChunks.some((chunk) => (
+    chunk.headingPath.join(' › ') === '内核手册 › 设备树章节 › 关键寄存器'
+    && chunk.markdown.includes('fdt_open_into')
+  ))).toBe(true)
+
+  const result = await retrieveNotebookLibrary({
+    query: 'fdt_open_into 扩容设备树',
+    candidatePages: [pages[0]!],
+    loadDocument: async () => doc,
+    maxCharacters: 800,
+  })
+  expect(result.chunks.length).toBeGreaterThan(0)
+  expect(result.chunks[0]?.pageId).toBe('fdt')
+  expect(result.chunks[0]?.headingPath).toEqual(['内核手册', '设备树章节', '关键寄存器'])
+  expect(result.chunks[0]?.markdown).toContain('fdt_open_into')
 })

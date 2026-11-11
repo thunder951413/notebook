@@ -20,13 +20,13 @@ export const DEFAULT_ACCENT_COLOR: AccentColor = 'purple'
 export const ACCENT_STORAGE_KEY = 'notebook-accent-color'
 
 export const ACCENT_PRESETS: readonly AccentPreset[] = [
-  { id: 'purple', label: '紫色', main: '#7c3aed', strong: '#6d28d9', soft: '#f0e7fa', softStrong: '#e4d5f5', border: '#9b6bd0', darkForeground: '#d8b8ff', darkSoft: '#49335e', rgb: '124, 58, 237' },
-  { id: 'blue', label: '蓝色', main: '#2563eb', strong: '#1d4ed8', soft: '#e8f0fe', softStrong: '#d9e6fd', border: '#6d96ee', darkForeground: '#a9c7ff', darkSoft: '#2b416a', rgb: '37, 99, 235' },
-  { id: 'cyan', label: '青色', main: '#0891b2', strong: '#0e7490', soft: '#e3f6fa', softStrong: '#cdeef4', border: '#55adbf', darkForeground: '#8eddec', darkSoft: '#254c55', rgb: '8, 145, 178' },
-  { id: 'green', label: '绿色', main: '#15803d', strong: '#166534', soft: '#e7f5eb', softStrong: '#d3edda', border: '#5aa875', darkForeground: '#92d9a9', darkSoft: '#294c36', rgb: '21, 128, 61' },
-  { id: 'orange', label: '橙色', main: '#c2410c', strong: '#9a3412', soft: '#fff0e7', softStrong: '#fbdcc9', border: '#dc8b64', darkForeground: '#ffb58e', darkSoft: '#5a3829', rgb: '194, 65, 12' },
-  { id: 'red', label: '红色', main: '#dc2626', strong: '#b91c1c', soft: '#fdeaea', softStrong: '#f8d6d6', border: '#e27676', darkForeground: '#ffaaaa', darkSoft: '#5b3032', rgb: '220, 38, 38' },
-  { id: 'pink', label: '粉色', main: '#db2777', strong: '#be185d', soft: '#fce8f1', softStrong: '#f8d5e5', border: '#e170a3', darkForeground: '#ffacd0', darkSoft: '#5b3045', rgb: '219, 39, 119' },
+  { id: 'purple', label: '紫色', main: '#65489d', strong: '#523886', soft: '#f2eef8', softStrong: '#e6def4', border: '#9c86c7', darkForeground: '#d4c2f7', darkSoft: '#3d3056', rgb: '101, 72, 157' },
+  { id: 'blue', label: '蓝色', main: '#3461b8', strong: '#284e99', soft: '#edf2fb', softStrong: '#dde7f8', border: '#7b9cd9', darkForeground: '#b3ccff', darkSoft: '#283b5e', rgb: '52, 97, 184' },
+  { id: 'cyan', label: '青色', main: '#1d7a8c', strong: '#166271', soft: '#eaf5f7', softStrong: '#d7ecf0', border: '#6baebd', darkForeground: '#9adce8', darkSoft: '#22454d', rgb: '29, 122, 140' },
+  { id: 'green', label: '绿色', main: '#2f7650', strong: '#245e3f', soft: '#ebf4ef', softStrong: '#d9ebe1', border: '#6fae8b', darkForeground: '#9fd8b7', darkSoft: '#254434', rgb: '47, 118, 80' },
+  { id: 'orange', label: '橙色', main: '#b85328', strong: '#96411d', soft: '#fbf1ec', softStrong: '#f5e0d5', border: '#d48d6f', darkForeground: '#f7b99e', darkSoft: '#523326', rgb: '184, 83, 40' },
+  { id: 'red', label: '红色', main: '#b83a3a', strong: '#962d2d', soft: '#fbeded', softStrong: '#f5dada', border: '#d67e7e', darkForeground: '#f7b0b0', darkSoft: '#522b2d', rgb: '184, 58, 58' },
+  { id: 'pink', label: '粉色', main: '#ad3e6e', strong: '#8e3059', soft: '#faedf3', softStrong: '#f3dbe6', border: '#d17fa3', darkForeground: '#f5b3d0', darkSoft: '#502c3d', rgb: '173, 62, 110' },
 ] as const
 
 export function isAccentColor(value: unknown): value is AccentColor {

@@ -293,6 +293,7 @@ export interface NotebookRepository {
   purgePage(pageId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   listTags(workspaceId: UUID): Promise<Tag[]>
   listPageTags(pageId: UUID): Promise<PageTag[]>
+  listWorkspacePageTags?(workspaceId: UUID): Promise<Record<UUID, UUID[]>>
   savePageTags(pageId: UUID, tagIds: UUID[]): Promise<void>
   listTaskSteps(pageId: UUID): Promise<TaskStep[]>
   saveTaskSteps(pageId: UUID, steps: TaskStep[]): Promise<void>
@@ -305,6 +306,7 @@ export interface NotebookRepository {
   saveSection(section: Section): Promise<void>
   deleteSection(sectionId: UUID, deletedAt: IsoDate, deviceId: string): Promise<void>
   duplicatePage(pageId: UUID, newPageId: UUID, createdAt: IsoDate): Promise<Page>
+  close?(): void
 }
 
 export const isoNow = () => new Date().toISOString()

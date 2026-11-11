@@ -1,6 +1,6 @@
 type DesktopInputSourceApi = Pick<NonNullable<Window['notebookDesktop']>, 'platform' | 'inputSource'>
 
-export function useAbcInputSourceForVimNormal(
+export function syncAbcInputSourceForVimNormal(
   vimEnabled: boolean,
   vimCommandMode: boolean,
   desktop = window.notebookDesktop as DesktopInputSourceApi | undefined,
@@ -9,3 +9,5 @@ export function useAbcInputSourceForVimNormal(
   void desktop.inputSource.useAbc().catch(() => false)
   return true
 }
+
+export const useAbcInputSourceForVimNormal = syncAbcInputSourceForVimNormal

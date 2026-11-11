@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { z } from 'zod'
 import type { AutomationProposal, AutomationProposalChange, Page, PageDocument } from '@notebook/domain'
+import { markdownToPlainText } from '@notebook/storage-renderer'
+import { LARGE_DOCUMENT_CHARACTERS } from '../data/largeDocument'
 import { automationRepository, WORKSPACE_ID } from '../data/useWorkspaceData'
 import { documentToMarkdown, markdownToDocument } from '../editor/extensions'
 import { recordDiagnosticEvent } from '../diagnostics/diagnostics'
@@ -218,6 +220,20 @@ function plainText(value: unknown): string {
   if (!value || typeof value !== 'object') return ''
   const record = value as Record<string, unknown>
   return [record.text, record.content].map(plainText).filter(Boolean).join(' ')
+}
+
+export function prepareProposalDocument(markdown: string) {
+  if (markdown.length >= LARGE_DOCUMENT_CHARACTERS) {
+    return {
+      tiptapJson: { type: 'doc', content: [] } as Record<string, unknown>,
+      preview: markdownToPlainText(markdown.slice(0, 4096)).slice(0, 240),
+    }
+  }
+  const editor = markdownToDocument(markdown)
+  return {
+    tiptapJson: editor,
+    preview: plainText(editor).replace(/\s+/g, ' ').trim().slice(0, 240),
+  }
 }
 
 async function publicSections() {
@@ -577,14 +593,14 @@ export function useAutomationBridge(onApplied: () => Promise<void>) {
         })
         continue
       }
-      const editor = markdownToDocument(change.after.markdown)
+      const { tiptapJson: editor, preview } = prepareProposalDocument(change.after.markdown)
       if (change.before) {
         const page = await automationRepository.getPage(change.before.pageId)
         if (!page) throw new Error(`页面不存在：${change.before.title}`)
-        const updated: Page = { ...page, title: change.after.title, preview: plainText(editor).replace(/\s+/g, ' ').trim().slice(0, 240), sectionId: change.after.sectionId, parentPageId: change.after.parentPageId, sortOrder: change.after.sortOrder, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' }
+        const updated: Page = { ...page, title: change.after.title, preview, sectionId: change.after.sectionId, parentPageId: change.after.parentPageId, sortOrder: change.after.sortOrder, treeUpdatedAt: now, updatedAt: now, syncStatus: 'pending' }
         prepared.push({ page: updated, document: { pageId: page.id, schemaVersion: 3, markdown: change.after.markdown, tiptapJson: editor, updatedAt: now }, previousPageId: page.id })
       } else {
-        const page: Page = { id: change.after.pageId, workspaceId: WORKSPACE_ID, sectionId: change.after.sectionId, parentPageId: change.after.parentPageId, sortOrder: change.after.sortOrder ?? Date.now(), treeUpdatedAt: now, kind: 'document', title: change.after.title, preview: plainText(editor).replace(/\s+/g, ' ').trim().slice(0, 240), favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
+        const page: Page = { id: change.after.pageId, workspaceId: WORKSPACE_ID, sectionId: change.after.sectionId, parentPageId: change.after.parentPageId, sortOrder: change.after.sortOrder ?? Date.now(), treeUpdatedAt: now, kind: 'document', title: change.after.title, preview, favorite: false, createdAt: now, updatedAt: now, syncStatus: 'pending' }
         prepared.push({ page, document: { pageId: page.id, schemaVersion: 3, markdown: change.after.markdown, tiptapJson: editor, updatedAt: now } })
       }
     }

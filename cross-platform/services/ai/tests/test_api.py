@@ -200,3 +200,18 @@ def test_semantic_index_returns_ranked_evidence(tmp_path) -> None:
         assert indexed.json()["indexed"] == 2
         results = client.post("/v1/retrieval/search", headers=headers, json={"workspace_id": "workspace-1", "query": "notes question"})
         assert results.json()[0]["page_id"] == "notes"
+
+
+def test_non_loopback_bind_requires_authentication(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="NOTEBOOK_AI_API_TOKEN"):
+        create_app(Settings(host="0.0.0.0", database_url=f"sqlite+aiosqlite:///{tmp_path / 'public.db'}"), FakeGateway())
+    app = create_app(Settings(host="0.0.0.0", api_token="secret", database_url=f"sqlite+aiosqlite:///{tmp_path / 'public-auth.db'}"), FakeGateway())
+    assert app is not None
+
+
+def test_unauthenticated_settings_drop_null_cors_origin_and_require_bridge_token(tmp_path) -> None:
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'no-null.db'}", enable_local_sftp_bridge=True)
+    assert "null" not in settings.origins
+    with TestClient(create_app(settings, FakeGateway()), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+        response = client.post("/v1/local-sftp/pull", json={"settings": {"host": "server", "port": 22, "username": "user", "password": "password", "remotePath": "~/notebook_backup"}})
+        assert response.status_code == 403

@@ -52,3 +52,26 @@ test('creates and selects a manual version from the history panel', async () => 
   expect(create).toHaveBeenCalledWith(manual.pageId)
   expect(await screen.findByText('版本 1 · 手动保存')).toBeInTheDocument()
 })
+
+test('exposes accessible dialog semantics and dismisses on Escape and outside mousedown', async () => {
+  render(<FluentProvider theme={webLightTheme}><div>
+    <button type="button">外部区域</button>
+    <VersionHistory
+      pageId={revisions[0]!.pageId}
+      getCurrentMarkdown={() => '# 标题\n新内容\n'}
+      load={vi.fn().mockResolvedValue(revisions)}
+      create={vi.fn().mockResolvedValue(revisions[0])}
+      restore={vi.fn().mockResolvedValue(undefined)}
+    />
+  </div></FluentProvider>)
+
+  fireEvent.click(screen.getByRole('button', { name: '版本' }))
+  expect(await screen.findByRole('dialog', { name: '版本历史' })).toBeInTheDocument()
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(screen.queryByRole('dialog', { name: '版本历史' })).not.toBeInTheDocument()
+
+  fireEvent.click(screen.getByRole('button', { name: '版本' }))
+  expect(await screen.findByRole('dialog', { name: '版本历史' })).toBeInTheDocument()
+  fireEvent.mouseDown(screen.getByRole('button', { name: '外部区域' }))
+  expect(screen.queryByRole('dialog', { name: '版本历史' })).not.toBeInTheDocument()
+})

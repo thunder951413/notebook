@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { expect, test } from 'vitest'
-import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, legacyTiptapToCanonicalMarkdown, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, normalizeLegacyMarkdownSyntax, readingPositionsSchema, verifyPrivacyKeyCheck, type MarkdownNoteEnvelope, type PrivacyKeyCheck } from './index'
+import { encodeLegacyRepository, encodeMarkdownRepository, importDocumentMigrationPackage, importLegacyBundle, importLegacyNote, importMarkdownRepository, legacyDocumentToTiptap, legacyTiptapToCanonicalMarkdown, libraryEnvelopeSchema, markdownToEditorCache, migratedDocumentSchema, migrationManifestSchema, noteEnvelopeSchema, noteIndexSchema, normalizeLegacyMarkdownSyntax, readingPositionsSchema, sha256Hex, verifyPrivacyKeyCheck, type MarkdownNoteEnvelope, type PrivacyKeyCheck } from './index'
 import type { NotebookDataBundle } from '@notebook/domain'
 
 test('parses the shared macOS/Android fixture and preserves identity and rich blocks', async () => {
@@ -371,23 +371,30 @@ test('encrypts private note metadata, body and history and keeps private attachm
     pageLinks: [], readingPositions: [], tombstones: [], knowledgeEntities: [], knowledgeRelations: [], comments: [],
   }
   const privateBytes = new TextEncoder().encode('绝密附件内容')
+  const plaintextHash = sha256Hex('绝密正文')
   const encoded = await encodeMarkdownRepository(bundle, new Map([['private-asset', privateBytes]]), 'electron', 'strong ssh password')
   const storedText = new TextDecoder().decode(encoded.files.get(`notes/${pageId}.json`))
+  const indexText = new TextDecoder().decode(encoded.files.get('notes/index.json'))
   expect(storedText).not.toContain('不能泄露的标题')
   expect(storedText).not.toContain('绝密正文')
+  expect(storedText).not.toContain(plaintextHash)
+  expect(indexText).not.toContain(plaintextHash)
   expect(storedText).not.toContain('绝密附件.txt')
   expect([...encoded.files.values()].some((value) => new TextDecoder().decode(value).includes('绝密附件内容'))).toBe(false)
   const manifest = JSON.parse(new TextDecoder().decode(encoded.files.get('notes/assets_manifest.json'))) as { entries: unknown[] }
   expect(manifest.entries).toEqual([])
   const stored = JSON.parse(storedText)
+  const index = noteIndexSchema.parse(JSON.parse(indexText))
+  expect(index.entries[0]?.contentHash).toBe(stored.currentContentHash)
   const privacyCheck = JSON.parse(new TextDecoder().decode(encoded.files.get('notes/privacy.json'))) as PrivacyKeyCheck
   await expect(verifyPrivacyKeyCheck(privacyCheck, 'strong ssh password')).resolves.toBeUndefined()
   await expect(verifyPrivacyKeyCheck(privacyCheck, 'wrong password')).rejects.toThrow(/未修改任何笔记/)
   const library = libraryEnvelopeSchema.parse(JSON.parse(new TextDecoder().decode(encoded.files.get('library.json'))))
-  const imported = await importMarkdownRepository({ library, notes: [stored], privacySecret: 'strong ssh password' }, workspaceId)
+  const imported = await importMarkdownRepository({ library, notes: [stored], index, privacySecret: 'strong ssh password' }, workspaceId)
   expect(imported.pages[0]?.title).toBe('不能泄露的标题')
   expect(imported.documents[0]?.markdown).toBe('绝密正文')
   expect(imported.assets).toEqual([])
+  await expect(importMarkdownRepository({ library, notes: [stored], index: { entries: [{ noteID: pageId, contentHash: '0'.repeat(64) }] }, privacySecret: 'strong ssh password' }, workspaceId)).rejects.toThrow(/内容哈希不一致/)
   await expect(importMarkdownRepository({ library, notes: [stored], privacySecret: 'wrong password' }, workspaceId)).rejects.toThrow(/解密失败/)
 })
 

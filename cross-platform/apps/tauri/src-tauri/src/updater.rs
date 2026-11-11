@@ -1,4 +1,4 @@
-//! In-app updates from GitHub Releases (macOS and Windows).
+//! In-app updates from GitHub Releases (macOS, Windows, and Linux).
 //!
 //! Windows: the release carries the NSIS installer. The app downloads it,
 //! verifies the SHA-256 and, once it has quit, a hidden PowerShell runs the
@@ -11,9 +11,17 @@
 //! extended attributes, and swaps the bundle after the app has quit.
 //!
 //! Release contract (see .github/workflows/desktop-tauri.yml):
-//!   tag       desktop-v<version>
-//!   assets    Notebook-macos-<arch>.zip  and  Notebook-macos-<arch>.zip.sha256
-//!             Notebook-windows-<arch>-setup.exe  and  Notebook-windows-<arch>-setup.exe.sha256
+//!   tag       desktop-v<major>.<minor>.<patch>
+//!   assets    Notebook-macos-<arch>.zip           + .sha256 (+ optional .sig)
+//!             Notebook-windows-<arch>-setup.exe   + .sha256 (+ optional .sig)
+//!             Notebook-linux-<arch>.AppImage      + .sha256 (+ optional .sig)
+//!
+//! Optional offline Ed25519 signature verification:
+//!   When compiled with `NOTEBOOK_UPDATE_PUBLIC_KEY` (32-byte Ed25519 public key
+//!   encoded as 64-char hex or base64), `download_inner` additionally requires
+//!   `${asset}.sig` (64-byte Ed25519 signature encoded as hex or base64 over the
+//!   release binary or its lowercase SHA-256 hex digest) before accepting an update.
+//!
 //! The repository is public, so no token is needed; a GitHub token saved in
 //! Settings (key `github-release-token`) is still sent when there is one.
 
@@ -21,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -31,6 +40,10 @@ use crate::AppState;
 pub const REPOSITORY: &str = "thunder951413/notebook";
 pub const RELEASES_PAGE: &str = "https://github.com/thunder951413/notebook/releases";
 const TAG_PREFIX: &str = "desktop-v";
+
+/// Optional compile-time Ed25519 public key (hex or base64) for offline update
+/// signature verification. When unset, mandatory HTTPS + `.sha256` verification runs.
+pub const UPDATE_PUBLIC_KEY: Option<&str> = option_env!("NOTEBOOK_UPDATE_PUBLIC_KEY");
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +78,8 @@ pub struct UpdateState {
 struct ReleaseAsset {
     version: String,
     zip_url: String,
-    checksum_url: Option<String>,
+    checksum_url: String,
+    signature_url: Option<String>,
     size: u64,
 }
 
@@ -79,7 +93,13 @@ pub struct Updater {
 impl Updater {
     pub fn new(version: String) -> Self {
         Self {
-            state: Mutex::new(UpdateState { status: "idle".into(), current_version: version, release_url: RELEASES_PAGE.into(), can_auto_install: true, ..Default::default() }),
+            state: Mutex::new(UpdateState {
+                status: "idle".into(),
+                current_version: version,
+                release_url: RELEASES_PAGE.into(),
+                can_auto_install: cfg!(any(target_os = "macos", windows)),
+                ..Default::default()
+            }),
             release: Mutex::new(None),
             downloaded: Mutex::new(None),
             busy: tokio::sync::Mutex::new(()),
@@ -98,21 +118,53 @@ fn arch() -> &'static str {
     }
 }
 
+fn asset_name_for(os: &str, arch: &str) -> String {
+    match os {
+        "windows" => format!("Notebook-windows-{arch}-setup.exe"),
+        "linux" => format!("Notebook-linux-{arch}.AppImage"),
+        _ => format!("Notebook-macos-{arch}.zip"),
+    }
+}
+
+fn package_extension_for(os: &str) -> &'static str {
+    match os {
+        "windows" => "exe",
+        "linux" => "AppImage",
+        _ => "zip",
+    }
+}
+
 pub fn asset_name() -> String {
     if cfg!(windows) {
-        format!("Notebook-windows-{}-setup.exe", arch())
+        asset_name_for("windows", arch())
+    } else if cfg!(target_os = "linux") {
+        asset_name_for("linux", arch())
     } else {
-        format!("Notebook-macos-{}.zip", arch())
+        asset_name_for("macos", arch())
     }
 }
 
 /// File extension of the downloaded package.
 fn package_extension() -> &'static str {
     if cfg!(windows) {
-        "exe"
+        package_extension_for("windows")
+    } else if cfg!(target_os = "linux") {
+        package_extension_for("linux")
     } else {
-        "zip"
+        package_extension_for("macos")
     }
+}
+
+/// Validates a strict `MAJOR.MINOR.PATCH` version (`^[0-9]+\.[0-9]+\.[0-9]+$`).
+/// Rejects pre-release suffixes, build metadata, whitespace, and path separators.
+pub fn is_valid_semver(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let (Some(major), Some(minor), Some(patch), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    [major, minor, patch]
+        .into_iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && part.parse::<u64>().is_ok())
 }
 
 /// Numeric comparison of dotted versions; pre-release suffixes are ignored.
@@ -126,6 +178,322 @@ pub fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
         }
     }
     std::cmp::Ordering::Equal
+}
+
+/// Parses the first token of a `.sha256` file and validates that it is a
+/// 64-character lowercase hex SHA-256 digest.
+fn parse_sha256_checksum(text: &str) -> Result<String, String> {
+    let expected = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err("安装包 SHA-256 校验值格式无效。".into());
+    }
+    Ok(expected)
+}
+
+/// Extracts optional inline signature metadata from a `.sha256` file (e.g. a
+/// `sig=<hex-or-base64>` or `# sig: <hex-or-base64>` line) when no separate
+/// `.sig` asset URL was published.
+fn extract_inline_signature(checksum_text: &str) -> Option<String> {
+    for line in checksum_text.lines().skip(1) {
+        let trimmed = line.trim().trim_start_matches('#').trim();
+        if let Some(rest) = trimmed.strip_prefix("sig=").or_else(|| trimmed.strip_prefix("sig:")) {
+            let value = rest.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn decode_fixed_bytes<const N: usize>(raw: &str) -> Option<[u8; N]> {
+    let token = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("untrusted comment:") && !line.starts_with('#') && !line.starts_with("-----"))?;
+    let bytes = if token.len() == N * 2 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        hex::decode(token).ok()?
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(token)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token))
+            .ok()?
+    };
+    bytes.try_into().ok()
+}
+
+mod ed25519 {
+    use sha2::{Digest, Sha512};
+
+    type Fe = [i64; 16];
+
+    const FE_ZERO: Fe = [0; 16];
+    const FE_ONE: Fe = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const D: Fe = [
+        0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070,
+        0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203,
+    ];
+    const I_SQRT_M1: Fe = [
+        0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43,
+        0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83,
+    ];
+    const L: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    ];
+    const BASE_ENCODED: [u8; 32] = [
+        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    ];
+
+    type Point = [Fe; 4];
+
+    fn carry(o: &mut Fe) {
+        for i in 0..16 {
+            o[i] += 1 << 16;
+            let c = o[i] >> 16;
+            if i < 15 {
+                o[i + 1] += c - 1;
+            } else {
+                o[0] += 38 * (c - 1);
+            }
+            o[i] -= c << 16;
+        }
+    }
+
+    fn add(a: &Fe, b: &Fe) -> Fe {
+        let mut out = FE_ZERO;
+        for i in 0..16 {
+            out[i] = a[i] + b[i];
+        }
+        out
+    }
+
+    fn sub(a: &Fe, b: &Fe) -> Fe {
+        let mut out = FE_ZERO;
+        for i in 0..16 {
+            out[i] = a[i] - b[i];
+        }
+        out
+    }
+
+    fn mul(a: &Fe, b: &Fe) -> Fe {
+        let mut t = [0i64; 31];
+        for i in 0..16 {
+            for j in 0..16 {
+                t[i + j] += a[i] * b[j];
+            }
+        }
+        for i in 0..15 {
+            t[i] += 38 * t[i + 16];
+        }
+        let mut out = FE_ZERO;
+        out.copy_from_slice(&t[..16]);
+        carry(&mut out);
+        carry(&mut out);
+        out
+    }
+
+    fn sqr(a: &Fe) -> Fe {
+        mul(a, a)
+    }
+
+    fn inv(a: &Fe) -> Fe {
+        let mut c = *a;
+        for i in (0..=253).rev() {
+            c = sqr(&c);
+            if i != 2 && i != 4 {
+                c = mul(&c, a);
+            }
+        }
+        c
+    }
+
+    fn pow2523(a: &Fe) -> Fe {
+        let mut c = *a;
+        for i in (0..=250).rev() {
+            c = sqr(&c);
+            if i != 1 {
+                c = mul(&c, a);
+            }
+        }
+        c
+    }
+
+    fn pack(n: &Fe) -> [u8; 32] {
+        let mut t = *n;
+        carry(&mut t);
+        carry(&mut t);
+        carry(&mut t);
+        for _ in 0..2 {
+            let mut m = FE_ZERO;
+            m[0] = t[0] - 0xffed;
+            for i in 1..15 {
+                m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
+                m[i - 1] &= 0xffff;
+            }
+            m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
+            let b = (m[15] >> 16) & 1;
+            m[14] &= 0xffff;
+            for i in 0..16 {
+                t[i] ^= (t[i] ^ m[i]) & (b - 1);
+            }
+        }
+        let mut out = [0u8; 32];
+        for i in 0..16 {
+            out[2 * i] = (t[i] & 0xff) as u8;
+            out[2 * i + 1] = (t[i] >> 8) as u8;
+        }
+        out
+    }
+
+    fn unpack_fe(bytes: &[u8; 32]) -> Fe {
+        let mut out = FE_ZERO;
+        for i in 0..16 {
+            out[i] = (bytes[2 * i] as i64) + ((bytes[2 * i + 1] as i64) << 8);
+        }
+        out[15] &= 0x7fff;
+        out
+    }
+
+    fn point_add(p: &Point, q: &Point) -> Point {
+        let a = mul(&sub(&p[1], &p[0]), &sub(&q[1], &q[0]));
+        let b = mul(&add(&p[1], &p[0]), &add(&q[1], &q[0]));
+        let d2 = add(&D, &D);
+        let c = mul(&mul(&p[3], &q[3]), &d2);
+        let d = mul(&p[2], &add(&q[2], &q[2]));
+        let e = sub(&b, &a);
+        let f = sub(&d, &c);
+        let g = add(&d, &c);
+        let h = add(&b, &a);
+        [mul(&e, &f), mul(&h, &g), mul(&g, &f), mul(&e, &h)]
+    }
+
+    fn scalar_mult(p: &Point, scalar: &[u8]) -> Point {
+        let mut q: Point = [FE_ZERO, FE_ONE, FE_ONE, FE_ZERO];
+        let mut acc = *p;
+        for &byte in scalar {
+            for bit in 0..8 {
+                if (byte >> bit) & 1 == 1 {
+                    q = point_add(&q, &acc);
+                }
+                acc = point_add(&acc, &acc);
+            }
+        }
+        q
+    }
+
+    fn unpack_point(s: &[u8; 32]) -> Option<Point> {
+        let y = unpack_fe(s);
+        let y2 = sqr(&y);
+        let u = sub(&y2, &FE_ONE);
+        let v = add(&mul(&y2, &D), &FE_ONE);
+        // Reject non-canonical y >= p
+        let mut canonical_y = pack(&y);
+        canonical_y[31] |= s[31] & 0x80;
+        if &canonical_y != s {
+            return None;
+        }
+        let vx = mul(&u, &inv(&v));
+        let mut x = mul(&vx, &pow2523(&vx));
+        let check = sub(&sqr(&x), &vx);
+        if pack(&check) != [0u8; 32] {
+            x = mul(&x, &I_SQRT_M1);
+            if pack(&sub(&sqr(&x), &vx)) != [0u8; 32] {
+                return None;
+            }
+        }
+        let x_bytes = pack(&x);
+        let x_sign = x_bytes[0] & 1;
+        let wanted_sign = (s[31] >> 7) & 1;
+        if x_bytes == [0u8; 32] && wanted_sign == 1 {
+            return None;
+        }
+        if x_sign != wanted_sign {
+            x = sub(&FE_ZERO, &x);
+        }
+        Some([x, y, FE_ONE, mul(&x, &y)])
+    }
+
+    fn pack_point(p: &Point) -> [u8; 32] {
+        let zi = inv(&p[2]);
+        let tx = mul(&p[0], &zi);
+        let ty = mul(&p[1], &zi);
+        let mut out = pack(&ty);
+        out[31] ^= (pack(&tx)[0] & 1) << 7;
+        out
+    }
+
+    fn is_canonical_scalar(s: &[u8; 32]) -> bool {
+        for i in (0..32).rev() {
+            if s[i] < L[i] {
+                return true;
+            }
+            if s[i] > L[i] {
+                return false;
+            }
+        }
+        false
+    }
+
+    pub fn verify_with_hasher(pubkey: &[u8; 32], sig: &[u8; 64], feed_message: impl FnOnce(&mut Sha512) -> bool) -> bool {
+        let s_bytes: [u8; 32] = sig[32..64].try_into().unwrap();
+        let r_bytes: [u8; 32] = sig[0..32].try_into().unwrap();
+        if !is_canonical_scalar(&s_bytes) {
+            return false;
+        }
+        let Some(a_point) = unpack_point(pubkey) else {
+            return false;
+        };
+        let Some(r_point) = unpack_point(&r_bytes) else {
+            return false;
+        };
+        let Some(base) = unpack_point(&BASE_ENCODED) else {
+            return false;
+        };
+        let mut hasher = Sha512::new();
+        hasher.update(r_bytes);
+        hasher.update(pubkey);
+        if !feed_message(&mut hasher) {
+            return false;
+        }
+        let k_hash: [u8; 64] = hasher.finalize().into();
+        // Check [S]B == R + [k]A  (RFC 8032 §5.1.7)
+        let lhs = scalar_mult(&base, &s_bytes);
+        let rhs = point_add(&r_point, &scalar_mult(&a_point, &k_hash));
+        // Constant-time 32-byte equality on packed Edwards points
+        let (left, right) = (pack_point(&lhs), pack_point(&rhs));
+        left.iter().zip(right.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    }
+}
+
+/// Verifies the downloaded update artifact against an Ed25519 signature when
+/// `public_key` is configured (e.g. via `NOTEBOOK_UPDATE_PUBLIC_KEY`).
+/// Accepts signatures over either the lowercase SHA-256 hex digest or the raw
+/// binary bytes. When `public_key` is `None`/empty, returns `Ok(())`.
+fn verify_release_signature(artifact: &Path, expected_sha256: &str, sig_text: Option<&str>, public_key: Option<&str>) -> Result<(), String> {
+    let Some(pk_raw) = public_key.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let pubkey: [u8; 32] = decode_fixed_bytes(pk_raw).ok_or_else(|| "内置更新公钥格式无效（需要 32 字节 Ed25519 公钥）。".to_string())?;
+    let sig_raw = sig_text.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| "当前构建要求验证更新签名，但发布缺少 .sig 签名文件。".to_string())?;
+    let signature: [u8; 64] = decode_fixed_bytes(sig_raw).ok_or_else(|| "更新签名文件（.sig）格式无效。".to_string())?;
+    let verified_digest = ed25519::verify_with_hasher(&pubkey, &signature, |hasher| {
+        hasher.update(expected_sha256.as_bytes());
+        true
+    });
+    if verified_digest {
+        return Ok(());
+    }
+    let verified_file = ed25519::verify_with_hasher(&pubkey, &signature, |hasher| {
+        let Ok(mut file) = std::fs::File::open(artifact) else { return false };
+        std::io::copy(&mut file, hasher).is_ok()
+    });
+    if verified_file {
+        Ok(())
+    } else {
+        Err("安装包数字签名校验失败，已拒绝更新。".into())
+    }
 }
 
 fn update(app: &AppHandle, change: impl FnOnce(&mut UpdateState)) -> UpdateState {
@@ -156,23 +524,35 @@ fn github_request(http: &reqwest::Client, url: &str, token: Option<&str>, accept
     request
 }
 
-/// Picks the newest published `desktop-v*` release with an asset for this computer.
+/// Picks the newest published `desktop-v*` release with both the platform binary
+/// asset and its `.sha256` checksum asset, and a strict `X.Y.Z` semver tag.
 pub fn select_release(releases: &[Value], current: &str) -> Option<(ReleaseAssetInfo, Value)> {
     let wanted = asset_name();
+    let wanted_checksum = format!("{wanted}.sha256");
+    let wanted_sig = format!("{wanted}.sig");
     releases
         .iter()
         .filter(|release| release["draft"].as_bool() != Some(true) && release["prerelease"].as_bool() != Some(true))
         .filter_map(|release| {
             let tag = release["tag_name"].as_str()?;
-            let version = tag.strip_prefix(TAG_PREFIX)?.to_string();
+            let version = tag.strip_prefix(TAG_PREFIX)?;
+            if !is_valid_semver(version) {
+                return None;
+            }
             let assets = release["assets"].as_array()?;
             let zip = assets.iter().find(|asset| asset["name"].as_str() == Some(wanted.as_str()))?;
-            let checksum = assets.iter().find(|asset| asset["name"].as_str() == Some(format!("{wanted}.sha256").as_str()));
+            let checksum = assets.iter().find(|asset| asset["name"].as_str() == Some(wanted_checksum.as_str()))?;
+            let signature_url = assets
+                .iter()
+                .find(|asset| asset["name"].as_str() == Some(wanted_sig.as_str()))
+                .and_then(|asset| asset["url"].as_str())
+                .map(str::to_string);
             Some((
                 ReleaseAssetInfo {
-                    version,
+                    version: version.to_string(),
                     zip_url: zip["url"].as_str()?.to_string(),
-                    checksum_url: checksum.and_then(|asset| asset["url"].as_str()).map(str::to_string),
+                    checksum_url: checksum["url"].as_str()?.to_string(),
+                    signature_url,
                     size: zip["size"].as_u64().unwrap_or(0),
                 },
                 release.clone(),
@@ -186,7 +566,8 @@ pub fn select_release(releases: &[Value], current: &str) -> Option<(ReleaseAsset
 pub struct ReleaseAssetInfo {
     pub version: String,
     pub zip_url: String,
-    pub checksum_url: Option<String>,
+    pub checksum_url: String,
+    pub signature_url: Option<String>,
     pub size: u64,
 }
 
@@ -217,7 +598,13 @@ pub async fn check(app: &AppHandle) -> UpdateState {
     match result {
         Ok(releases) => match select_release(&releases, &current) {
             Some((info, release)) => {
-                *state.updater.release.lock().unwrap() = Some(ReleaseAsset { version: info.version.clone(), zip_url: info.zip_url, checksum_url: info.checksum_url, size: info.size });
+                *state.updater.release.lock().unwrap() = Some(ReleaseAsset {
+                    version: info.version.clone(),
+                    zip_url: info.zip_url,
+                    checksum_url: info.checksum_url,
+                    signature_url: info.signature_url,
+                    size: info.size,
+                });
                 update(app, |s| {
                     s.status = "available".into();
                     s.available_version = Some(info.version.clone());
@@ -277,29 +664,41 @@ pub async fn download(app: &AppHandle) -> UpdateState {
 }
 
 async fn download_inner(app: &AppHandle, release: &ReleaseAsset) -> Result<PathBuf, String> {
+    if !is_valid_semver(&release.version) {
+        return Err("更新版本号格式无效".into());
+    }
     let state = app.state::<AppState>();
     let token = token(app).await;
     let dir = updates_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录：{e}"))?;
     let target = dir.join(format!("Notebook-{}.{}", release.version, package_extension()));
-    let expected = match &release.checksum_url {
-        Some(url) => {
-            let text = github_request(&state.http, url, token.as_deref(), "application/octet-stream")
+    let checksum_text = github_request(&state.http, &release.checksum_url, token.as_deref(), "application/octet-stream")
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|e| format!("无法下载校验值：{}", crate::webdav::reqwest_error_text(&e.without_url())))?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let expected = parse_sha256_checksum(&checksum_text)?;
+    let sig_text = match &release.signature_url {
+        Some(sig_url) if UPDATE_PUBLIC_KEY.is_some_and(|pk| !pk.trim().is_empty()) => Some(
+            github_request(&state.http, sig_url, token.as_deref(), "application/octet-stream")
                 .send()
                 .await
                 .and_then(|response| response.error_for_status())
-                .map_err(|e| format!("无法下载校验值：{}", crate::webdav::reqwest_error_text(&e.without_url())))?
+                .map_err(|e| format!("无法下载签名文件：{}", crate::webdav::reqwest_error_text(&e.without_url())))?
                 .text()
                 .await
-                .map_err(|e| e.to_string())?;
-            Some(text.split_whitespace().next().unwrap_or("").to_lowercase())
-        }
-        None => None,
+                .map_err(|e| e.to_string())?,
+        ),
+        _ => extract_inline_signature(&checksum_text),
     };
-    if let Some(expected) = &expected {
-        if target.is_file() && sha256_file(&target).ok().as_deref() == Some(expected.as_str()) {
+    if target.is_file() && sha256_file(&target).ok().as_deref() == Some(expected.as_str()) {
+        if verify_release_signature(&target, &expected, sig_text.as_deref(), UPDATE_PUBLIC_KEY).is_ok() {
             return Ok(target);
         }
+        let _ = std::fs::remove_file(&target);
     }
     update(app, |s| {
         s.status = "downloading".into();
@@ -338,11 +737,13 @@ async fn download_inner(app: &AppHandle, release: &ReleaseAsset) -> Result<PathB
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     let actual = hex::encode(hasher.finalize());
-    if let Some(expected) = expected {
-        if expected != actual {
-            let _ = std::fs::remove_file(&partial);
-            return Err("安装包 SHA-256 校验失败，已删除，请重新下载。".into());
-        }
+    if expected != actual {
+        let _ = std::fs::remove_file(&partial);
+        return Err("安装包 SHA-256 校验失败，已删除，请重新下载。".into());
+    }
+    if let Err(err) = verify_release_signature(&partial, &expected, sig_text.as_deref(), UPDATE_PUBLIC_KEY) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(err);
     }
     std::fs::rename(&partial, &target).map_err(|e| e.to_string())?;
     Ok(target)
@@ -382,6 +783,9 @@ pub fn prepare_install(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let zip = state.updater.downloaded.lock().unwrap().clone().ok_or("更新尚未下载完成")?;
     let version = state.updater.release.lock().unwrap().as_ref().map(|release| release.version.clone()).ok_or("没有待安装的版本")?;
+    if !is_valid_semver(&version) {
+        return Err("更新版本号格式无效".into());
+    }
     let current = current_bundle()?;
     let parent = current.parent().ok_or("无法确定应用目录")?.to_path_buf();
     // The swap happens next to the current bundle; make sure that works first.
@@ -400,16 +804,18 @@ pub fn prepare_install(app: &AppHandle) -> Result<(), String> {
         .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
         .ok_or("安装包里没有找到 .app")?;
     // Unsigned builds: clear quarantine and other extended attributes.
-    run("/usr/bin/xattr", &["-cr", new_bundle.to_str().ok_or("路径无效")?])?;
+    let new_bundle_str = new_bundle.to_str().ok_or("路径无效")?;
+    run("/usr/bin/xattr", &["-cr", new_bundle_str])?;
     let plist = new_bundle.join("Contents/Info.plist");
     let bundled_version = run("/usr/bin/plutil", &["-extract", "CFBundleShortVersionString", "raw", plist.to_str().ok_or("路径无效")?])?;
-    if compare_versions(&bundled_version, &version) != std::cmp::Ordering::Equal {
+    if !is_valid_semver(&bundled_version) || compare_versions(&bundled_version, &version) != std::cmp::Ordering::Equal {
         return Err(format!("安装包版本（{bundled_version}）与发布版本（{version}）不一致，已取消安装。"));
     }
     // Same volume as the target so the final swap is an atomic rename.
     let incoming = parent.join(format!(".Notebook-update-{version}.app"));
+    let incoming_str = incoming.to_str().ok_or("路径无效")?;
     let _ = std::fs::remove_dir_all(&incoming);
-    run("/bin/mv", &[new_bundle.to_str().unwrap(), incoming.to_str().ok_or("路径无效")?]).or_else(|_| run("/usr/bin/ditto", &[new_bundle.to_str().unwrap(), incoming.to_str().unwrap()]))?;
+    run("/bin/mv", &[new_bundle_str, incoming_str]).or_else(|_| run("/usr/bin/ditto", &[new_bundle_str, incoming_str]))?;
 
     let script = r#"
 pid="$1"; current="$2"; incoming="$3"; backup="$2.previous"
@@ -453,8 +859,9 @@ pub fn prepare_install(app: &AppHandle) -> Result<(), String> {
     const FLAGS: u32 = 0x0800_0000 | 0x0000_0200;
     let state = app.state::<AppState>();
     let installer = state.updater.downloaded.lock().unwrap().clone().ok_or("更新尚未下载完成")?;
-    if state.updater.release.lock().unwrap().is_none() {
-        return Err("没有待安装的版本".into());
+    let version = state.updater.release.lock().unwrap().as_ref().map(|release| release.version.clone()).ok_or("没有待安装的版本")?;
+    if !is_valid_semver(&version) {
+        return Err("更新版本号格式无效".into());
     }
     let script = powershell_install_script(std::process::id(), &installer);
     std::process::Command::new("powershell.exe")
@@ -512,6 +919,38 @@ mod tests {
     }
 
     #[test]
+    fn strict_semver_validation_blocks_traversal_and_prereleases() {
+        assert!(is_valid_semver("3.6.2"));
+        assert!(is_valid_semver("0.0.1"));
+        assert!(is_valid_semver("10.20.300"));
+        for invalid in [
+            "",
+            "3.6",
+            "3.6.2.1",
+            "v3.6.2",
+            "3.6.2-beta.1",
+            "99.0.0-../../evil",
+            "3.7.0-../../x",
+            "3.6.2/../../evil",
+            "3.6.2\n",
+            "3.-1.0",
+        ] {
+            assert!(!is_valid_semver(invalid), "{invalid:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn asset_names_and_extensions_cover_macos_windows_and_linux() {
+        assert_eq!(asset_name_for("macos", "arm64"), "Notebook-macos-arm64.zip");
+        assert_eq!(asset_name_for("windows", "x64"), "Notebook-windows-x64-setup.exe");
+        assert_eq!(asset_name_for("linux", "x64"), "Notebook-linux-x64.AppImage");
+        assert_eq!(asset_name_for("linux", "arm64"), "Notebook-linux-arm64.AppImage");
+        assert_eq!(package_extension_for("macos"), "zip");
+        assert_eq!(package_extension_for("windows"), "exe");
+        assert_eq!(package_extension_for("linux"), "AppImage");
+    }
+
+    #[test]
     fn the_installer_script_waits_for_the_app_and_survives_quotes() {
         let script = powershell_install_script(4242, Path::new(r"C:\Users\O'Neil\AppData\Local\Notebook\updates\Notebook-3.7.0.exe"));
         assert!(script.starts_with("Wait-Process -Id 4242 "));
@@ -522,7 +961,12 @@ mod tests {
     #[test]
     fn selects_newest_published_desktop_release_with_this_computers_asset() {
         let name = asset_name();
-        let asset = |tag: &str| json!([{ "name": name, "url": format!("https://api/{tag}/zip"), "size": 10 }, { "name": format!("{name}.sha256"), "url": format!("https://api/{tag}/sum") }]);
+        let asset = |tag: &str| {
+            json!([
+                { "name": name, "url": format!("https://api/{tag}/zip"), "size": 10 },
+                { "name": format!("{name}.sha256"), "url": format!("https://api/{tag}/sum") }
+            ])
+        };
         let releases = vec![
             json!({ "tag_name": "v2.9.0", "draft": false, "prerelease": false, "assets": asset("v2.9.0") }),
             json!({ "tag_name": "desktop-v3.0.2", "draft": true, "prerelease": false, "assets": asset("d302") }),
@@ -533,7 +977,85 @@ mod tests {
         let (info, _) = select_release(&releases, "3.0.0").unwrap();
         assert_eq!(info.version, "3.0.1");
         assert_eq!(info.zip_url, "https://api/d301/zip");
-        assert_eq!(info.checksum_url.as_deref(), Some("https://api/d301/sum"));
+        assert_eq!(info.checksum_url, "https://api/d301/sum");
         assert!(select_release(&releases, "3.0.1").is_none());
+    }
+
+    #[test]
+    fn ignores_releases_missing_sha256_checksum_asset() {
+        let name = asset_name();
+        let releases = vec![
+            // Newer version, but CI has not uploaded .sha256 yet (or it is missing)
+            json!({
+                "tag_name": "desktop-v3.8.0",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{ "name": name, "url": "https://api/d380/bin", "size": 100 }]
+            }),
+            // Older valid version with both binary and .sha256
+            json!({
+                "tag_name": "desktop-v3.7.0",
+                "draft": false,
+                "prerelease": false,
+                "assets": [
+                    { "name": name, "url": "https://api/d370/bin", "size": 100 },
+                    { "name": format!("{name}.sha256"), "url": "https://api/d370/sum" },
+                    { "name": format!("{name}.sig"), "url": "https://api/d370/sig" }
+                ]
+            }),
+        ];
+        let (info, _) = select_release(&releases, "3.6.2").unwrap();
+        assert_eq!(info.version, "3.7.0");
+        assert_eq!(info.checksum_url, "https://api/d370/sum");
+        assert_eq!(info.signature_url.as_deref(), Some("https://api/d370/sig"));
+        // If only the checksum-less release is newer, nothing is selected
+        assert!(select_release(&releases[..1], "3.6.2").is_none());
+    }
+
+    #[test]
+    fn rejects_tags_with_traversal_or_non_numeric_suffixes() {
+        let name = asset_name();
+        let asset = |tag: &str| {
+            json!([
+                { "name": name, "url": format!("https://api/{tag}/bin"), "size": 10 },
+                { "name": format!("{name}.sha256"), "url": format!("https://api/{tag}/sum") }
+            ])
+        };
+        let releases = vec![
+            json!({ "tag_name": "desktop-v3.7.0-../../x", "draft": false, "prerelease": false, "assets": asset("bad1") }),
+            json!({ "tag_name": "desktop-v99.0.0-../../evil", "draft": false, "prerelease": false, "assets": asset("bad2") }),
+            json!({ "tag_name": "desktop-v3.7.0-rc1", "draft": false, "prerelease": false, "assets": asset("bad3") }),
+            json!({ "tag_name": "desktop-v3.7", "draft": false, "prerelease": false, "assets": asset("bad4") }),
+        ];
+        assert!(select_release(&releases, "3.6.2").is_none());
+    }
+
+    #[test]
+    fn parses_valid_sha256_and_verifies_optional_ed25519_signatures() {
+        let valid_upper = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  Notebook.zip\n";
+        assert_eq!(
+            parse_sha256_checksum(valid_upper).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        for bad in ["", "short", &"z".repeat(64), "<html>not found</html>"] {
+            assert!(parse_sha256_checksum(bad).is_err(), "{bad:?} must fail");
+        }
+
+        // RFC 8032 §7.1 Test Vector 2 (1-byte message 0x72 = "r")
+        let pubkey_hex = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
+        let sig_hex = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00";
+        let temp = std::env::temp_dir().join(format!("notebook-sig-test-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&temp, [0x72u8]).unwrap();
+        let digest = sha256_file(&temp).unwrap();
+        // No public key configured -> skipped cleanly
+        assert!(verify_release_signature(&temp, &digest, None, None).is_ok());
+        // Public key configured, missing .sig -> rejected
+        assert!(verify_release_signature(&temp, &digest, None, Some(pubkey_hex)).is_err());
+        // Public key configured, valid Ed25519 signature over file -> accepted
+        assert!(verify_release_signature(&temp, &digest, Some(sig_hex), Some(pubkey_hex)).is_ok());
+        // Tampered file -> rejected
+        std::fs::write(&temp, [0x73u8]).unwrap();
+        assert!(verify_release_signature(&temp, &digest, Some(sig_hex), Some(pubkey_hex)).is_err());
+        let _ = std::fs::remove_file(&temp);
     }
 }

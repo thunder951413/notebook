@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hmac
 import io
 import ipaddress
 import json
@@ -24,11 +25,48 @@ AI_PROVIDER_MESSAGE = "AI provider unavailable. Configure a provider API key on 
 SFTP_BRIDGE_MESSAGE = "SSH/SFTP 操作失败。请检查服务器地址、凭证、主机指纹和远端目录；详细原因已写入服务日志。"
 WEBDAV_BRIDGE_MESSAGE = "WebDAV 同步操作失败。请检查服务器地址、用户名、应用密码和远端目录；详细原因已写入服务日志。"
 MAX_ASSET_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 logger = logging.getLogger(__name__)
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _safe_read_archive(payload: bytes) -> dict[str, bytes]:
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise HTTPException(status_code=413, detail="Archive exceeds size limit")
+    entries: dict[str, bytes] = {}
+    total_uncompressed = 0
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename
+            if not name or name.startswith("/") or ".." in name.split("/") or "\\" in name:
+                raise ValueError("Unsafe archive entry path")
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise HTTPException(status_code=413, detail="Uncompressed archive exceeds size limit")
+            data = archive.read(info)
+            if len(data) > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise HTTPException(status_code=413, detail="Archive entry exceeds size limit")
+            entries[name] = data
+    return entries
 
 
 def create_app(settings: Settings | None = None, gateway: AIGateway | None = None) -> FastAPI:
     config = settings or Settings()
+    if not _is_loopback_host(config.host) and not config.api_token and not config.jwt_secret:
+        raise RuntimeError("NOTEBOOK_AI_API_TOKEN or NOTEBOOK_AI_JWT_SECRET is required when binding outside loopback")
     ai = gateway or LiteLLMGateway()
     store = SyncStore(config.database_url)
     retrieval = RetrievalStore(store.sessions, ai)
@@ -52,8 +90,11 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
     )
 
     async def authorize(authorization: str | None = Header(default=None)) -> None:
-        if config.api_token and authorization != f"Bearer {config.api_token}":
-            raise HTTPException(status_code=401, detail="Invalid API token")
+        if config.api_token:
+            expected = f"Bearer {config.api_token}".encode("utf-8")
+            supplied = (authorization or "").encode("utf-8")
+            if not hmac.compare_digest(supplied, expected):
+                raise HTTPException(status_code=401, detail="Invalid API token")
 
     def authorize_local_bridge(request: Request) -> None:
         host = (request.url.hostname or "").lower()
@@ -62,8 +103,10 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
             client_is_loopback = ipaddress.ip_address(client).is_loopback
         except ValueError:
             client_is_loopback = client == "localhost"
-        if not config.enable_local_sftp_bridge or host not in {"127.0.0.1", "localhost", "::1"} or not client_is_loopback:
+        if not config.enable_local_sftp_bridge or host not in LOOPBACK_HOSTS or not client_is_loopback:
             raise HTTPException(status_code=404, detail="Local SFTP bridge is disabled")
+        if not config.api_token:
+            raise HTTPException(status_code=403, detail="NOTEBOOK_AI_API_TOKEN is required when local bridge is enabled")
 
     def bridge_failure(error: Exception, message: str = SFTP_BRIDGE_MESSAGE) -> HTTPException:
         logger.exception("Local sync bridge request failed")
@@ -112,16 +155,21 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
     async def legacy_sftp_push_archive(request: Request) -> LegacyPushResponse:
         authorize_local_bridge(request)
         try:
-            payload = await request.body()
-            with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
-                request_data = json.loads(archive.read("sync-request.json"))
-                files = [
-                    {"name": name.removeprefix("repository/"), "dataBase64": base64.b64encode(archive.read(name)).decode()}
-                    for name in archive.namelist()
-                    if name.startswith("repository/") and not name.endswith("/")
-                ]
+            if int(request.headers.get("content-length", "0")) > MAX_ARCHIVE_BYTES:
+                raise HTTPException(status_code=413, detail="Archive exceeds size limit")
+            archive_entries = _safe_read_archive(await request.body())
+            if "sync-request.json" not in archive_entries:
+                raise ValueError("Missing sync-request.json")
+            request_data = json.loads(archive_entries["sync-request.json"])
+            files = [
+                {"name": name.removeprefix("repository/"), "dataBase64": base64.b64encode(content).decode()}
+                for name, content in archive_entries.items()
+                if name.startswith("repository/") and not name.endswith("/")
+            ]
             parsed = LegacyPushRequest.model_validate({**request_data, "files": files})
             return await asyncio.to_thread(push_repository, parsed)
+        except HTTPException:
+            raise
         except Exception as error:
             raise bridge_failure(error) from error
 
@@ -129,13 +177,16 @@ def create_app(settings: Settings | None = None, gateway: AIGateway | None = Non
     async def legacy_sftp_publish_prepared_archive(request: Request, x_notebook_ssh_settings: str = Header(alias="X-Notebook-Ssh-Settings")) -> LegacyPushResponse:
         authorize_local_bridge(request)
         try:
+            if int(request.headers.get("content-length", "0")) > MAX_ARCHIVE_BYTES:
+                raise HTTPException(status_code=413, detail="Archive exceeds size limit")
             settings = SshConnection.model_validate_json(base64.b64decode(x_notebook_ssh_settings, validate=True))
-            payload = await request.body()
-            with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
-                files = [LegacyRepositoryFile(name=name, dataBase64=base64.b64encode(archive.read(name)).decode()) for name in archive.namelist() if name and not name.endswith("/")]
+            archive_entries = _safe_read_archive(await request.body())
+            files = [LegacyRepositoryFile(name=name, dataBase64=base64.b64encode(content).decode()) for name, content in archive_entries.items() if name and not name.endswith("/")]
             expected_hash = await asyncio.to_thread(repository_index_hash, settings)
             prepared = LegacyPushRequest(settings=settings, files=files, expectedIndexHash=expected_hash)
             return await asyncio.to_thread(push_repository, prepared)
+        except HTTPException:
+            raise
         except Exception as error:
             raise bridge_failure(error) from error
 

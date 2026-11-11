@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import hmac
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -171,8 +172,8 @@ class SyncStore:
 
 def workspace_authorizer(settings: Settings):
     async def authorize(workspace_id: str, authorization: str | None = Header(default=None)) -> None:
-        token = authorization.removeprefix("Bearer ") if authorization else ""
-        if settings.api_token and token == settings.api_token:
+        token = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") else ""
+        if settings.api_token and token and hmac.compare_digest(token.encode("utf-8"), settings.api_token.encode("utf-8")):
             return
         if not settings.jwt_secret:
             if settings.api_token:

@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
-import { automationRepository, useWorkspaceData } from './useWorkspaceData'
+import { automationRepository, MAX_LOADED_DOCUMENTS, useWorkspaceData } from './useWorkspaceData'
+import * as extensions from '../editor/extensions'
 import * as webdavSync from '../sync/webdavSync'
 
 afterEach(() => vi.restoreAllMocks())
@@ -239,4 +240,60 @@ test('emptying the trash purges every trashed page but never notes that were not
   expect(purged).toBe(2)
   expect(result.current.trashPages).toEqual([])
   expect(result.current.pages.map((page) => page.id)).toEqual(expect.arrayContaining(keep))
+})
+
+test('renaming a linked page keeps >=200k char linking notes as largeDocument without main-thread parsing', async () => {
+  const { result } = await renderLoadedWorkspace()
+  let targetId = ''
+  let largeSourceId = ''
+  const largeSource = '# 巨型链接笔记\n\n参见 [[原目标标题]]。\n\n' + '长篇内容填充段落。\n\n'.repeat(22_000)
+  expect(largeSource.length).toBeGreaterThanOrEqual(200_000)
+  await act(async () => {
+    targetId = await result.current.createPage('product', 'document', undefined, '原目标标题')
+    largeSourceId = (await result.current.importTextFiles(
+      [{ name: 'huge-links.md', data: new TextEncoder().encode(largeSource) }],
+      { sectionId: 'product' },
+    )).createdIds[0]!
+    await result.current.loadDocument(largeSourceId)
+  })
+  expect(result.current.documents[largeSourceId]?.type).toBe('notebook-large-document')
+  const parseSpy = vi.spyOn(extensions, 'markdownToDocument')
+  await act(async () => {
+    await result.current.updatePage(targetId, { title: '新目标标题' })
+  })
+  expect(parseSpy).not.toHaveBeenCalled()
+  const stored = await automationRepository.getPageDocument(largeSourceId)
+  expect(stored?.tiptapJson).toEqual({ type: 'doc', content: [] })
+  expect(stored?.markdown).toContain('[[新目标标题]]')
+  expect(result.current.documents[largeSourceId]?.type).toBe('notebook-large-document')
+  expect(String(result.current.documents[largeSourceId]?.markdown)).toContain('[[新目标标题]]')
+})
+
+test('bounds in-memory documents cache to MAX_LOADED_DOCUMENTS while retaining the active document, and bulk-reads pageTags on reload', async () => {
+  const { result } = await renderLoadedWorkspace()
+  const createdIds: string[] = []
+  await act(async () => {
+    for (let i = 0; i < MAX_LOADED_DOCUMENTS + 6; i++) {
+      createdIds.push(await result.current.createPage('product', 'document', undefined, `缓存页 ${i}`))
+    }
+  })
+  const pinnedId = createdIds[0]!
+  await act(async () => {
+    result.current.setActiveDocument(pinnedId)
+    await result.current.loadDocument(pinnedId)
+    for (const id of createdIds.slice(1)) {
+      await result.current.loadDocument(id)
+    }
+  })
+  expect(Object.keys(result.current.documents).length).toBeLessThanOrEqual(MAX_LOADED_DOCUMENTS)
+  expect(result.current.documents[pinnedId]).toBeDefined()
+  expect(result.current.documents[createdIds[1]!]).toBeUndefined()
+
+  const listPageTagsSpy = vi.spyOn(automationRepository, 'listPageTags')
+  await act(async () => {
+    await result.current.setPageTagNames(pinnedId, ['架构'])
+    await result.current.reloadWorkspace()
+  })
+  expect(listPageTagsSpy).not.toHaveBeenCalled()
+  expect(result.current.pages.find((page) => page.id === pinnedId)?.tags).toEqual(['架构'])
 })

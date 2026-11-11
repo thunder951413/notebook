@@ -18,3 +18,9 @@ test('scripts stay same-origin with no eval', () => {
   expect(scripts).not.toContain("'unsafe-eval'")
   expect(scripts).not.toContain("'unsafe-inline'")
 })
+
+test('blocks plugin objects, base-tag hijacking, and framing', () => {
+  expect(csp['object-src']).toBe("'none'")
+  expect(csp['base-uri']).toBe("'self'")
+  expect(csp['frame-ancestors']).toBe("'none'")
+})

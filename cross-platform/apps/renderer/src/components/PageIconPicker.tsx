@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Button, Input } from '@fluentui/react-components'
 import type { PageSummary } from '../model'
+import { closeOnEscape } from './dialogKeys'
 
 export const PAGE_ICON_GROUPS = [
   { label: '文档', icons: ['📄', '📝', '📒', '📓', '📔', '📕', '📗', '📘', '📙', '📚', '📖', '🔖'] },
@@ -20,7 +21,7 @@ export function PageIconPicker({ page, onClose, onSelect }: { page: PageSummary;
   return <div className="settings-backdrop page-icon-backdrop" role="presentation" onMouseDown={(event) => {
     if (event.target === event.currentTarget) onClose()
   }}>
-    <section className="settings-dialog page-icon-dialog" role="dialog" aria-modal="true" aria-label={`更换“${page.title}”的图标`}>
+    <section className="settings-dialog page-icon-dialog" role="dialog" aria-modal="true" aria-label={`更换“${page.title}”的图标`} onKeyDown={closeOnEscape(onClose)}>
       <header><div><span className="page-icon-preview" aria-hidden="true">{page.icon || '📄'}</span><div><h2>页面图标</h2><p>{page.title || '无标题页面'}</p></div></div><Button appearance="subtle" onClick={onClose}>取消</Button></header>
       <div className="page-icon-groups">
         {PAGE_ICON_GROUPS.map((group) => <section key={group.label}><h3>{group.label}</h3><div className="page-icon-grid">

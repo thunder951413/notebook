@@ -173,6 +173,7 @@ export function InboxDialog({ entries, onEntriesChange, pages, notebooks, tags, 
     <section
       className={`settings-dialog inbox-dialog ${dragging ? 'dragging' : ''}`}
       role="dialog"
+      aria-modal="true"
       aria-label="AI 收纳"
       tabIndex={-1}
       onPaste={onPaste}

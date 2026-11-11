@@ -6,7 +6,8 @@
 
 | 端 | 自动保留上限 | 获取方式 |
 | --- | --- | --- |
-| Electron | 2 MiB 活动文件 + 1 个归档，合计 4 MiB | 设置中的诊断区域 → 导出日志 / 显示日志位置 |
+| Tauri（桌面主壳） | 2 MiB 活动文件 + 1 个归档，合计 4 MiB | 设置 → 诊断日志 → 导出日志 / 显示日志位置（macOS 默认在 `~/Library/Logs/io.github.notebook.desktop/`） |
+| Electron（已废弃） | 2 MiB 活动文件 + 1 个归档，合计 4 MiB | 设置中的诊断区域 → 导出日志 / 显示日志位置 |
 | Android | 512 KiB 活动文件 + 3 个归档，合计 2 MiB | 设置与同步 → 诊断日志 → 导出；Debug 可直接 adb 提取 |
 | 网页服务器 | 512 KiB × 4 文件，合计 2 MiB | 设置 → 导出服务器诊断，或 DATA_DIR/diagnostics |
 | 网页浏览器 | 最多 200 条，且不超过 256 KiB | 设置 → 导出浏览器诊断 |
@@ -41,7 +42,7 @@ adb logcat -b crash -d -v threadtime > notebook-phone-crash.txt
 
 系统 logcat 与应用的脱敏日志不同，可能包含其他应用/系统信息；定位时先筛选 Notebook 相关进程。应用内日志随进程重启保留，清除应用数据或卸载会移除它们。
 
-完整 Android 说明见 [Android DIAGNOSTICS.md](https://github.com/thunder951413/notebook_android/blob/next/DIAGNOSTICS.md)。
+完整 Android 说明见 [Android DIAGNOSTICS.md](https://github.com/thunder951413/notebook_android/blob/main/DIAGNOSTICS.md)。
 
 ## 桌面端
 
