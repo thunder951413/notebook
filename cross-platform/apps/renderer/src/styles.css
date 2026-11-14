@@ -1131,7 +1131,7 @@ html:not([data-platform="mac"]):not([data-shell="tauri"]) .ai-workspace { box-si
 .collaboration-status.connected { color: #15603a; border-color: #a8d5bd; background: #effaf3; }
 .collaboration-status.error { color: #8d2d25; border-color: #e7b7b2; background: #fff3f1; }
 .document-editor-content { box-sizing: border-box; width: min(900px, calc(100% - 52px)); flex: 1 0 auto; margin: 0 auto; padding: 32px 20px 42vh; outline: 0; color: var(--text-primary); font-family: var(--font-editor, var(--font-ui)); font-size: 16px; line-height: 1.75; }
-.large-document .document-editor-content > * { content-visibility: auto; contain-intrinsic-size: auto 44px; }
+.large-document .document-editor-content[contenteditable="false"] > * { content-visibility: auto; contain-intrinsic-size: auto 44px; }
 .document-surface:has(.large-note-reader) { display: flex; overflow: hidden; flex-direction: column; }
 .document-surface:has(.large-note-reader) > .document-transition { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .large-note-reader { height: 100%; min-height: 0; }

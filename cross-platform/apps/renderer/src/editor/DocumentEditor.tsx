@@ -781,7 +781,7 @@ function ReadyDocumentEditor({ session, pageId, pageTitle, content, onChange, on
   return <div className={`document-editor ${duplicateTitle ? 'duplicate-title' : ''} ${largeDocument ? 'large-document' : ''}`}>
     {session.readOnly && session.status !== 'connecting' && session.status !== 'error' && <span className="collaboration-status">实时协作 · 只读访问</span>}
     {(session.status === 'connecting' || session.status === 'error') && <span className={`collaboration-status ${session.status}`}>{session.readOnly && session.status === 'error' ? '协作验证失败 · 正文只读' : statusLabels[session.status]}</span>}
-    {largeDocument && <span className="large-document-status">大型笔记 · 已按视口分段渲染</span>}
+    {largeDocument && session.readOnly && <span className="large-document-status">大型笔记 · 已按视口分段渲染</span>}
     <div
       ref={bodyRef}
       className="document-editor-body"
